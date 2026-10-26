@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
@@ -61,6 +61,7 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // Counts and cursors only, for a failure report: the live settlements the
       // service host made, held for export, or journaled, and those the relay holds.
       settlementEvidence: () => settlementEvidence(directory),
+      livePublication: (workspaceId: string, path: string) => livePublication(directory, workspaceId, path),
       // The document's accepted change just before a named account's first live
       // edit, the restore point that keeps everything the account did not write.
       acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
@@ -454,6 +455,33 @@ function settlementEvidence(directory: string) {
        FROM sync_relay_log s WHERE s.op_kind='live.audit.settlement' ORDER BY s.relay_seq`,
     ).all().map((row) => ({ terminalCursor: Number(row.cursor), momentPublished: Number(row.moment) === 1 }))),
   };
+}
+
+// How far the server's live work on one document has gone: the relay's
+// accepted head, the last cursor the service host settled, the host's
+// operations not yet pushed, and each host origin's last operation in the
+// relay log. Cursors and counts only.
+function livePublication(directory: string, workspaceId: string, path: string) {
+  const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  const count = (db: InstanceType<typeof DatabaseSync>, sql: string, ...params: string[]) => Number(db.prepare(sql).get(...params)?.n ?? 0);
+  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => ({
+    acceptedHead: count(db, "SELECT COALESCE(MAX(journal_cursor),0) AS n FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?", workspaceId, path),
+    hostOrigins: Object.fromEntries(db.prepare(
+      "SELECT origin_id AS origin, MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id=? AND origin_id LIKE 'service-host:%' GROUP BY origin_id",
+    ).all(workspaceId).map((row) => [String(row.origin), Number(row.seq)])),
+  }));
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  const hosts = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+    .map((file) => read(file, (db) => ({
+      settledThrough: count(db, "SELECT COALESCE(MAX(terminal_cursor),0) AS n FROM live_device_settlements"),
+      unpushed: count(db, `SELECT COUNT(*) AS n FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+        WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1)`),
+    })));
+  return { ...relay, hosts };
 }
 
 // The supported self-host profile: an initialized deployment whose service

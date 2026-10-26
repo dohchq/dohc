@@ -444,6 +444,14 @@ export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAudi
   return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));
 }
 
+// The last operation this engine applied from each service host origin of the workspace.
+export function appliedServiceHostSeqs(rootPath: string, workspaceId: string): Record<string, number> {
+  return withEngineDb(rootPath, (db) => Object.fromEntries(db
+    .prepare("SELECT origin_id, acked_seq FROM replication_peers WHERE workspace_id=? AND origin_id LIKE 'service-host:%'")
+    .all(workspaceId)
+    .map((row) => [String(row.origin_id), Number(row.acked_seq)]))) ?? {};
+}
+
 export function replicationOpKindCount(rootPath: string, opKind: string): number {
   return (
     withEngineDb(rootPath, (db) => {

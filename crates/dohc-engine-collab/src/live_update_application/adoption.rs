@@ -869,7 +869,14 @@ mod tests {
             NativeHistoryReconstruction {
                 working_reserve_bytes: 8 * 1024 * 1024,
             },
-            |_, audit| Ok(audit.result("test".into(), "test-moment".into(), "a".repeat(64), false)),
+            |_, audit| {
+                Ok(audit.result(
+                    Some("test".into()),
+                    "test-moment".into(),
+                    "a".repeat(64),
+                    false,
+                ))
+            },
         );
         let result = result.unwrap();
         assert_eq!(result.previous_cursor, 7);

@@ -1,11 +1,17 @@
-import { afterAll, afterEach, expect, it } from "vitest";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
+const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+afterEach(() => logged.mockClear());
 afterEach(cleanupLiveDeliveryFixtures);
+/** Each logged refusal as "<stage> <check>", in order. */
+const refusedChecks = () => logged.mock.calls.flatMap(([line]) =>
+  /^\[sync-relay\] live settlement refused at (\w+): workspace [^,]+, settlement [^,]+, check ([a-z-]+)\.$/u
+    .exec(String(line))?.slice(1).join(" ") ?? []);
 
 it("fits 1023 named authors and the window's marker in a settlement snapshot", () => {
   const authors = Array.from({length: 1023}, (_, index) => ({kind: "human", humanId: String(index), humanName: "Reader"}));
@@ -50,6 +56,9 @@ it("records deterministic settlement refusal and advances later origin operation
     expect(result.settlementRefusals).toMatchObject([
       { originSeq: start, momentId: "forged", reason: "authorship-mismatch" },
     ]);
+    expect(logged.mock.calls).toEqual([[
+      "[sync-relay] live settlement refused at prepare: workspace workspace, settlement forged, check record-digest.",
+    ]]);
     expect(
       f.storage.fetchLogCoordinate({
         workspaceId: "workspace",
@@ -287,6 +296,7 @@ it("refuses a client-supplied unattributed marker on settlement publication", as
     first.op.payloadJson = stableJsonStringify({...first.payload, authors: [{kind: "unattributed"}]});
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toMatchObject([{reason: "authorship-mismatch"}]);
+    expect(refusedChecks()).toEqual(["prepare client-authors"]);
     expect(f.raw.prepare("SELECT 1 FROM sync_relay_object_moments WHERE moment_id='client-marker'").get()).toBeUndefined();
   } finally { f.close(); }
 });
@@ -360,26 +370,26 @@ it("refuses a changed retry of an accepted proof after stripping its client auth
   } finally {f.close();}
 });
 it.each([
-  "before",
-  "state",
-  "scope",
-  "moment",
-  "authors",
-  "automation-authors",
-  "automation-presser",
-  "automation-claim",
-  "mixed-authors",
-  "human-authors",
-  "mixed-forged-human",
-  "replay",
-  "copied-ref",
-  "fence",
-  "future-cursor",
-  "after-path",
-  "operation",
+  ["before", "first-baseline-markdown"],
+  ["state", "state-digest"],
+  ["scope", "record-namespace"],
+  ["moment", "moment-payload"],
+  ["authors", "client-authors"],
+  ["automation-authors", "client-authors"],
+  ["automation-presser", "client-authors"],
+  ["automation-claim", "client-authors"],
+  ["mixed-authors", "client-authors"],
+  ["human-authors", "client-authors"],
+  ["mixed-forged-human", "client-authors"],
+  ["replay", "predecessor-published-past"],
+  ["copied-ref", "predecessor-published-past"],
+  ["fence", "accepted-event-binding"],
+  ["future-cursor", "journal-endpoint"],
+  ["after-path", "moment-payload"],
+  ["operation", "moment-payload"],
 ])(
   "consumes forged %s proof without changing current content",
-  async (field) => {
+  async (field, check) => {
     const f = registered({ deployment: true });
     try {
       const first = publication(f, "first", 0, f.input.evidence.projectedMarkdownSha256, 0,
@@ -453,6 +463,7 @@ it.each([
       await prepare(f, [first.op]);
       const result = append(f, [first.op]);
       expect(result.settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual([`prepare ${check}`]);
       expect(
         f.raw
           .prepare(
@@ -490,6 +501,7 @@ it("rechecks fence after worker proof and consumes stale proof instead of wedgin
         .run(),
     );
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["commit restore-fence"]);
   } finally {
     f.close();
   }
@@ -577,6 +589,7 @@ it("rejects altered full content with the same CRDT clocks", async () => {
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare state-digest"]);
   } finally {
     f.close();
   }
@@ -590,6 +603,7 @@ it.each(["bytes", "events"])("acknowledges a singleton over the %s budget and pu
     await prepare(f, [first.op], budget);
     expect(append(f, [first.op])).toMatchObject({currentMaxOriginSeq:0,
       settlementRefusals:[{originSeq:0, momentId:"oversized", settlementId:first.record.settlementId}]});
+    expect(refusedChecks()).toEqual(["prepare proof-budget"]);
     const fallback = {...first.payload, attributionUnavailable:{settlementId:first.record.settlementId,reason:"authorship-mismatch"}};
     delete (fallback as Record<string,unknown>).settlementReference;
     const ops = [{originSeq:1,opKind:"moment.append",payloadJson:stableJsonStringify(fallback),recordedAtMs:1},
@@ -631,6 +645,7 @@ it("refuses a different full CRDT state even when its Markdown projection is unc
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare state-digest"]);
   } finally { f.close(); }
 });
 
@@ -652,6 +667,7 @@ it("publishes admitted automation declaration without inferring its presser as a
     const copied = {...first.op, originSeq: 1, payloadJson: stableJsonStringify(forged)};
     await prepare(f, [copied]);
     expect(append(f, [copied]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare predecessor-published-past"]);
   } finally {f.close();}
 });
 
@@ -686,7 +702,10 @@ it.each(["transition", "skipped-base"])("anchors a changed full selector binding
       expect(result.settlementRefusals).toBeUndefined();
       const later=publication(f,"later-selector",next.receipt.journalCursor,next.markdownSha,2);
       await prepare(f,[later.op]);expect(append(f,[later.op]).settlementRefusals).toBeUndefined();
-    } else expect(result.settlementRefusals).toHaveLength(1);
+    } else {
+      expect(result.settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual(["prepare base-binding-change"]);
+    }
   } finally {f.close();}
 });
 
@@ -713,8 +732,13 @@ it.each([false, true])("anchors a projection-neutral accepted gap with same-push
   } finally { f.close(); }
 });
 
-it.each(["changed-markdown", "missing-cut", "wrong-document", "selector", "path", "fence", "namespace", "restore", "backwards"])(
-  "refuses an advanced publication anchor with %s", async variant => {
+it.each([
+  ["changed-markdown", "predecessor-unchanged-gap"], ["missing-cut", "predecessor-unchanged-gap"],
+  ["wrong-document", "journal-endpoint"], ["selector", "predecessor-unchanged-gap"], ["path", "predecessor-unchanged-gap"],
+  ["fence", "predecessor-unchanged-gap"], ["namespace", "predecessor-unchanged-gap"], ["restore", "predecessor-unchanged-gap"],
+  ["backwards", "predecessor-published-past"],
+])(
+  "refuses an advanced publication anchor with %s", async (variant, check) => {
     const f = registered({deployment: true});
     try {
       const first = publication(f, "first"); await prepare(f, [first.op]); append(f, [first.op]);
@@ -752,6 +776,7 @@ it.each(["changed-markdown", "missing-cut", "wrong-document", "selector", "path"
       });
       await prepare(f, [next.op]);
       expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual([`prepare ${check}`]);
       expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
     } finally { f.close(); }
   });
@@ -767,6 +792,7 @@ it("rechecks an unchanged publication anchor at commit", async () => {
     f.write(db => db.prepare("UPDATE sync_relay_live_settlement_cuts SET markdown_sha256=? WHERE journal_cursor=?")
       .run("f".repeat(64), neutral.receipt.journalCursor));
     expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["commit predecessor-unchanged-gap"]);
     expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
   } finally { f.close(); }

@@ -170,7 +170,12 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
                         30,
                     )?;
                     crate::author_coverage::advance_in(tx, &f.key, false)?;
-                    Ok(audit.result(id, "settled".into(), written.snapshot.blob_sha256, false))
+                    Ok(audit.result(
+                        Some(id),
+                        "settled".into(),
+                        written.snapshot.blob_sha256,
+                        false,
+                    ))
                 })?;
                 let TxnOutcome::Committed(result) = result else {
                     return Err(ApplicationError::Interrupted);
@@ -2672,7 +2677,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
         .unwrap();
     let resume = NativeRestoreResume {
         application: input,
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     f._owner
         .resume_restore(
@@ -2910,7 +2915,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             &mut f.store, None,
             NativeRestoreResume {
                 application: input,
-                settlement_id: settled.settlement_id,
+                settlement_id: settled.settlement_id.unwrap(),
             },
             coordinate.clone(),
             PROOF_BYTES,

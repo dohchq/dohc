@@ -1504,7 +1504,11 @@ fn settle_audited(
         false,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
-    let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
+    let id = if audit.is_empty() {
+        None
+    } else {
+        Some(audit.stored_id(store, &settled.moment_id, &settled.sha256)?)
+    };
     let mut result = audit.result(id, settled.moment_id, settled.sha256, settled.materialized);
     result.collection_reconcile_required = settled.collection_reconcile_required;
     Ok(result)

@@ -7,7 +7,9 @@ pub(super) mod restore;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveSettlementResult {
-    pub settlement_id: String,
+    /// Absent when nothing was accepted since the owner's handover or the
+    /// first baseline: such a settlement is neither recorded nor published.
+    pub settlement_id: Option<String>,
     pub previous_cursor: i64,
     pub terminal_cursor: i64,
     pub application_count: usize,
@@ -50,6 +52,9 @@ pub struct LiveSettlementAudit {
     first: bool,
     restore: Option<Box<restore::RestoreAudit>>,
     replay_anchor: Option<restore::PriorAnchor>,
+    /// No settlement is stored and the relay accepted nothing since the
+    /// owner's handover or the first baseline.
+    empty: bool,
 }
 
 fn audit_error(error: ApplicationError) -> ApplicationError {
@@ -107,13 +112,17 @@ impl LiveSettlementAudit {
     /// head, such as a pre-live imported projection, would publish its own
     /// historical before-image. A restore reuses only its own saved settlement,
     /// so its first settlement records the restore transition. Replay keeps its
-    /// exact record-time checks.
+    /// exact record-time checks. An empty settlement publishes nothing, so any
+    /// head holding its projection stands.
     pub fn reuses_head_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
     ) -> Result<bool, ApplicationError> {
+        if self.empty {
+            return Ok(true);
+        }
         if self.terminal_source {
             return Ok(false);
         }
@@ -132,6 +141,12 @@ impl LiveSettlementAudit {
     }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
+    }
+    /// The settlement covers no accepted edit. It still projects the file,
+    /// but nothing is recorded or published: the relay accepts only a
+    /// settlement whose interval holds an accepted edit.
+    pub fn is_empty(&self) -> bool {
+        self.empty
     }
     /// The accepted document this settlement projects instead of the native
     /// head. Present only while this owner's own native edits wait for the
@@ -269,6 +284,10 @@ impl LiveSettlementAudit {
             }
             return Ok(id);
         }
+        // Stored settlements may start where they end. A new one must not.
+        if self.previous_cursor >= self.terminal_cursor {
+            return Err(invalid("a new settlement must cover an accepted edit"));
+        }
         tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
                 serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
@@ -397,7 +416,7 @@ impl LiveSettlementAudit {
 
     pub fn result(
         &self,
-        settlement_id: String,
+        settlement_id: Option<String>,
         moment_id: String,
         markdown_digest: String,
         materialized: bool,
@@ -531,9 +550,11 @@ where
         };
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
+        // With nothing stored, the next settlement again starts at the origin.
+        let empty = previous.is_none() && restored_origin.is_none() && previous_cursor == terminal_cursor;
         Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
-            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
+            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor),empty })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
@@ -868,6 +889,7 @@ mod publication_state_tests {
             first: false,
             restore: None,
             replay_anchor: None,
+            empty: false,
         };
         (dir, store, audit)
     }

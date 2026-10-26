@@ -2759,7 +2759,9 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
+    // A settlement covering no accepted edit still projects, but records nothing.
+    let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
+    let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
     let projection = if use_reader {
         project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
     } else {
@@ -2998,7 +3000,7 @@ pub(super) fn ydoc_settle_on_store(
             faults,
             path,
             content_kind == ContentKind::Richdoc,
-            live_audit,
+            recorded_audit,
             &current,
             &projection.source_state_vector_sha256,
             publication_state_bytes.as_deref(),
@@ -3186,7 +3188,7 @@ pub(super) fn ydoc_settle_on_store(
         .map_err(|error| {
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
-        if let Some(audit) = live_audit {
+        if let Some(audit) = recorded_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
