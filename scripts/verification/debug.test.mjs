@@ -8,6 +8,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { SOCKET_PATH_BYTES, makeDebugHome, removeDebugHome } from "./debug-home.mjs";
 
 if (process.argv[2] === "fixture") {
   const root = process.argv[3];
@@ -106,7 +107,7 @@ if (process.argv[2] === "fixture") {
   async function fixture(t, { signal = "SIGINT", phase = "none", probe = "none" }) {
     const root = mkdtempSync(join(tmpdir(), "dohc-debug-test-"));
     // Run the actual launcher and close helper. Only build, Git and Electron/debugger I/O are adapters.
-    for (const file of ["debug.mjs", "close-electron.mjs", "desktop-close-policy.mjs"]) copyFileSync(join(import.meta.dirname, file), join(root, file));
+    for (const file of ["debug.mjs", "debug-home.mjs", "close-electron.mjs", "desktop-close-policy.mjs"]) copyFileSync(join(import.meta.dirname, file), join(root, file));
     writeFileSync(join(root, "build.mjs"), `export async function prepare() {}\nexport function assertPrepared() { return { desktop: { commit: 'earlier-build-head' } }; }`);
     writeFileSync(join(root, "process.mjs"), `import assert from 'node:assert/strict'; export const repoRoot = import.meta.dirname; export function git(args) { assert.deepEqual(args, ['rev-parse', 'HEAD']); return 'current-checkout-head'; }`);
     writeFileSync(join(root, "fs-adapter.mjs"), `export { mkdir, readFile } from 'node:fs/promises'; import { writeFile as write } from 'node:fs/promises'; export async function writeFile(path, ...args) { if (String(path).endsWith('desktop.jsonl')) await globalThis.debugFixtureHold('evidence'); return write(path, ...args); }`);
@@ -152,6 +153,11 @@ if (process.argv[2] === "fixture") {
       assert.deepEqual(JSON.parse(readFileSync(join(root, "outcome.json"), "utf8")).listeners, [0, 0]);
       const instance = JSON.parse(readFileSync(join(directory, "instance.json"), "utf8"));
       assert.equal(instance.commit, "current-checkout-head", "launch provenance must not reuse the build commit");
+      if (process.platform === "win32") assert.equal(instance.home, join(directory, "home"));
+      else {
+        assert.ok(!instance.home.startsWith(directory), "a Mac or Linux session keeps its home in the temp folder");
+        assert.equal(existsSync(instance.home), false, "the session removes its temporary home");
+      }
       assert.equal(instance.build.desktop.commit, "earlier-build-head");
       if (probe === "utf8") {
         const logs = readFileSync(join(directory, "desktop.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -171,5 +177,18 @@ if (process.argv[2] === "fixture") {
   for (const probe of ["pass", "fail"]) {
     test(`debug probe ${probe} retains cleanup and separate launch provenance`, { timeout: 30_000 }, async (t) => fixture(t, { probe }));
   }
+  test("a debug session's CLI socket path fits each platform's limit, and Windows keeps its home in the session", () => {
+    const directory = join(".agent-artifacts", "debug", "0".repeat(36));
+    for (const [platform, limit] of Object.entries(SOCKET_PATH_BYTES)) {
+      const session = makeDebugHome(directory, platform);
+      try {
+        assert.equal(session.temporary, true);
+        const socket = join(session.home, "dohc-cli.sock");
+        assert.ok(Buffer.byteLength(socket) <= limit, `${socket} is ${Buffer.byteLength(socket)} bytes, over ${platform}'s ${limit}`);
+      } finally { removeDebugHome(session); }
+      assert.equal(existsSync(session.home), false);
+    }
+    assert.deepEqual(makeDebugHome(directory, "win32"), { home: join(directory, "home"), temporary: false });
+  });
   test("debug evidence preserves split UTF8 in independent streams and flushes an incomplete final character", { timeout: 30_000 }, async (t) => fixture(t, { probe: "utf8" }));
 }

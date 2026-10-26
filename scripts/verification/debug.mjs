@@ -7,6 +7,7 @@ import { prepare, assertPrepared } from "./build.mjs";
 import { git, repoRoot } from "./process.mjs";
 import { closeDebugApplication } from "./close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "./desktop-close-policy.mjs";
+import { makeDebugHome, removeDebugHome } from "./debug-home.mjs";
 
 async function evaluateDebugger(url, expression) {
   const socket = new WebSocket(url);
@@ -40,7 +41,8 @@ const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 const { _electron: electron } = require("playwright");
 const directory = join(repoRoot, ".agent-artifacts/debug", randomUUID());
 const profile = join(directory, "profile");
-const home = join(directory, "home");
+const session = makeDebugHome(directory);
+const { home } = session;
 const workspace = join(directory, "workspace");
 let app;
 let processHandle;
@@ -111,6 +113,7 @@ finally {
       await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
       console.log(`[debug] Evidence retained at ${directory}`);
     } finally {
+      removeDebugHome(session);
       if (stop) { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
     }
   }
