@@ -1,6 +1,7 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { createRequire } from "node:module";
 import type { Plugin } from "vite";
 
 // Electron 43.3.0 ships Chromium 150 and Node 24.18. electron-vite 5.0.0
@@ -55,6 +56,13 @@ export const mainBuildEntries = {
     "src/workspaces/documentProjectionThread.ts",
   "workspace-files-worker": "src/workspaces/workspaceFilesThread.ts",
   "collection-history-worker": "src/workspaces/localDatasetHistoryThread.ts",
+};
+
+// micromark's browser build decodes character references through a DOM
+// element, and the chat Markdown worker has no DOM. Every renderer context
+// uses the package's entity table instead.
+export const rendererAlias = {
+  "decode-named-character-reference": createRequire(import.meta.url).resolve("decode-named-character-reference"),
 };
 
 function effectFree(surface: "preload" | "renderer"): Plugin {
@@ -132,6 +140,7 @@ export default defineConfig(({ mode }) => {
     renderer: {
       root: "src/renderer",
       plugins: [effectFree("renderer"), react(), tailwindcss()],
+      resolve: { alias: rendererAlias },
       build: {
         target: electronRendererTarget,
         minify,
