@@ -293,10 +293,10 @@ function replyToolCall(threadId: string, runId: string): string {
 }
 
 // A Claude Code run loads only the person's own Claude Code settings
-// (agentToolCatalog.ts), which leaves out the workspace's CLAUDE.md.
+// (agentToolCatalog.ts), which leaves out the workspace's instruction files.
 function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
   const form = replyFormFor(tool);
-  const instructionsFile = tool === "claude" ? "If the workspace has a CLAUDE.md file at its root, read it first and follow it. " : "";
+  const instructionsFile = tool === "claude" ? "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them. " : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;

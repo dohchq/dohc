@@ -92,7 +92,7 @@ function codexReplyServer(args) {
 // The dohc MCP server a Claude Code launch names, after checking the launch.
 // Claude Code starts its servers in its own working directory.
 function claudeReplyServer(args) {
-  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"];
+  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
   const servers = JSON.parse(readFileSync(args[7], "utf8")).mcpServers;
   return Object.keys(servers).join() === "dohc" && servers.dohc.type === "stdio"
