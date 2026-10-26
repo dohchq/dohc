@@ -85,6 +85,54 @@ fn native_accepted(
     Ok(Some((held, history.doc)))
 }
 
+/// The accepted projection at this binding's original owner handover.
+pub(crate) fn read_adoption_predecessor_in(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    remaining: &mut usize,
+) -> Result<Option<String>, ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = (|| {
+        let cursor: Option<i64> = conn.query_row(
+            "SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0",
+            params![namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id,
+                serde_json::to_string(binding).map_err(|_| ApplicationError::Corrupt)?],
+            |row| row.get(0),
+        ).optional().map_err(read_sql)?;
+        let Some(cursor) = cursor else {
+            return Ok(None);
+        };
+        let Some(held) = registration_in(conn, key, &mut budget)? else {
+            return Ok(None);
+        };
+        if held.namespace != namespace || held.binding != *binding {
+            return Ok(None);
+        }
+        current_in(conn, &held, &mut budget)?;
+        let history = accepted_history::read_inner(
+            conn,
+            &held,
+            cursor,
+            &mut budget,
+            accepted_history::CHECKPOINT_EVENTS as usize,
+            accepted_history::HistoryPurpose::Native,
+        )?;
+        Ok(Some(hex_sha256(
+            history
+                .doc
+                .project(crate::ContentKind::Richdoc)?
+                .content
+                .as_bytes(),
+        )))
+    })();
+    *remaining = budget.remaining;
+    result
+}
+
 /// The accepted head that the restore producing this exact binding replaced,
 /// from that restore's verified resume evidence. None when the current
 /// generation is not a resumed restore of this registration.

@@ -81,7 +81,9 @@ it("records deterministic settlement refusal and advances later origin operation
   }
 });
 import { createHash } from "node:crypto";
-import { encodeStateAsUpdate } from "yjs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { applyUpdate, encodeStateAsUpdate } from "yjs";
 import { createLiveMarkdownRegistrationValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { stableJsonStringify } from "../canonicalJson.js";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory.js";
@@ -352,6 +354,62 @@ it("authenticates full accepted state and publishes exact journal contributors t
         )
         .get()?.n,
     ).toBe(2);
+  } finally {
+    f.close();
+  }
+});
+it("starts a later proof at the Markdown its predecessor verified, not at the baseline", async () => {
+  const f = registered({ deployment: true });
+  try {
+    const first = publication(f, "first");
+    await prepare(f, [first.op]);
+    append(f, [first.op]);
+    const baseline = f.input.evidence.projectedMarkdownSha256;
+    expect(first.markdownSha).not.toBe(baseline);
+    const stale = publication(f, "stale", first.receipt.journalCursor, baseline, 1);
+    await prepare(f, [stale.op]);
+    expect(stale.op).toMatchObject({ settlementAdmission: { status: "refused" } });
+    expect(refusedChecks()).toEqual(["prepare predecessor-markdown"]);
+    const next = publication(f, "next", first.receipt.journalCursor, first.markdownSha, 1);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op])).toMatchObject({ inserted: 1 });
+    expect(next.op).toMatchObject({ settlementAdmission: { status: "accepted" } });
+    expect(refusedChecks()).toEqual(["prepare predecessor-markdown"]);
+  } finally {
+    f.close();
+  }
+});
+// owner_publication exports these states and the outgoing preimage. The relay
+// assigns its own journal coordinates and authorship to the same updates.
+const handoverEvidence = process.env.DOHC_HANDOVER_PUBLICATION_EVIDENCE;
+it.skipIf(!handoverEvidence).each(["changed", "unchanged"])("accepts the engine's %s handover preimage after a reload", async variant => {
+  const evidence = JSON.parse(readFileSync(join(handoverEvidence!, `${variant}.json`), "utf8")) as {
+    baselineBytes: number[]; handoverBytes: number[]; nextBytes: number[];
+    payload: {payloadBeforeBlobSha256: string; payloadAfterBlobSha256: string};
+  };
+  const f = registered({deployment: true, baselineBytes: Uint8Array.from(evidence.baselineBytes)});
+  try {
+    f.write(db => {
+      db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES ('sync_relay_live_update_journal',6)").run();
+    });
+    f.doc.gc = false;
+    const handover = Uint8Array.from(evidence.handoverBytes);
+    applyUpdate(f.doc, handover);
+    const first = publication(f, "handover", 0, undefined, 0, undefined, handover);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op])).toMatchObject({inserted: 1});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(first.receipt.journalCursor).toBe(7);
+    expect(first.markdownSha).toBe(evidence.payload.payloadBeforeBlobSha256);
+    const nextState = Uint8Array.from(evidence.nextBytes);
+    applyUpdate(f.doc, nextState);
+    const next = publication(f, "next", first.receipt.journalCursor, evidence.payload.payloadBeforeBlobSha256, 1, undefined, nextState);
+    expect(next.receipt.journalCursor).toBe(8);
+    expect(next.markdownSha).toBe(evidence.payload.payloadAfterBlobSha256);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op])).toMatchObject({inserted: 1});
+    expect(next.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(refusedChecks()).toEqual([]);
   } finally {
     f.close();
   }

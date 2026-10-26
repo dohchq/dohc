@@ -23,6 +23,10 @@ impl Fixture {
     }
 
     fn with_size(size: usize) -> Self {
+        Self::with_source(size, false)
+    }
+
+    fn with_source(size: usize, canonical: bool) -> Self {
         let root = ScratchDir::new().unwrap();
         let db = engine_db_path(&root).unwrap();
         let mut store = EngineStore::open(&db, 0).unwrap();
@@ -30,8 +34,17 @@ impl Fixture {
             "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
         ))
         .unwrap();
-        let mut text = source["markdown"].as_str().unwrap().to_owned();
+        let mut text = source[if canonical { "canonical" } else { "markdown" }]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let mut bytes: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+        if canonical {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
+                .unwrap();
+            bytes = doc.encode_full_state();
+        }
         if size > 0 {
             let doc = Ydoc::wire();
             doc.apply(&bytes).unwrap();
@@ -179,8 +192,12 @@ impl Fixture {
     }
 
     /// The relay accepted an owner edit at `cursor` and the outbox drained
-    /// before the handover, so the handover ends at that edit.
-    fn edit_accepted_before_handover(&mut self, cursor: i64) -> OwnerAdoptionCut {
+    /// before the handover. The edit can preserve the projected Markdown.
+    fn edit_accepted_before_handover(
+        &mut self,
+        cursor: i64,
+        changes_content: bool,
+    ) -> OwnerAdoptionCut {
         let key = DocKey::new("workspace", "main", "object").unwrap();
         let limits = dohc_engine_collab::OwnerOutboxLimits {
             max_pending_bytes: 1_000_000,
@@ -189,6 +206,11 @@ impl Fixture {
         self.doc
             .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
             .unwrap();
+        if !changes_content {
+            self.doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, &self.text)
+                .unwrap();
+        }
         let update = self.doc.encode_full_state();
         let dohc_engine_storage::TxnOutcome::Committed(recorded) =
             dohc_engine_collab::record_local_update(
@@ -2104,6 +2126,15 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
             .allowed_ops,
         1
     );
+    let mut unaccepted = op.clone();
+    unaccepted.payload["payloadBeforeBlobSha256"] =
+        serde_json::json!(hex_sha256(b"Unaccepted content"));
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        0
+    );
     assert_eq!(
         f.store
             .table_row_count("live_settlement_publication_states")
@@ -2475,7 +2506,7 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
 async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     let mut f = Fixture::new();
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    let cut = f.edit_accepted_before_handover(7);
+    let cut = f.edit_accepted_before_handover(7, true);
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
@@ -2565,10 +2596,23 @@ async fn settling_straight_after_a_handover_records_and_publishes_nothing() {
 }
 
 #[tokio::test]
-async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload() {
-    let mut f = Fixture::new();
+async fn the_settlement_after_an_empty_one_starts_at_a_changed_handover_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true).await;
+}
+
+#[tokio::test]
+async fn the_settlement_after_an_empty_one_starts_at_an_unchanged_handover_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false).await;
+}
+
+async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(
+    changes_content: bool,
+) {
+    use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
+    let mut f = Fixture::with_source(0, true);
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    let cut = f.edit_accepted_before_handover(7);
+    let cut = f.edit_accepted_before_handover(7, changes_content);
+    let handover_bytes = f.doc.encode_full_state();
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
@@ -2587,6 +2631,10 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         (None, 7, 7)
     );
     assert!(empty.materialized);
+    assert_eq!(
+        empty.markdown_digest == hex_sha256(f.text.as_bytes()),
+        !changes_content
+    );
     assert_eq!(recorded_settlements(&f.store), (0, 0));
     assert_eq!(
         owner
@@ -2636,6 +2684,43 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         .unwrap();
     assert_eq!(stored, (7, 8));
     assert_eq!(recorded_settlements(&f.store), (1, 1));
+    // The relay holds the Markdown at the handover cut as this proof's
+    // predecessor, so the outgoing moment starts there.
+    let op = f.store.read_with(|conn| conn.query_row("SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1", [&next.moment_id], |r| Ok(ReplicationEnvelope {
+        workspace_id:"workspace".into(), origin_id:r.get(0)?, origin_seq:r.get(1)?, relay_seq:None, op_kind:"moment.append".into(), payload:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(), recorded_at_ms:r.get(3)?, settlement_admission:None, admitted_author_snapshot:None
+    }))).unwrap();
+    assert_eq!(
+        op.payload["settlementReference"]["record"]["previousCursor"],
+        7
+    );
+    assert_eq!(
+        op.payload["payloadBeforeBlobSha256"],
+        serde_json::json!(empty.markdown_digest)
+    );
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    if let Some(directory) = std::env::var_os("DOHC_HANDOVER_PUBLICATION_EVIDENCE") {
+        let evidence = serde_json::json!({
+            "baselineBytes": f.bytes,
+            "handoverBytes": handover_bytes,
+            "nextBytes": f.doc.encode_full_state(),
+            "payload": op.payload,
+        });
+        let name = if changes_content {
+            "changed.json"
+        } else {
+            "unchanged.json"
+        };
+        std::fs::write(
+            PathBuf::from(directory).join(name),
+            serde_json::to_vec(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
