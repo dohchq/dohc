@@ -12,7 +12,8 @@ import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
-import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
+import { assertMoveParentCase, checkCaseRename, deleteIdentityUnavailable, deletePath, moveIdentityUnavailable, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
+import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
@@ -104,7 +105,7 @@ export async function admitPath(rootPath: string, path: string): Promise<Admitte
     spelled: path, label: "Path", access: "entry" });
   const info = await lstat(target.resolvedAbsolute).catch(() => null);
   const physical = info && !info.isSymbolicLink()
-    ? relative(await realpath(rootPath), await realpath(target.resolvedAbsolute)).split(sep).join("/")
+    ? await storedEntryPath(await realpath(rootPath), target.resolvedAbsolute)
     : target.relative;
   return { path: normalized, relative: target.relative, physical };
 }
@@ -113,9 +114,9 @@ export async function admitPath(rootPath: string, path: string): Promise<Admitte
 // History records at each of `bases`, as spelled and where it resolves. A
 // reserved or ignored folder, such as .git or node_modules, refuses before
 // dohc reads inside it.
-async function admitTree(rootPath: string, spelled: string, allowed: (path: string) => boolean,
+async function admitTree(rootPath: string, admitted: AdmittedPath, allowed: (path: string) => boolean,
   otherBases: readonly string[] = []): Promise<AdmittedTree> {
-  const admitted = await admitPath(rootPath, spelled);
+  const spelled = admitted.path;
   // The tree is named by its entry on disk from here on.
   const target = { ...admitted, relative: admitted.physical };
   const bases = [target.path, target.relative, ...otherBases];
@@ -292,6 +293,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
     assertWritable(operation);
     const change = async (markChanged: () => void) => {
       let gone: string[] = [];
+      if (!options.byHand) await assertMoveParentCase(await realpath(rootPath), { fromPath: checkedPath(input.fromPath), toPath: checkedPath(input.toPath) });
       // The capture settles, closes and checks these endpoints before the hold.
       const prepared = options.prepared;
       if (prepared && options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
@@ -302,15 +304,21 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
           await options.admit?.();
-          if (options.byHand) await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath);
+          const checked = options.byHand ? await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath) : undefined;
           const allowed = engine ? historyAdmission(engine.policy) : () => false;
           const to = await admitPath(rootPath, input.toPath);
-          const spelledFrom = await admitPath(rootPath, input.fromPath);
+          const spelledFrom = checked
+            ? { path: checkedPath(input.fromPath), relative: checked.physicalFromPath, physical: checked.physicalFromPath }
+            : await admitPath(rootPath, input.fromPath);
+          if (checked) to.relative = checked.physicalToPath;
+          if (!options.byHand) await assertMoveParentCase(await realpath(rootPath), { fromPath: spelledFrom.path, toPath: to.path });
           if (spelledFrom.physical !== endpoints[0] || (options.byHand ? to.relative : to.physical) !== endpoints[1]) {
             throw new Error(`${input.fromPath} or ${input.toPath} now leads somewhere else. Check both paths, then try again.`);
           }
           // Two spellings of one entry on disk are a rename of its case.
-          const caseOnly = spelledFrom.physical === to.physical && spelledFrom.relative !== to.relative;
+          const renamedTarget = join(dirname(spelledFrom.physical), basename(to.relative)).split(sep).join("/");
+          const caseOnly = spelledFrom.physical === to.physical && renamedTarget !== spelledFrom.physical;
+          if (caseOnly) to.relative = renamedTarget;
           const pairs = [[spelledFrom.path, to.path], [spelledFrom.relative, to.relative],
             ...(caseOnly ? [] : [[spelledFrom.physical, to.physical]])];
           for (const [a = "", b = ""] of pairs) {
@@ -321,14 +329,14 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           const from = options.byHand
             ? { ...spelledFrom, relative: spelledFrom.physical, files: (engine ? await historyFilesUnder(rootPath, spelledFrom.physical, allowed,
               folder => historyExcludesSubtree(engine.policy, folder)) : []).map(file => file.slice(spelledFrom.physical.length).replace(/^\//u, "")).filter(sub => allowed(under(to.relative, sub))) }
-            : await admitTree(rootPath, input.fromPath, allowed, [to.path, to.relative]);
+            : await admitTree(rootPath, spelledFrom, allowed, [to.path, to.relative]);
           for (const sub of from.files) assertMoveDocumentKind(under(from.relative, sub), under(to.relative, sub), options.byHand ? "rename" : "move");
           const source = join(rootPath, from.relative);
           const target = join(rootPath, to.relative);
           let dest: AdmittedTree | undefined;
           if (await exists(target) && !caseOnly) {
             if (!input.overwrite) throw new Error(`${input.toPath} already exists. Choose another destination, or move with overwrite.`);
-            dest = await admitTree(rootPath, input.toPath, allowed);
+            dest = await admitTree(rootPath, to, allowed);
           }
           // A replaced destination is named by its entry on disk.
           const destBase = dest?.relative ?? to.relative;
@@ -398,6 +406,10 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
             }
             change.moved = true;
             markChanged();
+            if (caseOnly && !options.byHand) {
+              const spelling = await realpath(rootPath).then(root => storedEntryPath(root, target)).catch(() => null);
+              checkCaseRename(spelling, target, input);
+            }
             for (const file of fromFiles) {
               if (!recorded.has(file)) continue;
               await engine!.rename(file, rebase(file));
@@ -457,6 +469,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
   } catch (error) {
+    if (error instanceof StoredEntryIdentityUnavailable) error = moveIdentityUnavailable(input.fromPath, input.toPath);
     return async () => ({ ok: false, path: input.fromPath, reason: reason(error, failed) });
   }
 }
@@ -573,7 +586,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
-          const target = await admitTree(rootPath, path, historyAdmission(engine.policy));
+          const target = await admitTree(rootPath, await admitPath(rootPath, path), historyAdmission(engine.policy));
           if (target.relative !== endpoint) throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
           const files = target.files.map(sub => under(target.relative, sub));
           const shown = (file: string) => target.path + file.slice(target.relative.length);
@@ -639,6 +652,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
     };
   } catch (error) {
     releaseRecovery();
+    if (error instanceof StoredEntryIdentityUnavailable) error = deleteIdentityUnavailable(path);
     return async () => ({ ok: false, deleted: [], path, reason: reason(error, failed) });
   }
 }
