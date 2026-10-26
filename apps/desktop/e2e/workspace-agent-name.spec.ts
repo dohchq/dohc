@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
+import { installFakeAgentTools } from "./helpers/agentTools";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, trustOpenWorkspace } from "./helpers/workspace";
 
 test("a named agent replies to a group mention with its owner on hover and focus", async ({}, testInfo) => {
@@ -13,7 +14,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
-    desktop = await launchDesktopApp({ workspace: temp });
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await trustOpenWorkspace(desktop);
     const page = desktop.page;
