@@ -5656,6 +5656,121 @@ fn reserved_agent_channel_shapes_rejected() {
     ));
 }
 
+/// A build from before agent ids refused codex's chat, then kept a thread in
+/// it in a hidden group for its wire id. After the upgrade, that group is
+/// codex's chat: the next thread in it applies, and codex's own chat on this
+/// computer is the same chat rather than one whose slug is taken.
+#[test]
+fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
+    // The suffix of this wire id is not an agent id.
+    let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";
+    let conn = rusqlite::Connection::open(&db).expect("open earlier store");
+    conn.execute(
+        "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+         VALUES ('ws', ?1, 'my-agent-codex', 'my-agent-codex', 'channel', 5, 5), \
+                ('ws', ?2, 'channel-wire-agent-v1-my-bot', 'channel-wire-agent-v1-my-bot', 'channel', 6, 6)",
+        params![codex, my_bot],
+    )
+    .expect("seed the hidden groups");
+    conn.execute(
+        "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+         VALUES ('ws', 'channel_wire_agent_v1_codex', ?1), ('ws', 'channel_wire_agent_v1_my_bot', ?2)",
+        params![codex, my_bot],
+    )
+    .expect("seed the wire ids");
+    conn.execute(
+        "INSERT INTO chat_channel_placeholders (workspace_id, channel_id, wire_id) \
+         VALUES ('ws', ?1, 'channel_wire_agent_v1_codex'), ('ws', ?2, 'channel_wire_agent_v1_my_bot')",
+        params![codex, my_bot],
+    )
+    .expect("seed the placeholders");
+    conn.execute(
+        "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+         VALUES ('ws', 'codex-first', 'First', 5, 5, ?1)",
+        params![codex],
+    )
+    .expect("seed the first thread");
+    drop(conn);
+
+    let mut engine = EngineStore::open(&db, 1_000).expect("migrate");
+    for (origin, thread_id, payload) in [
+        (
+            "device-a",
+            "codex-second",
+            json!({
+                "threadId": "codex-second", "title": "Second", "createdAtMs": 20,
+                "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
+            }),
+        ),
+        (
+            "device-c",
+            "my-bot-second",
+            json!({
+                "threadId": "my-bot-second", "title": "Second", "createdAtMs": 21,
+                "channelWireId": "channel_wire_agent_v1_my_bot"
+            }),
+        ),
+    ] {
+        let operation = envelope(origin, 0, "chat.thread.create", payload);
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults).expect(thread_id),
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new())),
+            "{thread_id} applies"
+        );
+    }
+
+    // The kind and agent of a thread's chat, and whether that chat is hidden.
+    let chat_of = |thread_id: &str| -> (String, Option<String>, bool) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT c.kind, c.agent_id, \
+                            EXISTS (SELECT 1 FROM chat_channel_placeholders p \
+                                    WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id) \
+                     FROM chat_threads t \
+                     JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     WHERE t.workspace_id = 'ws' AND t.thread_id = ?1",
+                    [thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("the thread's chat")
+    };
+    assert_eq!(
+        chat_of("codex-second"),
+        ("agent".to_owned(), Some("codex".to_owned()), false),
+        "the hidden group is codex's chat"
+    );
+    assert_eq!(
+        chat_of("my-bot-second"),
+        ("channel".to_owned(), None, true),
+        "a wire id that names no agent keeps its hidden group"
+    );
+
+    let mut chats = LinkedChatStore::new(&mut engine);
+    let chat = chats
+        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
+        .expect("codex's chat");
+    assert_eq!(chat.channel_id, codex);
+    assert_eq!(chat.slug, "my-agent-codex");
+    assert_eq!(chat.kind, ChatChannelKind::Agent);
+    assert_eq!(chat.agent_id.as_deref(), Some("codex"));
+    assert_eq!(
+        chats
+            .list_channels("ws")
+            .expect("channels")
+            .iter()
+            .filter(|summary| summary.channel.agent_id.as_deref() == Some("codex"))
+            .map(|summary| summary.thread_count)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}
+
 #[test]
 fn imported_agent_message_keeps_its_owner_display_name() {
     let (_scratch, _path, mut engine) = open_store();

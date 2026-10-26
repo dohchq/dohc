@@ -9,6 +9,26 @@
 -- rename runs in its normal mode.
 ALTER TABLE chat_channels ADD COLUMN agent_id TEXT;
 UPDATE chat_channels SET agent_id = 'default' WHERE kind = 'agent' AND slug = 'my-agent';
+-- An earlier build refused another agent's chat and kept that chat's threads
+-- in a hidden group for its wire id. The chat's create never comes again, so
+-- the group becomes the agent's chat. A wire id whose suffix is not an agent id
+-- is an ordinary wire id.
+UPDATE chat_channels
+SET kind = 'agent', name = substr(p.wire_id, 23), agent_id = substr(p.wire_id, 23)
+FROM chat_channel_placeholders AS p
+WHERE p.workspace_id = chat_channels.workspace_id
+  AND p.channel_id = chat_channels.channel_id
+  AND chat_channels.kind = 'channel'
+  AND p.wire_id GLOB 'channel_wire_agent_v1_[a-z]*'
+  AND length(p.wire_id) <= 22 + 64
+  AND substr(p.wire_id, 23) NOT GLOB '*[^a-z0-9-]*'
+  AND p.wire_id <> 'channel_wire_agent_v1_default';
+DELETE FROM chat_channel_placeholders
+WHERE wire_id GLOB 'channel_wire_agent_v1_*'
+  AND EXISTS (SELECT 1 FROM chat_channels AS c
+              WHERE c.workspace_id = chat_channel_placeholders.workspace_id
+                AND c.channel_id = chat_channel_placeholders.channel_id
+                AND c.agent_id IS NOT NULL);
 CREATE UNIQUE INDEX idx_chat_channels_agent
     ON chat_channels(workspace_id, agent_id) WHERE agent_id IS NOT NULL;
 ALTER TABLE chat_messages ADD COLUMN author_agent_id TEXT
