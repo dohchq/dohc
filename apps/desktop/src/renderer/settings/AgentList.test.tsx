@@ -4,13 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
-import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings } from "../../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList, agentListRows } from "./AgentList";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 const bridgeMock = {
+  getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" })),
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
   onChatDispatchPaused: vi.fn((listener: (event: ChatDispatchPausedEvent) => void) => {
     pausedListener = listener;
@@ -305,6 +306,7 @@ it("removes an agent, and Undo puts it back where it was", async () => {
   // The dialog hands down a new save after each one; the Undo goes through it.
   const latestSave = vi.fn(async (_settings: DesktopUserSettings) => true);
   rerender({ settings: saved, onSave: latestSave });
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: saved, source: "stored" });
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"]));
   expect(onSave).toHaveBeenCalledOnce();

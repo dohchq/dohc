@@ -16,6 +16,7 @@ import {
   type AgentProblem,
   type AgentSettings,
   type DesktopUserSettings,
+  type DesktopUserSettingsResult,
 } from "../../settings/userSettings";
 import type { AgentHue } from "../tokens";
 import { bridge } from "../bridge";
@@ -351,10 +352,10 @@ export function AgentList(props: {
   onNotice?: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
-  // An Undo can come after later changes, so it starts from the settings as they
-  // are then, and saves through the dialog's latest save, which diffs against them.
-  const latest = useRef({ settings, onSave });
-  latest.current = { settings, onSave };
+  // An Undo can come after later changes, so it saves through the dialog's
+  // latest save, which diffs against the settings as they are then.
+  const latestSave = useRef(onSave);
+  latestSave.current = onSave;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
@@ -444,15 +445,29 @@ export function AgentList(props: {
     if (await onOrder([agent.id])) onNotice?.(`Automations now wake ${agent.name}.`, () => void onOrder(previous));
   };
 
-  // Undo puts the agent back where it was, under the name and settings it had.
+  // Undo puts the agent back where it was, under the name and settings it had,
+  // unless an agent in the file has its id by then.
   const remove = async (agent: Agent) => {
     const previous = fileOrder;
     const { [agent.id]: entry, ...agents } = settings.agents;
     if (!entry || !(await onSave({ ...settings, agents }))) return;
     setRenaming((current) => (current === agent.id ? null : current));
     onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
-      const { settings: current, onSave: save } = latest.current;
-      if (await save({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
+      let file: DesktopUserSettingsResult;
+      try {
+        file = await bridge().getUserSettings();
+      } catch (cause) {
+        onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
+        return;
+      }
+      const current = file.settings;
+      const problem = file.agentProblems?.find((entry) => entry.id === agent.id);
+      const holder = current.agents[agent.id]?.name ?? (problem ? problem.name ?? problem.id : null);
+      if (holder !== null) {
+        onError?.(`Undo didn't replace the new ${holder}, so the one you removed stays removed.`);
+        return;
+      }
+      if (await latestSave.current({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
     })());
   };
 

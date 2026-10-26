@@ -1190,6 +1190,41 @@ describe("SettingsDialog", () => {
     expect(await screen.findByRole("button", { name: "Codex actions" })).toBeTruthy();
   });
 
+  it("doesn't replace an agent that came back before Undo", async () => {
+    const user = userEvent.setup();
+    let file: DesktopUserSettings = { ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex" }), default: testAgent({ name: "Nova" }) } };
+    const read = async (): Promise<DesktopUserSettingsResult> => ({ settings: file, source: "stored" });
+    const orderAgents = vi.fn(async (_payload: { order: string[] }) => read());
+    vi.stubGlobal("dohcDesktop", {
+      ...bridge,
+      getUserSettings: read,
+      setUserSettings: async ({ settings, base }: { settings: DesktopUserSettings; base: DesktopUserSettings }) => {
+        file = overlaySettings({ ...file }, base, settings) as DesktopUserSettings;
+        return read();
+      },
+      orderAgents,
+      detectAgentTools: async () => ({
+        workingDirectory: "/workspace",
+        tools: [{ tool: "codex", executable: "/bin/codex", version: "0.98", auth: "signed-in", probe: "detected" }],
+      }),
+    });
+    const onError = vi.fn();
+    const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Codex actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+    await user.click(await screen.findByRole("button", { name: /^Add Codex/ }));
+    await waitFor(() => expect(file.agents.codex?.launch).toEqual({ tool: "codex", executable: "/bin/codex" }));
+    const added = file.agents.codex;
+
+    await act(async () => onNotice.mock.calls[0]![1]!());
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Undo didn't replace the new Codex, so the one you removed stays removed."));
+    expect(file.agents.codex).toEqual(added);
+    expect(Object.keys(file.agents)).toEqual(["default", "codex"]);
+    expect(orderAgents).not.toHaveBeenCalled();
+  });
+
   // A shared view materializes no settings file, so the engine reads as
   // on by default, while main installs no recorder. The no-recorder branch
   // must not prescribe a restart that cannot make the check work.
