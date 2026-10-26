@@ -45,6 +45,7 @@ type Bridge = Pick<DohcDesktopBridge,
   | "getWorkspaceRegistry" | "openFileExternally" | "refreshSharedView" | "submitShareChanges" | "onWorkspaceActivity"
   | "createRelayShare" | "listOwnerLiveDocuments" | "listShareProposals" | "listNotices" | "getSyncStatus">;
 type Received = { temp: TempWorkspace; app: ElectronApplication; page: Page };
+type LiveDelivery = Awaited<ReturnType<Bridge["getSyncStatus"]>>["ownerLiveDelivery"];
 
 async function hasMark(path: string): Promise<boolean> {
   if (process.platform === "win32") {
@@ -139,19 +140,55 @@ function engineCounts(rootPath: string) {
   }));
 }
 
-// Notices holds no row. It opens to look, and closes again. A row fails the
-// test with the stored notices' details, and the checks after it still run.
-async function expectNoNotices(page: Page): Promise<void> {
+type NoticesRow = { id: string; kind: string | null; title: string; body: string; detail: string | null };
+
+// Every row Notices shows. A row's ID ends with its stored notice's, if it has
+// one, which gives its kind and detail. Any other row has no kind, and its
+// detail is what its Copy writes, caught before it reaches the clipboard.
+// Notices opens to look, and closes again.
+async function noticesRows(page: Page): Promise<NoticesRow[]> {
   const center = page.getByTestId("notice-center");
   const toggle = page.getByTestId("notice-center-toggle");
   if (await center.count() === 0) await toggle.click();
   await expect(center).toBeVisible();
-  const rows = await center.locator("[data-notice-row]").allTextContents();
-  const stored = rows.length === 0 ? "" : JSON.stringify(await page.evaluate(() =>
-    (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.listNotices({})));
-  expect.soft(rows, `Notices holds no row. Stored: ${stored}`).toEqual([]);
+  const rows = await page.evaluate(async () => {
+    const stored = (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.listNotices({})).notices;
+    const clipboard = navigator.clipboard;
+    const write = clipboard.writeText;
+    const copied = { text: null as string | null };
+    clipboard.writeText = async (text) => { copied.text = text; };
+    try {
+      return [...document.querySelectorAll<HTMLElement>('[data-testid="notice-center"] [data-notice-row]')].map((row) => {
+        const id = row.dataset.testid ?? "";
+        const notice = stored.find((notice) => id.endsWith(`-${notice.noticeId}`));
+        copied.text = null;
+        if (!notice) [...row.querySelectorAll<HTMLButtonElement>("button[data-testid]")].find((button) => button.dataset.testid === `${id}-copy`)?.click();
+        return {
+          id,
+          kind: notice?.kind ?? null,
+          title: row.querySelector('[id$="-title"]')?.textContent ?? "",
+          body: row.querySelector('[id$="-body"]')?.textContent ?? "",
+          detail: notice ? notice.detail ?? null : copied.text,
+        };
+      });
+    } finally {
+      clipboard.writeText = write;
+    }
+  });
   await toggle.click();
   await expect(center).toHaveCount(0);
+  return rows;
+}
+
+// Notices holds no row the baseline did not hold as it is: a new ID, or a
+// changed kind, title, body or detail. The rows on both sides are attached,
+// and the checks after a new row still run.
+async function expectNoNewNotices(page: Page, side: string, baseline: NoticesRow[]): Promise<void> {
+  const now = await noticesRows(page);
+  const held = new Set(baseline.map((row) => JSON.stringify(row)));
+  const added = now.filter((row) => !held.has(JSON.stringify(row)));
+  await test.info().attach(`${side} Notices`, { contentType: "application/json", body: JSON.stringify({ baseline, added }, null, 2) });
+  expect.soft(added, `Notices on the ${side}'s side holds no new row`).toEqual([]);
 }
 
 function samePath(path: string): string {
@@ -214,7 +251,7 @@ test("a file from another person opens in place, and the mark changes nothing in
     expect(await refresh(page)).toMatchObject({ ok: true });
     const before = engineCounts(temp.rootPath);
     expect(before?.moments.length, "History holds both files").toBeGreaterThan(0);
-    await expectNoNotices(page);
+    const notices = await noticesRows(page);
 
     for (const path of [NOTE, DATA]) await openExternally(page, path);
     const originals = await Promise.all([NOTE, DATA].map((path) => realpath(join(temp.rootPath, path))));
@@ -227,7 +264,7 @@ test("a file from another person opens in place, and the mark changes nothing in
     expect(engineCounts(temp.rootPath)).toEqual(before);
     await expect(page.getByTestId("changed-outside-notice")).toHaveCount(0);
     await expect(note).toContainText("The first draft.");
-    await expectNoNotices(page);
+    await expectNoNewNotices(page, "recipient", notices);
   });
 });
 
@@ -235,7 +272,7 @@ test("a file from another person that the person can only view opens as a marked
   test.setTimeout(300_000);
   await withReceivedShare("view", async ({ temp, app, page }) => {
     await revealExplorerPath(page, DATA);
-    await expectNoNotices(page);
+    const notices = await noticesRows(page);
     await openExternally(page, DATA);
     const opened = await systemOpens(app);
     expect(opened).toHaveLength(1);
@@ -247,7 +284,7 @@ test("a file from another person that the person can only view opens as a marked
     expect(await hasMark(copy)).toBe(MARKS);
     expect((await stat(copy)).mode & 0o222).toBe(0);
     expect(await hasMark(join(temp.rootPath, DATA))).toBe(false);
-    await expectNoNotices(page);
+    await expectNoNewNotices(page, "recipient", notices);
   });
 });
 
@@ -261,6 +298,8 @@ test("a file from another person opens in place during a live editing session, a
   const recipientAccount = { email: `recipient-${randomUUID()}@example.test`, password: `Recipient-proof-${randomUUID()}` };
   // Every request that would offer the recipient's changes to the owner.
   const offered: string[] = [];
+  // The owner's live editing at the Notices baseline, and at the end.
+  const delivery: { baseline?: LiveDelivery; end?: LiveDelivery } = {};
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
   let trust: ReturnType<typeof trustFixtureCa> | undefined;
   let ownerBrowser: BrowserContext | undefined;
@@ -351,9 +390,9 @@ test("a file from another person opens in place during a live editing session, a
     expect(await liveStatus()).toBe("ready");
 
     // Everything opening the view and the note did has settled on both sides.
-    await expect.poll(() => ownerPage.evaluate(async (workspaceId) =>
-      (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.getSyncStatus({ workspaceId })).ownerLiveDelivery, ownerWorkspaceId),
-    { message: "The owner's live editing is active.", timeout: 120_000, intervals: [1_000] }).toBe("active");
+    const liveDelivery = () => ownerPage.evaluate(async (workspaceId) =>
+      (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.getSyncStatus({ workspaceId })).ownerLiveDelivery, ownerWorkspaceId);
+    await expect.poll(liveDelivery, { message: "The owner's live editing is active.", timeout: 120_000, intervals: [1_000] }).toBe("active");
     expect(await refresh(page)).toMatchObject({ ok: true });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
     const before = {
@@ -364,8 +403,8 @@ test("a file from another person opens in place during a live editing session, a
     expect(before.recipient?.moments.length, "the recipient's History holds both files").toBeGreaterThan(0);
     expect(before.owner?.length, "the owner's History holds both files").toBeGreaterThan(0);
     expect(await proposals()).toEqual([]);
-    await expectNoNotices(page);
-    await expectNoNotices(ownerPage);
+    const notices = { recipient: await noticesRows(page), owner: await noticesRows(ownerPage) };
+    delivery.baseline = await liveDelivery();
 
     await recordObservedPaths(page);
     for (const path of [NOTE, DATA]) await openExternally(page, path);
@@ -390,21 +429,23 @@ test("a file from another person opens in place during a live editing session, a
     expect(await proposals()).toEqual([]);
     expect(await readFile(join(ownerTemp.rootPath, NOTE), "utf8")).toBe(NOTE_TEXT);
     expect(await readFile(join(ownerTemp.rootPath, DATA), "utf8")).toBe(DATA_TEXT);
-    for (const side of [page, ownerPage]) {
+    for (const [name, side] of [["recipient", page], ["owner", ownerPage]] as const) {
       await expect(side.getByTestId("changed-outside-notice")).toHaveCount(0);
       // A calm live session may draw no save state at all.
       await expect(side.locator('[data-testid="markdown-save-state"][data-state="changed-on-disk"]')).toHaveCount(0);
       await expect(side.getByTestId("markdown-editor")).toContainText("The first draft.");
       await expect(side.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
-      await expectNoNotices(side);
+      await expectNoNewNotices(side, name, notices[name]);
     }
+    delivery.end = await liveDelivery();
   } catch (error) {
     bodyFailure = { error };
+    throw error;
+  } finally {
+    await testInfo.attach("owner live editing", { contentType: "application/json", body: JSON.stringify(delivery) }).catch(() => undefined);
     if (stack) {
       await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() }).catch(() => undefined);
     }
-    throw error;
-  } finally {
     const cleanup = await Promise.allSettled([recipientBrowser?.close(), ownerBrowser?.close(), recipient?.close(), owner?.close()]);
     trust?.restore();
     cleanup.push(...await Promise.allSettled([stack?.close()]));
