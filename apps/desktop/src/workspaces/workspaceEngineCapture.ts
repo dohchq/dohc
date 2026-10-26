@@ -124,6 +124,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
+  EngineCaptureNotSettledError,
   type CaptureTextFileMetadata,
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
@@ -939,6 +940,12 @@ export function isVolumeSharesNewFilesCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+// An engine still taking in files: it refused the read, or its capture pass
+// outlasted the settle budget.
+function isCaptureBusy(error: unknown): boolean {
+  return isWorkspaceUpdatingRefusal(error) || error instanceof EngineCaptureNotSettledError;
 }
 
 function isUpdateBackoffCause(error: unknown): boolean {
@@ -4109,8 +4116,8 @@ export function createWorkspaceEngineCapture(
   // reaches onCaptureOutcome, whether the failure was a thrown task (store
   // unavailable) or per-path errors the task swallowed to keep the batch
   // going. Rethrows so enqueue's catch still logs via onError. An engine
-  // still taking in files is busy, not broken: that refusal leaves the
-  // previous outcome standing.
+  // still taking in files is busy, not broken (`isCaptureBusy`): that
+  // answer leaves the previous outcome standing.
   async function reportCaptureOutcome(task: () => Promise<boolean>): Promise<void> {
     let ok: boolean;
     try {
@@ -4118,7 +4125,7 @@ export function createWorkspaceEngineCapture(
       storeRefused = null;
       storeRefusedDetail = null;
     } catch (error) {
-      if (isWorkspaceUpdatingRefusal(error)) return;
+      if (isCaptureBusy(error)) return;
       // A thrown pass says whether the engine refused the store or
       // failed some other way; a pass that completed — even degraded —
       // reached the store, so any earlier refusal no longer describes it.
@@ -4313,7 +4320,7 @@ export function createWorkspaceEngineCapture(
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
             // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
-            if (healthy || !isWorkspaceUpdatingRefusal(error)) throw error;
+            if (healthy || !isCaptureBusy(error)) throw error;
           });
         }
         return healthy;
