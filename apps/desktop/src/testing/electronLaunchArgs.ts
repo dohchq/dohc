@@ -30,6 +30,9 @@ export function electronLaunchArgs(input: {
     "--dohc-isolated-test",
     // Chromium's sandbox needs privileges the CI containers do not grant.
     ...(platform === "linux" ? ["--no-sandbox"] : []),
+    // Chromium's async encryption key comes from a fake keychain, so nothing
+    // in a test can open a keychain dialog on the Mac it runs on.
+    ...(platform === "darwin" ? ["--use-mock-keychain"] : []),
     ...(input.switches ?? []),
     // Electron takes the first non-switch argument as the app to run, so the
     // entry stays last.

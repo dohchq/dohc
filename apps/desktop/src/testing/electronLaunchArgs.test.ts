@@ -71,4 +71,12 @@ describe("electronLaunchArgs", () => {
     expect(linux).toContain("--no-sandbox");
     expect(windows).not.toContain("--no-sandbox");
   });
+
+  it("gives Chromium a fake keychain on a Mac only", () => {
+    const launch = (platform: NodeJS.Platform) => electronLaunchArgs({ mainEntry: MAIN, userDataDir: "/tmp/dohc/electron-user-data", platform });
+    expect(launch("darwin")).toContain("--use-mock-keychain");
+    expect(launch("darwin").at(-1)).toBe(MAIN);
+    expect(launch("linux")).not.toContain("--use-mock-keychain");
+    expect(launch("win32")).not.toContain("--use-mock-keychain");
+  });
 });
