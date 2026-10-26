@@ -12,11 +12,6 @@ export const settingsOperations = {
     scope: "device", guard: "trusted-sender",
     payload: z.void(), result: DesktopUserSettingsResult,
   },
-  reloadUserSettings: {
-    capabilityId: "settings.user.reload", channel: "desktop:reload-user-settings",
-    scope: "device", guard: "trusted-sender",
-    payload: z.void(), result: DesktopUserSettingsResult,
-  },
   setUserSettings: {
     capabilityId: "settings.user.write", channel: "desktop:set-user-settings",
     scope: "device", guard: "trusted-sender",

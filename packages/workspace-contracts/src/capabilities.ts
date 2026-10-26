@@ -1,7 +1,7 @@
 // Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
-export const RETIRED_CAPABILITY_IDS: readonly string[] = [];
+export const RETIRED_CAPABILITY_IDS: readonly string[] = ["settings.user.reload"];
 
 type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 export interface CapabilityMetadata {
@@ -33,7 +33,6 @@ export const CAPABILITIES = {
   "links.in": capability("Read documents that link to a file.", { ipc: ["linksIn"], mcp: { owner: ["dohc_links_in"], view: ["dohc_links_in"], comment: ["dohc_links_in"], edit: ["dohc_links_in"] } }),
   "links.resolve": capability("Resolve links from one document.", { ipc: ["linksResolve"], mcp: { owner: ["dohc_links_resolve"], view: ["dohc_links_resolve"], comment: ["dohc_links_resolve"], edit: ["dohc_links_resolve"] } }),
   "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),
-  "settings.user.reload": capability("Reload and apply this computer's user settings file.", {ipc: ["reloadUserSettings"]}),
   "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
   "agent.color.set": capability("Choose a personal color for an agent shown in the admitted workspace.", {ipc: ["setAgentColor"]}),
   "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {ipc: ["setAppPinned"]}),

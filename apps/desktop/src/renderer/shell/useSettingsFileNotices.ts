@@ -47,11 +47,11 @@ export function settingsFileNotice(
 
 /**
  * Tells the person when a settings file they can edit is not fully in
- * effect, as one row per file that opens the file and reads it again. The
- * user settings arrive with every change to them. The workspace settings are
- * read once the workspace opens, again if the engine had not opened it yet,
- * and from every read or save in Settings that reached the file, which the
- * answered callback takes.
+ * effect, as one row per file that opens the file. The user settings arrive
+ * with every change to them, so their row has no Try again. The workspace
+ * settings are read once the workspace opens, again if the engine had not
+ * opened it yet, and from every read or save in Settings that reached the
+ * file, which the answered callback takes. Its row's Try again reads it again.
  */
 export function useSettingsFileNotices(input: {
   workspaceId: string;
@@ -60,7 +60,7 @@ export function useSettingsFileNotices(input: {
   show: (
     kind: SettingsFileKind,
     message: string | null,
-    steps: { retry: () => void; open: () => void },
+    steps: { retry?: () => void; open: () => void },
   ) => void;
   reportError: (message: string) => void;
 }): (read: WorkspaceSettingsResult) => void {
@@ -94,17 +94,11 @@ export function useSettingsFileNotices(input: {
     return stop;
   }, [notOpened, readWorkspaceFile, workspaceId]);
 
-  // Each row's two steps. Try again shows the row again when the file still
-  // says the same thing, because the retry has already cleared it.
-  const stepsRef = useRef<Record<SettingsFileKind, { retry: () => void; open: () => void }> | null>(null);
+  // Each row's steps. Try again shows the row again when the file still says
+  // the same thing, because the retry has already cleared it.
+  const stepsRef = useRef<Record<SettingsFileKind, { retry?: () => void; open: () => void }> | null>(null);
   stepsRef.current = {
     "user-settings-file": {
-      retry: () => {
-        void bridge()
-          .reloadUserSettings()
-          .then((read) => showNotice("user-settings-file", settingsFileNotice(USER_FILE, read)))
-          .catch((error: unknown) => reportError(ipcErrorMessage(error, "dohc could not read its settings file.")));
-      },
       open: () => {
         void bridge()
           .openUserSettingsFile()
@@ -130,7 +124,9 @@ export function useSettingsFileNotices(input: {
   const showNotice = useCallback(
     (kind: SettingsFileKind, message: string | null) =>
       show(kind, message, {
-        retry: () => stepsRef.current?.[kind].retry(),
+        ...(stepsRef.current?.[kind].retry
+          ? { retry: () => stepsRef.current?.[kind].retry?.() }
+          : {}),
         open: () => stepsRef.current?.[kind].open(),
       }),
     [show],

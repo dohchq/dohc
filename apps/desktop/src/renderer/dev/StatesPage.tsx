@@ -1106,6 +1106,18 @@ const LONG_NOTICE = {
   onDismiss: noop,
 };
 
+// A row with two worded actions: they sit under its text, not beside its title.
+const SETTINGS_NOTICE = {
+  id: "workspace-settings-file",
+  tone: "danger" as const,
+  title: "dohc ignored accent in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Open settings file", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "dohc ignored accent in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1728,6 +1740,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={SETTINGS_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>

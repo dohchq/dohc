@@ -4,7 +4,6 @@
   "desktop:dataset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "datasetHandler.withRendererWorkspaceOperation" } },
   "desktop:keep-collections-here": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:reload-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-app-pinned": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-agent-color": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

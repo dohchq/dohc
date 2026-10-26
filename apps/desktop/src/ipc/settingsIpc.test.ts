@@ -34,7 +34,6 @@ const uiPayload = { ...workspacePayload, state };
 const localState = fakeLocalStateOpens();
 const settingsRequests = [
   [settingsOperations.getUserSettings.channel, undefined],
-  [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
@@ -752,8 +751,7 @@ describe("personal agent colour IPC", () => {
     expect(h.broadcastUserSettings).toHaveBeenCalledWith(expect.objectContaining({ source: "stored" }));
     const stored = await userSettingsStore.readUserSettingsFile(h.stateDirectory());
     expect(Object.values(stored.settings.appearance.agentColors ?? {})).toEqual(["blue"]);
-    for (const channel of [settingsOperations.getUserSettings.channel, settingsOperations.reloadUserSettings.channel]) {
-      const result = await h.invoke(channel);
+    for (const result of [await h.invoke(settingsOperations.getUserSettings.channel), await h.reload()]) {
       expect(JSON.stringify(result)).not.toContain("agentColors");
     }
     const settings = { ...DEFAULT_USER_SETTINGS, editor: { ...DEFAULT_USER_SETTINGS.editor, fontSize: 16 } };

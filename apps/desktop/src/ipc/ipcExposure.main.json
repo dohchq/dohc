@@ -236,7 +236,6 @@
     "desktop:refresh-shared-view",
     "desktop:register-chat-dispatch-notices",
     "desktop:reload-renderer",
-    "desktop:reload-user-settings",
     "desktop:report-renderer-error",
     "desktop:request-access-refresh",
     "desktop:request-dm-again",
