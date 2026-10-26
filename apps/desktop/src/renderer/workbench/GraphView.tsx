@@ -939,12 +939,16 @@ export function GraphView(props: {
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
-        <span title={counts} className="min-w-0 truncate text-[11px] text-muted">
-          <output data-testid="graph-doc-count">{docCount}</output>
-          <span aria-hidden className="mx-2 text-[13px] text-subtle">
+        <span title={counts} className="flex min-w-0 items-center gap-2 overflow-hidden text-[11px] text-muted">
+          <output data-testid="graph-doc-count" className="shrink-0">
+            {docCount}
+          </output>
+          <span aria-hidden className="text-[13px] text-subtle">
             ·
           </span>
-          <output data-testid="graph-link-count">{linkCount}</output>
+          <output data-testid="graph-link-count" className="min-w-0 truncate">
+            {linkCount}
+          </output>
         </span>
         {notice && variant === "page" ? (
           <span
