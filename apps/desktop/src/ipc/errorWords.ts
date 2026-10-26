@@ -230,6 +230,13 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
+// Data, such as the JSON a validation error sends as its message, or a stack.
+// A sentence can start with a bracket, as a button named "[Send]" does.
+function isDump(message: string): boolean {
+  if (message.includes("\n")) return true;
+  if (!/^[[{]/.test(message)) return false;
+  try { return typeof JSON.parse(message) === "object"; } catch { return false; }
+}
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
 const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?: /;
 
@@ -346,7 +353,7 @@ export function readError(error: unknown): ReadError {
     return { words, mapped: words !== null, cause: text };
   }
   if (!message) return { words: null, mapped: false, cause: null };
-  if (RAW_CODE.test(message)) {
+  if (RAW_CODE.test(message) || isDump(message)) {
     return { words: null, mapped: false, cause: plain ? message : text };
   }
   return { words: message, mapped: false, cause: plain ? null : text };
@@ -457,10 +464,20 @@ export function isWorkspaceRestricted(error: unknown): boolean {
   return parse(error).name === "WorkspaceRestrictedError";
 }
 
+/** An exclusive create found the path taken. */
+export function isPathTaken(error: unknown): boolean {
+  return parse(error).code === "EEXIST";
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
   return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
+}
+
+/** History's current rules refused a restore. Its words say why and what to do next. */
+export function isRestorePolicyRefusal(error: unknown): boolean {
+  return parse(error).name === "RestorePolicyRefusalError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */

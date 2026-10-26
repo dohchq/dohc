@@ -6,7 +6,9 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { HostedLogClientClosedError, startServerProxy, type HostedLogResponseBarrier } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
+import { once } from "node:events";
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -17,6 +19,8 @@ import { parseFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, YdocLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
@@ -99,6 +103,8 @@ interface LiveDaemonCapture {
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  // What the desktop does first at quit.
+  beginShutdown(): void;
   close(): Promise<void>;
 }
 
@@ -142,6 +148,10 @@ async function openLiveDaemonCapture(input: {
         workspaceId: input.workspaceId,
       }, { workspace: handle }),
     ),
+    beginShutdown: () => {
+      capture.beginShutdown();
+      workspace.sessions.beginShutdown();
+    },
     close: async () => {
       try {
         await capture.stop();
@@ -207,6 +217,10 @@ async function openJoinedDaemonCapture(input: {
         workspaceId: input.workspaceId,
       }, { workspace: handle }),
     ),
+    beginShutdown: () => {
+      capture.beginShutdown();
+      workspace.sessions.beginShutdown();
+    },
     close: async () => {
       try {
         await capture.stop();
@@ -723,8 +737,9 @@ it.skipIf(engine.missing).each([
     catch (error) { throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() }), { cause: error }); }
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
+    const refusals = new OwnerKnownRefusals();
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, refusals, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     let saveState: string | undefined;
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
@@ -994,10 +1009,17 @@ it.skipIf(engine.missing).each([
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
-          if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
+          if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
-        }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+          return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+            : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+        }), liveDocument: async (_workspace, target) => {
+          const resolved = await source.sessions.run(source.workspace, async ({client, workspace}) =>
+            new VersionedLiveAdapter(client, workspace, {workspaceId: source.workspace.workspaceId}).resolveFiles({workspaceId: source.workspace.workspaceId, targets: [target]}));
+          const [file] = resolved.results;
+          return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+        }, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+        sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({
         handle: (channel, handler) => {handlers.set(channel, handler);},
@@ -1098,7 +1120,7 @@ it.skipIf(engine.missing).each([
         const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
         return {ready, row};
       };
-      const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
+      const unadmitted = {ready: false, row: {path, objectId: document.binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"}};
       // The operator's reports that the host's copy misses the owner's edit.
       const reports = () => relayServer!.diagnostics().stderr
         .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
@@ -1489,6 +1511,66 @@ it.skipIf(engine.missing)(
       bootstrapRelayBeforeCapture: false,
     }),
   60_000,
+);
+
+// Quit stops waiting for a relay push the server has not answered. The
+// engine has not acknowledged the edit, so the next launch sends it.
+it.skipIf(engine.missing)(
+  "sends an edit whose push was unanswered at quit on the next launch",
+  async () => {
+    const workspaceId = "two-daemon-quit-push";
+    const token = `test:${workspaceId}`;
+    const rootA = await createTestScratch("dohc-quit-push-a-");
+    const rootB = await createTestScratch("dohc-quit-push-b-");
+    const relayRoot = await createTestScratch("dohc-quit-push-relay-");
+    const dbPath = join(relayRoot, "relay.sqlite");
+    let relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain });
+    const port = Number(new URL(relay.baseUrl).port);
+    const connection = { baseUrl: relay.baseUrl, token };
+    // A server that takes each connection and never answers. The engine resets
+    // the connection when it stops.
+    const held = new Set<Socket>();
+    const silent = createServer((socket) => {
+      held.add(socket);
+      socket.on("error", () => undefined);
+    });
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await daemonA.chats.ensureGeneralChannel({ workspaceId });
+      await pushUntilDrained(daemonA.relay);
+      await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+
+      await relay.stop();
+      silent.listen(port, "127.0.0.1");
+      await once(silent, "listening");
+      const reached = once(silent, "connection") as Promise<[Socket]>;
+      const push = daemonA.relay.push();
+      const [socket] = await reached;
+      await once(socket, "data");
+      daemonA.beginShutdown();
+      await expect(push).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      await daemonA.close();
+      daemonA = null;
+      for (const socket of held) socket.destroy();
+      silent.close();
+      await once(silent, "close");
+
+      relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain, port });
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(daemonB, rootB, "notes.md", "body\n");
+    } finally {
+      for (const socket of held) socket.destroy();
+      if (silent.listening) silent.close();
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  120_000,
 );
 
 // A rename that changes only case reaches a peer as a delete of the old

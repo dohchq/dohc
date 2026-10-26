@@ -148,18 +148,20 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
+- If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
 
-The look in one line: warm paper, quiet graphite, mono metadata, serif for brand moments, and color only for meaning.
+The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
@@ -190,13 +192,18 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | --- | --- |
 | Body, rows, inputs | `text-[13px]` |
 | Dense secondary text | `text-[12px] text-muted` |
-| Hints, timestamps, kbd | `text-[11px] text-subtle`, often `font-mono` |
-| Section labels | `text-[10px] font-semibold uppercase tracking-wide text-subtle` |
+| Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
+| Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
 | Panel and dialog titles | `text-sm font-semibold text-ink` |
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
-| Paths, counts, ids, keys | `font-mono` |
+| Code and Markdown source | `font-mono` |
 
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
+Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
+Never uppercase a label.
+
+Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
+`PathLine` in `ui/PathLine.tsx` draws it.
 
 ### Radius and elevation
 
@@ -219,7 +226,7 @@ Flat panels get borders, not shadows.
 
 ### Recipes
 
-Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for mono content.
+Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
 List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
@@ -243,7 +250,7 @@ Pass `closeOnBackdrop` to `Overlay` for a picker only.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
-Kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`.
+Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
 Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
 
@@ -269,7 +276,7 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way. The command palette's `focus-within:border-ink` is one example. Say why in a comment.
+- Keep the global `:focus-visible` ring. Do not add `outline-none`, with two exceptions, each explained in a comment. Where a ring would clip, opt out only if the frame shows focus another way, as the command palette's `focus-within:border-ink` does. A dialog's panel never wears the ring: it holds focus only until Tab reaches its controls, which show their own.
 - Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
 
 ## Before you finish
@@ -277,6 +284,7 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+   Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
 5. Does each string do one job, and does every error and empty state give a Next?
 6. Does every noun match the surrounding UI?

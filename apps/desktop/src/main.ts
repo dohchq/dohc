@@ -41,6 +41,7 @@ import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/priv
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerWorkspaceFolderNameIpc } from "./ipc/workspaceFolderNameIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -341,7 +342,6 @@ import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/aut
 import { wakeAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
-import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
@@ -377,7 +377,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
-import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -390,7 +390,7 @@ import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion"
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
+import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers, type OwnerLiveDocumentActionDependencies } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -428,6 +428,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
+import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
@@ -539,7 +540,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import type { ThemeMode } from "./settings/userSettings";
+import { firstAgent, firstAgentWithLaunch, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -901,12 +902,12 @@ function cloudLogin(): CloudLogin {
       allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
-        cipher: {
+        cipher: mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env }) ? {
           isAvailable: () => safeStorage.isEncryptionAvailable(),
           encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
           decrypt: (cipherText) =>
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-        },
+        } : undefined,
       }),
     });
   }
@@ -1011,7 +1012,7 @@ const desktopWindows = createDesktopWindows({
   preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
-    RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
+    RendererWorkspaceSessionOwner<WebContents>, "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
   get exitRounds() { return exitRounds; },
 });
@@ -2626,6 +2627,7 @@ const activity = {
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
+      ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -3569,8 +3571,8 @@ const chatDispatchService = createChatDispatchService({
   }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
-  readRunnerSettings: async () =>
-    (await readCachedUserSettingsFile(stateDir())).settings.runner,
+  readDispatchAgent: async () =>
+    firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings),
   identityFor: (workspace, target) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       await warmCredentialCache();
@@ -3588,7 +3590,7 @@ const chatDispatchService = createChatDispatchService({
       const settings = (await readCachedUserSettingsFile(stateDir())).settings;
       lease.assertCurrent();
       return {
-        displayName: settings.profile.agentName ?? "Agent",
+        displayName: firstAgent(settings)?.name ?? "Agent",
         ownerDisplayName: localUserDisplayName(),
         ...(verifiedUserId ? { verifiedUserId } : {}),
       };
@@ -3881,8 +3883,7 @@ const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
 async function agentRunnerReady(): Promise<boolean> {
-  const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
-  return runner.enabled && configuredRunnerCommand(runner) !== "";
+  return firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
 }
 
 async function wakeAutomationAgent(
@@ -4902,7 +4903,7 @@ const chatWrites = createChatWrites({
   currentCredentialGeneration: () => credentialCacheGeneration,
   localUserDisplayName,
   agentDisplayName: async () =>
-    (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
+    firstAgent((await readCachedUserSettingsFile(stateDir())).settings)?.name ?? "Agent",
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -4914,6 +4915,7 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -4945,8 +4947,19 @@ const serverAccountDeletion = createServerAccountDeletion({
   },
 });
 
+const documentProjection = createDocumentProjectionWorker();
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
+  ownerLiveRecovery: {
+    keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
+    save: (workspace, path, incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
+    retry: (workspace, objectId, incident) => desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
+    stopAgain: (operation, kept) => {
+      if (!ownerLiveStopAgainForCli) throw new Error("Live editing is not ready. Try again.");
+      return ownerLiveStopAgainForCli(operation, kept);
+    },
+  },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   serverAccount: serverAccountDeletion,
@@ -5049,7 +5062,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   },
   trashItem: (path) => shell.trashItem(path),
   markDeletedUnderPath: (attachmentId, path) => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(attachmentId, path),
-  documentProjection: createDocumentProjectionWorker(),
+  documentProjection,
   chatWrites,
   startCliServer,
   stateDir,
@@ -5216,13 +5229,21 @@ const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
+    // A window's reads that came before this open, such as its settings, read again.
+    notifyRenderer({workspaceId});
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
+      reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+      automationHosts.open(workspaceId);
+      void lease.state.collectionAutomations.workspaceOpened();
+    });
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
   },
   onRefusalsChanged: notifyNoticesChanged,
+  ownerLiveReleases: createUnwrittenReleases(() => join(stateDir(), "owner-live-releases.json")),
+  documentProjection,
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -5808,6 +5829,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        currentRendererDocumentId: (sender) => rendererWorkspaceSessions.currentDocumentId(sender),
+        prepareForRendererReload,
         afterRendererCrashLoop,
         preloadArguments,
       }),
@@ -5870,7 +5893,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
-      cachedAgentName = settings.profile.agentName;
+      cachedAgentName = firstAgent(settings)?.name;
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
       applyThemeMode(settings.appearance.themeMode);
       session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -6325,6 +6348,7 @@ const workspaceChatLinks = createChatLinksReader({
 });
 
 function registerIpcHandlers(): void {
+  registerWorkspaceFolderNameIpc(operationBoundary, workspaceRootApproval.usableRoot);
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
@@ -6558,41 +6582,75 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
 
+  // The window's Stop and Resume, and an agent's Stop again, use these alike.
+  const ownerLiveDocumentDependencies: OwnerLiveDocumentActionDependencies<DesktopWorkspaceOperation["workspace"]> = {
+    remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    relayShareJsonWithCredentials,
+    ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
+      let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
+      try {
+        result=await requireEngineSessions().run(workspace,async session => {
+          const client=desktopEngine.daemon?.currentClient();
+          if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+          const request={id:0,workspace:session.workspace,deadlineMs:30_000};
+          if (action==="request") {
+            if (!binding || "lineageClaimId" in binding) throw new TypeError("A Stop request names its document.");
+            return client.ownerYDocStopRequest(request,binding);
+          }
+          if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
+          return undefined;
+        });
+        if (action==="release" && binding && "lineageClaimId" in binding) result=await desktopEngine.releaseOwnerLiveStop(workspace,binding,acceptedCursor!);
+        if (action==="clear") {
+          if (!binding || "lineageClaimId" in binding) throw new TypeError("A Resume names its document.");
+          await desktopEngine.clearOwnerLiveStop(workspace,binding);
+        }
+      } finally {
+        // Each step of a Stop, failed or not, and a Resume change which refused
+        // queues remain and how: a requested Stop shows as waiting at once.
+        await desktopEngine.refreshOwnerLiveQuarantines(workspace)
+          .catch(error => console.error("[desktop] owner live quarantine read failed:",error));
+      }
+      if ((result?.state==="released" && !result.retirementOwed) || action==="retired") {
+        desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:result?.document.objectId ?? binding!.objectId});
+      } else if (action==="clear") desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:binding!.objectId});
+      desktopEngine.retryOwnerDelivery(workspace.workspaceId);
+      return result;
+    },
+    liveDocument: async (workspace,target) => {
+      const resolved=await withEngineAdapter(workspace,adapter => adapter.resolveFiles({workspaceId:workspace.workspaceId,targets:[target]}));
+      if (!resolved) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+      const [file]=resolved.results;
+      return file?.status==="found" ? {mainVersionId:resolved.versionId,objectId:file.objectId,currentPath:file.path} : null;
+    },
+    withoutEditors: (workspace,path,change) => engineYDocSessionIpc.withLiveEditingChange(workspace.attachmentId,path,change),
+    ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
+    unwrittenOwnerLiveReleases: workspace => desktopEngine.unwrittenOwnerLiveReleases(workspace.workspaceId),
+    retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
+    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
+      const client = desktopEngine.daemon?.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
+      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
+    }),
+  };
+  const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
+  ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stop(
+    {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    remoteForWorkspace,
-    currentCredentialGeneration: () => credentialCacheGeneration,
+    ...ownerLiveDocumentDependencies,
     currentCredentials: () => cachedCredentials,
     warmCredentialCache,
     relayShareJson,
-    relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
-    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
-      const client = desktopEngine.daemon?.currentClient();
-      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
-      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
-    }),
-    ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
-      const result=await requireEngineSessions().run(workspace,async session => {
-        const client=desktopEngine.daemon?.currentClient();
-        if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
-        const request={id:0,workspace:session.workspace,deadlineMs:30_000};
-        if (action==="request") return client.ownerYDocStopRequest(request,path);
-        if (action==="release" && binding && "lineageClaimId" in binding) return client.ownerYDocRelease(request,binding,acceptedCursor!);
-        if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
-        await client.ownerYDocStopClear(request,path);return undefined;
-      });
-      if ((result?.state==="released" && !result.retirementOwed) || action==="retired") {
-        desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:result?.document.objectId ?? binding!.objectId});
-      } else if (action==="clear") desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{path});
-      desktopEngine.retryOwnerDelivery(workspace.workspaceId);
-      return result;
-    },
+    retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
+    saveOwnerLiveRecoveryCopy: (workspace,path,incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path,incident),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
@@ -7013,7 +7071,7 @@ function registerIpcHandlers(): void {
   });
 
   const buttonsIpc = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
     // A file is a record of the nearest Collection folder above it, when
@@ -7137,7 +7195,7 @@ function registerIpcHandlers(): void {
     CloudSessionCredentials
   >({
     hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),

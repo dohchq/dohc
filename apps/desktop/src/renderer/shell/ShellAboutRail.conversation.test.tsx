@@ -10,6 +10,7 @@ import type { PresencePeer } from "../collab/presenceChannel";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { publishAboutConversation, type AboutConversation } from "../workbench/aboutConversation";
 import { setChosenColors } from "../workbench/chosenColors";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { ReactionStoreProvider } from "../workbench/reactionStore";
 import { CHATS_TAB_PATH, GRAPH_TAB_PATH, chatTabPath, defaultWorkbenchState } from "../workbench/workbenchState";
 import { ShellAboutRail, type AboutSearchHit } from "./ShellAboutRail";
@@ -133,7 +134,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => {
     for (const withdraw of withdrawals.splice(0)) withdraw();
-    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+    setChosenColors(DEFAULT_USER_SETTINGS);
   });
   cleanup();
   vi.unstubAllGlobals();
@@ -154,7 +155,7 @@ describe("About for an open conversation", () => {
     ["agent", AGENT, conversation({ kind: "agent", name: "Nova", channelWireId: "wire-agent" }), null],
   ] as const)("shows a %s's name, its mark, and who is here", async (kind, tabPath, entry, here) => {
     // Your agent in the color you chose, so its avatar shows it is yours.
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourAgentColor: "teal" });
+    setChosenColors(settingsWithAgent({ hue: "teal" }));
     publish("workspace-a", tabPath, entry);
     render(<Rail focusedTabPath={tabPath} />);
     const panel = await screen.findByTestId("about-panel");
@@ -169,7 +170,7 @@ describe("About for an open conversation", () => {
       expect(avatar).toBeNull();
     } else if (kind === "person") {
       expect(header.querySelector(".lucide-hash")).toBeNull();
-      expect(avatar?.textContent).toBe("SR");
+      expect(avatar?.textContent).toBe("S");
     } else {
       expect(avatar?.querySelector(".lucide-sparkles")).toBeTruthy();
       expect(avatar?.className).toContain("text-hue-teal");

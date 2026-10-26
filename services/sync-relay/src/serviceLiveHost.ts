@@ -18,7 +18,8 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
-import { VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
+import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
+import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveCommittedDelivery.js";
@@ -26,6 +27,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
+import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
@@ -44,6 +46,12 @@ interface ServiceLiveHostConfig {
   readonly activation?: ServiceActivationConfig;
   readonly adoption?: { readonly maxBytes: number; readonly maxEvents: number;
     readonly ownerOutbox: { readonly maxPendingBytes: number; readonly maxPendingAgeMs: number } };
+  /**
+   * Where the daemon copies an earlier store that needs migrations before its
+   * owner's recovery copy, under `<root>/.recovery`, and how long preparing
+   * one may take. Without it, no earlier store opens for recovery.
+   */
+  readonly recovery?: { readonly root: string; readonly preparationDeadlineMs: number };
 }
 
 function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -112,7 +120,7 @@ function checkServiceMembership(workspaces: readonly ServiceWorkspace[], targets
 /** Operator configuration only. Incoming document fields never supply these paths. */
 export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id: string) => boolean = () => true): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation", "recovery"]);
   // A host may start empty; `update` attaches workspaces as documents are shared.
   if (value.version !== 1 || !Array.isArray(value.workspaces)) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.filter(item => {
@@ -129,6 +137,11 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
     return Object.freeze({maxBytes: integer(row.maxBytes), maxEvents: integer(row.maxEvents),
       ownerOutbox: Object.freeze({maxPendingBytes: integer(outbox.maxPendingBytes), maxPendingAgeMs: integer(outbox.maxPendingAgeMs)})});
   })();
+  const recovery = value.recovery === undefined ? undefined : (() => {
+    const row = record(value.recovery, ["root", "preparationDeadlineMs"]);
+    // The engine answers no request after 300 s.
+    return Object.freeze({root: path(row.root, true), preparationDeadlineMs: integer(row.preparationDeadlineMs, 1, 300_000)});
+  })();
   const parsedActivation=parseServiceActivationConfig(value.activation);
   const activation=parsedActivation ? {...parsedActivation, targets: parsedActivation.targets.filter(row => keepWorkspace(row.workspaceId))} : undefined;
   const sync=parseNativeLiveSyncConfig(value.sync,integer(ingress.aggregateBytes));
@@ -141,7 +154,7 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement, restore, adoption, activation, sync,
+    settlement, restore, adoption, activation, sync, recovery,
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -150,6 +163,19 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
 }
 
 const held = new WeakSet<SyncRelayStorage>();
+// An earlier store's recovery handle closes after this long without a page read.
+const RECOVERY_IDLE_MS = 60_000;
+// An engine refusal of an open with one of these codes proves it holds no
+// handle for the store. Any other failure, an overloaded or expired request
+// included, may follow an open that made one.
+const RECOVERY_OPEN_REFUSALS = new Set(["INVALID_PARAMS", "CONFLICT"]);
+// A page read failing with one of these says nothing about the store.
+const RECOVERY_READ_TRANSIENT = new Set(["WORKSPACE_UNAVAILABLE", "OVERLOADED", "DEADLINE_EXCEEDED", "CANCELLED", "SESSION_EXPIRED"]);
+const recoveryRefusal = (error: unknown) => new RecoveryCopyRefusal(
+  !(error instanceof EngineRequestError) ? "server"
+    : error.wireError?.message === "recovery-store-disk-full" ? "disk-space"
+    : error.wireError?.message === "recovery-store-needs-update" ? "newer-schema"
+    : error.wireError?.message === "recovery-store-busy" ? "busy" : "server");
 /**
  * An attached workspace's hosted replica. `pulls` counts the pulls started and
  * `confirmed` numbers the last one that succeeded. A departing document is
@@ -158,6 +184,7 @@ const held = new WeakSet<SyncRelayStorage>();
  */
 interface HostedAttachment {
   readonly handle: string; readonly hosted: ServiceHostedReplication; readonly replica: ServiceActivationReplica;
+  readonly identity: ServiceKeptEditsIdentity;
   pulls: number; confirmed: number; readonly announced: Map<string, number>;
 }
 
@@ -204,6 +231,13 @@ export async function startServiceLiveHost(options: {
   const leaving = new Set<string>();
   // Leaving documents an earlier daemon may have left unsettled. Each resumes its retained activation before it unloads.
   const recovering = new Set<string>();
+  // Documents an earlier daemon left that are no longer at their enrolled path, by workspace and object, never by
+  // path, so a document now at that path changes nothing. Each stays, unsettled and outside activation, only while
+  // its owner has no recovery copy of edits this host refused, and keeps its workspace attached so they can still
+  // read them from its store.
+  // `ended` is set once no Try again of its queues stays granted.
+  const retained = new Map<string, {target: ServiceActivationTarget; objectId: string; ended?: boolean}>();
+  const documentKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify([document.workspaceId, document.objectId]);
   // Leaving documents the engine refused as not ready, with the number of the pull that must succeed before they are known parked.
   const parking = new Map<string, number>();
   // Whether an update completed on this daemon.
@@ -326,7 +360,7 @@ export async function startServiceLiveHost(options: {
     yield* Effect.promise(() => writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
       workspaces: config.workspaces.map(({hostedReplication, ...workspace}) => ({...workspace,
         ...(hostedReplication ? {relay: hostedReplication.relay} : {})})),
-      ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption,
+      ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption, recovery: config.recovery,
       restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 }));
     signal.throwIfAborted();
     const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
@@ -360,7 +394,7 @@ export async function startServiceLiveHost(options: {
       if (!attachment) return;
       const replica = new ServiceHostedReplication({client, workspace: handle, workspaceId: workspace.workspaceId, nextRequestId,
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
-      const attached: HostedAttachment = {handle, hosted: replica, pulls: 0, confirmed: 0, announced: new Map(), replica: {
+      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, pulls: 0, confirmed: 0, announced: new Map(), replica: {
         pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
@@ -441,10 +475,12 @@ export async function startServiceLiveHost(options: {
       members.delete(workspaceId); consumers.delete(workspaceId);
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) if (document.target.workspaceId === workspaceId) forget(key);
+      for (const [key, document] of retained) if (document.target.workspaceId === workspaceId) retained.delete(key);
       changes?.notifyHost([workspaceId]);
     };
     const forget = (key: string) => {
-      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key);
+      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key); keeping.delete(key);
+      grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
@@ -470,6 +506,108 @@ export async function startServiceLiveHost(options: {
         !storage.serviceHostEnrollmentHasEditGrant({workspaceId: target.workspaceId, ownerUserId: share.granterUserId, path: target.path});
     };
     const PARKING = "Waiting for its hosted replica to confirm the document parked.";
+    // A departed document whose owner has not saved a recovery copy of edits
+    // this host refused stays, with its workspace attached, so the owner can
+    // still read them. Once it settled and unloaded, passes only check the copy.
+    const KEPT = "Waiting for its owner to save a recovery copy of the edits the server kept.";
+    const keeping = new Set<string>();
+    // Once its owner lost live authority, nothing grants a Try again on a
+    // departing document or delivers its queues, so each of these scans runs
+    // once until the document returns: the documents whose departure ended
+    // every grant, and the lineages each one's first scan in its document's
+    // work found frozen at the seed. Once a departing document unloaded,
+    // nothing applies to it either: `observed` holds the documents whose
+    // departure recorded the checkpoints their copies must hold.
+    const grantsEnded = new Set<string>(), seededOf = new Map<string, ReadonlySet<string>>(), observed = new Set<string>();
+    // Whether one of the document's refusals in its attached store has no recovery copy.
+    const uncopied = (row: {target: ServiceActivationTarget; objectId: string}) => {
+      const attached = attachments.get(row.target.workspaceId);
+      return !!attached && storage.serviceKeptEditsHeld({workspaceId: row.target.workspaceId, objectId: row.objectId}, attached.identity);
+    };
+    const kept = (key: string, row: {target: ServiceActivationTarget; objectId: string}) => {
+      if (!uncopied(row)) {keeping.delete(key); return undefined;}
+      // Activation passes leave it unloaded meanwhile.
+      if (!keeping.has(key)) {keeping.add(key); activation!.removeTarget(row.target);}
+      return KEPT;
+    };
+    // Once it leaves with a recovery copy of every refusal, its rows go too. Its store keeps the queues.
+    // A row released here comes back uncopied if the same quarantined queue drains again, as after the
+    // document is shared again, and its owner is asked for a recovery copy once more. Its first check in a
+    // departure records the checkpoint a copy of each of its queues reads now, as it unloaded with nothing
+    // more to apply, so a digest an earlier departure recorded decides nothing.
+    const gone = async (key: string, row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      if (!observed.has(key)) {await observeKeptCheckpoints(row, joined); observed.add(key);}
+      const waiting = kept(key, row);
+      if (waiting === undefined) {forget(key); storage.releaseServiceKeptEdits({workspaceId: row.target.workspaceId, objectId: row.objectId});}
+      return waiting;
+    };
+    // Ends what the owner's Try again left outstanding on a queue this host
+    // keeps, once nothing can deliver it, so its unload no longer waits for
+    // that attempt. The queue keeps its bytes. A refusal whose quarantine never
+    // reached the engine is quarantined now, and a row whose queue delivered
+    // again, or that the engine no longer holds, is forgotten. Resolves to
+    // the engine's answer whether the queue stays frozen at its owner's
+    // adoption seed at its document's current restore generation, which no
+    // settlement may pass. The row of a queue holding a refused seed, at any
+    // generation, records the checkpoint a recovery copy reads now, which its
+    // copy must hold.
+    const endKeptRetry = async (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => {
+      let head;
+      try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
+      catch (error) {
+        if (!(error instanceof Error && error.message === "owner-outbox-not-found")) throw error;
+        storage.forgetServiceKeptEdits(kept);
+        return false;
+      }
+      const quarantined = head.state === "quarantined";
+      if (quarantined ? head.retryDeliveryId !== null : !kept.retrying && head.entry?.deliveryId === kept.headDeliveryId) {
+        await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});
+        // An ended grant can freeze the queue at its seed; only the engine can say.
+        head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);
+      } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return false;}
+      if (kept.retrying) storage.endServiceKeptEditsRetry(kept);
+      storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
+      return head.frozenAtRefusedSeed;
+    };
+    // Runs `work` on every queue of the document in its attached store, page
+    // by page, so each gets its turn. Takes no turn of its document's work
+    // when `inTurn` is set.
+    const eachKeptOutbox = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean,
+      work: (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => Promise<void>) => {
+      const attached = attachments.get(row.target.workspaceId);
+      if (!attached) return;
+      for (let after: number | null = 0; after !== null;) {
+        const page = storage.serviceKeptEditsOf({workspaceId: row.target.workspaceId, objectId: row.objectId}, after);
+        for (const kept of page.keptEdits) {
+          if (!sameKeptEditsIdentity(kept.identity, attached.identity)) continue;
+          const each = (outbox: OwnerYDocOutbox) => work(kept, outbox);
+          await (inTurn ? openKeptOutbox(kept, joined, each) : withKeptOutbox(kept, joined, each));
+        }
+        after = page.nextCursor;
+      }
+    };
+    // Records, on each of the document's rows, the checkpoint a recovery copy of its queue reads now,
+    // before a departure checks the copies, so a digest an earlier departure recorded decides nothing.
+    const observeKeptCheckpoints = (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) =>
+      eachKeptOutbox(row, joined, false, async (kept, outbox) => {
+        let head;
+        try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
+        catch (error) {
+          if (!(error instanceof Error && error.message === "owner-outbox-not-found")) throw error;
+          storage.forgetServiceKeptEdits(kept);
+          return;
+        }
+        storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
+      });
+    // Runs `endKeptRetry` on every queue of the document. Resolves to the lineages whose queue stays frozen
+    // at the seed at the current restore generation; an earlier generation's seed freezes nothing.
+    const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean) => {
+      const seeded = new Set<string>();
+      await eachKeptOutbox(row, joined, inTurn, async (kept, outbox) => {
+        if (await endKeptRetry(kept, outbox)) seeded.add(kept.binding.lineageClaimId);
+      });
+      return seeded;
+    };
     // The engine refused the document as not ready, as once it parked. Only a pull that starts after
     // this can tell: a parked document is no longer departed, and one its scope still held becomes so.
     // Meanwhile it leaves activation passes, which would keep its workspace from pulling.
@@ -492,20 +630,30 @@ export async function startServiceLiveHost(options: {
       await resolveUnload(key, joined);
       const row = hosted.get(key);
       if (!row) return undefined;
+      // Nothing can deliver a Try again once its owner lost live authority, so
+      // none stays granted, whatever this departure waits for next.
+      const lost = authorityLost(row);
+      if (lost && !grantsEnded.has(key)) {await endKeptRetries(row, joined, false); grantsEnded.add(key);}
+      if (keeping.has(key) && kept(key, row)) return KEPT;
       const attached = attachments.get(row.target.workspaceId)!, required = parking.get(key);
       if (required !== undefined) {
         if (attached.confirmed < required) return PARKING;
         parking.delete(key);
-        if (attached.hosted.departed?.has(row.objectId) === false) {forget(key); return undefined;}
+        if (attached.hosted.departed?.has(row.objectId) === false) return gone(key, row, joined);
       }
       const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
-      if (authorityLost(row)) {
+      if (lost) {
         recovering.delete(key);
         const document = activation!.departing(row.target, joined);
         if (document) {
           // Settle, publish, then unload, under the departure's registration.
+          // A queue frozen at its owner's adoption seed keeps the document
+          // unsettled: settling would drop the owner's pre-adoption head from
+          // the file. It unloads with its queue's bytes kept and nothing published.
           const waiting = await runDocument(document, joined, async operation => {
-            if (settleTarget) {
+            let seeded = seededOf.get(key);
+            if (!seeded) {seeded = await endKeptRetries(row, operation, true); seededOf.set(key, seeded);}
+            if (settleTarget && !seeded.has(document.lineageClaimId)) {
               const settled = await activation!.settleDeparted(row.target, document, operation);
               if (settled?.kind === "unready") return awaitParking(key, row);
               if (settled?.kind === "pending") return settled.reason;
@@ -522,8 +670,7 @@ export async function startServiceLiveHost(options: {
           const waiting = await requestUnload(row, joined);
           if (waiting !== undefined) return waiting;
         }
-        forget(key);
-        return undefined;
+        return gone(key, row, joined);
       }
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
       if (recovering.has(key) && activation!.retained(row.target)) {
@@ -553,7 +700,21 @@ export async function startServiceLiveHost(options: {
         const waiting = document ? await runDocument(document, joined, leave) : await leave(joined);
         if (waiting !== undefined) return waiting;
       }
-      forget(key);
+      return gone(key, row, joined);
+    };
+    // Resolves to why a retained document stays, or undefined once its owner has
+    // a recovery copy of every refusal, when its rows go too. Nothing delivers
+    // it, so first no Try again of its queues stays granted. One hosted again
+    // belongs to activation.
+    const keepRetained = async (key: string, joined: AbortSignal) => {
+      const row = retained.get(key);
+      if (!row) return undefined;
+      if (hostedKey({workspaceId: row.target.workspaceId, objectId: row.objectId}) !== undefined) {retained.delete(key); return undefined;}
+      // Nothing delivers it on this daemon, which may not even be registered, so this takes no turn of its document's work.
+      if (!row.ended) {await endKeptRetries(row, joined, true); row.ended = true;}
+      if (uncopied(row)) return KEPT;
+      retained.delete(key);
+      storage.releaseServiceKeptEdits({workspaceId: row.target.workspaceId, objectId: row.objectId});
       return undefined;
     };
     // Unloads one idle hosted document and keeps it hosted. Resolves to why it
@@ -623,6 +784,141 @@ export async function startServiceLiveHost(options: {
         await activation!.activate(row.target, joined, settleTarget, false);
       }));
     };
+    // A refused queue this host keeps, through its own connection. Only the
+    // store of the row's workspace identity holds it.
+    const reachable = (kept: ServiceKeptEdits) => {
+      const member = members.get(kept.binding.workspaceId), attached = attachments.get(kept.binding.workspaceId);
+      if (!member || !attached || !sameKeptEditsIdentity(kept.identity, attached.identity)) throw new Error("This server does not hold the workspace's live documents now.");
+      return member;
+    };
+    const openKeptOutbox = async <T>(kept: ServiceKeptEdits, joined: AbortSignal, work: (outbox: OwnerYDocOutbox, joined: AbortSignal) => Promise<T>) => {
+      const member = reachable(kept);
+      const outbox = new OwnerYDocOutbox({sendRequest: async original => ({...await client.sendRequest({...original, id: nextRequestId(),
+        deadlineMs: config.client.requestDeadlineMs}, joined), id: original.id})}, member.handle);
+      try {return await work(outbox, joined);} finally {outbox.dispose();}
+    };
+    // The same, in its document's work so no delivery changes it meanwhile.
+    const withKeptOutbox = <T>(kept: ServiceKeptEdits, callerSignal: AbortSignal | undefined, work: (outbox: OwnerYDocOutbox, joined: AbortSignal) => Promise<T>) => {
+      const {binding} = kept;
+      reachable(kept);
+      return runDocument({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId}, callerSignal, joined => openKeptOutbox(kept, joined, work));
+    };
+    // `preparing`: an earlier store is still being prepared; its reader asks again.
+    const keptPage = (page: JsonValue | undefined): JsonValue => {
+      if (!page || typeof page !== "object" || Array.isArray(page) || !["page", "readChanged", "preparing"].includes(String(page.kind))) throw new Error("Invalid kept edits page.");
+      return page;
+    };
+    // Earlier stores open read-only for their owners' recovery copies, by
+    // workspace. The engine opens at most one per workspace, so each
+    // workspace's recovery work takes turns, and its handle closes before
+    // another of its stores opens. A handle also closes once idle, once a
+    // read through it is abandoned, once the engine refused its store, and
+    // once no refusal kept in its store waits for a recovery copy. An open
+    // whose answer was lost, or whose lookup failed without the engine
+    // refusing it, stays recorded with no handle, and a close that fails keeps
+    // its handle: either closes on the workspace's next turn, or once idle.
+    // A record drops its handle only once a close of it ended.
+    type Recovery = {readonly identity: ServiceKeptEditsIdentity; readonly root: string; handle?: string; idle?: ReturnType<typeof setTimeout>};
+    const recoveries = new Map<string, Recovery>();
+    const recoveryTurns = new Map<string, Promise<void>>();
+    const recoveryTurn = <T>(workspaceId: string, work: () => Promise<T>): Promise<T> => {
+      const run = (recoveryTurns.get(workspaceId) ?? Promise.resolve()).then(work);
+      const settled = run.then(() => {}, () => {});
+      recoveryTurns.set(workspaceId, settled);
+      void settled.then(() => {if (recoveryTurns.get(workspaceId) === settled) recoveryTurns.delete(workspaceId);});
+      return run;
+    };
+    // The recovery handle, opening its store if it has none. The engine
+    // answers an open of a store it already holds with that store's handle,
+    // so this also finds the handle of an open whose answer was lost.
+    const recoveryHandle = async (workspaceId: string, open: Recovery, joined: AbortSignal) => {
+      if (open.handle !== undefined) return open.handle;
+      const opened = record(await membershipRequest("liveApplication.openRecoveryStore", undefined, {root: open.root, workspaceId,
+        replicationEpoch: open.identity.replicationEpoch, streamIdentity: open.identity.streamIdentity}, joined), ["workspaceHandle"]);
+      if (typeof opened.workspaceHandle !== "string" || !opened.workspaceHandle) throw new Error("Invalid recovery store response.");
+      return open.handle = opened.workspaceHandle;
+    };
+    // Closes the record's handle; the engine answers a close of a handle
+    // already closing once that close ends. Resolves once the handle is gone,
+    // and throws, keeping it, while that is unknown.
+    const endRecoveryHandle = async (open: Recovery, joined: AbortSignal) => {
+      try {await membershipRequest("liveApplication.closeRecoveryStore", open.handle, {}, joined);}
+      catch (error) {if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;}
+      delete open.handle;
+    };
+    const closeRecovery = async (workspaceId: string) => {
+      const open = recoveries.get(workspaceId);
+      if (!open) return;
+      clearTimeout(open.idle);
+      try {await recoveryHandle(workspaceId, open, signal);}
+      catch (error) {
+        if (RECOVERY_OPEN_REFUSALS.has(engineCode(error) ?? "")) {recoveries.delete(workspaceId); return;}
+        idleRecovery(workspaceId, open);
+        throw error;
+      }
+      try {await endRecoveryHandle(open, signal);}
+      catch (error) {idleRecovery(workspaceId, open); throw error;}
+      recoveries.delete(workspaceId);
+    };
+    const idleRecovery = (workspaceId: string, open: Recovery) => {
+      clearTimeout(open.idle);
+      if (signal.aborted) return;
+      open.idle = setTimeout(() => {
+        void recoveryTurn(workspaceId, async () => {if (!signal.aborted && recoveries.get(workspaceId) === open) await closeRecovery(workspaceId);}).catch(() => {});
+      }, RECOVERY_IDLE_MS);
+      open.idle.unref?.();
+    };
+    // A page of a queue kept in an earlier store of its workspace, at `root`,
+    // read through that store's recovery handle. It admits, settles,
+    // publishes and delivers nothing, so it needs no live registration, only
+    // a host that was not retired. The engine answers `preparing` until the
+    // store is ready; a store it refused throws RecoveryCopyRefusal, and its
+    // handle closes, so another read prepares it again.
+    const readEarlierKeptEdits = (kept: ServiceKeptEdits, root: string, cursor: JsonValue | undefined, callerSignal?: AbortSignal) =>
+      withLiveHostSignal(signal, callerSignal, joined => recoveryTurn(kept.workspaceId, async (): Promise<JsonValue> => {
+        joined.throwIfAborted();
+        checkPreparing();
+        // A read that waited behind an account deletion, or behind a change to
+        // the row it names, opens nothing.
+        if (workspaceIsDeleted(storage, kept.workspaceId) ||
+          !storage.readServiceKeptEditsRefusal({workspaceId: kept.workspaceId, outboxId: kept.outboxId, generation: kept.generation})) return {kind: "readChanged"};
+        const held = recoveries.get(kept.workspaceId);
+        if (held && (!sameKeptEditsIdentity(held.identity, kept.identity) || held.root !== root)) await closeRecovery(kept.workspaceId);
+        const open = recoveries.get(kept.workspaceId) ?? {identity: kept.identity, root};
+        recoveries.set(kept.workspaceId, open);
+        clearTimeout(open.idle);
+        try {
+          for (let reopened = false; ; reopened = true) {
+            let handle: string;
+            try {handle = await recoveryHandle(kept.workspaceId, open, joined);}
+            catch (error) {
+              if (!RECOVERY_OPEN_REFUSALS.has(engineCode(error) ?? "")) throw error;
+              recoveries.delete(kept.workspaceId);
+              throw recoveryRefusal(error);
+            }
+            try {
+              return keptPage((await client.sendRequest({id: nextRequestId(), workspace: handle, method: "ydoc.ownerOutbox.readPending",
+                params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
+            } catch (error) {
+              const code = engineCode(error);
+              // The engine reads nothing through a handle whose close began, as
+              // one that timed out, and may still be preparing behind it. The
+              // record keeps the handle until a close of it ends or finds it
+              // gone; only then does its store open once more.
+              if (code === "WORKSPACE_UNAVAILABLE" && !reopened) {await endRecoveryHandle(open, joined); continue;}
+              if (code === undefined || RECOVERY_READ_TRANSIENT.has(code)) throw error;
+              await closeRecovery(kept.workspaceId).catch(() => {});
+              throw recoveryRefusal(error);
+            }
+          }
+        } finally {
+          if (recoveries.get(kept.workspaceId) === open) {
+            if (joined.aborted) await closeRecovery(kept.workspaceId).catch(() => {});
+            else idleRecovery(kept.workspaceId, open);
+          }
+        }
+      }));
     // Restore work takes a turn, so no idle unload runs beside it. A step that
     // registers on a dormant document reloads it, and passes then settle it.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
@@ -668,7 +964,10 @@ export async function startServiceLiveHost(options: {
       // One that returns before it is gone activates again; a recovered or parking one was never in activation passes.
       for (const [key, document] of hosted) {
         if (isDeepStrictEqual(wanted.get(key), document)) {
-          if (leaving.delete(key)) {recovering.delete(key); parking.delete(key); activation.addTarget(document.target, document.objectId);}
+          if (leaving.delete(key)) {
+            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
+            activation.addTarget(document.target, document.objectId);
+          }
         } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
@@ -679,13 +978,18 @@ export async function startServiceLiveHost(options: {
       }
       // A fresh daemon has nothing loaded, but an earlier one may have left a
       // departing document's work unsettled in its store. Passes settle each
-      // one still at its enrolled path, then publish and unload it.
+      // one still at its enrolled path, then publish and unload it. One that
+      // moved is not settled there; it stays only for its owner's recovery
+      // copy, whatever document now holds its old path.
       if (!updated) {
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
-          if (hosted.has(key) || !members.has(workspaceId) ||
-            storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) continue;
-          hosted.set(key, document); leaving.add(key); recovering.add(key);
+          if (!members.has(workspaceId)) continue;
+          if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
+            if (uncopied(document)) retained.set(documentKey({workspaceId, objectId: document.objectId}), document);
+            continue;
+          }
+          if (!hosted.has(key)) {hosted.set(key, document); leaving.add(key); recovering.add(key);}
         }
       }
       // A departing document is confirmed gone only by a pull that starts after this.
@@ -707,7 +1011,7 @@ export async function startServiceLiveHost(options: {
     }));
     const drained = (workspaceId: string) => {
       const attached = attachments.get(workspaceId);
-      return !!attached && ![...hosted.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
+      return !!attached && ![...hosted.values(), ...retained.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
         attached.hosted.departed?.size === 0 && [...attached.announced.values()].every(required => required <= attached.confirmed);
     };
     if(config.activation){
@@ -739,6 +1043,10 @@ export async function startServiceLiveHost(options: {
         // Departures go first: a document an earlier daemon left resumes only before a pull adopts the scope it left.
         for(const key of [...leaving])await step(async()=>{
           const waiting=await depart(key,passSignal);
+          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
+        });
+        for(const key of [...retained.keys()])await step(async()=>{
+          const waiting=await keepRetained(key,passSignal);
           if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
         });
         // A dormant document stays out of memory until someone opens it. One whose
@@ -826,6 +1134,7 @@ export async function startServiceLiveHost(options: {
       async deleteWorkspaces(workspaceIds: readonly string[]) {
         await exclusive(() => withLiveHostSignal(signal, undefined, async joined => {
           for (const workspaceId of workspaceIds) {
+            await recoveryTurn(workspaceId, () => closeRecovery(workspaceId));
             const member = members.get(workspaceId), roots = [...diverged].flatMap(([root, id]) => id === workspaceId ? [root] : []);
             if (member) {roots.push(member.workspace.root); await detach(workspaceId, joined);}
             for (const root of roots) {await rm(root, {recursive: true, force: true}); diverged.delete(root);}
@@ -833,13 +1142,14 @@ export async function startServiceLiveHost(options: {
         }));
       },
       /**
-       * Whether this daemon may still hold any of the document: it is hosted
-       * or unloading, its workspace is not attached, or no pull that started
-       * after it departed has succeeded without listing it in its replica.
+       * Whether this daemon may still hold any of the document: it is hosted,
+       * unloading or retained for its owner's recovery copy, its workspace is
+       * not attached, or no pull that started after it departed has succeeded
+       * without listing it in its replica.
        */
       retains(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
-        return hostedKey(document) !== undefined || !attached || required === undefined || attached.confirmed < required ||
+        return hostedKey(document) !== undefined || retained.has(documentKey(document)) || !attached || required === undefined || attached.confirmed < required ||
           attached.hosted.departed?.has(document.objectId) !== false;
       },
       /**
@@ -849,7 +1159,7 @@ export async function startServiceLiveHost(options: {
        */
       pulledAfterDeparture(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
-        return hostedKey(document) === undefined && required !== undefined && attached!.confirmed >= required;
+        return hostedKey(document) === undefined && !retained.has(documentKey(document)) && required !== undefined && attached!.confirmed >= required;
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {
@@ -879,6 +1189,73 @@ export async function startServiceLiveHost(options: {
       unblock(document: {workspaceId: string; objectId: string}): boolean {
         const key = hostedKey(document);
         return key !== undefined && activation!.unblock(hosted.get(key)!.target);
+      },
+      /**
+       * Reads one bounded page of a refused queue this host keeps, as the
+       * engine pages a recovery read, for its owner's recovery copy. `cursor`
+       * is the previous page's, and the engine answers `readChanged` once the
+       * queue changed under it. It admits, settles and publishes nothing.
+       * `store` is the root of the store that holds the queue: a queue of an
+       * earlier identity of its workspace is read there, through a read-only
+       * recovery handle, even on a daemon that hosts no document; one of the
+       * current identity, or of the store still attached, through its attachment.
+       */
+      readKeptEditsPage(kept: ServiceKeptEdits, cursor: JsonValue | undefined, store: string, callerSignal?: AbortSignal): Promise<JsonValue> {
+        if (!sameKeptEditsIdentity(kept.identity, attachments.get(kept.workspaceId)?.identity) &&
+          !sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(kept.workspaceId))) return readEarlierKeptEdits(kept, store, cursor, callerSignal);
+        check();
+        return withKeptOutbox(kept, callerSignal, async (_outbox, joined) => {
+          try {
+            return keptPage((await client.sendRequest({id: nextRequestId(), workspace: reachable(kept).handle, method: "ydoc.ownerOutbox.readPending",
+              params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
+          } catch (error) {
+            // A refused seed whose earlier generation's final accepted state was not kept.
+            if (error instanceof EngineRequestError && error.wireError?.message === "owner-outbox-recovery-checkpoint-unavailable") throw recoveryRefusal(error);
+            throw error;
+          }
+        });
+      },
+      /**
+       * Closes the recovery handle of the earlier store that holds the queue,
+       * once no refusal kept in that store waits for a recovery copy.
+       */
+      releaseKeptEditsStore(kept: ServiceKeptEdits): Promise<void> {
+        return recoveryTurn(kept.workspaceId, async () => {
+          const open = recoveries.get(kept.workspaceId);
+          if (open && sameKeptEditsIdentity(open.identity, kept.identity) && !storage.serviceKeptEditsStoreHeld(kept.workspaceId, kept.identity)) {
+            await closeRecovery(kept.workspaceId);
+          }
+        });
+      },
+      /**
+       * Grants the refused head of a hosted document one more delivery attempt,
+       * then wakes the document so a pass delivers it. In the document's work,
+       * right before the grant, `guard` rechecks its caller and the host
+       * rechecks its owner's live authority and the refusal. `unavailable`
+       * while its owner has no live authority over it here, and `changed`
+       * once the refusal changed or already has a Try again; neither grants.
+       */
+      async retryKeptEdits(kept: ServiceKeptEdits, guard: () => void, callerSignal?: AbortSignal): Promise<"granted" | "changed" | "unavailable"> {
+        check();
+        const live = () => {
+          const key = hostedKey(kept.binding), row = key === undefined ? undefined : hosted.get(key);
+          return key !== undefined && !!row && !leaving.has(key) && !authorityLost(row);
+        };
+        if (!live()) return "unavailable";
+        const outcome = await withKeptOutbox(kept, callerSignal, async outbox => {
+          guard();
+          if (!live()) return "unavailable" as const;
+          const current = storage.readServiceKeptEdits(kept);
+          if (current?.generation !== kept.generation || current.retrying) return "changed" as const;
+          await outbox.retry({outboxId: kept.outboxId, binding: kept.binding});
+          // A grant the relay could not record ends at once.
+          let marked = false;
+          try {marked = storage.markServiceKeptEditsRetrying(kept);}
+          finally {if (!marked) await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});}
+          return marked ? "granted" as const : "changed" as const;
+        });
+        if (outcome === "granted") await wake(kept.binding, callerSignal);
+        return outcome;
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {

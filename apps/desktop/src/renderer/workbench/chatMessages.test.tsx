@@ -113,7 +113,7 @@ describe("ChatComposer Enter-to-send", () => {
 
 describe("chat authorship display", () => {
   it("does not infer self or colours from a settings display name", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" });
+    setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" } });
     const messages: ChatMessageRecord[] = [{ presentation: { group: "fixture", hue: null, self: false },
       id: "m1", threadId: "thread", authorKind: "human", authorDisplayName: "Ada",
       body: "Hello", createdAtMs: new Date(2026, 8, 17, 12).getTime(),
@@ -135,7 +135,7 @@ describe("chat authorship display", () => {
 
     rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
-    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+    setChosenColors(DEFAULT_USER_SETTINGS);
   });
 
   it.each([

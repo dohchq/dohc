@@ -236,6 +236,8 @@ export type WindowRole = "workspace" | "manager";
 
 export function createMainWindow(options?: {
   beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
+  currentRendererDocumentId?: (sender: WebContents) => string | undefined;
+  prepareForRendererReload?: (sender: WebContents, rendererDocumentId: string) => Promise<boolean>;
   // The renderer crashed too often to reload again.
   afterRendererCrashLoop?: () => void;
   // The manager is a smaller window that renders only the workspace
@@ -307,6 +309,24 @@ export function createMainWindow(options?: {
       : undefined,
     options?.afterRendererCrashLoop,
   );
+
+  // On commit, retire only the document current when navigation started.
+  // The reload IPC and crash recovery retire it before navigation starts.
+  let navigatingDocumentId: string | undefined;
+  window.webContents.on("did-start-navigation", (event) => {
+    if (!event.isMainFrame || event.isSameDocument) return;
+    navigatingDocumentId = options?.currentRendererDocumentId?.(window.webContents);
+  });
+  window.webContents.on("did-navigate", async () => {
+    const documentId = navigatingDocumentId;
+    navigatingDocumentId = undefined;
+    if (documentId === undefined) return;
+    try {
+      await options?.prepareForRendererReload?.(window.webContents, documentId);
+    } catch (error) {
+      console.error("[desktop] renderer navigation cleanup failed:", error);
+    }
+  });
 
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except

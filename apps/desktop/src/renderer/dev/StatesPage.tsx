@@ -23,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -86,12 +86,12 @@ import {
   AboutHistoryView,
   AboutLinksView,
   AboutSection,
-  type AccessReason,
   type AccessSetup,
   type AccessView,
   type ChatLinksView,
   type LinksView,
 } from "../workbench/About";
+import type { AccessReason } from "../workbench/accessReason";
 import type { AboutConversation } from "../workbench/aboutConversation";
 import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
@@ -128,7 +128,7 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
 const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
-const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
 // the dark theme, and its whole shadow must stay in its own capture, which
@@ -574,7 +574,8 @@ const REFUSED_RESTORE = new Error(
 );
 const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",
-  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  title: "dohc could not restore notes/plan.md",
+  message: readError(REFUSED_RESTORE).words ?? "",
   details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
   atMs: 0,
   canRetry: true,
@@ -896,7 +897,7 @@ function AgentOfferComposer(props: {
       agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
       above={props.replying ? (
         <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
-          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
   const focused = props.focus ? (
@@ -1567,8 +1568,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="person, rose chosen">
           <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
-        <Specimen label="agent, Default chosen">
-          <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        <Specimen label="agent, olive chosen">
+          <HueControl label="Your agent's color" value="olive" shape="agent" onChange={noop} />
         </Specimen>
         <Specimen label="agent, teal chosen">
           <HueControl label="Your agent's color" value="teal" shape="agent" onChange={noop} />
@@ -2146,9 +2147,35 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="unknown: no cause dohc can name">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
         </Specimen>
-        <Specimen label="loading, then failed reads: words in Notices">
+        <Specimen label="History paused: the line heads the rows">
           <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }} paused expanded onToggle={noop}
+              onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="the first read: lines after 150 ms until it answers">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="while the workspace is read in: no deadline">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
+            <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <RetryRow testId="linked-chats-failed" onRetry={noop} />
+            </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
@@ -3022,7 +3049,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={
                 <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
-                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
               }
               poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>
@@ -3068,7 +3095,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="agent-color" title="Agent color">
-        <Specimen label="a person and two agents, Default and plum; keyboard focus on the plum agent's avatar">
+        <Specimen label="a person and two agents, olive and plum; keyboard focus on the plum agent's avatar">
           <div data-force-state="focus-visible" data-force-target='[data-message-id="color-orbit"] [data-testid="agent-color-trigger"]'>
             <AgentColorContext.Provider value={noop}>
               <AboutPanelSpecimen>
@@ -3079,8 +3106,8 @@ function Pane(props: { theme: "light" | "dark" }) {
             </AgentColorContext.Provider>
           </div>
         </Specimen>
-        <Specimen label="open, plum chosen, keyboard focus on Default">
-          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Default"]'>
+        <Specimen label="open, plum chosen, keyboard focus on olive">
+          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Olive"]'>
             <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
           </div>
         </Specimen>

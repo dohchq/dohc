@@ -108,18 +108,14 @@ describe('optimistic file tree moves', () => {
     ).toBe(true)
   })
 
-  it('projects pending creates into the rendered tree rows', () => {
+  it('projects pending folder creates into the rendered tree rows', () => {
     const pending: PendingTreeChange[] = [
-      { id: 'create-file', kind: 'create-file', path: 'ideas/new.md' },
       { id: 'create-folder', kind: 'create-folder', path: 'ideas' },
     ]
 
     const projected = applyPendingTreeMoves(files, folders, pending)
 
-    expect(projected.files.map((file) => file.path)).toContain('ideas/new.md')
-    expect(projected.files.find((file) => file.path === 'ideas/new.md')).toEqual(
-      { path: 'ideas/new.md', kind: 'file' },
-    )
+    expect(projected.files).toEqual(files)
     expect(projected.folders).toContain('ideas')
   })
 
@@ -136,10 +132,10 @@ describe('optimistic file tree moves', () => {
   })
 
   it('keeps pending creates and deletes until the live projection catches up', () => {
-    const createFile: PendingTreeChange = {
-      id: 'create-file',
-      kind: 'create-file',
-      path: 'ideas/new.md',
+    const createFolder: PendingTreeChange = {
+      id: 'create-folder',
+      kind: 'create-folder',
+      path: 'ideas',
     }
     const deleteFile: PendingTreeChange = {
       id: 'delete-file',
@@ -147,14 +143,8 @@ describe('optimistic file tree moves', () => {
       path: 'inbox/note.md',
     }
 
-    expect(pendingTreeMoveSettled(createFile, files, folders)).toBe(false)
-    expect(
-      pendingTreeMoveSettled(
-        createFile,
-        [{ ...files[0]!, path: 'ideas/new.md' }],
-        folders,
-      ),
-    ).toBe(true)
+    expect(pendingTreeMoveSettled(createFolder, files, folders)).toBe(false)
+    expect(pendingTreeMoveSettled(createFolder, files, [...folders, 'ideas'])).toBe(true)
     expect(pendingTreeMoveSettled(deleteFile, files, folders)).toBe(false)
     expect(
       pendingTreeMoveSettled(

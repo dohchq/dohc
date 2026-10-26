@@ -110,11 +110,13 @@ The public alpha is the nightly channel. A nightly publishes only when all of th
 
 - The dispatch selects `platforms=windows-linux`, so every installation the workflow builds for receives the update.
 - The Windows and Linux packages each pass their packaged smoke.
-- No other nightly published on the same UTC day.
+- No other nightly published in the same nightly day. A nightly day starts at 18:00 UTC, before the scheduled nightly at 20:00 UTC.
 
 Before packaging, the workflow refuses a dispatch that breaks the platform or day rule.
 The publish job checks both rules again before it creates the release.
-A run that publishes after 00:00 UTC therefore counts for the day it published on.
+A run that publishes after 18:00 UTC therefore counts for the nightly day it published in.
+A nightly published by hand before 18:00 UTC doesn't hold back that evening's scheduled nightly.
+When the workflow refuses a nightly, its error names the time the next nightly can publish.
 A dry run skips both rules, so a dry run can test one platform at any time.
 If any package fails, the publish job does not run.
 
@@ -135,13 +137,13 @@ The job stops unless the clone is clean and on `main`. The job:
 
 1. Waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
 2. Adds the macOS files to the newest nightly if it published without them, after a failure or a lost run.
-3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
+3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published in that nightly day.
 4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
 5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
 6. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
 
 The job comments on #2281 after each published nightly and each failure.
-It also comments when it skips for a reason someone must fix, such as missing verification, and when launchd cannot update its clone.
+It also comments on every other skip that leaves `main` unpublished, such as missing verification or a nightly already published that nightly day, and when launchd cannot update its clone.
 A night with nothing new posts nothing.
 The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
 The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.

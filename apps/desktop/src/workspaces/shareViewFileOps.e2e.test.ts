@@ -1680,6 +1680,7 @@ describe("share-view file operations through the real store", () => {
       ).toEqual({
         imported: ["docs/dropped.md"],
         skipped: 2,
+        skippedSources: [{ path: "link.md", reason: "link" }, { path: "folder", reason: "no-files" }],
       });
       expect(await storePaths(view)).toEqual([
         "docs/dropped.md",

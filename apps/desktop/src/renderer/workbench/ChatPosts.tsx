@@ -283,33 +283,33 @@ function RunChip(props: { run: ChatRunRecord }) {
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
           <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Command</span>
-            <code data-testid="chats-run-command" className="break-words text-[11px] text-ink">
+            <span className="text-[11px] text-muted">Command</span>
+            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
               {props.run.command}
             </code>
           </span>
           <span className="grid grid-cols-2 gap-2">
             <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Started</span>
+              <span className="text-[11px] text-muted">Started</span>
               <time
                 data-testid="chats-run-started"
                 dateTime={started.iso}
-                className="font-mono text-[10px] text-muted"
+                className="text-[11px] tabular-nums text-ink"
               >
                 {started.label}
               </time>
             </span>
             <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="font-mono text-[10px] text-muted">
+              <span className="text-[11px] text-muted">Exit code</span>
+              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
                 {props.run.exitCode ?? "—"}
               </span>
             </span>
           </span>
           <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Log</span>
+            <span className="text-[11px] text-muted">Log</span>
             <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[10px] text-muted">
+              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
                 {props.run.logPath ?? "No log path"}
               </code>
               {props.run.logPath ? (
@@ -538,7 +538,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 aria-hidden
                 dateTime={commentTime.iso}
                 title={commentTime.label}
-                className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                className="whitespace-nowrap text-[10px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
               >
                 {formatClockDigits(comment.createdAtMs)}
               </time>
@@ -564,7 +564,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
               </AgentName>
             </span>
-            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
             {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
@@ -578,7 +578,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
               title={commentTime.label}
-              className="font-mono text-[11px] text-subtle"
+              className="text-[11px] tabular-nums text-subtle"
             >
               {formatShortTime(comment.createdAtMs)}
             </time>
@@ -620,7 +620,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </div>
           ) : null}
           {replyCount > 0 ? (
-            <span data-testid="chats-reply-count" className="mt-1 block font-mono text-[11px] text-subtle">
+            <span data-testid="chats-reply-count" className="mt-1 block text-[11px] tabular-nums text-subtle">
               {replyCount} {replyCount === 1 ? "reply" : "replies"}
             </span>
           ) : null}
@@ -735,7 +735,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
               </AgentName>
             </span>
-            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} presentation={openingMessage.presentation} /> : null}
             {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
@@ -745,14 +745,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 onOpenPath={props.onOpenPath}
               />
             ) : null}
-            <span className="truncate font-mono text-[11px] text-subtle">
+            <span className="truncate text-[11px] tabular-nums text-subtle">
               {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
             </span>
             <time
               data-testid="chats-message-time"
               dateTime={openingTime.iso}
               title={openingTime.label}
-              className="shrink-0 font-mono text-[11px] text-subtle"
+              className="shrink-0 text-[11px] tabular-nums text-subtle"
             >
               {formatShortTime(openingMessage.createdAtMs)}
             </time>
@@ -850,7 +850,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 
       <div
         data-testid="chats-comments-divider"
-        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 font-mono text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
       >
         <span className="inline-flex items-center gap-1">
           <MessageSquare size={12} strokeWidth={1.9} aria-hidden />

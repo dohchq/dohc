@@ -212,6 +212,18 @@ const deleteRetainedCopiesArgsSchema = z
   })
   .strict();
 
+// Edits the server refused for good that this computer keeps for a live
+// document, found by the document's path. Try again and Stop again name the
+// refusal they answer, so a newer one is read before either runs. Save
+// recovery copy may name one, to save exactly those edits.
+const liveKeptEditsArgsSchema = z.object(argsBase).strict();
+const keptEditsIncidentSchema = z.string().min(1).max(1024);
+const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() }).strict();
+const retryKeptEditsArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
+  .strict();
+const stopAgainArgsSchema = retryKeptEditsArgsSchema;
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
@@ -484,6 +496,10 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -560,6 +576,10 @@ export const CLI_CAPABILITIES = {
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
+  liveKeptEdits: ["workspace.status"],
+  saveRecoveryCopy: ["share.live.document.recovery.save"],
+  retryKeptEdits: ["share.live.document.retry"],
+  stopAgain: ["share.live.document.stop"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1180,6 +1200,58 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// Live documents whose edits the server refused for good, as dohc keeps them
+// on this computer or, for a document the server hosts, on the server
+// (`storedOn`). `recovery` is paused while they wait for the owner, retrying
+// while Try again waits for the server, stopping while a Stop waits for it,
+// stopped-kept or not-written after a Stop kept them, cannot-write once only
+// a recovery copy can return them, copied once a recovery copy of edits the
+// server keeps is saved, maybe by another of the owner's computers, and
+// unreadable while this computer's engine refuses to read them, for `reason`.
+// `earlier` marks edits the server keeps in an earlier copy of the workspace,
+// copied or not, which only a recovery copy can reach.
+const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
+const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptEdits: z.array(z.object({
+      path: z.string().min(1),
+      reason: z.string().min(1),
+      storedOn: keptEditsStoredOnSchema,
+      incident: keptEditsIncidentSchema,
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
+      earlier: z.literal(true).optional(),
+    }).strict()),
+  }).strict(),
+  rawFailureSchema,
+]);
+// The package always holds every kept edit. `copyPath` is null when dohc
+// could not read the edits as a document. Both sit in `folder`. The edits
+// came from where `storedOn` says. `keptEdits` is kept while they stay there,
+// copied once the server may release them, and ended once dohc no longer
+// keeps a Stop's edits it could not write.
+const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copyPath: z.string().min(1).nullable(),
+    packagePath: z.string().min(1),
+    folder: z.string().min(1),
+    storedOn: keptEditsStoredOnSchema,
+    keptEdits: z.enum(["kept", "copied", "ended"]),
+  }).strict(),
+  rawFailureSchema,
+]);
+const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+// What the Stop did with the kept edits: wrote them into the file, still
+// keeps them, or kept none.
+const stopAgainResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1479,6 +1551,10 @@ export const cliResultSchemas = {
   saveKeptCopy: saveKeptCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+  liveKeptEdits: liveKeptEditsResultSchema,
+  saveRecoveryCopy: saveRecoveryCopyResultSchema,
+  retryKeptEdits: retryKeptEditsResultSchema,
+  stopAgain: stopAgainResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

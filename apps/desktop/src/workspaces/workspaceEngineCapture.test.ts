@@ -2724,6 +2724,138 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // An engine still taking in a new workspace's files refuses the poll's
+  // reads. That is busy, not broken: no outcome changes, and a real error
+  // still reports a failure.
+  it("keeps the capture outcome while the engine is still updating, and reports a real failure", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const updating = () => new DaemonRefusalError(
+      { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+    let status: "updating" | "ok" = "ok";
+    let adoptionsAnswer: "updating" | "fail" | "ok" = "updating";
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => {
+          if (status === "updating") throw updating();
+          return { running: true, degraded: false, terminal: false, deferredWrites: [] };
+        };
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (adoptionsAnswer === "updating") throw updating();
+          if (adoptionsAnswer === "fail") throw new Error("store gone");
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    // The flush queues behind the poll, so its settling means the poll ran.
+    // It drains the same adoptions, so it can be refused too.
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      status = "updating";
+      await poll();
+      expect(outcomes).toEqual([]);
+
+      status = "ok";
+      adoptionsAnswer = "fail";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "updating";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "ok";
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+    } finally {
+      status = "ok";
+      adoptionsAnswer = "ok";
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
+  // Busy is bounded by the engine's own status. Its refusal cannot hide a
+  // degraded watcher, and the early-import deadline answers not running and
+  // degraded, which reports a failure whatever the adoptions answer.
+  it("reports a degraded or timed-out import while the engine still refuses reads", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    let watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] as string[] };
+    let refuseAdoptions = true;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (refuseAdoptions) {
+            throw new DaemonRefusalError(
+              { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+          }
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      watcher = { ...watcher, degraded: true };
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+
+      watcher = { ...watcher, degraded: false };
+      refuseAdoptions = false;
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+      // The deadline's status, with a refusal still in flight.
+      watcher = { ...watcher, running: false, degraded: true };
+      refuseAdoptions = true;
+      await poll();
+      expect(outcomes).toEqual(["other", null, "other"]);
+    } finally {
+      watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] };
+      refuseAdoptions = false;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -4159,7 +4291,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     };
   }
 
-  it("opens a document and publishes an authored file between bounded relay passes", async () => {
+  it("opens a document and publishes an authored file while a relay push waits", async () => {
     const root = await createTestScratch("dohc-drain-interleave-");
     const loopback = new VersionedLoopbackEngine();
     const path = "note.md";
@@ -4200,17 +4332,17 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     try {
       const pass = sync.start();
       await entered.promise;
-      const opened = engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
-      const written = engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
-        { kind: "agent", agentId: "agent", onBehalfOf: "local" }).then(result => {
-        events.push("authored write");
-        return result;
-      });
-      release.resolve();
-      const [, session] = await Promise.all([pass, opened, written]);
-      await continued.promise;
-      expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2"]);
+      // Neither waits for the push on the relay.
+      const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+      await engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
+        { kind: "agent", agentId: "agent", onBehalfOf: "local" });
+      events.push("authored write");
+      expect(events).toEqual(["push 1", "document opened", "authored write"]);
       expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("authored content");
+      release.resolve();
+      await pass;
+      await continued.promise;
+      expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2"]);
       releaseContinuation.resolve();
       await sync.stop();
       expect(events.at(-1)).toBe("pull");

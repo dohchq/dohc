@@ -3385,6 +3385,30 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_link_author.sql"),
         sets_user_version: None,
     },
+    // The delivery a quarantined outbox's owner asked to try once more.
+    // Acceptance or another refusal clears it. Every refusal recorded for the
+    // pending head keeps its key, so writing any of them again changes nothing.
+    // A queue still waiting when a later restore generation replaces its
+    // accepted checkpoint keeps that checkpoint, which its edits may build on.
+    // A queue frozen at its lineage's refused adoption seed records the
+    // recovery checkpoint built from its accepted frames, and the applied
+    // cursor it runs through.
+    Migration {
+        ordinal: 70,
+        id: "v2-owner-outbox-retry",
+        sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
+              CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_cursor INTEGER \
+              CHECK ((recovery_checkpoint_cursor IS NULL) = (recovery_checkpoint_digest IS NULL) AND (recovery_checkpoint_cursor IS NULL OR recovery_checkpoint_cursor >= 0)); \
+              CREATE TABLE owner_ydoc_outbox_refusals ( \
+              outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
+              delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
+              refusal_key TEXT NOT NULL CHECK (length(refusal_key) > 0), \
+              PRIMARY KEY (outbox_id, refusal_key)) STRICT;",
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -3806,6 +3830,78 @@ pub(crate) fn newer_build_refusal(
             // The id reaches the desktop's technical details; bound it.
             id: id.chars().take(64).collect(),
         }))
+}
+
+/// What a store's ledger says about this build's migrations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerState {
+    /// Every migration completed from this build's definition and passed its
+    /// integrity check.
+    Current,
+    /// Some migrations have not run, as in a store an older build last
+    /// opened. Every recorded one matches this build's definition.
+    Pending,
+}
+
+/// Classify the ledger of an existing store against `migrations`, reading
+/// only. A recorded migration must match its definition's ordinal and, once
+/// completed, its checksum and a passed integrity check; anything else is a
+/// ledger the runner would refuse or this build cannot judge. A migration
+/// this build does not define means a newer build ran it.
+pub(crate) fn classify_ledger(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<LedgerState, StorageError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT ordinal, id, checksum, completed_at IS NOT NULL, integrity_ok \
+             FROM engine_migrations ORDER BY ordinal",
+        )
+        .map_err(StorageError::corrupt)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(StorageError::corrupt)?;
+    if !rows.iter().any(|(_, id, ..)| id == BASELINE_MIGRATION_ID) {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
+    let mut completed = 0;
+    for (ordinal, id, checksum, complete, integrity_ok) in &rows {
+        let Some(migration) = migrations.iter().find(|migration| migration.id == id) else {
+            return Err(StorageError::MigratedByNewerBuild {
+                ordinal: *ordinal,
+                id: id.chars().take(64).collect(),
+            });
+        };
+        if i64::from(migration.ordinal) != *ordinal
+            || (*complete
+                && (*checksum != migration_checksum(migration.sql) || *integrity_ok != Some(1)))
+        {
+            return Err(StorageError::MigrationFailed {
+                source: Some(
+                    format!(
+                        "migration {} ({}) was recorded unlike this build's definition",
+                        migration.ordinal, migration.id
+                    )
+                    .into(),
+                ),
+            });
+        }
+        completed += usize::from(*complete);
+    }
+    Ok(if completed == migrations.len() {
+        LedgerState::Current
+    } else {
+        LedgerState::Pending
+    })
 }
 
 /// Run every pending migration in `migrations` (ordered) against `conn`,
@@ -4467,6 +4563,10 @@ mod tests {
             (
                 "v2-chat-link-author",
                 "5b21c35c5a98bc7621b3cc004e422a53b03bb0e74355e28344a24db6c4100f4b",
+            ),
+            (
+                "v2-owner-outbox-retry",
+                "2ac9352889cc37f605b39b3e39fff5fe5611721fd7cdf369c4187a5d72e3aaeb",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
