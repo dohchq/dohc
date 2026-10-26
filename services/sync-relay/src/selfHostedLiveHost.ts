@@ -3,7 +3,7 @@ import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
 import {basename, isAbsolute, join, posix, resolve} from "node:path";
-import type {Event} from "@dohc/workspace-engine-client";
+import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import {setTimeout as delay} from "node:timers/promises";
 import * as Cause from "effect/Cause";
@@ -13,6 +13,7 @@ import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admi
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor} from "./storage/serviceHostEnrollment";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import {deriveServiceHostBearer} from "./serviceHostCredential";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
 import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
@@ -161,8 +162,9 @@ export async function startSelfHostedLiveHost(options: {
     try {
       const configPath = join(temporary, "service.json");
       // The daemon starts empty. Each update attaches and detaches its workspaces and documents.
+      // It copies earlier stores for recovery under the store root.
       await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
-        ...profile.service, activation: {...profile.service.activation, targets: []}}), {flag: "wx", mode: 0o600});
+        ...profile.service, activation: {...profile.service.activation, targets: []}, recovery: {...profile.service.recovery, root}}), {flag: "wx", mode: 0o600});
       signal.throwIfAborted();
       const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
@@ -278,7 +280,8 @@ export async function startSelfHostedLiveHost(options: {
       Effect.sync(() => observeRelayWrites(storage, () => {writeGeneration++; schedule();})),
       stopWatching => Effect.gen(function* () {
         stopWatching();
-        yield* Effect.promise(stopCurrent);
+        // After any start a recovery read began outside reconciliation.
+        yield* Effect.promise(() => exclusive(stopCurrent));
       }),
     );
     yield* Effect.forkScoped(Effect.forever(pause(2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
@@ -326,6 +329,26 @@ export async function startSelfHostedLiveHost(options: {
       const unblocked = current?.unblock(document) ?? false;
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
+    },
+    /**
+     * The running daemon's page reads and Try again of refused queues it keeps
+     * for their owners, and its release of an earlier store once the owner
+     * has a recovery copy of every refusal kept there. The row's workspace
+     * identity names the store that holds its queue, whatever identity the
+     * workspace has now.
+     */
+    keptEdits: {
+      // A recovery read starts the daemon if none runs, as after an identity
+      // change left only earlier stores. It takes a turn, so no other start
+      // runs beside it, and the next reconciliation keeps it.
+      async page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, callerSignal?: AbortSignal) {
+        let host = current;
+        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start();});
+        if (!host) throw new Error("This server does not hold the workspace's live documents now.");
+        return host.readKeptEditsPage(kept, cursor, join(root, storeName({workspaceId: kept.workspaceId, ...kept.identity})), callerSignal);
+      },
+      async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, guard, signal) : "unavailable" as const;},
+      async copied(kept: ServiceKeptEdits) {await current?.releaseKeptEditsStore(kept);},
     },
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},

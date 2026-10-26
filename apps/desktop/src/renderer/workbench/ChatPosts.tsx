@@ -538,7 +538,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 aria-hidden
                 dateTime={commentTime.iso}
                 title={commentTime.label}
-                className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                className="whitespace-nowrap text-[10px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
               >
                 {formatClockDigits(comment.createdAtMs)}
               </time>
@@ -578,7 +578,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
               title={commentTime.label}
-              className="font-mono text-[11px] text-subtle"
+              className="text-[11px] tabular-nums text-subtle"
             >
               {formatShortTime(comment.createdAtMs)}
             </time>
@@ -620,7 +620,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </div>
           ) : null}
           {replyCount > 0 ? (
-            <span data-testid="chats-reply-count" className="mt-1 block font-mono text-[11px] text-subtle">
+            <span data-testid="chats-reply-count" className="mt-1 block text-[11px] tabular-nums text-subtle">
               {replyCount} {replyCount === 1 ? "reply" : "replies"}
             </span>
           ) : null}
@@ -745,14 +745,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 onOpenPath={props.onOpenPath}
               />
             ) : null}
-            <span className="truncate font-mono text-[11px] text-subtle">
+            <span className="truncate text-[11px] tabular-nums text-subtle">
               {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
             </span>
             <time
               data-testid="chats-message-time"
               dateTime={openingTime.iso}
               title={openingTime.label}
-              className="shrink-0 font-mono text-[11px] text-subtle"
+              className="shrink-0 text-[11px] tabular-nums text-subtle"
             >
               {formatShortTime(openingMessage.createdAtMs)}
             </time>
@@ -850,7 +850,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 
       <div
         data-testid="chats-comments-divider"
-        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 font-mono text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
       >
         <span className="inline-flex items-center gap-1">
           <MessageSquare size={12} strokeWidth={1.9} aria-hidden />

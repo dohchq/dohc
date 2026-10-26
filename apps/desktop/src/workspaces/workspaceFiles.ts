@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   open,
@@ -38,6 +39,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
@@ -346,7 +348,59 @@ export async function createFile(
   if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
     throw new Error(workspaceTextLimitReason(observedBytes));
   }
-  const absolute = join(rootPath, validated.normalized);
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized);
+  const handle = await open(target, "wx").catch((error: unknown) => {
+    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return null;
+  });
+  if (handle) {
+    try {
+      try { await handle.writeFile(initialText); }
+      finally { await handle.close(); }
+    } catch (error) {
+      throw new CreatedFileWriteError(validated.normalized, error);
+    }
+  }
+  return validated.normalized;
+}
+
+/**
+ * Creates a new workspace file of any size and syncs it to disk before
+ * returning. It never replaces a file: an existing path refuses with EEXIST.
+ * The bytes reach the final name only complete, through a link from an
+ * ignored temporary sibling, so a crash never leaves a cut-off file there.
+ * A drive without hard links refuses: nothing is written to the final name.
+ */
+export async function createDurableFile(rootPath: string, relativePath: string, text: string,
+  operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {}): Promise<string> {
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (!validated.ok) {
+    throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const created: { directory?: string } = {};
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized, created);
+  const temporary = join(dirname(target), `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
+  const publish = operations.link ?? link;
+  const linkWhole = (source: string, destination: string) => publish(source, destination).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "EEXIST") throw error;
+    throw new Error("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.", { cause: error });
+  });
+  if (!await atomicCreateFile(target, text, 0o666, { ...operations, link: linkWhole, temporary })) {
+    throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), { code: "EEXIST" });
+  }
+  // The file's own folder is synced; each folder this create made needs its entry synced in its parent.
+  if (created.directory && process.platform !== "win32") {
+    const top = dirname(created.directory);
+    for (let folder = dirname(target); folder !== top && dirname(folder) !== folder; folder = dirname(folder)) {
+      const handle = await open(dirname(folder), "r");
+      try { await handle.sync(); } finally { await handle.close(); }
+    }
+  }
+  return validated.normalized;
+}
+
+async function newFileTarget(rootPath: string, relativePath: string, normalized: string, created?: { directory?: string }): Promise<string> {
+  const absolute = join(rootPath, normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
   // Both questions get asked of the real path before mkdir, so a symlinked
   // ancestor can neither have directories created through it nor name a
@@ -362,25 +416,14 @@ export async function createFile(
   if (!isInside(realRoot, await existingAncestor(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await mkdir(dirname(target), { recursive: true });
+  const directory = await mkdir(dirname(target), { recursive: true });
+  if (created && directory) created.directory = directory;
   // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
   // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
   if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  const handle = await open(target, "wx").catch((error: unknown) => {
-    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return null;
-  });
-  if (handle) {
-    try {
-      try { await handle.writeFile(initialText); }
-      finally { await handle.close(); }
-    } catch (error) {
-      throw new CreatedFileWriteError(validated.normalized, error);
-    }
-  }
-  return validated.normalized;
+  return target;
 }
 
 // Import outcome: what landed (workspace-relative paths, destination prefix

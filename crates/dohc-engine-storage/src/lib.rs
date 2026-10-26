@@ -39,6 +39,7 @@ mod flush;
 pub mod limits;
 pub mod links;
 pub mod materialize;
+pub mod recovery;
 pub mod remote_changes;
 pub mod replica;
 pub mod store;
@@ -85,5 +86,6 @@ pub use materialize::{
     enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
     upsert_projection_job,
 };
+pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
 pub use store::{EngineStore, TxnOutcome};

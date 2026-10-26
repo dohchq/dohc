@@ -896,7 +896,7 @@ function AgentOfferComposer(props: {
       agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
       above={props.replying ? (
         <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
-          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
   const focused = props.focus ? (
@@ -3022,7 +3022,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={
                 <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
-                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
               }
               poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>

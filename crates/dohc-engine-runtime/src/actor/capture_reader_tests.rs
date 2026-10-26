@@ -372,7 +372,8 @@ fn scripted_reader(
     scratch: &ScratchDir,
     edit: impl FnOnce(String) -> String,
 ) -> dohc_engine_reader::Config {
-    let output = std::process::Command::new("node").args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+    let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+    let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
     assert!(output.status.success());
     let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let node = PathBuf::from(

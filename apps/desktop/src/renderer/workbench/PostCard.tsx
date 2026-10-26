@@ -73,8 +73,8 @@ export const FEED_ROW =
 export const FEED_TOOLBAR = "top-1 right-9";
 // Home's rows have no unread count, so their toolbar sits at the row's edge.
 export const HOME_TOOLBAR = "top-1 right-2";
-// A feed row's meta line: reactions and counts in the mono voice.
-export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 font-mono text-[11px] text-subtle";
+// A feed row's meta line: reactions and counts.
+export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
 
 // One icon button in a row's toolbar.
 export function ActionButton(props: {
@@ -273,13 +273,13 @@ export function PostCard(props: {
               />
             ) : null}
             {props.groupLabel ? (
-              <span className="truncate font-mono text-[11px] text-subtle">{props.groupLabel}</span>
+              <span className="truncate text-[11px] tabular-nums text-subtle">{props.groupLabel}</span>
             ) : null}
             <time
               data-testid="chats-post-time"
               dateTime={time.iso}
               title={time.label}
-              className="shrink-0 font-mono text-[11px] text-subtle"
+              className="shrink-0 text-[11px] tabular-nums text-subtle"
             >
               {formatShortTime(createdAtMs)}
             </time>

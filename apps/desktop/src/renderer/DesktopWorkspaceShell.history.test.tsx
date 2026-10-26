@@ -462,6 +462,123 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
+  // A large first open keeps capture working past the ladder. That is not a
+  // failure: nothing is said, and the activity capture sends when it settles
+  // reads again.
+  it("says nothing while capture outlasts the newest-moment ladder, then re-reads once capture settles", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridge, state } = freshnessShell();
+      const reads = await settledReads(bridge);
+      state.latestMomentOrder = 4;
+      state.queued.push("updating", "updating", "updating", "updating", "updating");
+      const asked = bridge.listEngineMoments.mock.calls.length;
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBe(asked + 1));
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(bridge.listEngineMoments.mock.calls.length).toBe(asked + 5);
+      await act(async () => {});
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByRole("dialog", { name: "Notices" }).textContent)
+        .not.toContain("dohc could not check whether open files changed.");
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+      // Capture settles: the engine's wake arrives as workspace activity.
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, pathSetChanged: false }));
+      await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still says so when capture has failed and the newest-moment read stays updating", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridge, state } = freshnessShell();
+      const reads = await settledReads(bridge);
+      bridge.getSyncStatus.mockResolvedValue({ ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null });
+      state.latestMomentOrder = 4;
+      state.queued.push("updating", "updating", "updating", "updating", "updating");
+      act(() => bridge.emitWorkspaceActivity());
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(toast.textContent).toContain("dohc could not check whether open files changed.");
+      expect(toast.textContent).toContain("Recent changes are still being added to History.");
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notices = screen.getByRole("dialog", { name: "Notices" });
+      expect(notices.textContent).toContain("dohc could not check whether open files changed.");
+      await userEvent.click(within(notices).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // DesktopRoot keys the shell by workspace. A's newest-moment read can
+  // answer after B is on screen, and must neither re-read B's open file nor
+  // raise a failure there.
+  it("keeps a newest-moment answer workspace A asked for out of workspace B", async () => {
+    const heldA = deferred<{ status: "updating" }>();
+    let holdA = false;
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "b.md", kind: "file" as const }], folders: [] }));
+    bridge.getSyncStatus = vi.fn(async () => ({ ...SYNC_STATUS, historyCaptureFailed: true as const, engineStoreRefused: null }));
+    let latestMomentOrder = 3;
+    let readsOfA = 0;
+    bridge.listEngineMoments.mockImplementation(async (payload?: { workspaceId: string }) => {
+      if (payload?.workspaceId === WORKSPACE.workspaceId) readsOfA += 1;
+      return payload?.workspaceId === WORKSPACE.workspaceId && holdA ? heldA.promise
+        : { moments: [], nextCursor: null, latestMomentOrder, activeVersionId: "main", ...historyPageFields };
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    await settledReads(bridge);
+
+    holdA = true;
+    const readsOfABeforeHold = readsOfA;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(readsOfA).toBe(readsOfABeforeHold + 1));
+    const readsOfABeforeAnswer = readsOfA;
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenLastCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId, limit: 1 }));
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceId: OTHER_WORKSPACE.workspaceId, relativePath: "b.md" })));
+    await act(async () => {});
+    const readsInB = bridge.readWorkspaceText.mock.calls.length;
+
+    // A's held read answers `updating` under a failed capture: in A it would
+    // retry, then report. In B it does nothing at all.
+    latestMomentOrder = 9;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await act(async () => {
+        heldA.resolve({ status: "updating" });
+        await heldA.promise;
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(readsOfA).toBe(readsOfABeforeAnswer);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.readWorkspaceText.mock.calls.length).toBe(readsInB);
+  });
+
   it("says when the newest-moment read fails while History answers, and Try again re-reads the open file", async () => {
     const { bridge, state } = freshnessShell();
     const reads = await settledReads(bridge);

@@ -19,7 +19,9 @@ describe("Ref", () => {
     const { rerender } = render(<Ref path="research/notes/plan.md" testId="ref" />);
     expect(screen.queryByText("research/notes")).toBeNull();
     rerender(<Ref path="research/notes/plan.md" folder testId="ref" />);
-    expect(screen.getByText("research/notes").className).toContain("font-mono");
+    // A path isn't code, so the folder is in the interface font.
+    expect(screen.getByText("research/notes").className).toContain("text-subtle");
+    expect(screen.getByText("research/notes").className).not.toContain("font-mono");
     // The name and folder spell the path, so nothing is added for a reader.
     expect(screen.getByTestId("ref").textContent).toBe("plan.mdresearch/notes");
   });
