@@ -44,7 +44,10 @@ export class WorkspaceFileListingCache {
           : cached.listing;
       }
     }
+    return this.walk(options, true);
+  }
 
+  private walk(options: { workspaceId: string; attachmentId: symbol; load: () => ListingPromise }, again: boolean): ListingPromise {
     const entry: ListingEntry = {
       attachmentId: options.attachmentId,
       listing: Promise.resolve({ files: [], folders: [] }),
@@ -58,10 +61,12 @@ export class WorkspaceFileListingCache {
           if (offset + 128 < result.files.length) await new Promise<void>(resolve => setImmediate(resolve));
         }
         // A file removed and written again behind the walk reads as changed,
-        // and the walk lacks it. Its callers, who may have asked after that
-        // change, get a walk that started after it instead.
-        if (this.#listings.get(options.workspaceId) === entry && [...entry.changed].some(path => !entry.files.has(path))) {
-          return this.list({ ...options, allowCached: false });
+        // and the walk lacks it, even if a newer walk replaced it. Its callers,
+        // who may have asked after that change, get one walk that started after
+        // it. That walk answers with what it finds: a path no walk lists, such
+        // as a re-pointed symlink, would otherwise keep it walking.
+        if (again && [...entry.changed].some(path => !entry.files.has(path))) {
+          return this.walk(options, false);
         }
         for (const path of entry.changed) {
           const file = entry.files.get(path);

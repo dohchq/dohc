@@ -288,8 +288,9 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const folderReason = "Undo for a folder move isn't available yet. Move it back yourself.";
     expect(folder).toMatchObject({ ok: true, undo: { available: false, reason: folderReason, paths: [] } });
     const folderId = (folder as { operationId: string }).operationId;
-    expect(await request("historyUndo", { operationId: folderId })).toEqual({ ok: false, reason: folderReason });
-    expect(await owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: folderId })).toEqual({ ok: false, reason: folderReason });
+    const refused = { ok: false, reason: folderReason, refusal: { code: "unexplained" } };
+    expect(await request("historyUndo", { operationId: folderId })).toEqual(refused);
+    expect(await owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: folderId })).toEqual(refused);
     expect(await capture.fileObjectIdForPath("archive/folder/tracked.txt")).toBe(object);
     await expect(stat(join(rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {

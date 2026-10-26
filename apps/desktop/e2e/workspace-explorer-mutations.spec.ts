@@ -72,7 +72,7 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(true);
     const notice = page.getByTestId("workspace-shell-notice");
-    await expect(notice).toContainText("Renamed notes.txt to plan.txt");
+    await expect(notice).toContainText("Renamed notes.md to plan.md");
     await expect(notice.getByRole("button", { name: "Undo" })).toBeVisible();
 
     // The row's menu, opened from the keyboard, focuses its first entry and
@@ -94,13 +94,13 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(false);
-    await expect(notice).toContainText("Deleted plan.txt");
+    await expect(notice).toContainText("Deleted plan.md");
     await notice.getByRole("button", { name: "Undo" }).click();
     await expect(renamed).toBeVisible();
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(true);
-    await expect(notice).toContainText("Restored plan.txt");
+    await expect(notice).toContainText("Restored plan.md");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

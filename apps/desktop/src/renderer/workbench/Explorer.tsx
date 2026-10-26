@@ -1057,8 +1057,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             operationId: entry.operationId,
           });
           if (!result.ok) {
-            throw new UndoRefusedError(result.reason, true,
-              result.refusal && undoRefusedNotice(entry.change, result.refusal));
+            throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal));
           }
           if (result.remaining.length > 0) {
             throw new UndoRefusedError(

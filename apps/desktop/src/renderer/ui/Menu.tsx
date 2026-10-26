@@ -327,6 +327,15 @@ export function Menu(props: {
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
     if (inField && isComposingKey(event)) return;
+    // A key runs only a row a person can see marked. Until one is, Enter and
+    // Space mark the first row, as Down does. Space clicks on keyup, which the
+    // prevented keydown also stops.
+    if (!marked && !inField && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      setMarked(true);
+      rowElements.current[0]?.focus();
+      return;
+    }
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it. The

@@ -48,9 +48,9 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
   return { message: refused.noUndo ? `${message}. ${refused.noUndo}` : message, undoable: false };
 }
 
-// A refused Undo says what cannot happen, what is in the way, and what to do,
-// since its row has Try again. A refusal main did not name says only what
-// cannot happen; main's own text goes to Copy.
+// A refused Undo fits a notice's two lines: what failed, then the one thing to
+// do before Try again. A refusal main did not name says only what failed. The
+// cause, in main's own text, goes to Copy.
 export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal: UndoHistoryOperationRefusal): string {
   const word = operationWord(change);
   const failed = word === "delete"
@@ -59,8 +59,8 @@ export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal:
   if (refusal.code !== "old-path-occupied") return failed;
   const name = basenameOf(refusal.path);
   return word === "move"
-    ? `${failed} ${folderOf(refusal.path)} already has a ${name}. Move or rename that one, then try again.`
-    : `${failed} A new ${name} is in its place. Move or rename it, then try again.`;
+    ? `${failed} Move the ${name} in ${folderOf(refusal.path)} first.`
+    : `${failed} Move the new ${name} first.`;
 }
 
 export function undoneNotice(done: readonly RecordedTreeChange[]): string {

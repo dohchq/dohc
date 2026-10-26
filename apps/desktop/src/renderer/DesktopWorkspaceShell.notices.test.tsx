@@ -3718,7 +3718,7 @@ describe("Undo on an Explorer notice", () => {
     await undoFromNotices(user);
     await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledOnce());
     view.rerender(shell(bridge, OTHER_WORKSPACE));
-    await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete." }));
-    expect(screen.queryByText("Cannot undo the delete.")).toBeNull();
+    await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete.", refusal: { code: "unexplained" } }));
+    expect(screen.queryByText("Cannot restore a.md.")).toBeNull();
   });
 });

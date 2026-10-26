@@ -245,13 +245,14 @@ describe("Menu", () => {
     render(<Harness items={items} />);
     const trigger = screen.getByTestId("row-menu");
 
-    await user.click(trigger);
+    trigger.focus();
+    await user.keyboard("{Enter}");
     await user.keyboard("{Enter}");
     expect(rename).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);
 
-    await user.click(trigger);
+    await user.keyboard(" ");
     await user.keyboard(" ");
     expect(rename).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("menu")).toBeNull();
@@ -281,7 +282,7 @@ describe("Menu", () => {
       </Harness>,
     );
     await user.click(screen.getByTestId("row-menu"));
-    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}{Enter}");
     expect(rename).toHaveBeenCalledOnce();
     expect(screen.getByRole("menu").contains(screen.getByRole("status"))).toBe(true);
   });
@@ -431,6 +432,23 @@ describe("Menu", () => {
       await user.click(trigger);
       await user.keyboard("{ArrowUp}");
       expect(marked()).toEqual(["Delete"]);
+    });
+
+    it.each([["Enter", "{Enter}"], ["Space", " "]])("marks the first row on the first %s after a pointer open and runs nothing, then runs it on the next", async (_, key) => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      // The pointer's fill sits on another row.
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
+      await user.keyboard(key);
+      expect(marked()).toEqual(["Rename"]);
+      expect(rename).not.toHaveBeenCalled();
+      expect(items[1]!.onSelect).not.toHaveBeenCalled();
+      expect(screen.getByRole("menu")).toBeTruthy();
+
+      await user.keyboard(key);
+      expect(rename).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("menu")).toBeNull();
     });
 
     it("keeps the mark on the row the pointer moves to once a key has marked one", async () => {

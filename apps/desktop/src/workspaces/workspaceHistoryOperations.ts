@@ -220,6 +220,6 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
   } catch (error) {
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
-    return { ...failure(error, "undo"), ...(error instanceof DaemonRefusalError ? { refusal: engineRefusal(error) } : {}) };
+    return { ...failure(error, "undo"), refusal: error instanceof DaemonRefusalError ? engineRefusal(error) : { code: "unexplained" as const } };
   }
 }

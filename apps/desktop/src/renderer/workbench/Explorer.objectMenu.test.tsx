@@ -338,15 +338,16 @@ describe("Undo after a rename, a move or a delete", () => {
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Moved notes.md back to Files"));
   });
 
-  it("files main's refusal with Try again, which asks main again", async () => {
-    const reason = "Cannot undo the rename. notes.md now occupies the old path. Move it first.";
-    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason });
+  it("files a refused Undo with Try again, which asks main again", async () => {
+    const reason = "Cannot undo the rename. ideas.md is no longer there.";
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal: { code: "unexplained" } });
     const props = explorerProps();
     render(<Explorer {...props} />);
     await renameTo("notes.md", "ideas");
     const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
     act(() => undo());
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(reason, undefined, expect.any(Function)));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
+      "Cannot undo the rename.", expect.objectContaining({ message: reason }), expect.any(Function)));
     expect(props.onNotice).not.toHaveBeenCalledWith("Renamed ideas.md back to notes.md");
 
     const retry = vi.mocked(props.onError).mock.calls[0]![2]!;
@@ -373,9 +374,9 @@ describe("Undo after a rename, a move or a delete", () => {
 
   // Main's text stays in the cause, for Copy.
   it.each([
-    [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. A new notes.md is in its place. Move or rename it, then try again."],
+    [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. Move the new notes.md first."],
     [{ code: "unexplained" } as const, "Cannot undo the rename."],
-  ])("words a refusal main named: %o", async (refusal, words) => {
+  ])("words a refused Undo from its refusal: %o", async (refusal, words) => {
     const reason = "domain error: Undo refused: old path occupied: notes.md";
     bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal });
     const props = explorerProps();

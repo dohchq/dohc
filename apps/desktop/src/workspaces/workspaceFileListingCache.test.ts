@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { WorkspaceFileListingCache } from "./workspaceFileListingCache";
-import { deferred } from "../testing/deferred";
+import { deferred, type Deferred } from "../testing/deferred";
 
 const ATTACHMENT_A = Symbol("attachment-a");
 const ATTACHMENT_B = Symbol("attachment-b");
@@ -60,6 +60,40 @@ describe("WorkspaceFileListingCache", () => {
     await expect(asked).resolves.toEqual(both);
     await expect(read()).resolves.toEqual({ ...both, cached: true });
     expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers after one more walk when a path no walk lists keeps changing", async () => {
+    const cache = new WorkspaceFileListingCache("win32");
+    // A symlink file, which the walk skips, re-pointed during every walk.
+    const load = vi.fn(async () => {
+      cache.observe("ws-a", ATTACHMENT_A, [{ path: "link.md", kind: "changed" }]);
+      return listing("plan.md");
+    });
+    await expect(cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load })).resolves.toEqual(listing("plan.md"));
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["answers", (walk: Deferred<WorkspacePathListing>, both: WorkspacePathListing) => walk.resolve(both)],
+    ["fails", (walk: Deferred<WorkspacePathListing>) => walk.reject(new Error("walk failed"))],
+  ])("does not answer with a replaced walk that lacks a file changed during it, when the newer walk %s", async (outcome, settle) => {
+    const cache = new WorkspaceFileListingCache("win32");
+    const replaced = deferred<WorkspacePathListing>();
+    const newer = deferred<WorkspacePathListing>();
+    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
+    const load = vi.fn().mockReturnValueOnce(replaced.promise).mockReturnValueOnce(newer.promise).mockResolvedValue(both);
+    const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
+    // Started after a delete answered; packing.md is put back behind it.
+    const walking = cache.list({ ...options, allowCached: true });
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    const replacing = cache.list({ ...options, allowCached: false });
+    replaced.resolve(listing("plan.md"));
+    await expect(walking).resolves.toEqual(both);
+    settle(newer, both);
+    if (outcome === "answers") await expect(replacing).resolves.toEqual(both);
+    else await expect(replacing).rejects.toThrow("walk failed");
+    await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual({ ...both, cached: true });
+    expect(load).toHaveBeenCalledTimes(3);
   });
 
   it("keeps a walk that holds a file changed during it", async () => {

@@ -395,13 +395,14 @@ describe("DocumentMenu", () => {
       />,
     );
 
-    await user.click(screen.getByTestId("document-menu-trigger"));
+    // Keyboard only, which is the path the tooltip could not serve: a menu
+    // opened from the keyboard marks its first row, so Enter runs it.
+    screen.getByTestId("document-menu-trigger").focus();
+    await user.keyboard("{Enter}");
     const status = screen.getByTestId("document-menu-status");
     expect(status.getAttribute("role")).toBe("status");
     expect(status.textContent).toBe("");
 
-    // Keyboard only, which is the path the tooltip could not serve: the menu
-    // takes focus on open, so Enter runs the selected item.
     await user.keyboard("{Enter}");
     await act(async () => {});
     expect(screen.getByTestId("document-menu-status").textContent).toBe(
