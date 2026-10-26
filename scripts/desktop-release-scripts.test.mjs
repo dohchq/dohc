@@ -151,6 +151,9 @@ test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, 
   const manual = publishedRelease("v0.1.1-nightly.20261019.38.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
   assert.throws(() => check([manual]), /can publish from 2026-10-19 18:00 UTC/);
   assert.doesNotThrow(() => check([manual], new Date("2026-10-19T20:00:00Z")));
+  // On 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still publishes.
+  const morning = publishedRelease("v0.1.1-nightly.20261026.152.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-26T07:00:00Z");
+  assert.doesNotThrow(() => check([morning], new Date("2026-10-26T20:00:00Z")));
   // The day turns at 18:00 UTC exactly.
   const beforeTurn = publishedRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"], "2026-10-19T17:59:00Z");
   assert.throws(() => check([beforeTurn], new Date("2026-10-19T17:59:59Z")), /can publish from 2026-10-19 18:00 UTC/);
@@ -1635,6 +1638,8 @@ test("the nightly job dispatches only a new main that passed verification", () =
   assert.deepEqual([quiet.kind, quiet.report], ["skip", false], "a night with nothing new is not reported");
   // A nightly published by hand before 18:00 UTC leaves tonight's to go ahead.
   assert.deepEqual(nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T01:00:00Z" } }), { kind: "dispatch" });
+  assert.deepEqual(nightlyDecision({ ...night, now: Date.parse("2026-10-26T20:00:00Z"), lastNightly: { ...YESTERDAY, publishedAt: "2026-10-26T07:00:00Z" } }), { kind: "dispatch" },
+    "on 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still dispatches");
   // One published after 18:00 UTC is tonight's, so main stays unpublished, and that is reported.
   const sameDay = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T19:00:00Z" } });
   assert.deepEqual([sameDay.kind, sameDay.report], ["skip", true]);
