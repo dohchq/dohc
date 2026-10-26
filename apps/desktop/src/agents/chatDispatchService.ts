@@ -1527,32 +1527,34 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   // The one place that decides which run Try again can run again: the
-  // conversation's latest run, while its request is still stopped and the
-  // engine allows it another attempt. Once the request is back in line, the
-  // conversation shows it waiting instead. Runs live in this computer's
-  // engine, so another computer's runs never show here.
+  // conversation's newest run that a quit or restart stopped, while it is
+  // still its agent's latest run there and its request is still stopped.
+  // Another agent's run in the conversation doesn't hide it. Once the request
+  // is back in line, the conversation shows it waiting instead. Runs live in
+  // this computer's engine, so another computer's runs never show here.
   async function stoppedRunForThread(
     workspace: ChatDispatchWorkspace,
     threadId: string,
   ): Promise<{ stopped: ChatDispatchStoppedRun; agentId: string } | null> {
-    const run = await options
-      .dispatchStoreFor(workspace)
-      .latestRunForThread(workspace.workspaceId, threadId);
-    if (!run || run.endedAtMs === undefined) return null;
-    const ending = savedRunOutcome(run);
-    if (ending !== "restarted" && ending !== "quit") return null;
     const recoveries = (await options.listAppQuitRecoveries?.(workspace)) ?? [];
-    const recovery = recoveries.find((candidate) => candidate.run.runId === run.runId);
-    if (!recovery) return null;
-    return {
-      stopped: {
-        runId: run.runId,
-        triggerMessageId: run.triggerMessageId,
-        ending,
-        retryable: recovery.attemptCount < 2,
-      },
-      agentId: run.agentId,
-    };
+    const dispatch = options.dispatchStoreFor(workspace);
+    for (const { run, attemptCount } of recoveries.toReversed()) {
+      if (run.threadId !== threadId) continue;
+      const ending = savedRunOutcome(run);
+      if (ending !== "restarted" && ending !== "quit") continue;
+      const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
+      if (latest?.runId !== run.runId) continue;
+      return {
+        stopped: {
+          runId: run.runId,
+          triggerMessageId: run.triggerMessageId,
+          ending,
+          retryable: attemptCount < 2,
+        },
+        agentId: run.agentId,
+      };
+    }
+    return null;
   }
 
   // Try again on a stopped run puts its request back in line. False when
@@ -1567,6 +1569,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!workspace) throw new Error("This workspace is not open. Open it again.");
       const found = await stoppedRunForThread(workspace, threadId);
       if (found?.stopped.runId !== runId || !found.stopped.retryable) return false;
+      // A request for an agent this computer can't start would fail as soon
+      // as it was back in line, so it stays stopped and the person learns why.
+      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.agentId);
+      if (!agent?.enabled || !agent.launch) {
+        const why = !agent
+          ? "That agent is not set up on this computer."
+          : agent.launch ? `${agent.name} is off.` : `${agent.name} has no command to start it.`;
+        throw new Error(`${why} Check it in Settings → Agents, then try again.`);
+      }
       const requeued = (await options.requeueFailedTrigger?.({
         workspaceId,
         ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),

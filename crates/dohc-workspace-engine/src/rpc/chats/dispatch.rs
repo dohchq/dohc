@@ -95,6 +95,14 @@ struct ChatDispatchFailPendingParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchLatestRunParams {
+    thread_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchRecordRunMessageParams {
     message_id: String,
     run_id: String,
@@ -557,14 +565,17 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatThreadParams = parse(params)?;
+        let params: ChatDispatchLatestRunParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let run = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.latestRunForThread",
-            open.actor
-                .chat_dispatch_latest_run_for_thread(open.workspace_id.clone(), params.thread_id),
+            open.actor.chat_dispatch_latest_run_for_thread(
+                open.workspace_id.clone(),
+                params.thread_id,
+                params.agent_id,
+            ),
         )
         .await?;
         Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))

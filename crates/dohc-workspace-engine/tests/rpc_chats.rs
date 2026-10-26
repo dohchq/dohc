@@ -4121,6 +4121,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(latest, claim["run"]);
+    let agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "default" }),
+    )
+    .await;
+    assert_eq!(agents_latest, claim["run"]);
+    let other_agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "nova" }),
+    )
+    .await;
+    assert_eq!(other_agents_latest, Value::Null);
     let open = call(
         &transport,
         &handle,

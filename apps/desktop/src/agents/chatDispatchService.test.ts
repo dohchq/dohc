@@ -2748,7 +2748,7 @@ describe("chatDispatchService", () => {
       expect(await owedRuns(fixture)).toEqual([]);
     });
 
-    it("offers it only on the conversation's latest run", async () => {
+    it("offers it only on its agent's latest run in the conversation", async () => {
       const fixture = await createFixture({ restricted: true });
       const run = await stoppedRun(fixture, "restarted");
       await activate(fixture);
@@ -2763,6 +2763,38 @@ describe("chatDispatchService", () => {
       expect(await stateOf(fixture, run.threadId)).toBeUndefined();
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(false);
       expect(fixture.requeues).toEqual([]);
+    });
+
+    it("keeps offering it while another agent answers in the conversation", async () => {
+      const fixture = await createFixture({
+        restricted: true,
+        agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+      });
+      const run = await stoppedRun(fixture, "quit");
+      await activate(fixture);
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: run.messageId, threadId: run.threadId, agentId: "codex",
+      });
+      const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "node codex.mjs" });
+      if (codex?.run.agentId !== "codex") throw new Error("Expected Codex's run.");
+      await fixture.dispatch.completeRun({ runId: codex.run.runId, exitCode: 0 });
+
+      expect(await stateOf(fixture, run.threadId)).toEqual({
+        runId: run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: true,
+      });
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+      expect(fixture.requeues).toEqual([expect.objectContaining({ agentId: "default", runId: run.runId })]);
+    });
+
+    it("leaves the request stopped and says why when its agent is off", async () => {
+      const fixture = await createFixture({ runner: { enabled: false } });
+      const run = await stoppedRun(fixture, "quit");
+      await activate(fixture);
+
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId))
+        .rejects.toThrow("Nova is off. Check it in Settings → Agents, then try again.");
+      expect(fixture.requeues).toEqual([]);
+      expect(await stateOf(fixture, run.threadId)).toMatchObject({ runId: run.runId, retryable: true });
     });
 
     it("keeps the words but not the button once the request has had its second attempt", async () => {
