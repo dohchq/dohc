@@ -324,6 +324,30 @@ it("shows no automations chip while only one agent can be started", () => {
   expect(screen.queryByTestId("agent-for-automations")).toBeNull();
 });
 
+// The order since Remove stays: Undo moves only the agent it puts back.
+it("puts a removed agent back after the one it followed, in the order the file has then", async () => {
+  const { onSave, onOrder, onNotice } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
+  // Codex was then chosen for automations, so the file starts with it.
+  const { default: claude, codex } = SETTINGS.agents;
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex: codex!, default: claude! } }, source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["codex", "terminal", "default"]));
+  expect(Object.keys(onSave.mock.lastCall![0].agents)).toEqual(["codex", "default", "terminal"]);
+
+  // An agent whose entry before it is gone goes back first.
+  cleanup();
+  const second = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalled());
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude! } }, source: "stored" });
+  second.onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(second.onOrder).toHaveBeenCalledWith(["terminal", "default"]));
+});
+
 it("removes an agent, and Undo puts it back where it was", async () => {
   const { onSave, onOrder, onNotice, rerender } = renderList();
   await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));

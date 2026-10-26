@@ -49,6 +49,8 @@ export function agentListRows(settings: Pick<DesktopUserSettings, "agents">, pro
   return [...rows, ...agents.slice(next).map((agent) => ({ kind: "agent" as const, agent }))];
 }
 
+const rowId = (row: AgentListRow) => (row.kind === "agent" ? row.agent.id : row.problem.id);
+
 /** A problem sentence, with each key in backticks set in monospace. */
 export function ProblemText(props: { text: string }) {
   return <>{props.text.split("`").map((part, index) =>
@@ -396,7 +398,7 @@ export function AgentList(props: {
   // The chip shows only when there is more than one agent to choose from.
   const automation = automationAgent(settings);
   const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
-  const fileOrder = rows.map((row) => (row.kind === "agent" ? row.agent.id : row.problem.id));
+  const fileOrder = rows.map(rowId);
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn);
   // Why Check can't start now. Try again on a toast can come at such a time.
   const checkBlocked = useRef<string | null>(null);
@@ -455,10 +457,12 @@ export function AgentList(props: {
     if (await onOrder([agent.id])) onNotice?.(`Automations now wake ${agent.name}.`, () => void onOrder(previous));
   };
 
-  // Undo puts the agent back where it was, under the name and settings it had,
-  // unless an agent in the file has its id by then.
+  // Undo puts the agent back under the name and settings it had, after the
+  // entry it followed, or first when that entry is gone. Every other entry
+  // keeps its place in the file as it is then. An agent in the file with its
+  // id by then stays.
   const remove = async (agent: Agent) => {
-    const previous = fileOrder;
+    const before = fileOrder[fileOrder.indexOf(agent.id) - 1];
     const { [agent.id]: entry, ...agents } = settings.agents;
     if (!entry || !(await onSave({ ...settings, agents }))) return;
     setRenaming((current) => (current === agent.id ? null : current));
@@ -477,7 +481,9 @@ export function AgentList(props: {
         onError?.(`Undo didn't replace the new ${holder}, so the one you removed stays removed.`);
         return;
       }
-      if (await latestSave.current({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
+      const order = agentListRows(current, file.agentProblems).map(rowId);
+      order.splice(before === undefined ? 0 : order.indexOf(before) + 1, 0, agent.id);
+      if (await latestSave.current({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(order);
     })());
   };
 
