@@ -1418,6 +1418,8 @@ fn resolve_or_create_placeholder(
         None
     };
     if let Some(channel_id) = mapped_channel_id {
+        // An agent's wire id that maps to another chat refuses the thread, so
+        // sync goes on past it.
         if let Some(agent_id) = agent_id {
             let mapped: Option<(String, Option<String>)> = tx
                 .query_row(
@@ -1433,9 +1435,9 @@ fn resolve_or_create_placeholder(
                 Some((ref kind, Some(ref mapped_agent)))
                     if kind == "agent" && mapped_agent == agent_id
             ) {
-                return Err(local_corruption(
-                    "reserved agent-channel mapping is corrupt",
-                ));
+                return Err(SyncError::InvalidInput {
+                    reason: "agent chat wire id names another chat",
+                });
             }
         }
         return Ok(channel_id);

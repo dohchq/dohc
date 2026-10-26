@@ -5771,6 +5771,52 @@ fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
     );
 }
 
+/// A thread whose agent's wire id maps to a group is refused, and the next op
+/// from its device still applies.
+#[test]
+fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'group', 'Group', 'group', 'channel', 1, 1); \
+                 INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1_codex', 'group');",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("a group mapped from codex's wire id");
+    let refused = envelope(
+        "device-a",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "codex-thread", "title": "Codex", "createdAtMs": 20,
+            "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+    let next = envelope(
+        "device-a",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "group-thread", "title": "Group", "createdAtMs": 21, "channelSlug": "group"
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &next, &NoFaults).expect("the next thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "device-a").expect("ack"),
+        1
+    );
+}
+
 #[test]
 fn imported_agent_message_keeps_its_owner_display_name() {
     let (_scratch, _path, mut engine) = open_store();
