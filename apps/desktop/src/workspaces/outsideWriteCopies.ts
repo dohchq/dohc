@@ -19,8 +19,10 @@ class CopyRecordError extends Error {
 }
 
 async function readRecord(path: string) {
-  const text = await readFile(path, "utf8");
-  try { return CopyRecord.parse(JSON.parse(text)); }
+  try {
+    const text = await readFile(path, "utf8");
+    return CopyRecord.parse(JSON.parse(text));
+  }
   catch (cause) { throw new CopyRecordError(path, cause); }
 }
 
@@ -125,8 +127,8 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
     if (errors.length) throw errors[0];
     const dir = await directory();
     const receipt = join(dir, createHash("sha256").update(path).update(sha256).digest("hex") + ".json");
-    const previous = await readRecord(receipt).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
+    const previous = await readRecord(receipt).catch((error: unknown) => {
+      if (error instanceof CopyRecordError && (error.cause as NodeJS.ErrnoException)?.code === "ENOENT") return null;
       throw error;
     });
     if (previous !== null) {

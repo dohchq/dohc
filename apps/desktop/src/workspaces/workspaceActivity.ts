@@ -55,9 +55,9 @@ interface WatchedWorkspace {
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
   recoveryUnavailable: boolean;
-  // Null until this capture first reports.
+  // Null until this capture first reads the list.
   outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
-  outsideWriteCopyReadError: string | null;
+  outsideWriteCopyReadError: string | null | undefined;
   keptFiles: readonly (readonly [string, string])[];
   // Old file copies the engine keeps on a drive that cannot tell it whether
   // a program still uses one. Null until the engine first reports.
@@ -162,7 +162,7 @@ export interface WorkspaceCaptureHooks {
   ) => void;
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
-  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[], readError: string | null) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
@@ -297,8 +297,8 @@ export function createWorkspaceActivity(
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       ...(w && w.outsideWriteCopies !== null ? {
         outsideWriteCopies: w.outsideWriteCopies.map(([original, copy, id]): [string, string, string] => [original, copy, id]),
-        outsideWriteCopyReadError: w.outsideWriteCopyReadError,
       } : {}),
+      ...(w?.outsideWriteCopyReadError !== undefined ? { outsideWriteCopyReadError: w.outsideWriteCopyReadError } : {}),
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
@@ -398,7 +398,7 @@ export function createWorkspaceActivity(
         onNetworkShare: false,
         recoveryUnavailable: false,
         outsideWriteCopies: null,
-        outsideWriteCopyReadError: null,
+        outsideWriteCopyReadError: undefined,
         keptFiles: [],
         retainedCopies: null,
         heldFiles: [],
@@ -430,7 +430,7 @@ export function createWorkspaceActivity(
               },
               onOutsideWriteCopies: (paths, readError) => {
                 if (state.entry !== entry) return;
-                entry.outsideWriteCopies = [...paths];
+                entry.outsideWriteCopies = paths === null ? null : [...paths];
                 entry.outsideWriteCopyReadError = readError;
                 notify({ workspaceId: workspace.workspaceId });
               },

@@ -72,6 +72,10 @@ describe("workspaceActivity capture hooks", () => {
       expect(initial).not.toHaveProperty("outsideWriteCopyReadError");
       expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopies");
       expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopyReadError");
+      hooks.onOutsideWriteCopies?.(null, "local state not opened");
+      const failedRead = activity.getStatus("activity-test");
+      expect(failedRead.outsideWriteCopyReadError).toBe("local state not opened");
+      expect(failedRead).not.toHaveProperty("outsideWriteCopies");
       hooks.onOutsideWriteCopies?.([], null);
       expect(activity.getStatus("activity-test")).toMatchObject({ outsideWriteCopies: [], outsideWriteCopyReadError: null });
       await activity.stopAll();

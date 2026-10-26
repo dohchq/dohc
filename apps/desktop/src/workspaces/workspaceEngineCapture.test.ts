@@ -63,7 +63,7 @@ import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
-import { openedLocalState } from "../testing/preparedLocalState";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 
 vi.mock("node:timers/promises", { spy: true });
@@ -2714,9 +2714,9 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(adoptions).toHaveBeenCalled();
       expect(outcomes).toHaveBeenLastCalledWith(null, null);
       expect(errors).not.toHaveBeenCalled();
-      const rows = damage === "malformed receipt" ? originalRows : [];
+      const rows = damage === "malformed receipt" ? originalRows : null;
       expect(outside).toHaveBeenCalledExactlyOnceWith(rows, expect.stringContaining(broken));
-      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, ...(rows === null ? {} : { outsideWriteCopies: rows }) });
       await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
       await engine.flush();
       expect(outside).toHaveBeenCalledOnce();
@@ -2724,11 +2724,53 @@ describe("workspaceEngineCapture batch capture", () => {
       await rm(broken);
       if (damage === "file at receipt folder") await mkdir(folder);
       await engine.listKeptCopies();
-      expect(outside).toHaveBeenLastCalledWith(rows, null);
+      expect(outside).toHaveBeenLastCalledWith(rows ?? [], null);
     } finally {
       await engine.stop();
       await liveStore.close();
       vi.useRealTimers();
+    }
+  });
+
+  it("reports a first failed copy-list read without a list, then clears the error on recovery", async () => {
+    const root = await createTestScratch("copy-record-unopened-");
+    const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID };
+    const opens = fakeLocalStateOpens();
+    await opens.open(workspace);
+    await write(root, "n.md", "outside");
+    const copies = outsideWriteCopies(workspace);
+    await copies.beforeWrite("n.md", null, () => undefined, async () => false);
+    const rows = await copies.list();
+    opens.close(workspace);
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(workspace, sessions).store;
+    const native = { keptCopies: [], more: false };
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "listKeptCopies") return async () => native;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outside = vi.fn();
+    const engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: outside });
+    try {
+      const first = await engine.listKeptCopies();
+      expect(first).toEqual(native);
+      expect(first).not.toHaveProperty("outsideWriteCopies");
+      expect(outside).toHaveBeenCalledExactlyOnceWith(null, expect.stringContaining("dohc has not finished opening this workspace"));
+      await engine.listKeptCopies();
+      expect(outside).toHaveBeenCalledOnce();
+      await opens.open(workspace);
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(outside).toHaveBeenLastCalledWith(rows, null);
+      opens.close(workspace);
+      await rm(join(root, rows[0]![1]));
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(outside).toHaveBeenLastCalledWith(rows, expect.stringContaining("dohc has not finished opening this workspace"));
+    } finally {
+      await engine.stop();
+      await liveStore.close();
     }
   });
 

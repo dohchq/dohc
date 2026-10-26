@@ -9,7 +9,8 @@ import { makeBridge, renderShell, SYNC_STATUS, WORKSPACE } from "./DesktopWorksp
 
 afterEach(() => localStorage.clear());
 
-it.each([false, true])("preserves shown copy state through unreported status on remount, dismissed=%s", async dismissed => {
+it.each([false, true].flatMap(dismissed => [false, true].map(readFailed => ({ dismissed, readFailed }))))(
+  "preserves saved copy state on remount, dismissed=$dismissed, readFailed=$readFailed", async ({ dismissed, readFailed }) => {
   const user = userEvent.setup();
   const status: SyncStatusResult = { ...SYNC_STATUS, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
   const firstBridge = makeBridge(Promise.resolve(null));
@@ -32,10 +33,14 @@ it.each([false, true])("preserves shown copy state through unreported status on 
   renderShell(nextBridge);
   await waitFor(() => expect(nextBridge.getSyncStatus).toHaveBeenCalled());
   expect(localStorage.getItem(key)).toBe(saved);
-  await act(async () => answer.resolve(SYNC_STATUS));
+  await act(async () => answer.resolve({ ...SYNC_STATUS,
+    ...(readFailed ? { outsideWriteCopyReadError: "local state not opened" } : {}) }));
+  if (readFailed) {
+    expect(within(await screen.findByTestId("workspace-shell-error")).getByText("dohc could not list every kept copy")).toBeTruthy();
+  }
   expect(localStorage.getItem(key)).toBe(saved);
   expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-  nextBridge.getSyncStatus.mockResolvedValue(status);
+  nextBridge.getSyncStatus.mockResolvedValue({ ...status, outsideWriteCopyReadError: null });
   const refreshed = nextBridge.getSyncStatus.mock.calls.length;
   act(() => nextBridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
   await waitFor(() => expect(nextBridge.getSyncStatus.mock.calls.length).toBeGreaterThan(refreshed));
@@ -44,6 +49,7 @@ it.each([false, true])("preserves shown copy state through unreported status on 
   expect(row !== null).toBe(!dismissed);
   expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
   expect(localStorage.getItem(key)).toBe(saved);
+  expect(screen.queryByText("dohc could not list every kept copy")).toBeNull();
 });
 
 it("shows one kept-copy list failure with its cause, retries, and clears it on recovery", async () => {

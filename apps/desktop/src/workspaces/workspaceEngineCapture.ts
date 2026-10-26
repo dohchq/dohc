@@ -857,7 +857,7 @@ export interface WorkspaceEngineCaptureOptions {
   // moment. Sticky: the drive does not change while the workspace is open.
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
-  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[], readError: string | null) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
@@ -1828,7 +1828,7 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
   const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
-  let lastOutsideCopies: [string, string, string][] = [];
+  let lastOutsideCopies: [string, string, string][] | null = null;
   let reportedOutsideCopies: string | null = null;
   const reportOutsideWriteCopies = async () => {
     let readError: string | null = null;
@@ -6872,7 +6872,9 @@ export function createWorkspaceEngineCapture(
     },
 
     async listKeptCopies() {
-      return { ...await (await engineStore()).listKeptCopies(), outsideWriteCopies: await reportOutsideWriteCopies() };
+      const native = await (await engineStore()).listKeptCopies();
+      const outsideWriteCopies = await reportOutsideWriteCopies();
+      return { ...native, ...(outsideWriteCopies === null ? {} : { outsideWriteCopies }) };
     },
 
     async saveKeptCopy(id) {

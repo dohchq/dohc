@@ -131,9 +131,11 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(await readdir(join(rootPath, ".dohc/local/outside-write-copies"))).toEqual([]);
   });
 
-  it("reports malformed receipts in path order regardless of read completion order", async () => {
-    const { rootPath, copies } = await setup();
-    await copies.list();
+  it.each(["malformed", "unreadable"])("reports %s receipts in path order regardless of read completion order", async damage => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    const expected = await copies.list();
     const folder = join(rootPath, ".dohc/local/outside-write-copies");
     const paths = [join(folder, "a.json"), join(folder, "z.json")];
     for (const path of paths) await writeFile(path, "invalid");
@@ -151,12 +153,15 @@ describe("materialization keeps outside bytes before replacement", () => {
           entered[index]!.resolve();
           await release[index]!.promise;
         }
-        const text = await readFile(...args);
-        if (index !== -1) {
-          completed.push(paths[index]!);
-          finished[index]!.resolve();
+        try {
+          if (index !== -1 && damage === "unreadable") throw Object.assign(new Error("EACCES: receipt access denied"), { code: "EACCES" });
+          return await readFile(...args);
+        } finally {
+          if (index !== -1) {
+            completed.push(paths[index]!);
+            finished[index]!.resolve();
+          }
         }
-        return text;
       }) as typeof readFile);
       const errors: string[] = [];
       const listing = fresh.list(error => errors.push(String(error)));
@@ -166,7 +171,7 @@ describe("materialization keeps outside bytes before replacement", () => {
           release[index]!.resolve();
           await finished[index]!.promise;
         }
-        expect(await listing).toEqual([]);
+        expect(await listing).toEqual(expected);
       } finally {
         release.forEach(signal => signal.resolve());
         await listing;
@@ -179,6 +184,32 @@ describe("materialization keeps outside bytes before replacement", () => {
       reported.push(errors);
     }
     expect(reported[0]).toEqual(reported[1]);
+  });
+
+  it("lists readable receipts but refuses a copy when another receipt has EACCES", async () => {
+    const { rootPath, workspace, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    const expected = await copies.list();
+    const broken = join(rootPath, ".dohc/local/outside-write-copies/blocked.json");
+    await writeFile(broken, "unreadable");
+    const { readFile } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const cause = Object.assign(new Error("EACCES: receipt access denied"), { code: "EACCES" });
+    vi.spyOn(files, "readFile").mockImplementation((...args) => String(args[0]) === broken ? Promise.reject(cause) : readFile(...args));
+    const fresh = outsideWriteCopies(workspace);
+    const errors = vi.fn();
+    expect(await fresh.list(errors)).toEqual(expected);
+    expect(errors).toHaveBeenCalledOnce();
+    const error = errors.mock.calls[0]![0] as Error;
+    expect(error.message).toContain(broken);
+    expect(error.cause).toBe(cause);
+    await writeFile(join(rootPath, "other.md"), "another outside edit");
+    const failure = await fresh.beforeWrite("other.md", null, () => undefined, isRecorded).catch(error => error as unknown);
+    expect(failure).toBeInstanceOf(OutsideWriteCopyError);
+    expect(String(failure)).toContain(`Blocking file: ${broken}`);
+    expect(String(failure)).toContain("EACCES: receipt access denied");
+    expect(await readFile(join(rootPath, "other.md"), "utf8")).toBe("another outside edit");
+    expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual(["n (kept copy).md"]);
   });
 
   it("leaves the original when preserving the copy fails", async () => {
