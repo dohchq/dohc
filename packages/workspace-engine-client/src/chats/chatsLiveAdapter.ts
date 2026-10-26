@@ -139,10 +139,14 @@ export class ChatsLiveAdapter {
 
   async ensureAgentChannel(input: {
     workspaceId: string;
+    agentId: string;
+    name: string;
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.channelEnsureAgent, {
       channelId: this.createId("channel"),
+      agentId: input.agentId,
+      name: input.name,
     });
   }
 
@@ -209,6 +213,8 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     author: ChatWriteActor;
@@ -252,6 +258,10 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
@@ -343,6 +353,8 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    namedAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -384,6 +396,10 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
@@ -845,27 +861,17 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async recordEligibleTriggers(input: {
-    workspaceId: string;
-    verifiedUserId?: string;
-  }): Promise<number> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(CHATS_METHOD.dispatchRecordEligibleTriggers, {
-      ...(input.verifiedUserId !== undefined
-        ? { verifiedUserId: input.verifiedUserId }
-        : {}),
-    });
-  }
-
   async recordTrigger(input: {
     workspaceId: string;
     triggerMessageId: string;
+    agentId: string;
     threadId: string;
   }): Promise<boolean> {
     this.assertWorkspace(input.workspaceId);
     return (
       await this.request(CHATS_METHOD.dispatchEnqueue, {
         triggerMessageId: input.triggerMessageId,
+        agentId: input.agentId,
         threadId: input.threadId,
       })
     ).enqueued;
@@ -886,11 +892,13 @@ export class ChatsLiveAdapter {
   async failPendingForThread(input: {
     workspaceId: string;
     threadId: string;
+    agentId: string;
     reason: string;
   }): Promise<number> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.dispatchFailPendingForThread, {
       threadId: input.threadId,
+      agentId: input.agentId,
       reason: input.reason,
     });
   }

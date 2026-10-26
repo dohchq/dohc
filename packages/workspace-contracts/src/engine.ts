@@ -418,6 +418,8 @@ export interface ChatMessageAppendPayload {
   // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
   linkGrantId?: string;
   linkPrincipalId?: string;
+  // The agent that wrote an agent message in one of its runs.
+  authorAgentId?: string;
   body: string;
   createdAtMs: number;
 }
@@ -746,6 +748,8 @@ export interface ChatChannel {
   // The workspace-relative folder the group's files live in. Absent for
   // dm and agent channels and for channels older than the groups migration.
   folderPath?: string;
+  // The agent whose chat this is. Present on, and only on, an agent chat.
+  agentId?: string;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -866,6 +870,8 @@ export interface ChatMessage {
   body: string;
   createdAtMs: number;
   automation?: ChatMessageAutomation;
+  // The agent that wrote the message in one of its runs. Provenance only.
+  authorAgentId?: string;
   attachments: ChatAttachment[];
 }
 
@@ -1024,7 +1030,13 @@ export interface LinkedChatStore {
   // Idempotent: creates the workspace's default "general" channel on first
   // chat use, returns the existing one afterwards.
   ensureGeneralChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
-  ensureAgentChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
+  // Idempotent: one chat per agent. The default agent's chat is "My agent";
+  // another agent's chat takes `name` when it is created.
+  ensureAgentChannel(input: {
+    workspaceId: WorkspaceId;
+    agentId: string;
+    name: string;
+  }): Promise<ChatChannel>;
   listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
   // Slug is a lookup ALIAS only; durable state keys on channelId.
   findChannelBySlug(input: {
@@ -1059,6 +1071,11 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    // The agent writing in one of its runs. Only an agent author has one.
+    authorAgentId?: string;
+    // The author's own agents the message names, resolved on this computer.
+    // Each one wakes, as does the agent whose chat this is. Never journaled.
+    namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     author: ChatWriteActor;
@@ -1114,6 +1131,11 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    // The agent writing in one of its runs. Only an agent author has one.
+    authorAgentId?: string;
+    // The author's own agents the message names, resolved on this computer.
+    // Each one wakes, as does the agent whose chat this is. Never journaled.
+    namedAgentIds?: string[];
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1312,6 +1334,8 @@ type AgentDispatchState = "pending" | "running" | "done" | "failed";
 export interface AgentDispatchRecord {
   workspaceId: WorkspaceId;
   triggerMessageId: ChatMessageId;
+  // The agent the trigger message wakes.
+  agentId: string;
   threadId: ChatThreadId;
   state: AgentDispatchState;
   runId?: string;
@@ -1324,6 +1348,8 @@ export interface AgentDispatchRecord {
 export interface AgentRunRecord {
   workspaceId: WorkspaceId;
   runId: string;
+  // The agent that runs.
+  agentId: string;
   threadId: ChatThreadId;
   triggerMessageId: ChatMessageId;
   command: string;
@@ -1353,22 +1379,21 @@ export interface ThreadDispatchPauseState {
 }
 
 export interface AgentDispatchStore {
-  recordEligibleTriggers(input: {
-    workspaceId: WorkspaceId;
-    verifiedUserId?: string;
-  }): number;
   recordTrigger(input: {
     workspaceId: WorkspaceId;
     triggerMessageId: ChatMessageId;
+    agentId: string;
     threadId: ChatThreadId;
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
     options?: { command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
+  // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
+    agentId: string;
     reason: string;
   }): number;
   completeRun(input: { runId: string; exitCode: number }): AgentRunRecord;

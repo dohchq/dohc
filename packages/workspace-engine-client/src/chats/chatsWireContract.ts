@@ -53,7 +53,6 @@ export const CHATS_METHOD = {
   bookmarkMarkFailed: "chats.bookmarks.markFailed",
   bookmarkMarkStale: "chats.bookmarks.markStale",
   dispatchEnqueue: "chats.dispatch.enqueue",
-  dispatchRecordEligibleTriggers: "chats.dispatch.recordEligibleTriggers",
   dispatchClaimNextPending: "chats.dispatch.claimNextPending",
   dispatchListPending: "chats.dispatch.listPending",
   dispatchOpenRuns: "chats.dispatch.openRuns",
@@ -136,6 +135,10 @@ type ChatChannelEnsureParams = ChatsJsonObject & {
   channelId: string;
   nowMs?: number;
 };
+type ChatChannelEnsureAgentParams = ChatChannelEnsureParams & {
+  agentId: string;
+  name: string;
+};
 type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
 
 type ChatThreadStartParams = ChatsJsonObject & {
@@ -155,6 +158,8 @@ type ChatThreadStartParams = ChatsJsonObject & {
   options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
+  authorAgentId?: string;
+  namedAgentIds?: string[];
   nowMs?: number;
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
@@ -196,6 +201,8 @@ type ChatMessageSendParams = ChatsJsonObject & {
   options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
+  authorAgentId?: string;
+  namedAgentIds?: string[];
   nowMs?: number;
 };
 type ChatMessagesListParams = ChatsJsonObject & {
@@ -296,11 +303,9 @@ type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
 type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
   failureReason?: string;
 };
-type ChatDispatchRecordEligibleParams = ChatsJsonObject & {
-  verifiedUserId?: string;
-};
 type ChatDispatchEnqueueParams = ChatsJsonObject & {
   triggerMessageId: string;
+  agentId: string;
   threadId: string;
   nowMs?: number;
 };
@@ -323,6 +328,7 @@ type ChatDispatchRecentCountParams = ChatsJsonObject & {
 };
 type ChatDispatchFailPendingParams = ChatsJsonObject & {
   threadId: string;
+  agentId: string;
   reason: string;
 };
 type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
@@ -360,7 +366,7 @@ export type ChatFeedPage =
 
 export type ChatsMethodParamsMap = {
   [CHATS_METHOD.channelCreate]: ChatChannelCreateParams;
-  [CHATS_METHOD.channelEnsureAgent]: ChatChannelEnsureParams;
+  [CHATS_METHOD.channelEnsureAgent]: ChatChannelEnsureAgentParams;
   [CHATS_METHOD.channelEnsureGeneral]: ChatChannelEnsureParams;
   [CHATS_METHOD.channelFindBySlug]: ChatChannelFindBySlugParams;
   [CHATS_METHOD.channelsList]: ChatPageParams;
@@ -404,7 +410,6 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkMarkFailedParams;
   [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkMarkStaleParams;
   [CHATS_METHOD.dispatchEnqueue]: ChatDispatchEnqueueParams;
-  [CHATS_METHOD.dispatchRecordEligibleTriggers]: ChatDispatchRecordEligibleParams;
   [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaimParams;
   [CHATS_METHOD.dispatchListPending]: ChatPageParams;
   [CHATS_METHOD.dispatchOpenRuns]: ChatPageParams;
@@ -538,6 +543,7 @@ const ChatMessageSchema = mutableStruct({
   body: Schema.String,
   createdAtMs: AnyInt,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
+  authorAgentId: Schema.optionalKey(Schema.String),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
 }).check(noAccountOnLinkMessage);
 const ChatDecisionSchema = mutableStruct({
@@ -586,6 +592,7 @@ const ChatBookmarkSchema = mutableStruct({
 const ChatDispatchSchema = mutableStruct({
   workspaceId: Schema.String,
   triggerMessageId: Schema.String,
+  agentId: Schema.String,
   threadId: Schema.String,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
   runId: Schema.optionalKey(Schema.String),
@@ -597,6 +604,7 @@ const ChatDispatchSchema = mutableStruct({
 const ChatRunSchema = mutableStruct({
   workspaceId: Schema.String,
   runId: Schema.String,
+  agentId: Schema.String,
   threadId: Schema.String,
   triggerMessageId: Schema.String,
   command: Schema.String,
@@ -636,6 +644,7 @@ const ChatChannelSchema = mutableStruct({
   type: ChannelTypeSchema,
   purpose: Schema.String,
   folderPath: Schema.optional(Schema.String),
+  agentId: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
 });
@@ -648,6 +657,7 @@ const ChatChannelSummarySchema = mutableStruct({
   type: ChannelTypeSchema,
   purpose: Schema.String,
   folderPath: Schema.optional(Schema.String),
+  agentId: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
   threadCount: NonnegativeInt,
@@ -843,7 +853,6 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.bookmarkMarkFailed]: BookmarkTransitionSchema,
   [CHATS_METHOD.bookmarkMarkStale]: BookmarkTransitionSchema,
   [CHATS_METHOD.dispatchEnqueue]: mutableStruct({ enqueued: Schema.Boolean }),
-  [CHATS_METHOD.dispatchRecordEligibleTriggers]: NonnegativeInt,
   [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(
     ChatDispatchClaimSchema,
   ),
