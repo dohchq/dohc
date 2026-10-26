@@ -218,6 +218,9 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
   fileMomentSteps,
+  HistoryPaused,
+  HistoryUpdating,
+  isHistoryPaused,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -4800,6 +4803,8 @@ export function DesktopWorkspaceShell(props: {
   // or, for a shared view, the registry capability and the share's live
   // state — never from the renderer's own capability read.
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
+  // History stopped recording, so the panel says so in place of taking in changes.
+  const historyPaused = isHistoryPaused(syncStatus);
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -4831,6 +4836,7 @@ export function DesktopWorkspaceShell(props: {
             reportShellError("Could not refresh history.", error),
           )
         }
+        paused={historyPaused}
       />
     ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
       <HistoryHiddenState
@@ -4842,30 +4848,22 @@ export function DesktopWorkspaceShell(props: {
           )
         }
       />
-    ) : engineHistoryReadState === "failed" ||
-      engineHistoryReadState === "updating" ? (
+    ) : engineHistoryReadState === "updating" ? (
+      // The next capture's activity reads again, so the line asks nothing.
+      <div className="flex flex-1 items-center justify-center px-4">
+        {historyPaused ? <HistoryPaused testId="history-paused" /> : <HistoryUpdating testId="history-updating" />}
+      </div>
+    ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
       // both say a panel could not load beside a Try again — so it takes
       // their look, not the empty-state recipe next door. One line, and a
       // Next that works on this surface: the read this panel runs itself.
       <div
-        data-testid={
-          engineHistoryReadState === "updating"
-            ? "history-updating"
-            : "history-load-failed"
-        }
+        data-testid="history-load-failed"
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span
-          className={
-            engineHistoryReadState === "updating"
-              ? "text-xs text-muted"
-              : "text-xs text-danger"
-          }
-        >
-          {engineHistoryReadState === "updating"
-            ? "Recent changes are still being added to History."
-            : "dohc could not load this workspace's history."}
+        <span className="text-xs text-danger">
+          dohc could not load this workspace's history.
         </span>
         <button
           type="button"
@@ -6197,7 +6195,7 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
-            openMoment={openMomentDiffTab}
+              openMoment={openMomentDiffTab}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
             openChatMention={openChatMention}
