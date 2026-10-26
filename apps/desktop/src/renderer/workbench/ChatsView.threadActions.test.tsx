@@ -34,9 +34,7 @@ describe("ChatsView decisions", () => {
         parentMessageId: opening.id,
         body: "Resolved ✓",
       }),
-    });
-    bridgeMock.resolveChatDecision.mockResolvedValue({
-      decision: {
+      resolved: {
         ...openDecision,
         state: "resolved",
         resolvedByMessageId: "resolution-message",
@@ -63,14 +61,7 @@ describe("ChatsView decisions", () => {
         threadId: "thread-1",
         parentMessageId: "message-1",
         body: "Resolved ✓",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-1",
-        messageId: "message-1",
-        resolvedByMessageId: "resolution-message",
+        resolves: { messageId: "message-1" },
       }),
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
@@ -94,9 +85,7 @@ describe("ChatsView decisions", () => {
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [poll] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", parentMessageId: opening.id, body: "Monday" }),
-    });
-    bridgeMock.resolveChatDecision.mockResolvedValue({
-      decision: {
+      resolved: {
         ...poll,
         state: "resolved",
         resolvedByMessageId: "answer",
@@ -122,15 +111,7 @@ describe("ChatsView decisions", () => {
         threadId: "thread-1",
         parentMessageId: "message-1",
         body: "Monday",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-1",
-        messageId: "message-1",
-        resolvedByMessageId: "answer",
-        chosenOption: "Monday",
+        resolves: { messageId: "message-1", chosenOption: "Monday" },
       }),
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
@@ -191,21 +172,19 @@ describe("ChatsView decisions", () => {
           : [targetOpen, otherOpen],
       }),
     );
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: resolutionMessage });
-    let resolveDecision!: (value: { decision: typeof targetResolved }) => void;
-    const pendingResolution = new Promise<{ decision: typeof targetResolved }>(
-      (resolve) => {
-        resolveDecision = resolve;
-      },
-    );
-    bridgeMock.resolveChatDecision.mockImplementation(() => pendingResolution);
+    type Answered = { message: typeof resolutionMessage; resolved: typeof targetResolved };
+    let finishAnswer!: (value: Answered) => void;
+    const pendingAnswer = new Promise<Answered>((resolve) => {
+      finishAnswer = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingAnswer);
 
     renderView();
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     await user.click(await screen.findByTestId("chats-message-decision-resolve"));
     await user.click(screen.getByTestId("chats-send"));
-    await waitFor(() => expect(bridgeMock.resolveChatDecision).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
 
     refreshed = true;
     await user.click(screen.getByTestId("chats-thread-back"));
@@ -214,8 +193,8 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
 
     await act(async () => {
-      resolveDecision({ decision: targetResolved });
-      await pendingResolution;
+      finishAnswer({ message: resolutionMessage, resolved: targetResolved });
+      await pendingAnswer;
     });
 
     expect(screen.getAllByTestId("chats-comment-decision-open")).toHaveLength(1);
@@ -461,5 +440,31 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "3 queued",
     );
+  });
+
+  it("says when this computer paused dispatch, before the thread's own pause, and resumes it", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: true });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      liveRunId: null,
+      pendingCount: 2,
+      paused: true,
+      pausedReason: "budget",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-dispatch-status").textContent).toBe(
+        "dispatch paused on this computer — Resume",
+      ),
+    );
+    await user.click(screen.getByTestId("chats-resume-computer-dispatch"));
+    expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: false });
+    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("dispatch paused — Resume");
   });
 });

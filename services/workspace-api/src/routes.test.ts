@@ -189,13 +189,15 @@ describe("account pages", () => {
     expect(body).toContain('data-next="/device?user_code=ABCD-EFGH"');
   });
 
-  it("asks for a password at sign-up only on an open server", async () => {
+  it("asks for a name and password at sign-up only on an open server", async () => {
     const open = await (await router()(get("/account/sign-up"))).text();
+    expect(open).toContain('id="name"');
     expect(open).toContain('id="password"');
     expect(open).toContain("Send a verification link");
 
-    // A closed server binds the password when the person opens the emailed link.
+    // A closed server sets the password and name when the person opens the emailed link.
     const closed = await (await router({ closedSignUp: true })(get("/account/sign-up"))).text();
+    expect(closed).not.toContain('id="name"');
     expect(closed).not.toContain('id="password"');
     expect(closed).not.toContain("Send a verification link");
   });
@@ -238,6 +240,15 @@ describe("account pages", () => {
     expect(withToken).toContain('data-token="abc"');
     const without = await (await router()(get("/account/reset-password"))).text();
     expect(without).toContain("This reset link is incomplete");
+  });
+
+  it("asks for a name only on a closed server's setup link", async () => {
+    const reset = await (await router()(get("/account/reset-password?token=abc"))).text();
+    expect(reset).toContain("<h1>Choose a new password</h1>");
+    expect(reset).not.toContain('id="name"');
+    const setup = await (await router()(get("/account/reset-password?token=abc&setup=1"))).text();
+    expect(setup).toContain("<h1>Finish setting up your account</h1>");
+    expect(setup).toContain('id="name"');
   });
 
   it("serves the hashed assets with a long-lived cache", async () => {

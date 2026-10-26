@@ -274,14 +274,14 @@ describe("share-web e2e-lite", () => {
     ]);
 
     const log = await body(
-      await fetch(`${shareWebUrl}/api/view/log?since=0&limit=100`, {
+      await fetch(`${shareWebUrl}/api/view/log?since=0&limit=100&current=true`, {
         headers: sessionHeaders,
       }),
     );
     expect(log.ops).toEqual([
       expect.objectContaining({
-        opKind: "moment.append",
-        payload: expect.objectContaining({ path: "docs/readme.md", payloadAfterBlobSha256: blobSha }),
+        opKind: "file.current",
+        payload: expect.objectContaining({ file: expect.objectContaining({ path: "docs/readme.md", blobSha256: blobSha }) }),
       }),
     ]);
     const file = await fetch(`${shareWebUrl}/api/view/blob/${blobSha}`, {

@@ -255,6 +255,12 @@ export function createSyncDemo(syncDemo) {
   a.addEventListener('pointerdown', () => takeOver());
   b.addEventListener('pointerdown', () => takeOver());
   toggle.addEventListener('change', () => { takeOver(); setConnection(toggle.checked); });
+  // Each word beside the switch picks its own state, so clicking the current one only stops autoplay.
+  document.querySelectorAll('[data-sync-side]').forEach((side) => side.addEventListener('click', (event) => {
+    if ((side.dataset.syncSide === 'online') !== toggle.checked) return;
+    event.preventDefault();
+    takeOver();
+  }));
 
   motion.addEventListener('change', () => {
     reduced = motion.matches;

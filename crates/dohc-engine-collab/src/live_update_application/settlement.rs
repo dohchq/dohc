@@ -52,10 +52,13 @@ pub struct LiveSettlementAudit {
     replay_anchor: Option<restore::PriorAnchor>,
 }
 
-fn audit_error(error: ApplicationError) -> StorageError {
+fn audit_error(error: ApplicationError) -> ApplicationError {
     match error {
-        ApplicationError::Storage(error) => error,
-        _ => StorageError::StateCorrupt { source: None },
+        ApplicationError::Storage(_)
+        | ApplicationError::Collab(
+            CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable,
+        ) => error,
+        _ => StorageError::StateCorrupt { source: None }.into(),
     }
 }
 
@@ -66,7 +69,7 @@ impl LiveSettlementAudit {
         conn: &Connection,
         moment: &str,
         markdown: &str,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<bool, ApplicationError> {
         if let Some(restore) = &self.restore {
             return restore
                 .covers_projection(conn, self, moment, markdown)
@@ -87,7 +90,7 @@ impl LiveSettlementAudit {
                 available && binding == *b && coordinate == self.coordinate
             })
         {
-            return Err(StorageError::StateCorrupt { source: None });
+            return Err(StorageError::StateCorrupt { source: None }.into());
         }
         let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
@@ -110,7 +113,7 @@ impl LiveSettlementAudit {
         conn: &Connection,
         moment: &str,
         markdown: &str,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<bool, ApplicationError> {
         if self.terminal_source {
             return Ok(false);
         }
@@ -120,7 +123,7 @@ impl LiveSettlementAudit {
                 "SELECT EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND settlement_kind='restore' AND restore_operation_id=?7 AND moment_id=?8 AND markdown_digest=?9 AND binding_json=?10)",
                 params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,restore.operation_id(),moment,markdown,serde_json::to_string(b).map_err(StorageError::persist_public)?],
                 |row| row.get(0),
-            ).map_err(StorageError::persist_public);
+            ).map_err(|error| ApplicationError::Storage(StorageError::persist_public(error)));
         }
         if self.replay_anchor.is_some() {
             return Ok(true);
@@ -161,13 +164,13 @@ impl LiveSettlementAudit {
         markdown: &str,
         vector: &str,
         now_ms: i64,
-    ) -> Result<String, StorageError> {
+    ) -> Result<String, ApplicationError> {
         if let Some(restore) = &self.restore {
             restore
                 .verify(tx, self, markdown, vector)
                 .map_err(audit_error)?;
         } else {
-            let corrupt = || StorageError::StateCorrupt { source: None };
+            let corrupt = || ApplicationError::Storage(StorageError::StateCorrupt { source: None });
             let b = &self.binding;
             let registration = Registration {
                 workspace_id: b.workspace_id.clone(),
@@ -206,7 +209,7 @@ impl LiveSettlementAudit {
                 return Err(corrupt());
             }
         }
-        let corrupt = || StorageError::StateCorrupt { source: None };
+        let corrupt = || ApplicationError::Storage(StorageError::StateCorrupt { source: None });
         let b = &self.binding;
         let matches_projection: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND d.path=?4 AND d.lineage_claim_id=?7 AND d.last_settled_sha=?6)",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,b.lineage_claim_id],|row|row.get(0)).map_err(StorageError::persist_public)?;
@@ -518,7 +521,11 @@ where
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
-            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction)?)
+            // A settlement still answers a missing dependency as a conflict.
+            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction).map_err(|error| match error {
+                ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                error => error,
+            })?)
         } else {
             None
         };

@@ -79,16 +79,17 @@ pub fn bootstrap_committed<E>(
     cache: &mut WriterDocCache,
     handle: &ApplicationHandle,
     input: LiveApplicationBootstrap,
-    bytes: Vec<u8>,
+    bytes: impl AsRef<[u8]>,
     faults: &dyn FaultInjector,
     follow_up: impl FnOnce(&Transaction<'_>, &WriteResult, &str, &LiveObjectBinding) -> Result<(), E>,
 ) -> Result<BootstrapResult, E>
 where
     E: From<ApplicationError> + From<StorageError> + From<DomainError>,
 {
+    let bytes = bytes.as_ref();
     input.validate().map_err(E::from)?;
     if bytes.len() as i64 != input.baseline_byte_length
-        || hex_sha256(&bytes) != input.baseline_digest
+        || hex_sha256(bytes) != input.baseline_digest
     {
         return Err(E::from(invalid("bootstrap baseline digest or length")));
     }
@@ -154,15 +155,63 @@ where
                 OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
             params![binding.workspace_id, binding.main_version_id, binding.object_id, binding.current_path], |row| row.get(0)
         ).map_err(read_sql).map_err(E::from)?;
-        if occupied { return Err(E::from(ApplicationError::Conflict)); }
         let doc = Ydoc::wire();
-        doc.apply(&bytes).map_err(ApplicationError::from).map_err(E::from)?;
+        let applied = doc.apply(bytes);
+        if occupied && (applied.is_err() || !doc.has_reader_source()) {
+            return Err(E::from(ApplicationError::Conflict));
+        }
+        applied.map_err(ApplicationError::from).map_err(E::from)?;
+        if occupied && doc.has_reader_source() {
+            let other_occupant: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
+                 OR EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
+                 OR EXISTS(SELECT 1 FROM fork_base_snapshots WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4))
+                 OR EXISTS(SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.current_path], |row| row.get(0)
+            ).map_err(read_sql).map_err(E::from)?;
+            if other_occupant { return Err(E::from(ApplicationError::Conflict)); }
+        }
         if doc.has_missing_updates() {
             return Ok(BootstrapResult::Pending(ApplicationPending::DependenciesUnresolved));
         }
-        doc.validate_public_baseline(&bytes).map_err(ApplicationError::from).map_err(E::from)?;
+        let reader_source = if doc.has_reader_source() {
+            doc.validate_reader_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
+            // Registration can drop a witness. Only an independently received file
+            // can supply the bytes this baseline is allowed to preserve.
+            let moment: Option<String> = tx.query_row(
+                "SELECT latest_moment_id FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                 AND path=?4 AND content_kind='text' AND blob_sha256=?5",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.current_path,input.projected_markdown_digest],
+                |row| row.get(0)).optional().map_err(read_sql).map_err(E::from)?;
+            let Some(moment) = moment else {
+                return Ok(BootstrapResult::Pending(ApplicationPending::BaselineUnavailable));
+            };
+            let lineage_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM fork_base_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR EXISTS(SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+                 OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id], |row| row.get(0))
+                .map_err(read_sql).map_err(E::from)?;
+            if lineage_exists { return Err(E::from(ApplicationError::Conflict)); }
+            let authority = serde_json::to_string(&(&held.namespace, binding, &held.coordinate))
+                .map_err(|_| E::from(ApplicationError::Corrupt))?;
+            let canonical = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?.content;
+            let source = crate::reader_snapshot::resolve(tx, &key, &doc, &canonical,
+                &crate::reader_snapshot::SnapshotIdentity {
+                    moment: &moment, path: &binding.current_path, digest: &input.projected_markdown_digest,
+                    lineage: &binding.lineage_claim_id, restore_fence: None, authority: &authority,
+                }, cache.reader_resolver.as_deref()).map_err(ApplicationError::from).map_err(E::from)?;
+            Some(source)
+        } else {
+            doc.validate_public_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
+            None
+        };
         let mut projection = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?;
-        projection.content = doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content);
+        projection.content = if let Some(source) = reader_source { source } else {
+            doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content)
+        };
         if projection.content.len() as i64 != input.projected_markdown_byte_length
             || hex_sha256(projection.content.as_bytes()) != input.projected_markdown_digest {
             return Err(E::from(invalid("bootstrap Markdown projection mismatch")));
@@ -176,7 +225,7 @@ where
             now_ms: input.baseline_registered_at_ms, request_id: None,
         }).map_err(E::from)?;
         if written.deduped || written.snapshot.object_id != binding.object_id { return Err(E::from(ApplicationError::Conflict)); }
-        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &bytes, &doc.encode_state_vector(), input.baseline_registered_at_ms)
+        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, bytes, &doc.encode_state_vector(), input.baseline_registered_at_ms)
             .map_err(ApplicationError::from).map_err(E::from)?;
         if !matches!(claimed, durable::ClaimOutcome::Claimed { ref base_snapshot_sha } if base_snapshot_sha == &input.baseline_digest) {
             return Err(E::from(ApplicationError::Conflict));
@@ -188,7 +237,7 @@ where
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
         // The baseline is a document from elsewhere. A replay returns above.
         dohc_engine_storage::count_remote_change_in_tx(tx, &binding.workspace_id).map_err(E::from)?;
-        accepted_history::initialize(tx, &held, &bytes).map_err(E::from)?;
+        accepted_history::initialize(tx, &held, bytes).map_err(E::from)?;
         follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if readback != (input.clone(), binding.clone(), held.coordinate.clone(), marker.head_update_seq) { return Err(E::from(ApplicationError::Corrupt)); }
@@ -267,6 +316,169 @@ mod tests {
         ))
         .unwrap()
     }
+
+    fn reader_vector() -> Vector {
+        let (bytes, markdown) = crate::reader_resolver::tests::original_baseline_case("valid");
+        Vector {
+            name: "reader".into(),
+            bytes,
+            markdown,
+            registration_accepted: true,
+            projection_refused: false,
+            kept_frontmatter: None,
+        }
+    }
+
+    fn receive_reader_file(store: &mut EngineStore, vector: &Vector) {
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "notes/example.md".into(),
+                    text: vector.markdown.clone(),
+                    moment_id: "received-file".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn reader_bootstrap_waits_for_an_independent_snapshot_and_reader() {
+        let vector = reader_vector();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        assert_eq!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+            BootstrapResult::Pending(ApplicationPending::BaselineUnavailable)
+        );
+        assert_eq!(store.table_row_count("snapshots").unwrap(), 0);
+        receive_reader_file(&mut store, &vector);
+        assert!(run(&mut store, &mut cache, &handle, &vector, &NoFaults).is_err());
+        assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+        assert_eq!(store.table_row_count("snapshots").unwrap(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+    fn reader_bootstrap_accepts_file_first_and_update_first_after_proof() {
+        for update_first in [false, true] {
+            let vector = reader_vector();
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let config =
+                serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+            cache.reader_resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+                Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+            )));
+            if update_first {
+                assert_eq!(
+                    run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+                    BootstrapResult::Pending(ApplicationPending::BaselineUnavailable)
+                );
+            }
+            receive_reader_file(&mut store, &vector);
+            loop {
+                match run(&mut store, &mut cache, &handle, &vector, &NoFaults) {
+                    Err(Error::Application(ApplicationError::Collab(
+                        CollabError::MarkdownReaderPending(pending),
+                    ))) => crate::reader_resolver::tests::run(pending.resolve()),
+                    result => {
+                        assert!(
+                            matches!(result, Ok(BootstrapResult::Bootstrapped(_))),
+                            "{result:?}"
+                        );
+                        break;
+                    }
+                }
+            }
+            assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+    fn reader_bootstrap_has_its_own_authority_matrix() {
+        for case in [
+            "valid",
+            "forged",
+            "partial",
+            "stale",
+            "binding",
+            "claim",
+            "fence",
+            "missing",
+            "self-anchor",
+            "foreign-object",
+        ] {
+            let mut vector = reader_vector();
+            let (bytes, source) = crate::reader_resolver::tests::original_baseline_case(
+                if ["forged", "partial", "stale"].contains(&case) {
+                    case
+                } else {
+                    "valid"
+                },
+            );
+            vector.bytes = bytes;
+            vector.markdown = source;
+            let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+            let config =
+                serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+            cache.reader_resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+                Arc::new(dohc_engine_reader::Reader::new(Some(config))),
+            )));
+            if case != "self-anchor" {
+                receive_reader_file(&mut store, &vector);
+            }
+            store.write_with(&NoFaults, |tx| {
+                match case {
+                    "missing" => { tx.execute("DELETE FROM snapshots", []).map_err(read_sql)?; }
+                    "foreign-object" => { tx.execute("UPDATE snapshots SET path='foreign.md'", []).map_err(read_sql)?; }
+                    "claim" => { tx.execute("UPDATE live_device_application_bindings SET lineage_claim_id=?1", ["0".repeat(64)]).map_err(read_sql)?; }
+                    "fence" => { tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES('workspace','main','object','relay-A','reader-fence',?1,'{}')",
+                        [serde_json::json!({"newFence":1,"oldBinding":{"lineageClaimId":hex_sha256(&vector.bytes),"restoreFenceGeneration":0}}).to_string()]).map_err(read_sql)?; }
+                    _ => {}
+                }
+                Ok::<_, ApplicationError>(())
+            }).unwrap();
+            if case == "binding" {
+                let held = handle.registration.lock().unwrap();
+                let binding = held.binding.clone();
+                let mut coordinate = held.coordinate.clone();
+                drop(held);
+                coordinate.connection_id = "replacement".into();
+                owner
+                    .register(&mut store, "relay-A".into(), coordinate, binding)
+                    .unwrap();
+            }
+            let mut success = false;
+            for _ in 0..3 {
+                match run(&mut store, &mut cache, &handle, &vector, &NoFaults) {
+                    Err(Error::Application(ApplicationError::Collab(
+                        CollabError::MarkdownReaderPending(pending),
+                    ))) => crate::reader_resolver::tests::run(pending.resolve()),
+                    result => {
+                        success = matches!(result, Ok(BootstrapResult::Bootstrapped(_)));
+                        break;
+                    }
+                }
+            }
+            assert_eq!(success, case == "valid", "{case}");
+            assert_eq!(
+                store.table_row_count("ydoc_docs").unwrap(),
+                i64::from(success)
+            );
+            if case == "self-anchor" {
+                assert_eq!(store.table_row_count("snapshots").unwrap(), 0);
+            }
+        }
+    }
     fn input(vector: &Vector) -> LiveApplicationBootstrap {
         LiveApplicationBootstrap {
             bootstrap_id: "bootstrap-1".into(),
@@ -278,6 +490,74 @@ mod tests {
             projected_markdown_digest: hex_sha256(vector.markdown.as_bytes()),
             projected_markdown_byte_length: vector.markdown.len() as i64,
         }
+    }
+
+    #[test]
+    fn reader_bootstrap_conflicts_with_other_occupants() {
+        for case in [
+            "own",
+            "alias",
+            "other-object",
+            "other-path",
+            "file-only",
+            "fork",
+        ] {
+            let vector = reader_vector();
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            receive_reader_file(&mut store, &vector);
+            store.write_with(&NoFaults, |tx| {
+                match case {
+                    "alias" => { tx.execute("INSERT INTO path_aliases VALUES('workspace','main','other.md','object')", []).unwrap(); }
+                    "other-object" => {
+                        tx.execute("INSERT INTO file_objects VALUES('workspace','foreign',0)", []).unwrap();
+                        tx.execute("INSERT INTO snapshots SELECT workspace_id,version_id,'foreign',path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary,metadata_correlation_id FROM snapshots", []).unwrap();
+                    }
+                    "other-path" => { tx.execute("UPDATE snapshots SET path='other.md'", []).unwrap(); }
+                    "file-only" => { tx.execute("DELETE FROM snapshots", []).unwrap(); }
+                    "fork" => { tx.execute("INSERT INTO fork_base_snapshots SELECT * FROM snapshots", []).unwrap(); }
+                    _ => {}
+                }
+                Ok::<_, StorageError>(())
+            }).unwrap();
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            if case == "own" {
+                assert!(matches!(
+                    result,
+                    Err(Error::Application(ApplicationError::Collab(
+                        CollabError::MarkdownReaderUnavailable
+                    )))
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(Error::Application(ApplicationError::Conflict))),
+                    "{case}: {result:?}"
+                );
+            }
+            assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn reader_bootstrap_validates_before_requesting_proof() {
+        let mut vector = reader_vector();
+        vector.bytes = crate::reader_resolver::tests::baseline_with_meta(&vector.bytes, "foreign");
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        receive_reader_file(&mut store, &vector);
+        let reader = Arc::new(dohc_engine_reader::Reader::new(None));
+        cache.reader_resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )));
+        let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Application(ApplicationError::Collab(
+                    CollabError::MalformedUpdate { .. }
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(reader.dispatch_count(), 0);
     }
     fn fixture(
         vector: &Vector,
@@ -354,6 +634,10 @@ mod tests {
         let held = handle.registration.lock().unwrap();
         (
             NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: held.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: held.namespace.clone(),
                 old_binding: held.binding.clone(),
@@ -382,6 +666,7 @@ mod tests {
         let receipt = owner
             .fence_restore(
                 &mut store,
+                None,
                 input.clone(),
                 coordinate.clone(),
                 200,
@@ -426,6 +711,7 @@ mod tests {
             owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     203,
@@ -437,7 +723,7 @@ mod tests {
         let mut conflict = input;
         conflict.operation_id = "different".into();
         assert!(owner
-            .fence_restore(&mut store, conflict, coordinate, 204, &NoFaults)
+            .fence_restore(&mut store, None, conflict, coordinate, 204, &NoFaults)
             .is_err());
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
@@ -747,7 +1033,7 @@ mod tests {
         let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
         let (fence, coordinate) = fence_input(&handle);
         owner
-            .fence_restore(&mut store, fence, coordinate, 200, &NoFaults)
+            .fence_restore(&mut store, None, fence, coordinate, 200, &NoFaults)
             .unwrap();
         assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
         assert!(read_next_applied(&store, &handle, &cut.position, sync_policy(), || true).is_err());
@@ -806,6 +1092,7 @@ mod tests {
             owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     200,
@@ -820,7 +1107,7 @@ mod tests {
                 .unwrap();
             assert!(
                 owner
-                    .fence_restore(&mut store, input, coordinate, 201, &NoFaults)
+                    .fence_restore(&mut store, None, input, coordinate, 201, &NoFaults)
                     .is_err(),
                 "{sql}"
             );
@@ -855,6 +1142,7 @@ mod tests {
             assert!(owner
                 .fence_restore(
                     &mut store,
+                    None,
                     input.clone(),
                     coordinate.clone(),
                     200,
@@ -882,7 +1170,7 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, input, coordinate, 202, &NoFaults)
+                .fence_restore(&mut store, None, input, coordinate, 202, &NoFaults)
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if committed { 200 } else { 202 });
         }
@@ -930,7 +1218,7 @@ mod tests {
             let before = counts(&store);
             assert!(
                 owner
-                    .fence_restore(&mut store, input, coordinate, 200, &NoFaults)
+                    .fence_restore(&mut store, None, input, coordinate, 200, &NoFaults)
                     .is_err(),
                 "{field}"
             );
@@ -982,6 +1270,7 @@ mod tests {
         owner
             .fence_restore(
                 &mut store,
+                None,
                 input,
                 coordinate,
                 202,
@@ -1038,7 +1327,7 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, input, coordinate, 204, &NoFaults)
+                .fence_restore(&mut store, None, input, coordinate, 204, &NoFaults)
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if after { 202 } else { 204 });
             assert_eq!(receipt.local_head_sequence, 0);
@@ -1319,6 +1608,28 @@ mod tests {
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
     }
+    #[test]
+    fn occupied_native_bootstrap_keeps_conflict_precedence_over_decode_errors() {
+        let mut vector = vectors().remove(1);
+        vector.bytes = vec![1, 0];
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO file_objects VALUES ('workspace','object',0)",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults),
+            Err(Error::Application(ApplicationError::Conflict))
+        ));
+        assert_eq!(counts(&store), (0, 0, 0, 0));
+    }
+
     #[test]
     fn existing_domain_object_and_retired_registration_cannot_be_bootstrapped() {
         let vector = vectors().remove(1);

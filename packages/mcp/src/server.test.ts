@@ -14,9 +14,15 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  // Refused live edits are kept only in the original workspace.
+  "dohc_save_recovery_copy",
+  "dohc_retry_kept_edits",
+  "dohc_stop_again",
+  "dohc_delete_retained_copies",
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
+  "dohc_duplicate_file",
   "dohc_move_path",
   "dohc_delete_path",
   "dohc_create_app",
@@ -93,6 +99,27 @@ describe("share-level tool profiles", () => {
     expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
   });
 
+  it("saves, tries again and stops again an owner's kept edits by path, refusing a path outside the workspace", async () => {
+    const root = await workspaceRoot();
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ root, home: base.home, request: async request => {
+      requests.push(request);
+      return request.verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+        : "incident" in request.args ? { ok: true, path: "plan.md" }
+        : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "this-computer", keptEdits: "kept" };
+    } });
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_retry_kept_edits", arguments: { path: "plan.md", incident: "outbox:delivery:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "plan.md", incident: "release:a:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "../other/plan.md" } })).isError).toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "../other/plan.md", incident: "release:a:0" } })).isError).toBe(true);
+    expect(requests).toEqual([
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "saveRecoveryCopy", args: { cwd: root, actor: "agent", path: "plan.md" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "retryKeptEdits", args: { cwd: root, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "stopAgain", args: { cwd: root, actor: "agent", path: "plan.md", incident: "release:a:0" } },
+    ]);
+  });
+
   it("parses the --share-access flag", () => {
     expect(parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"])).toMatchObject({
       root: "/w",
@@ -111,6 +138,23 @@ describe("share-level tool profiles", () => {
     expect(() => parseArgs(["--share-access"])).toThrow(
       "--share-access must be one of view, comment, edit. Received: no value.",
     );
+  });
+
+  it("offers only the tools named with --tool", async () => {
+    const ctx = parseArgs(["--workspace", "/w", "--home", "/h", "--tool", "dohc_reply_to_chat"]);
+    expect(ctx.tools).toEqual(new Set(["dohc_reply_to_chat"]));
+    expect((await connectedToolNames(ctx)).names).toEqual(["dohc_reply_to_chat"]);
+    // The share level still decides: a view profile can't reply.
+    const view = parseArgs(["--share-access", "view", "--tool", "dohc_reply_to_chat", "--tool", "dohc_read_file"]);
+    expect((await connectedToolNames(view)).names).toEqual(["dohc_read_file"]);
+  });
+
+  it("refuses a --tool that names no dohc tool", () => {
+    expect(() => parseArgs(["--tool", "dohc_reply"])).toThrow(
+      '--tool must name a dohc tool, such as dohc_reply_to_chat. Received: "dohc_reply".',
+    );
+    expect(() => parseArgs(["--tool", "toString"])).toThrow(/Received: "toString"/u);
+    expect(() => parseArgs(["--tool"])).toThrow(/Received: no value/u);
   });
 
   it("registers NO write tools for a view profile and keeps read tools", async () => {
@@ -242,6 +286,37 @@ describe("MCP tool results", () => {
     const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
     expect(result.isError).not.toBe(true);
     expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
+  });
+
+  it("lists old file copies and deletes them only with the late-write risk accepted", async () => {
+    const requests: { verb: string; args: unknown }[] = [];
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        requests.push({ verb: request.verb, args: request.args });
+        return request.verb === "retainedCopies"
+          ? { ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }
+          : { ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } };
+      },
+    });
+    const listed = await client.callTool({ name: "dohc_list_retained_copies", arguments: {} });
+    expect(listed.structuredContent).toEqual({ ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } });
+    for (const acceptLateWriteRisk of [undefined, false]) {
+      const refused = await client.callTool({
+        name: "dohc_delete_retained_copies",
+        arguments: { copies: [{ id: 3, revision: 10 }], ...(acceptLateWriteRisk === undefined ? {} : { acceptLateWriteRisk }) },
+      });
+      expect(refused.isError).toBe(true);
+    }
+    const deleted = await client.callTool({
+      name: "dohc_delete_retained_copies",
+      arguments: { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true },
+    });
+    expect(deleted.isError).not.toBe(true);
+    expect(requests).toEqual([
+      { verb: "retainedCopies", args: { cwd: "/workspace", actor: "agent" } },
+      { verb: "deleteRetainedCopies", args: { cwd: "/workspace", actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true } },
+    ]);
   });
 
   it("reports authorization refusals as tool errors", async () => {

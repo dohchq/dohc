@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
+import * as storedNames from "./diskSpelling";
 import {
   lstat,
   mkdir,
@@ -10,14 +11,15 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { join, sep } from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewFiles,
   ShareViewMountRollbackError,
   type ResolvedShareViewFilesTarget,
   type PreparedShareViewFilesMount,
+  type ShareViewFileChange,
   type ShareViewFilesDependencies,
   type ShareViewFilesStore,
   type ShareViewFilesTarget,
@@ -41,6 +43,7 @@ import {
 } from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import { deferred } from "../testing/deferred";
 
 let materializationWriteSchedule: {
@@ -106,24 +109,42 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
+// Writers of `.dohc/local` ask the engine's open. Here every view counts as
+// opened once its `.dohc/local` exists.
+const OPENED = { localStateReady: true };
+beforeEach(() => {
+  readLocalStateFrom({ currentBinding: () => OPENED, localStateOpenAt: async () => ({ current: () => true }) });
+});
+
+/** A view the engine has opened: its `.dohc/local` is made. */
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");
-  await mkdir(root, { recursive: true });
+  await mkdir(join(root, ".dohc", "local"), { recursive: true, mode: 0o700 });
   return root;
+}
+
+/** Where a view's refresh records live. */
+function recordsDir(rootPath: string): string {
+  return join(rootPath, ".dohc", "local", "share-refresh");
+}
+
+async function writeRecord(rootPath: string, name: string, content: string): Promise<string> {
+  await mkdir(recordsDir(rootPath), { recursive: true, mode: 0o700 });
+  const path = join(recordsDir(rootPath), name);
+  await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+  return path;
 }
 
 async function seedPendingMaterializationPaths(
   rootPath: string,
   paths: readonly string[],
 ): Promise<void> {
-  const metadataPath = join(rootPath, ".dohc");
-  await mkdir(metadataPath, { recursive: true });
-  await writeFile(
-    join(metadataPath, "pending-materialization.json"),
+  await writeRecord(
+    rootPath,
+    "pending-materialization.json",
     JSON.stringify({
       counts: Object.fromEntries([...new Set(paths)].map((path) => [path, 1])),
     }),
-    "utf8",
   );
 }
 
@@ -313,6 +334,35 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  // On a disk that ignores case, notes.md owns the one file and Notes.md is
+  // held behind it (#2416). Saving, deleting or moving Notes.md would write
+  // over notes.md's file, so each change is refused and nothing changes.
+  it("refuses a change to a spelling held behind another one's file", async (context) => {
+    const rootPath = await workspaceRoot();
+    await writeFile(join(rootPath, "probe.md"), "");
+    const ignoresCase = await lstat(join(rootPath, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootPath, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const registered = target(rootPath);
+    const store = mutableTextStore({ initial: [{ path: "notes.md", text: "n\n" }, { path: "Notes.md", text: "N\n" }] });
+    await writeFile(join(rootPath, "notes.md"), "n\n");
+    await writeRecord(rootPath, "share-collision-record.json", JSON.stringify({ shareId: registered.shareId, paths: ["Notes.md"] }));
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    const changes: ShareViewFileChange[] = [
+      { kind: "save", path: "Notes.md", text: "edited\n", expectedContentHash: createHash("sha256").update("N\n").digest("hex") },
+      { kind: "delete", path: "Notes.md" },
+      { kind: "move", fromPath: "Notes.md", toPath: "moved.md" },
+    ];
+    for (const change of changes) {
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change)))
+        .rejects.toThrow("dohc did not change Notes.md. This machine treats Notes.md and notes.md as the same name.");
+    }
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    expect(store.deleteTextFile).not.toHaveBeenCalled();
+    expect(await readFile(join(rootPath, "notes.md"), "utf8")).toBe("n\n");
+  });
+
   it.each(["end", "narrow"] as const)("lists unconfirmed changes without protecting them after %s", async restriction => {
     const rootPath = await workspaceRoot();
     const yaml = "tasks/automations.yaml";
@@ -784,8 +834,7 @@ describe("ShareViewFiles", () => {
           if (failedRecord === "pending") {
             sidecarRenameFailure = {
               path: join(
-                rootPath,
-                ".dohc",
+                recordsDir(rootPath),
                 "pending-materialization.json",
               ),
               error: new Error("pending marker persistence failed"),
@@ -795,8 +844,7 @@ describe("ShareViewFiles", () => {
           if (failedRecord === "collision") {
             sidecarRenameFailure = {
               path: join(
-                rootPath,
-                ".dohc",
+                recordsDir(rootPath),
                 "share-collision-record.json",
               ),
               error: new Error("collision persistence failed"),
@@ -893,6 +941,8 @@ describe("ShareViewFiles", () => {
       createMount: async (owner) => {
         leakedOwner = owner;
         await shareViewFilesMountProjection(owner).create();
+        // The engine's open of the mount's store makes its `.dohc/local`.
+        await mkdir(join(prepared.rootPath, ".dohc", "local"), { recursive: true });
         registered = true;
       },
       removeMount: async (owner) => {
@@ -1019,7 +1069,7 @@ describe("ShareViewFiles", () => {
         files.mount(lease, prepared),
       ),
     ).rejects.toThrow("belongs to another target");
-    await expect(lstat(join(otherRoot, ".dohc"))).rejects.toMatchObject({
+    await expect(lstat(recordsDir(otherRoot))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -1147,7 +1197,7 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
     sidecarRenameFailure = {
-      path: join(rootPath, ".dohc", "pending-materialization.json"),
+      path: join(recordsDir(rootPath), "pending-materialization.json"),
       error: new Error("real pending mark failed"),
     };
 
@@ -1181,8 +1231,7 @@ describe("ShareViewFiles", () => {
     const before = "before\n";
     const after = "after\n";
     const pendingPath = join(
-      rootPath,
-      ".dohc",
+      recordsDir(rootPath),
       "pending-materialization.json",
     );
     await mkdir(join(rootPath, "notes"), { recursive: true });
@@ -1254,17 +1303,15 @@ describe("ShareViewFiles", () => {
     const before = "before\n";
     const after = "agent edit\n";
     const pendingPath = join(
-      rootPath,
-      ".dohc",
+      recordsDir(rootPath),
       "pending-materialization.json",
     );
     await mkdir(join(rootPath, "notes"), { recursive: true });
-    await mkdir(join(rootPath, ".dohc"), { recursive: true });
     await writeFile(join(rootPath, path), after, "utf8");
-    await writeFile(
-      pendingPath,
+    await writeRecord(
+      rootPath,
+      "pending-materialization.json",
       JSON.stringify({ counts: { [path]: 2 } }),
-      "utf8",
     );
     const store = mutableTextStore({ initial: [{ path, text: before }] });
     const pull = vi.fn(async () => {
@@ -1928,12 +1975,7 @@ describe("ShareViewFiles", () => {
     const path = "docs/collision.md";
     await mkdir(join(rootPath, "docs"), { recursive: true });
     await writeFile(join(rootPath, path), "recipient data\n", "utf8");
-    await mkdir(join(rootPath, ".dohc"), { recursive: true });
-    await writeFile(
-      join(rootPath, ".dohc", "share-collision-record.json"),
-      "not json",
-      "utf8",
-    );
+    await writeRecord(rootPath, "share-collision-record.json", "not json");
     const store = mutableTextStore({
       initial: [{ path, text: "granter old\n" }],
     });
@@ -2028,6 +2070,107 @@ describe("ShareViewFiles", () => {
     } finally {
       errorLog.mockRestore();
     }
+  });
+
+  // A view's records wait for the engine's open of that view's own store: a
+  // standalone view's attachment, or a mount's store in its own folder.
+  it("saves in a standalone view only once its attachment's open is ready, and changes nothing before", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/attached.md";
+    const before = "before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), before, "utf8");
+    const attachmentId = Symbol("attached view");
+    const asked: unknown[] = [];
+    let opened = false;
+    readLocalStateFrom({
+      currentBinding: (view) => {
+        asked.push(view);
+        return opened && view.attachmentId === attachmentId ? OPENED : null;
+      },
+      localStateOpenAt: async () => (opened ? { current: () => opened } : null),
+    });
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => ({ ...target(rootPath), attachmentId }),
+      openStore: () => store,
+    });
+    const save = () =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: "after\n",
+            expectedContentHash: createHash("sha256").update(before).digest("hex"),
+          },
+        ),
+      );
+
+    await expect(save()).rejects.toThrow(
+      "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.",
+    );
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(before);
+    await expect(lstat(recordsDir(rootPath))).rejects.toMatchObject({ code: "ENOENT" });
+
+    opened = true;
+    await expect(save()).resolves.toMatchObject({ status: "committed", projection: "current" });
+    await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("after\n");
+    expect(asked).not.toEqual([]);
+    for (const view of asked) {
+      expect(view).toMatchObject({ workspaceId: "workspace-a", rootPath, attachmentId });
+    }
+  });
+
+  it("names a mount's own .dohc/local when its open can't keep it out of iCloud Drive", async () => {
+    const hostRoot = await workspaceRoot();
+    const mounted = {
+      ...mountTarget(mountRootFor(hostRoot, "granter")),
+      schedulingRootPath: hostRoot,
+    };
+    await mkdir(join(mounted.rootPath, ".dohc", "local"), { recursive: true });
+    const notExcluded = { localStateReady: false };
+    readLocalStateFrom({
+      currentBinding: (view) =>
+        view.workspaceId === "host-a:share-a" &&
+        view.rootPath === mounted.rootPath &&
+        view.attachmentId === undefined
+          ? notExcluded
+          : null,
+      // The open prepared the folder and could not keep it out of iCloud Drive.
+      localStateOpenAt: async (rootPath) => (rootPath === mounted.rootPath ? { current: () => true } : null),
+    });
+    const pull = vi.fn(async (): Promise<never> => {
+      throw new Error("Unexpected pull");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => mounted,
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(hostRoot, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+      ),
+    ).rejects.toThrow(
+      "dohc did not update these shared files because it can't keep shared-with-me/granter/.dohc/local out of iCloud Drive. Restart dohc to try again.",
+    );
+    expect(pull).not.toHaveBeenCalled();
+    expect(await readdir(join(mounted.rootPath, ".dohc", "local"))).toEqual([]);
   });
 
   it("propagates a mounted refresh failure", async () => {
@@ -2454,10 +2597,12 @@ describe("ShareViewFiles", () => {
     "leaves %s collision record untouched for capture to quarantine",
     async (_recordKind, serialized) => {
       const rootPath = await workspaceRoot();
-      const metadataPath = join(rootPath, ".dohc");
-      const collisionPath = join(metadataPath, "share-collision-record.json");
-      await mkdir(metadataPath, { recursive: true });
-      await writeFile(collisionPath, serialized, "utf8");
+      const metadataPath = recordsDir(rootPath);
+      const collisionPath = await writeRecord(
+        rootPath,
+        "share-collision-record.json",
+        serialized,
+      );
       const store = readStore({ text: "canonical\n" });
       const files = createShareViewFiles({
         ...unusedReconcilePorts,
@@ -2923,71 +3068,250 @@ describe("ShareViewFiles", () => {
     }
   });
 
-  it("keeps a case-only folder rename", async () => {
+  it("lists folders a fixed number of times through a case-only folder rename", async (context) => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
+    if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const initial = Array.from({ length: 12 }, (_, index) => ({ path: `docs/plans/${index}.md`, text: "body\n" }));
+    for (const file of initial) await writeFile(join(rootPath, file.path), file.text);
+    const listing = vi.spyOn(fsPromises, "readdir");
+    const store = mutableTextStore({
+      initial,
+    });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+      ));
+      expect(listing.mock.calls.filter(([path]) => String(path) === rootPath)).toHaveLength(3);
+      expect(listing.mock.calls.filter(([path]) => String(path).toLowerCase() === join(rootPath, "docs", "plans").toLowerCase())).toHaveLength(1);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(initial.length);
+    } finally {
+      listing.mockRestore();
+    }
+  });
+
+  it("keeps store renames when the post-rename leaf uses NFD", async (context) => {
+    const rootPath = await workspaceRoot();
+    const fromPath = "docs/résumé";
+    const toPath = "docs/Résumé";
+    await mkdir(join(rootPath, fromPath), { recursive: true });
+    await writeFile(join(rootPath, fromPath, "a.md"), "body\n");
+    if (!(await lstat(join(rootPath, toPath)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: `${fromPath}/a.md`, text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const spelling = vi.spyOn(storedNames, "diskSpelling");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    const rename = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      await originalRename(from, to);
+      if (String(from) === join(rootPath, fromPath) && String(to) === join(rootPath, toPath)) {
+        spelling.mockResolvedValueOnce(join(rootPath, toPath).normalize("NFD"));
+      }
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" }, { kind: "move", fromPath, toPath },
+      ));
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: `${toPath}/a.md` }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(1);
+      expect((await readdir(join(rootPath, "docs"))).map((name) => name.normalize("NFC"))).toEqual(["Résumé"]);
+      expect(await readFile(join(rootPath, toPath, "a.md"), "utf8")).toBe("body\n");
+    } finally {
+      rename.mockRestore();
+      spelling.mockRestore();
+    }
+  });
+
+  it("keeps store renames when the post-rename spelling is unknown", async (context) => {
     const rootPath = await workspaceRoot();
     const plans = join(rootPath, "docs", "plans");
-    const renamedPlans = join(rootPath, "docs", "Plans");
+    const renamed = join(rootPath, "docs", "Plans");
     await mkdir(plans, { recursive: true });
-    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    await writeFile(join(plans, "a.md"), "body\n");
+    if (!(await lstat(renamed).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let postRenameListingFailed = false;
+    const rename = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      await originalRename(from, to);
+      if (String(from) === plans && String(to) === renamed) {
+        listing.mockImplementationOnce(async () => {
+          postRenameListingFailed = true;
+          throw Object.assign(new Error("listing unavailable after rename"), { code: "EIO" });
+        });
+      }
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+      ));
+      expect(postRenameListingFailed).toBe(true);
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: "docs/Plans/a.md" }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(1);
+      expect(await readdir(join(rootPath, "docs"))).toEqual(["Plans"]);
+      expect(await readFile(join(renamed, "a.md"), "utf8")).toBe("body\n");
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+    } finally {
+      rename.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  it("puts back store renames when a case-only folder rename silently does nothing", async (context) => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "body\n");
+    if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    const noOp = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      if (String(from) === plans && String(to) === join(rootPath, "docs", "Plans")) return;
+      return originalRename(from, to);
+    });
+    try {
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+      ))).rejects.toThrow("This disk kept the name plans");
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: "docs/plans/a.md" }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(2);
+      expect(await readdir(join(rootPath, "docs"))).toEqual(["plans"]);
+      expect(await readFile(join(plans, "a.md"), "utf8")).toBe("body\n");
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+    } finally {
+      noOp.mockRestore();
+    }
+  });
+
+  for (const kind of ["folder", "file"] as const) {
+    it(`keeps a case-only ${kind} rename when realpath keeps lookup case`, async (context) => {
+      const rootPath = await workspaceRoot();
+      const from = kind === "folder" ? "docs/plans" : "docs/plans/a.md";
+      const to = kind === "folder" ? "docs/Plans" : "docs/plans/A.md";
+      const plans = join(rootPath, "docs", "plans");
+      await mkdir(plans, { recursive: true });
+      await writeFile(join(plans, "a.md"), "a\n", "utf8");
+      if (!(await lstat(join(rootPath, to)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+      const store = mutableTextStore({
+        initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+      });
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => target(rootPath),
+        openStore: () => store,
+      });
+
+      const originalRealpath = fsPromises.realpath.bind(fsPromises);
+      // Linux resolves links but keeps lookup case on a disk that ignores it.
+      const realpath = vi
+        .spyOn(fsPromises, "realpath")
+        .mockImplementation(async (path) => {
+          const resolved = await originalRealpath(path);
+          return String(path).startsWith(`${rootPath}${sep}`) ? String(path) : resolved;
+        });
+      try {
+        await expect(
+          withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+            files.change(
+              lease,
+              { kind: "standalone", workspaceId: "workspace-a" },
+              {
+                kind: "move",
+                fromPath: from,
+                toPath: to,
+              },
+            ),
+          ),
+        ).resolves.toMatchObject({ status: "committed", value: to });
+
+        expect(store.renameTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fromPath: "docs/plans/a.md",
+            toPath: kind === "folder" ? "docs/Plans/a.md" : to,
+          }),
+        );
+        await expect(readdir(kind === "folder" ? join(rootPath, "docs") : plans)).resolves.toEqual([kind === "folder" ? "Plans" : "A.md"]);
+        await expect(readFile(join(rootPath, kind === "folder" ? "docs/Plans/a.md" : to), "utf8")).resolves.toBe("a\n");
+      } finally {
+        realpath.mockRestore();
+      }
+    });
+  }
+
+  it("refuses a move into a case alias's missing tail before changing the store", async (context) => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n");
+    if (!(await lstat(join(rootPath, "docs", "plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: "docs/Plans/a.md", text: "a\n" }] });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    const realpath = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await originalRealpath(path);
+      return String(path).startsWith(`${rootPath}${sep}`) ? String(path) : resolved;
+    });
+    try {
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/Plans", toPath: "docs/plans/archive/Deep" },
+      ))).rejects.toThrow("Cannot move a path into itself: docs/Plans");
+      expect(store.renameTextFile).not.toHaveBeenCalled();
+      await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({ pendingPaths: new Set() });
+    } finally {
+      realpath.mockRestore();
+    }
+  });
+
+  it("refuses a move when the disk cannot name its source before changing the store", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs"));
+    await writeFile(join(rootPath, "docs", "before.md"), "body\n");
+    const originalLstat = fsPromises.lstat.bind(fsPromises);
+    const spelling = vi.spyOn(fsPromises, "lstat");
     const store = mutableTextStore({
-      initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+      initial: [{ path: "docs/before.md", text: "body\n" }],
+      afterMetadataRead: (read) => {
+        if (read >= 3) spelling.mockImplementation((path, options) => {
+          if (String(path) === join(rootPath, "docs", "before.md")) throw new Error("identity unavailable");
+          return originalLstat(path, options);
+        });
+      },
     });
     const files = createShareViewFiles({
       ...unusedReconcilePorts,
       resolveTarget: () => target(rootPath),
       openStore: () => store,
     });
-
-    const destinationAlreadyAliasesSource = await lstat(renamedPlans).then(
-      () => true,
-      () => false,
-    );
-    const originalRealpath = fsPromises.realpath.bind(fsPromises);
-    let forcedSameEntry = 0;
-    // Case-insensitive disks already resolve both spellings to `plans`. On a
-    // case-sensitive runner, make only the identity probe observe that fact;
-    // the store mutation and physical directory rename below stay real.
-    const realpath = vi
-      .spyOn(fsPromises, "realpath")
-      .mockImplementation(async (path) => {
-        if (
-          !destinationAlreadyAliasesSource &&
-          forcedSameEntry === 0 &&
-          String(path) === renamedPlans
-        ) {
-          forcedSameEntry += 1;
-          return originalRealpath(plans);
-        }
-        return originalRealpath(path);
-      });
     try {
-      await expect(
-        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-          files.change(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            {
-              kind: "move",
-              fromPath: "docs/plans",
-              toPath: "docs/Plans",
-            },
-          ),
-        ),
-      ).resolves.toMatchObject({ status: "committed", value: "docs/Plans" });
-
-      expect(forcedSameEntry).toBe(destinationAlreadyAliasesSource ? 0 : 1);
-      expect(store.renameTextFile).toHaveBeenCalledWith(
-        expect.objectContaining({
-          fromPath: "docs/plans/a.md",
-          toPath: "docs/Plans/a.md",
-        }),
-      );
-      await expect(readdir(join(rootPath, "docs"))).resolves.toEqual(["Plans"]);
-      await expect(readFile(join(renamedPlans, "a.md"), "utf8")).resolves.toBe(
-        "a\n",
-      );
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/before.md", toPath: "docs/after.md" },
+      ))).rejects.toThrow("dohc did not rename docs/before.md to docs/after.md. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.");
+      expect(store.renameTextFile).not.toHaveBeenCalled();
+      await expect(readFile(join(rootPath, "docs", "before.md"), "utf8")).resolves.toBe("body\n");
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({ pendingPaths: new Set() });
     } finally {
-      realpath.mockRestore();
+      spelling.mockRestore();
     }
   });
 
@@ -3091,4 +3415,25 @@ it("keeps link reads inside the share target gate and tracked-path floor, includ
     return { pending };
   }).then(async ({ pending }) => { await expect(pending).rejects.toThrow(); });
   expect(openStore).toHaveBeenCalledTimes(3);
+});
+
+it("filters edge file metadata, both endpoints, and unchecked paths through the projected share lease", async () => {
+  const rootPath=await workspaceRoot();
+  const requested={kind:"standalone" as const,workspaceId:"workspace-a"};
+  let current: ResolvedShareViewFilesTarget | null={...target(rootPath),ended:true};
+  const page={versionId:"main",files:[{objectId:"a",path:"notes/a.md",title:"A"},{objectId:"secret",path:".env",title:"Secret"}],
+    entries:[{source:"notes/a.md",target:"notes/b.md",kind:"markdown" as const,ordinal:0},
+      {source:"notes/a.md",target:".env",kind:"markdown" as const,ordinal:1},
+      {source:".env",target:"notes/a.md",kind:"markdown" as const,ordinal:2}],
+    unchecked:["notes/pending.md",".env"],complete:false,indexBuilding:false,mountsCovered:true,nextCursor:"sealed"};
+  const store=Object.assign(readStore({text:""}),{linkEdges:vi.fn(async()=>page)});
+  const openStore=vi.fn(()=>store);
+  const files=createShareViewFiles({...unusedReconcilePorts,resolveTarget:()=>current,openStore});
+  expect(await files.linksEdges(requested,{})).toEqual({...page,files:[page.files[0]],entries:[page.entries[0]],unchecked:["notes/pending.md"]});
+  await withShareViewRefreshLifecycleLock(rootPath,async()=>{
+    const pending=files.linksEdges(requested,{cursor:"sealed"});
+    current=null;
+    return {pending};
+  }).then(async({pending})=>{await expect(pending).rejects.toThrow();});
+  expect(openStore).toHaveBeenCalledOnce();
 });

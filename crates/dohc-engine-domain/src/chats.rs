@@ -80,6 +80,16 @@ pub const LINKED_CHAT_PROJECTION_KIND: &str = "thread";
 
 /// Message body byte cap (64 KiB UTF-8, `normalizeBody`).
 pub const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
+/// A link message's body byte cap, below the general one.
+pub const MAX_LINK_MESSAGE_BODY_BYTES: usize = 8_000;
+/// The relay names every link message with this prefix; no other message may
+/// use it, so no device can take a link post's id first.
+pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
+/// The relay names a link post's new thread with this prefix and writes it
+/// under the link holder's origin; a thread from any other origin may not use it.
+pub const LINK_THREAD_ID_PREFIX: &str = "link-thread:";
+/// The relay's origin for one link holder's posts.
+pub const LINK_ORIGIN_PREFIX: &str = "relay:share-link:";
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
@@ -103,9 +113,6 @@ const MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS: usize = 300;
 const MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS: usize = 400;
 /// Opening-message preview bound used by channel summaries.
 const OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS: usize = 500;
-/// The logical file-mention lookup never exposes more than the oracle's newest
-/// 2,000 matching attachment rows, even when the wire drains multiple pages.
-pub const MAX_FILE_MENTION_RESULTS: i64 = 2_000;
 /// Feed cursor string cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
@@ -217,12 +224,15 @@ pub struct ChannelGroup {
 
 /// A chat message author kind. An automation writes only through the
 /// automation executor, which names itself with [`ChatMessageAutomation`].
+/// A link holder writes only through the relay, which names the link with
+/// [`ChatMessageLinkAuthor`]; no write on this computer is a link message.
 /// Reactions stay human or agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatActorKind {
     Human,
     Agent,
     Automation,
+    Link,
 }
 
 impl ChatActorKind {
@@ -231,6 +241,7 @@ impl ChatActorKind {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
             ChatActorKind::Automation => "automation",
+            ChatActorKind::Link => "link",
         }
     }
     fn from_db(raw: &str) -> Result<Self, DomainError> {
@@ -238,11 +249,21 @@ impl ChatActorKind {
             "human" => Ok(ChatActorKind::Human),
             "agent" => Ok(ChatActorKind::Agent),
             "automation" => Ok(ChatActorKind::Automation),
+            "link" => Ok(ChatActorKind::Link),
             _ => Err(DomainError::StateCorrupt {
                 reason: "chat message has an unknown author kind",
             }),
         }
     }
+}
+
+/// The share link a link holder posted through: the relay-minted link grant
+/// and link principal. The message's display name is the name the holder
+/// had set when the relay wrote it. A link message names no account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessageLinkAuthor {
+    pub grant_id: String,
+    pub principal_id: String,
 }
 
 /// A durable chat channel row.
@@ -342,6 +363,8 @@ pub struct ChatMessage {
     pub created_at_ms: i64,
     /// Set on a message this computer's automation wrote.
     pub automation: Option<ChatMessageAutomation>,
+    /// Set on, and only on, a link message.
+    pub link_author: Option<ChatMessageLinkAuthor>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -457,15 +480,6 @@ pub struct ChatAttachment {
     pub heading_anchor: Option<String>,
     pub heading_occurrence: Option<i64>,
     pub created_at_ms: i64,
-}
-
-/// One fully hydrated file-mention result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatFileMention {
-    pub attachment: ChatAttachment,
-    pub message: ChatMessage,
-    pub thread: ChatThread,
-    pub channel: Option<ChatChannel>,
 }
 
 /// One indexed `@handle` occurrence, hydrated through its authoritative
@@ -619,6 +633,7 @@ pub struct ChannelOpeningMessage {
     pub created_at_ms: i64,
     /// Set when this computer's automation wrote the message.
     pub automation: Option<ChatMessageAutomation>,
+    pub link_author: Option<ChatMessageLinkAuthor>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -1256,13 +1271,15 @@ fn opening_message_body_snippet(body: &str) -> String {
 }
 
 /// Indexed message text (`chatIndexText`): author, the author's kind for an
-/// agent or automation, body. `author_kind` is the stored kind.
+/// agent, automation or link holder, body. `author_kind` is the stored kind.
 pub fn chat_message_search_text(display_name: &str, author_kind: &str, body: &str) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if !display_name.is_empty() {
         parts.push(display_name.to_owned());
-        if matches!(author_kind, "agent" | "automation") {
-            parts.push(format!("{display_name} ({author_kind})"));
+        match author_kind {
+            "agent" | "automation" => parts.push(format!("{display_name} ({author_kind})")),
+            "link" => parts.push(format!("{display_name} (link holder)")),
+            _ => {}
         }
     }
     if !body.is_empty() {
@@ -1574,6 +1591,16 @@ pub fn normalize_agent_owner_name(
     }
 }
 
+/// Only the relay writes a link message, so no write on this computer is one.
+fn refuse_local_link_author(author_kind: ChatActorKind) -> Result<(), DomainError> {
+    if author_kind == ChatActorKind::Link {
+        return Err(DomainError::InvalidInput {
+            reason: "only the relay writes a link message",
+        });
+    }
+    Ok(())
+}
+
 /// An automation message must name its Collection automation and chain
 /// depth, and no other message may. The id is `collection:<collection id>#<id>`, and
 /// the depth is bounded like a record change's declared depth.
@@ -1625,6 +1652,62 @@ pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, D
             }
             Ok(Some(normalized.to_owned()))
         }
+    }
+}
+
+/// The origin that wrote a replicated op. A named recipient stores a shared
+/// op under `shared:<shareId>:<source>`; share ids contain no `:`.
+pub fn replicated_source_origin(origin_id: &str) -> &str {
+    origin_id
+        .strip_prefix("shared:")
+        .and_then(|rest| rest.split_once(':'))
+        .map_or(origin_id, |(_, source)| source)
+}
+
+/// A replicated message's link provenance. A link message names its grant and
+/// link principal, carries no account, owner, origin or chain depth, stays
+/// within the link body cap, uses the link message id prefix, and comes from
+/// its link principal's relay origin, as the relay writes it. No other message
+/// names a link or uses the prefix. Ids must already be in their stored form.
+pub fn validate_replicated_link_author(
+    origin_id: &str,
+    message_id: &str,
+    author_kind: &str,
+    grant_id: Option<&str>,
+    principal_id: Option<&str>,
+    account_fields: bool,
+    body: &str,
+) -> Result<Option<ChatMessageLinkAuthor>, DomainError> {
+    let invalid = || DomainError::InvalidInput {
+        reason: "chat message link author is invalid",
+    };
+    let source = replicated_source_origin(origin_id);
+    let id = |value: &str| {
+        !value.is_empty()
+            && value.encode_utf16().count() <= MAX_AUTHOR_USER_ID_CHARS
+            && value.trim_matches(is_js_trim_ws) == value
+            && !has_projection_control_char(value)
+    };
+    match (
+        author_kind == ChatActorKind::Link.as_str(),
+        grant_id,
+        principal_id,
+    ) {
+        (false, None, None) if !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) => Ok(None),
+        (true, Some(grant_id), Some(principal_id))
+            if id(grant_id)
+                && id(principal_id)
+                && !account_fields
+                && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
+                && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
+                && source.strip_prefix(LINK_ORIGIN_PREFIX) == Some(principal_id) =>
+        {
+            Ok(Some(ChatMessageLinkAuthor {
+                grant_id: grant_id.to_owned(),
+                principal_id: principal_id.to_owned(),
+            }))
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -2505,6 +2588,7 @@ impl<'a> LinkedChatStore<'a> {
                 reason: "passive store cannot originate",
             });
         }
+        refuse_local_link_author(input.author_kind)?;
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -2794,6 +2878,7 @@ impl<'a> LinkedChatStore<'a> {
                 body: body_c.clone(),
                 created_at_ms: now,
                 automation: automation.clone(),
+                link_author: None,
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -2825,6 +2910,7 @@ impl<'a> LinkedChatStore<'a> {
                 reason: "passive store cannot originate",
             });
         }
+        refuse_local_link_author(input.author_kind)?;
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -3102,6 +3188,7 @@ impl<'a> LinkedChatStore<'a> {
                 body: body_c.clone(),
                 created_at_ms: now,
                 automation: automation.clone(),
+                link_author: None,
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3446,7 +3533,8 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
-                         created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key \
+                         created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
+                         link_grant_id, link_principal_id \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3480,6 +3568,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_user_id: message.author_user_id,
                         created_at_ms: message.created_at_ms,
                         automation: message.automation,
+                        link_author: message.link_author,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,
@@ -3611,88 +3700,6 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
-        })
-    }
-
-    /// Newest file mentions with object-id precedence, a complete message /
-    /// thread / optional-channel hydration, and fail-closed missing entities.
-    pub fn list_file_mentions(
-        &self,
-        workspace_id: &str,
-        object_id: Option<&str>,
-        path_hint: Option<&str>,
-        after: Option<(i64, String)>,
-        limit: i64,
-    ) -> Result<Vec<ChatFileMention>, DomainError> {
-        validate_chat_page_limit(limit)?;
-        let object_id = object_id.map(normalize_attachment_object_id).transpose()?;
-        let path_hint = path_hint.map(normalize_attachment_path_hint).transpose()?;
-        if object_id.is_none() && path_hint.is_none() {
-            return Err(DomainError::chat(
-                "invalid-path",
-                "A file mention lookup requires an object id or path hint.",
-            ));
-        }
-        let selector = object_id
-            .as_deref()
-            .or(path_hint.as_deref())
-            .unwrap_or_default();
-        let (has_after, after_created_at_ms, after_attachment_id) = chat_after(after);
-        self.store.read_with(|conn| {
-            let predicate = if object_id.is_some() {
-                "a.object_id = ?2"
-            } else {
-                "a.path_hint = ?2"
-            };
-            let sql = format!(
-                "SELECT a.attachment_id, a.thread_id, a.message_id, a.target_kind, \
-                        a.object_id, a.path_hint, a.heading_text, a.heading_anchor, \
-                        a.heading_occurrence, a.created_at_ms \
-                 FROM chat_attachments a JOIN chat_messages m \
-                   ON m.workspace_id = a.workspace_id AND m.thread_id = a.thread_id \
-                  AND m.message_id = a.message_id \
-                 WHERE a.workspace_id = ?1 AND {predicate} \
-                   AND (?3 = 0 OR a.created_at_ms < ?4 \
-                     OR (a.created_at_ms = ?4 AND a.attachment_id < ?5)) \
-                 ORDER BY a.created_at_ms DESC, a.attachment_id DESC LIMIT ?6"
-            );
-            let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        workspace_id,
-                        selector,
-                        has_after,
-                        after_created_at_ms,
-                        after_attachment_id,
-                        limit
-                    ],
-                    map_attachment_row,
-                )
-                .map_err(DomainError::sql_corrupt)?;
-            let attachments = collect(rows)?;
-            drop(stmt);
-            let mut mentions = Vec::with_capacity(attachments.len());
-            for attachment in attachments {
-                let message = require_message(conn, workspace_id, &attachment.message_id)?;
-                if message.thread_id != attachment.thread_id {
-                    return Err(DomainError::StateCorrupt {
-                        reason: "file mention message belongs to another thread",
-                    });
-                }
-                let thread = require_thread(conn, workspace_id, &message.thread_id)?;
-                let channel = match thread.channel_id.as_deref() {
-                    Some(channel_id) => Some(require_channel(conn, workspace_id, channel_id)?),
-                    None => None,
-                };
-                mentions.push(ChatFileMention {
-                    attachment,
-                    message,
-                    thread,
-                    channel,
-                });
-            }
-            Ok(mentions)
         })
     }
 
@@ -3949,7 +3956,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -4616,12 +4623,12 @@ impl<'a> LinkedChatStore<'a> {
                     None => None,
                 };
                 let mut matched_by = Vec::new();
-                // An automation is neither a person nor an agent, so only its
-                // Group or thread follows can match it.
+                // An automation and a link holder have no account to follow,
+                // so only their Group or thread follows can match them.
                 let author_kind = match message.author_kind {
                     ChatActorKind::Agent => Some(FollowTargetKind::Agent),
                     ChatActorKind::Human => Some(FollowTargetKind::Person),
-                    ChatActorKind::Automation => None,
+                    ChatActorKind::Automation | ChatActorKind::Link => None,
                 };
                 if let (Some(author_user_id), Some(kind)) = (&message.author_user_id, author_kind)
                     && active_follow_exists(
@@ -7020,7 +7027,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -7040,7 +7047,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7249,10 +7256,20 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let automation_id: Option<String> = row.get(12)?;
     let chain_depth: Option<u32> = row.get(13)?;
     let author_actor_key: Option<String> = row.get(14)?;
+    let link_grant_id: Option<String> = row.get(15)?;
+    let link_principal_id: Option<String> = row.get(16)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
             chain_depth,
+        }),
+        _ => None,
+    };
+    // The table pairs both ids with the link kind.
+    let link_author = match (link_grant_id, link_principal_id) {
+        (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
+            grant_id,
+            principal_id,
         }),
         _ => None,
     };
@@ -7272,6 +7289,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             body,
             created_at_ms,
             automation,
+            link_author,
             attachments: Vec::new(),
         }),
     )
@@ -7453,4 +7471,55 @@ fn map_bookmark_row(
         projection_object_id: row.get(15)?,
         failure_reason: row.get(16)?,
     }))
+}
+
+#[cfg(test)]
+mod replicated_origin_tests {
+    use super::{ChatMessageLinkAuthor, replicated_source_origin, validate_replicated_link_author};
+
+    #[test]
+    fn a_shared_origin_unwraps_once_and_any_other_origin_stays_as_written() {
+        for unchanged in ["relay:share-link:p", "origin_1", "shared:abc", "shared:"] {
+            assert_eq!(replicated_source_origin(unchanged), unchanged);
+        }
+        assert_eq!(
+            replicated_source_origin("shared:s:relay:share-link:p"),
+            "relay:share-link:p"
+        );
+        assert_eq!(
+            replicated_source_origin("shared:s2:shared:s1:relay:share-link:p"),
+            "shared:s1:relay:share-link:p"
+        );
+    }
+
+    #[test]
+    fn a_replicated_link_post_needs_its_own_principal_origin() {
+        let author = |origin: &str| {
+            validate_replicated_link_author(
+                origin,
+                "link-message:m",
+                "link",
+                Some("grant-1"),
+                Some("p"),
+                false,
+                "Hi",
+            )
+        };
+        let link = ChatMessageLinkAuthor {
+            grant_id: "grant-1".to_owned(),
+            principal_id: "p".to_owned(),
+        };
+        for applies in ["relay:share-link:p", "shared:s:relay:share-link:p"] {
+            assert_eq!(author(applies).expect(applies), Some(link.clone()));
+        }
+        for refused in [
+            "shared:s:relay:share-link:q",
+            "relay:share-link:q",
+            "shared:s2:shared:s1:relay:share-link:p",
+            "shared:s:relay:share-member:x",
+            "origin_1",
+        ] {
+            assert!(author(refused).is_err(), "{refused}");
+        }
+    }
 }

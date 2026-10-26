@@ -36,9 +36,10 @@ export function createExplorerMenuIpc<
         isMountPath,
         hasMountRecord,
         // Sharing onward is offered nowhere in a share view or a mount:
-        // someone else's files are not this account's to grant, and a share
-        // needs a relay-side workspace to grant from.
-        canShare: shareView === null && !isMountPath && !!workspace.remote && input.kind !== "root",
+        // someone else's files are not this account's to grant. A workspace
+        // that does not sync still offers it, as the toolbar does, and the
+        // dialog says how to set up sync.
+        canShare: shareView === null && !isMountPath && input.kind !== "root",
         shareView,
       }, platform);
     },

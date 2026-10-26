@@ -5,6 +5,7 @@ use dohc_engine_collab::OwnerOutboxError;
 use dohc_engine_collab::live_update_application::ApplicationError;
 use dohc_engine_domain::DomainError;
 use dohc_engine_protocol::error::ErrorCode;
+use dohc_engine_protocol::error::Retryability;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_runtime::RuntimeError;
 use dohc_engine_runtime::SearchError;
@@ -53,6 +54,12 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
         OwnerOutboxError::ParentMismatch => "owner-outbox-parent-mismatch",
         OwnerOutboxError::AppendKeyMismatch => "owner-outbox-append-key-mismatch",
         OwnerOutboxError::Frozen => "owner-outbox-frozen",
+        OwnerOutboxError::NotQuarantined => "owner-outbox-not-quarantined",
+        OwnerOutboxError::RecoveryCheckpointOutdated => "owner-outbox-read-changed",
+        OwnerOutboxError::RecoveryCheckpointUnavailable => {
+            "owner-outbox-recovery-checkpoint-unavailable"
+        }
+        OwnerOutboxError::AcceptedStateIncomplete => "owner-outbox-accepted-state-incomplete",
         OwnerOutboxError::NotFound => "owner-outbox-not-found",
         OwnerOutboxError::ReceiptMismatch => "owner-outbox-receipt-mismatch",
         OwnerOutboxError::Corrupt => {
@@ -122,7 +129,64 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
     (wire, line)
 }
 
+/// Each io error in `error`'s chain.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn io_errors(error: &RuntimeError) -> impl Iterator<Item = &std::io::Error> {
+    let error: &(dyn std::error::Error + 'static) = error;
+    std::iter::successors(Some(error), |error| error.source())
+        .filter_map(|error| error.downcast_ref::<std::io::Error>())
+}
+
+/// What keeps the engine's folder or a store file from being private, and
+/// its path from the workspace's root, which the desktop shows. The path is
+/// `.dohc`, the engine's folder or a store file, never one of the person's.
+#[cfg(target_os = "macos")]
+fn engine_folder_not_private(refused: &dohc_macos_files::NotPrivate) -> WireError {
+    let (reason, path) = (refused.reason.code(), refused.path.display());
+    WireError::new(
+        ErrorCode::Internal,
+        format!("engine-folder-not-private: {reason} {path}"),
+    )
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    // The volume keeps ACL entries on the engine's folder or store, or what is
+    // at one of their paths can't be kept private.
+    #[cfg(target_os = "macos")]
+    for io in io_errors(error) {
+        if dohc_macos_files::volume_shares_new_files(io) {
+            return WireError::new(ErrorCode::Internal, "volume-shares-new-files");
+        }
+        if let Some(refused) = dohc_macos_files::not_private(io) {
+            return engine_folder_not_private(refused);
+        }
+    }
+    // On Linux, the engine can't reach its checked folder through the
+    // descriptor it holds.
+    #[cfg(target_os = "linux")]
+    for io in io_errors(error) {
+        if let Some(refused) = dohc_linux_files::held::not_held(io) {
+            let (reason, path) = (
+                dohc_linux_files::held::NotHeld::CODE,
+                refused.path.display(),
+            );
+            return WireError::new(
+                ErrorCode::Internal,
+                format!("engine-folder-not-private: {reason} {path}"),
+            );
+        }
+    }
+    if matches!(
+        error,
+        RuntimeError::ChatMentionAccessChanged
+            | RuntimeError::ChatMentionVersionChanged
+            | RuntimeError::ChatConversationLinksChanged
+    ) {
+        return WireError::new(ErrorCode::Conflict, error.code());
+    }
+    if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
+        return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
@@ -168,6 +232,17 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // involved, and there is nothing for a person to do.
     if store_busy(error) {
         return WireError::new(ErrorCode::Overloaded, "engine-store-busy");
+    }
+    // A read that never migrates, as a CLI read of a workspace dohc has not
+    // opened since it updated, found migrations this build has yet to run.
+    if matches!(
+        error,
+        RuntimeError::Storage(dohc_engine_storage::StorageError::MigrationPending)
+    ) {
+        return WireError::new(
+            ErrorCode::Internal,
+            "Open the workspace in dohc first, then try again.",
+        );
     }
     // Keep the storage refusal code so the desktop can offer move-aside
     // recovery instead of reporting a generic workspace failure.
@@ -520,6 +595,9 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
+        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
+            ErrorCode::Internal
+        }
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -563,6 +641,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
+        SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
@@ -597,7 +676,20 @@ fn map_search_code(error: &SearchError) -> ErrorCode {
 }
 
 pub(super) fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
-    WireError::new(ErrorCode::InvalidParams, error.to_string())
+    let code = match &error {
+        // The code every other path sends this refusal with, which the
+        // desktop matches.
+        root_binding::RootBindingError::VolumeSharesNewFiles => ErrorCode::Internal,
+        #[cfg(target_os = "macos")]
+        root_binding::RootBindingError::NotPrivate(refused) => {
+            return engine_folder_not_private(refused);
+        }
+        // The message is the one a Mac sends as `NotPrivate`.
+        #[cfg(not(target_os = "macos"))]
+        root_binding::RootBindingError::NotPrivate(..) => ErrorCode::Internal,
+        _ => ErrorCode::InvalidParams,
+    };
+    WireError::new(code, error.to_string())
 }
 
 pub(super) fn initial_capture_updating() -> WireError {
@@ -605,6 +697,17 @@ pub(super) fn initial_capture_updating() -> WireError {
         ErrorCode::Overloaded,
         "Workspace is still updating. Try again.",
     )
+}
+
+/// The initial capture ended without reading the file. No capture wake will
+/// follow, so the refusal is not retryable, but a later capture pass can still
+/// read the file, and the caller can open it then.
+pub(super) fn initial_capture_degraded() -> WireError {
+    WireError {
+        code: ErrorCode::Overloaded,
+        message: "dohc has not read this file yet. Open it again once dohc has read it.".to_owned(),
+        retry: Retryability::No,
+    }
 }
 
 pub(super) fn workspace_unavailable() -> WireError {
@@ -616,6 +719,24 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changed_chat_authority_has_a_restartable_wire_reason() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "chat-mention-access-changed");
+        let error =
+            super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionVersionChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "chat-mention-version-changed");
+    }
+
+    #[test]
+    fn changed_edge_source_has_a_restartable_wire_reason() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "links-edges-source-changed");
+    }
+
     #[test]
     fn internal_refusal_maps_the_wire_and_logs_each_cause_once() {
         use dohc_engine_files::MaterializeError;
@@ -821,6 +942,103 @@ mod tests {
         ));
         assert_eq!(write.code, dohc_engine_protocol::ErrorCode::Internal);
         assert_eq!(write.message, "volume-shares-new-files");
+        let root =
+            super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
+        assert_eq!(root.code, dohc_engine_protocol::ErrorCode::Internal);
+        assert_eq!(root.message, "volume-shares-new-files");
+        #[cfg(target_os = "macos")]
+        {
+            let refused = || std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+            let folder = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+                reason: "could not create engine.db parent directory",
+                source: Some(refused()),
+            });
+            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Storage(
+                dohc_engine_storage::StorageError::persist_public(refused()),
+            ));
+            for wire in [folder, store] {
+                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+                assert_eq!(wire.message, "volume-shares-new-files");
+            }
+        }
+    }
+
+    /// The desktop names what keeps the engine's folder from being private,
+    /// and where, by this code, from the root binding and from the store.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_dohc_cant_keep_private_reaches_rpc_by_its_code() {
+        use dohc_macos_files::{NotPrivate, NotPrivateReason};
+        for (path, reason, message) in [
+            (
+                ".dohc",
+                NotPrivateReason::Link,
+                "engine-folder-not-private: link .dohc",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::NotFolder,
+                "engine-folder-not-private: not-folder .dohc/engine",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::OtherOwner,
+                "engine-folder-not-private: other-owner .dohc/engine",
+            ),
+            (
+                ".dohc/engine/engine.db-wal",
+                NotPrivateReason::NotFile,
+                "engine-folder-not-private: not-file .dohc/engine/engine.db-wal",
+            ),
+            (
+                ".dohc/engine",
+                NotPrivateReason::UncheckedVolume,
+                "engine-folder-not-private: unchecked-volume .dohc/engine",
+            ),
+        ] {
+            let refused = NotPrivate {
+                path: path.into(),
+                reason,
+            };
+            let root = super::map_root_binding(crate::root_binding::RootBindingError::NotPrivate(
+                refused.clone(),
+            ));
+            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+                reason: "could not keep the engine store private",
+                source: Some(std::io::Error::other(refused)),
+            });
+            for wire in [root, store] {
+                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+                assert_eq!(wire.message, message);
+            }
+        }
+    }
+
+    /// On Linux, an engine folder the engine can't reach through the
+    /// descriptor it holds reaches the desktop by the same code, from the root
+    /// binding and from the store.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_dohc_cant_hold_reaches_rpc_by_its_code() {
+        use dohc_linux_files::held::NotHeld;
+        let root = super::map_root_binding(crate::root_binding::RootBindingError::NotPrivate(
+            NotHeld::CODE,
+            ".dohc/engine",
+        ));
+        let refused = NotHeld {
+            path: ".dohc/engine".into(),
+        };
+        let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
+            reason: "could not keep the engine store private",
+            source: Some(std::io::Error::other(refused)),
+        });
+        for wire in [root, store] {
+            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+            assert_eq!(
+                wire.message,
+                "engine-folder-not-private: unchecked-system .dohc/engine"
+            );
+        }
     }
 
     #[test]
@@ -894,6 +1112,18 @@ mod tests {
             assert_eq!(mapped.code, expected);
             assert_eq!(mapped.message, message);
         }
+    }
+
+    #[test]
+    fn a_store_with_pending_migrations_asks_for_the_workspace_to_open_first() {
+        let mapped = map_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::MigrationPending,
+        ));
+        assert_eq!(mapped.code, ErrorCode::Internal);
+        assert_eq!(
+            mapped.message,
+            "Open the workspace in dohc first, then try again."
+        );
     }
 
     #[test]

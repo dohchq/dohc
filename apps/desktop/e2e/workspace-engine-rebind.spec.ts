@@ -20,6 +20,6 @@ test("a live rebind replays outage originals without a recovery moment or Notice
  const disk=await readFile(join(temp.rootPath,path),"utf8");const text=await editor.innerText();for(const sentinel of sentinels){expect(disk.split(sentinel).length-1).toBe(1);expect(text.split(sentinel).length-1).toBe(1);}
  const status=await page.evaluate(async workspaceId=>(window as unknown as {dohcDesktop:DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}),workspace.workspaceId);expect(status.captureRecoveries).toEqual([]);
  expect(await withEngineDb(temp.rootPath,db=>db.prepare("SELECT count(*) AS count FROM moments WHERE metadata_origin='capture-recovery'").get())).toEqual({count:0});
- await expect(page.getByTestId("workspace-shell-notice").filter({hasText:"Typing kept in History"})).toHaveCount(0);await page.getByTestId("notice-center-toggle").click();await expect(page.getByTestId("notice-center").getByText("Typing kept in History",{exact:true})).toHaveCount(0);
+ await expect(page.getByTestId("workspace-shell-notice").filter({hasText:"Text kept in History"})).toHaveCount(0);await page.getByTestId("notice-center-toggle").click();await expect(page.getByTestId("notice-center").getByText("Text kept in History",{exact:true})).toHaveCount(0);
  }finally{await rm(gate,{force:true});await cleanupDesktopWorkspace(desktop,temp);}
 });

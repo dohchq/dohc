@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Privacy | dohc</title>
+<meta name="description" content="What the dohc website and desktop app send, and where it goes." />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  // Set theme before first paint to avoid a flash.
+  (function () {
+    var saved = null;
+    try {
+      saved = localStorage.getItem('dohc-theme');
+    } catch (_) {
+      // Storage is optional in privacy-restricted browsers and embeds.
+    }
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="/" aria-label="dohc home">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </a>
+  <nav class="nav-links" aria-label="Site">
+    <a href="/#demo">demo</a>
+    <a href="/#drive">drive</a>
+    <a href="/#downloads">downloads</a>
+  </nav>
+  <div class="nav-end">
+    <a class="nav-github" href="https://github.com/dohchq/dohc">github</a>
+    <a class="btn btn-primary btn-small nav-download" href="/#downloads">Download</a>
+  </div>
+</header>
+
+<main class="privacy">
+  <h1>Privacy</h1>
+  <p class="privacy-lede">What this website and the dohc desktop app send, and where it goes.</p>
+
+  <h2>This website</h2>
+  <p>This website sets no cookies of its own and shows no ads. It keeps two things in your browser's storage: your light or dark theme, and the files you edit in the demo. Neither leaves your browser. If you add an image from another website to a demo file, your browser loads that image from that website.</p>
+
+  <h2>Hosting</h2>
+  <p>Cloudflare hosts this website. Each page you open passes through Cloudflare, which sees your IP address and the request your browser sends, so it can deliver the page and block attacks. If Cloudflare asks your browser to pass a security check, it sets a cookie that records the check. If a page fails to load, your browser may report the error to Cloudflare. We have not turned on request logs. Cloudflare's dashboard shows us traffic totals for the site. <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a> covers what Cloudflare does with this data.</p>
+
+  <h2>Analytics</h2>
+  <p>We use Cloudflare Web Analytics to count visits and see which pages people read. Each page you open loads a small script from Cloudflare. When the page loads, the script sends Cloudflare the page's address without anything after a ? or #, performance figures such as how long the page took to load, and your browser and operating system versions. When you leave the page or switch tabs, it sends a second report with more timings, including which part of the page you clicked or typed in. Jumping to another section of the page can send both reports again. When your browser shares the page that linked you here, the script reports it.</p>
+  <p>Cloudflare receives your IP address when your browser downloads the script and sends these reports. It works out your country from your IP address and your device type from your browser's request, and shows us totals by country, browser, operating system, device type, page, and referring page, along with timings for the parts of the page in these reports.</p>
+  <p>The script sets no cookies and stores nothing in your browser. Cloudflare says Web Analytics does not identify you by your IP address or browser details, and does not track individuals across the websites of Cloudflare's customers. Cloudflare keeps every report for 7 days, then a sample of about one in ten, or more for a site with few visitors. We can see the last six months. Blocking static.cloudflareinsights.com, as many ad blockers do, stops the script and leaves this website working. <a href="https://www.cloudflare.com/web-analytics/">Cloudflare Web Analytics</a> describes the service.</p>
+
+  <h2>Downloads</h2>
+  <p>When you click a download button, your browser asks GitHub which build is the newest. The file then downloads from GitHub. GitHub sees your IP address for both requests, under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>.</p>
+
+  <h2>The Drive waitlist</h2>
+  <p>When you join the Drive waitlist, your email address goes to Loops, the service that sends our updates about Drive. Each email has an unsubscribe link. You can also write to <a href="mailto:sup@dohc.computer">sup@dohc.computer</a>, and we will remove you. <a href="https://loops.so/privacy">Loops' privacy policy</a> covers how Loops handles your address.</p>
+
+  <h2>The desktop app</h2>
+  <p>The desktop app can send usage and error reports to dohc's developers. <a href="https://github.com/dohchq/dohc/blob/main/docs/reference/usage-and-error-reports.md">Usage and error reports</a> lists what each report holds, where it goes, and how to turn it off. A crash report leaves your computer only when you choose to send it.</p>
+
+  <h2>Questions</h2>
+  <p>Write to <a href="mailto:sup@dohc.computer">sup@dohc.computer</a>.</p>
+
+  <p class="privacy-updated">Last changed October 24, 2026.</p>
+</main>
+
+<footer class="footer">
+  <div class="footer-brand">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </div>
+  <p class="footer-tagline">A workspace for you and your agents.</p>
+  <nav class="footer-links" aria-label="Footer">
+    <a href="/#demo">Demo</a>
+    <a href="/#drive">Drive</a>
+    <a href="/#downloads">Downloads</a>
+    <a href="https://github.com/dohchq/dohc">GitHub</a>
+    <a href="/privacy.html" aria-current="page">Privacy</a>
+  </nav>
+  <p class="footer-line">© 2026</p>
+</footer>
+
+</body>
+</html>

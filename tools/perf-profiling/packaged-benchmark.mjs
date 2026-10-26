@@ -210,9 +210,9 @@ async function fixture(runDir, documentCase) {
   for (let index = 0; index < 2; index++) {
     benchmarkSignal.throwIfAborted();
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
-    await mkdir(join(workspace.rootPath, '.dohc'), { recursive: true });
+    await mkdir(join(workspace.rootPath, '.dohc/local'), { recursive: true });
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
-    await json(join(workspace.rootPath, '.dohc/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', aboutVisible: false, aboutWidth: 360 });
+    await json(join(workspace.rootPath, '.dohc/local/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', aboutVisible: false, aboutWidth: 360 });
     const workspaceHash = createHash('sha256');
     if (sizeDocument && index === 0) {
       await mkdir(join(workspace.rootPath,'linked'),{recursive:true});

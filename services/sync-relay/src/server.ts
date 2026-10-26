@@ -55,7 +55,8 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
-import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
+import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
@@ -88,6 +89,7 @@ import {
 import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
+import type {DevelopmentReplicaReads} from "./replicaLinkReadService";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -104,7 +106,7 @@ import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
 
 export { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { MAX_KEY_ENVELOPE_BYTES } from "./keyEnvelopeRoutes";
-export { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS } from "./discussionRoutes";
+export { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
 export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareReadQueries";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
@@ -145,7 +147,8 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
-  replicaWatches?: Pick<ReplicaWatches, "watched">;
+  replicaWatches?: Pick<ReplicaWatches, "watched"> & Partial<Pick<ReplicaWatches,"holdReader">>;
+  developmentReplicaReads?: DevelopmentReplicaReads;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -205,6 +208,7 @@ export function createSyncRelayHandler({
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
   replicaWatches = new ReplicaWatches(discussionActivity),
+  developmentReplicaReads,
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -253,6 +257,7 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  dispose(): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
@@ -549,6 +554,7 @@ export function createSyncRelayHandler({
     const capabilityToken = match[1]!;
     const capability = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
@@ -561,7 +567,6 @@ export function createSyncRelayHandler({
     rateLimiter: collectionWriteRateLimiter,
     admission: linkCollectionWriteAdmission,
     linkKey,
-    publicEditRelease,
     requireLinkCapability,
     nowMs,
     newId,
@@ -590,6 +595,7 @@ export function createSyncRelayHandler({
     if (!linkKey) throw invalidLinkCapability();
     const fresh = validateLinkCapability({
       storage,
+      publicEditRelease,
       capabilityToken,
       linkKey,
       nowMs: nowMs(),
@@ -650,7 +656,6 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
-    publicEditRelease,
   );
 
   const {
@@ -680,6 +685,8 @@ export function createSyncRelayHandler({
 
   const respondToLinkChat = createLinkChatRoutes({
     storage,
+    linkKey,
+    nowMs,
     requireLinkRead,
     requireFreshLinkRead,
     linkJsonResponse,
@@ -689,6 +696,8 @@ export function createSyncRelayHandler({
     reads: { chatResolverFor },
   });
 
+  const replicaLinkReads=developmentReplicaReads ? storage.createReplicaLinkReadService(developmentReplicaReads,
+    {holdReader:authorized=>replicaWatches.holdReader?.(authorized)},discussionActivity,newestFilteredOpFreshness,linkKey) : undefined;
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -708,6 +717,7 @@ export function createSyncRelayHandler({
     admitLinkBlobBytes,
     respondWithLinkBytes,
     linkKey,
+    replicaLinkReads,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
@@ -1015,6 +1025,7 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    dispose(){replicaLinkReads?.close();},
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       presence.deleteAccount(userId, workspaceIds);
       deletePresenceAccount(userId);

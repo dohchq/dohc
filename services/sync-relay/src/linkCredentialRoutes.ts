@@ -15,6 +15,7 @@ import {
   hashLinkBearer,
   hashLinkHandoffCode,
   isPublicLinkAccess,
+  servableFiles,
   LINK_HANDOFF_CODE_TTL_MS,
   LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
@@ -26,7 +27,7 @@ import {
   authorizeLinkShareAction,
   type AuthorizedShareAction,
 } from "./shareAuthorization";
-import {isLiveEditShareSelector, type ShareSelector} from "./shareFilter";
+import type {ShareSelector} from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 
 export function createLinkCredentialRoutes(
@@ -83,11 +84,6 @@ export function createLinkCredentialRoutes(
     }
     return { capabilityHash, session };
   };
-
-  // A link serves the access its files carry: its own, or a Group folder's.
-  const servableFiles = ({ effectiveSelector }: AuthorizedShareAction<ShareSelector>) =>
-    isPublicLinkAccess(effectiveSelector.access, publicEditRelease) &&
-    (effectiveSelector.access !== "edit" || isLiveEditShareSelector(effectiveSelector));
 
   const linkExchangeResult = (
     authorized: AuthorizedShareAction<ShareSelector>,
@@ -158,7 +154,7 @@ export function createLinkCredentialRoutes(
         if (
           !authorized.ok ||
           authorized.grant.generation !== found.credential.generation ||
-          !servableFiles(authorized)
+          !servableFiles(authorized.effectiveSelector, publicEditRelease)
         ) {
           if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
           return refused();
@@ -242,7 +238,7 @@ export function createLinkCredentialRoutes(
     if (
       !authorized.ok ||
       authorized.grant.generation !== current.session.generation ||
-      !servableFiles(authorized)
+      !servableFiles(authorized.effectiveSelector, publicEditRelease)
     ) {
       throw invalidLinkCapability();
     }
@@ -323,15 +319,14 @@ export function createLinkCredentialRoutes(
               capabilityToken,
               linkKey,
               nowMs: nowMs(),
+              publicEditRelease,
             });
             return (
               fresh !== null &&
               fresh.shareId === capability.shareId &&
               fresh.grantId === capability.grantId &&
               fresh.generation === capability.generation &&
-              fresh.access === capability.access &&
-              isPublicLinkAccess(fresh.access, publicEditRelease) &&
-              (fresh.access !== "edit" || isLiveEditShareSelector(fresh.effectiveSelector))
+              fresh.access === capability.access
             );
           } catch {
             return false;
@@ -395,7 +390,7 @@ export function createLinkCredentialRoutes(
             authorized.grant.grantId === storedCode.grantId &&
             authorized.grant.generation === storedCode.generation &&
             isPublicLinkAccess(authorized.grant.access, publicEditRelease) &&
-            (authorized.grant.access !== "edit" || isLiveEditShareSelector(authorized.effectiveSelector))
+            servableFiles(authorized.effectiveSelector, publicEditRelease)
           );
         } catch {
           return false;

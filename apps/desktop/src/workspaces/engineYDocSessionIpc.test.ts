@@ -640,6 +640,21 @@ describe("engine Y.Doc IPC adapter", () => {
     await holding;
     await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
   });
+  // An agent's Stop again refuses a document an editor holds, as the window closes its own editors first.
+  it("changes a document's live editing for a main-side door only while no editor holds it", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const change = vi.fn(async () => "stopped");
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
+      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+    expect(change).not.toHaveBeenCalled();
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
+    // The change's own failure passes through unchanged.
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", async () => {throw new Error("Stop live editing is waiting.");}))
+      .rejects.toThrow("Stop live editing is waiting.");
+  });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();
@@ -813,6 +828,77 @@ describe("engine Y.Doc IPC adapter", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("names a save the engine refused over a missing file as a file deleted outside dohc", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-deleted-"));
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      const failures = () => sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure);
+      const stale = new DaemonRefusalError({ code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" }, undefined);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: stale }));
+      expect(failures().at(-1)).toEqual({ reason: "deleted" });
+      // A missing file the engine did not refuse for is a document that has
+      // no file yet.
+      h.capturedOpen()?.onSaveState?.("settling", 2, "start");
+      h.capturedOpen()?.onSaveState?.("error", 2, "outcome", false, undefined, new Error("disk full"));
+      expect(failures().at(-1)).toEqual({ reason: null });
+      await h.ipc.shutdown();
+
+      // A shared view's file is its host's to put back.
+      let sharedOpen: Parameters<EngineYDocSessionCapture["openYDocSession"]>[0] | undefined;
+      const shared = harness(providerSession(), { rootPath: root, sharedCaptureFor: async () => ({
+        openYDocSession: async (input) => { sharedOpen = input; return providerSession(); },
+      }) });
+      shared.setReadOnly(true);
+      const viewer = new FakeSender(8);
+      expect((await shared.ipc.open(viewer, openPayload)).available).toBe(true);
+      sharedOpen?.onSaveState?.("error", 1, "outcome", false, undefined, stale);
+      expect(viewer.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1)).toEqual({ reason: null });
+      await shared.ipc.shutdown();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("saves a deleted file again only from the window that holds it, including after its tab closed", async () => {
+    const close = vi.fn(async () => undefined);
+    const h = harness(providerSession({ close }));
+    const saveDeletedFileAgain = vi.fn(async () => true);
+    h.capture.saveDeletedFileAgain = saveDeletedFileAgain;
+    const sender = new FakeSender(7);
+    const again = { workspaceId: "workspace-1", path: "notes/a.md", recreateFile: true as const };
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).not.toHaveBeenCalled();
+
+    await h.ipc.open(sender, openPayload);
+    await expect(h.ipc.retrySave(new FakeSender(8), again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).not.toHaveBeenCalled();
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("settled");
+    expect(saveDeletedFileAgain).toHaveBeenCalledWith("notes/a.md");
+    expect(h.session.settleNow).not.toHaveBeenCalled();
+
+    // The tab closes and the close is refused: the session still holds the
+    // text. Save it again saves it, then finishes the close.
+    close.mockRejectedValueOnce(new Error("conflict-stale-target"));
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("settled");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(2);
+    await expect(h.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    await h.ipc.shutdown();
+
+    // A shared view's file is its host's to put back.
+    const shared = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: async () => providerSession() }) });
+    shared.capture.saveDeletedFileAgain = saveDeletedFileAgain;
+    shared.setReadOnly(true);
+    expect((await shared.ipc.open(sender, openPayload)).available).toBe(true);
+    await expect(shared.ipc.retrySave(sender, again)).resolves.toBe("closed");
+    expect(saveDeletedFileAgain).toHaveBeenCalledTimes(2);
+    await shared.ipc.shutdown();
   });
 
   // A Finder lock refuses writes with EPERM, as a macOS privacy refusal does,
@@ -1892,12 +1978,29 @@ describe("engine Y.Doc IPC adapter", () => {
       workspaceId: "workspace-1",
       path: "notes/a.md",
       origin: agentOrigin,
+      assertEditable: async () => undefined,
       change: async (state: Uint8Array, { keepBlocks }: { keepBlocks: boolean }) => {
         keepBlocksSeen.push(keepBlocks);
         return documentEditUpdate(state, documentEdit, { keepBlocks });
       },
     });
     const append = edit({ replacement: "After." });
+
+    it("refuses a lossy note before it opens a session or changes the held one", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      const refusal = new Error("dohc can't change notes/a.md without also changing parts it can't show.");
+      const refused = { ...append, assertEditable: vi.fn(async () => { throw refusal; }) };
+
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(refused.assertEditable).toHaveBeenCalledWith("notes/a.md");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
 
     it("applies the edit through the editor that holds the document and shows it there", async () => {
       const sender = new FakeSender(7);

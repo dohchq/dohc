@@ -27,7 +27,8 @@ const SAFE: i64 = 9_007_199_254_740_991;
 mod accepted_history;
 mod publication;
 pub(crate) use publication::{
-    read_native_accepted_in, read_restore_predecessor_in, require_restore_registration_in,
+    read_native_accepted_cut_in, read_native_accepted_in, read_native_applied_cursor_in,
+    read_restore_predecessor_in, require_restore_registration_in,
 };
 mod ack_read;
 pub mod passive;
@@ -63,7 +64,10 @@ pub(crate) use restore_fence::require_registration as require_restore_registrati
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
+pub use restore_fence::{
+    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestoreRefusal,
+    NativeRestoreRefusalReason, NativeRestoreSelection, RestoreDeliveryOrigin,
+};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
     with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,
@@ -99,6 +103,14 @@ pub enum ApplicationError {
     Interrupted,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
+    /// An accepted update still waits on a missing dependency, so the restore
+    /// fence cannot yet keep the accepted state a refused seed's copy needs.
+    #[error(
+        "this document's accepted updates must receive their dependencies before a restore fence"
+    )]
+    AcceptedStateIncomplete,
+    #[error("native restore refused before fencing ({:?})", .0.reason)]
+    RestoreRefused(Box<NativeRestoreRefusal>),
     #[error(
         "this document's last settlement must reach its file before its interval can name another author"
     )]
@@ -1005,6 +1017,7 @@ impl ApplicationOwner {
                 &registration.namespace,
                 &registration.binding,
             )?;
+            keep_left_recovery_checkpoints(tx, &registration)?;
             install_binding(tx, &registration)
         })?;
         if !matches!(outcome, TxnOutcome::Committed(())) {
@@ -1090,15 +1103,36 @@ pub enum UnloadPending {
     Materialization,
 }
 
+/// A queue of the lineage frozen at its owner's adoption seed: quarantined,
+/// with no Try again granted, and the seed never applied. Settlement refuses
+/// to pass the seed, so nothing applied on that lineage since the adoption
+/// can settle. That work stays in the store, unsettled and unpublished.
+/// `a` names the lineage and `$generation` the current binding's restore
+/// generation: an earlier generation's seed never holds a successor's work.
+macro_rules! frozen_at_refused_seed {
+    ($generation:literal) => {
+        concat!("EXISTS(SELECT 1 FROM owner_ydoc_outboxes q JOIN owner_ydoc_outbox_entries e ON e.outbox_id=q.outbox_id
+            WHERE q.workspace_id=a.workspace_id AND q.main_version_id=a.main_version_id
+                AND q.object_id=a.object_id AND q.lineage_claim_id=a.lineage_claim_id
+                AND q.restore_fence_generation=", $generation, "
+                AND q.state='quarantined' AND q.retry_delivery_id IS NULL
+                AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+                AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))")
+    };
+}
+
 /// The settlement clause reads only the binding's current lineage: a restore
 /// replaces the lineage, and the replaced one never settles again. `?3` counts
-/// deferred updates.
-const UNLOAD_PENDING: &str = "SELECT
+/// deferred updates. A refused queue waits for its owner, not for delivery,
+/// unless the owner's Try again granted its head an attempt. A lineage frozen
+/// at a refused adoption seed waits for nothing to settle.
+const UNLOAD_PENDING: &str = concat!("SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
-            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
+            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0
+                AND (state<>'quarantined' OR retry_delivery_id IS NOT NULL)),
     EXISTS(SELECT 1 FROM live_device_update_applications a
         JOIN live_device_application_bindings b
             ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
@@ -1112,7 +1146,28 @@ const UNLOAD_PENDING: &str = "SELECT
             COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
                 WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
                 AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
-                AND o.lineage_claim_id=a.lineage_claim_id),0)))";
+                AND o.lineage_claim_id=a.lineage_claim_id),0))
+            AND NOT ", frozen_at_refused_seed!("b.restore_fence_generation"), ")");
+
+/// Whether the document's current lineage, at its current binding's restore
+/// generation, is frozen at a refused adoption seed. Its head then holds work
+/// no settlement can write, so the artifact need not hold it before the
+/// document unloads or parks.
+pub fn frozen_at_refused_seed(conn: &Connection, key: &DocKey) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        concat!(
+            "SELECT EXISTS(SELECT 1 FROM (SELECT d.workspace_id,d.version_id AS main_version_id,d.object_id,d.lineage_claim_id,b.restore_fence_generation
+                FROM ydoc_docs d JOIN live_device_application_bindings b ON b.workspace_id=d.workspace_id
+                    AND b.main_version_id=d.version_id AND b.object_id=d.object_id AND b.lineage_claim_id=d.lineage_claim_id
+                WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3) a WHERE ",
+            frozen_at_refused_seed!("a.restore_fence_generation"),
+            ")"
+        ),
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
 
 /// Name the first incomplete restore, delivery, or settlement record for one
 /// document. The caller still proves the artifact holds the head.
@@ -1244,6 +1299,30 @@ fn require_binding_workspace(
     }
     Ok(())
 }
+/// Before `r` moves its document's binding to another lineage or restore
+/// generation without a restore fence, keeps the final accepted state of the
+/// one it leaves for that one's refused seeds, as the fence does. A state it
+/// cannot keep, as one still waiting on a missing dependency, leaves those
+/// copies refused instead of this registration, which that dependency may need.
+/// A storage failure refuses the registration, so the binding stays put.
+fn keep_left_recovery_checkpoints(
+    tx: &Transaction<'_>,
+    r: &Registration,
+) -> Result<(), ApplicationError> {
+    let Some((left, _, _)) = read_binding(tx, r)? else {
+        return Ok(());
+    };
+    if left.lineage_claim_id == r.binding.lineage_claim_id
+        && left.restore_fence_generation == r.binding.restore_fence_generation
+    {
+        return Ok(());
+    }
+    match crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, &left) {
+        Err(crate::OwnerOutboxError::Storage(error)) => Err(ApplicationError::Storage(error)),
+        _ => Ok(()),
+    }
+}
+
 fn install_binding(tx: &Transaction<'_>, r: &Registration) -> Result<(), ApplicationError> {
     let b = &r.binding;
     let c = &r.coordinate;

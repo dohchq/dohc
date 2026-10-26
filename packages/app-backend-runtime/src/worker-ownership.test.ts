@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -53,6 +53,21 @@ it("never deletes a directory whose ownership manifest is unknown",async()=>{
   await writeFile(join(path,".dohc-worker.json"),'{}');
   await expect(acquireSupervisorOwnership(root)).rejects.toThrow("Check it before you remove anything");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("keep");
 });
+it.skipIf(process.platform==="win32").each(["session record","lock","worker's owner record"])("refuses a %s another user could change, and removes nothing",async kind=>{
+  const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory();
+  await writeFile(join(path,"app.sqlite"),"keep");owner.close();
+  const file=kind==="session record"?join(root,".dohc-worker-session.json"):kind==="lock"?join(root,".dohc-worker-lock.sqlite"):join(path,".dohc-worker.json");
+  await chmod(file,0o666);
+  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("not one only you can change");
+  expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("keep");
+});
+it("refuses a worker's owner record with a second name, and removes nothing",async()=>{
+  const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory();
+  await writeFile(join(path,"app.sqlite"),"keep");owner.close();
+  await link(join(path,".dohc-worker.json"),join(root,"second-name.json"));
+  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("not one only you can change");
+  expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("keep");
+});
 it("refuses unexpected worker folders and preserves unrelated host files",async()=>{
   const root=await fixture();await writeFile(join(root,"owner-notes.txt"),"keep");await mkdir(join(root,"worker-unknown"));
   await expect(acquireSupervisorOwnership(root)).rejects.toThrow("outside the folder dohc keeps Collections in");expect(await readFile(join(root,"owner-notes.txt"),"utf8")).toBe("keep");
@@ -67,14 +82,14 @@ it("reclaims actual supervisor materialization after host death and IPC worker e
   const supervisorUrl=new URL("../dist/supervisor.mjs",import.meta.url).href,journalUrl=new URL("../dist/journal.mjs",import.meta.url).href;
   const childSource=JSON.stringify("globalThis.operations={run(){return 'saved';}};");
   const run=await child(`import {createDatasetSupervisor} from ${JSON.stringify(supervisorUrl)};import {createDatasetJournal} from ${JSON.stringify(journalUrl)};
-    import {DatabaseSync} from 'node:sqlite';import {readFile} from 'node:fs/promises';import {join} from 'node:path';import {spawn} from 'node:child_process';
+    import {DatabaseSync} from 'node:sqlite';import {mkdir,readFile} from 'node:fs/promises';import {join} from 'node:path';import {spawn} from 'node:child_process';
     const directory=${JSON.stringify(directory)},root=${JSON.stringify(root)};const schemaSql='CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL);';
     const seed=new DatabaseSync(join(directory,'seed.sqlite'));seed.exec(schemaSql);seed.close();const db=new DatabaseSync(join(directory,'authority.sqlite'));
     function transaction(work){db.exec('BEGIN IMMEDIATE');try{const result=work();db.exec('COMMIT');return result;}catch(error){db.exec('ROLLBACK');throw error;}}
     const journal=createDatasetJournal({db,transaction}),scope={workspaceId:'workspace',datasetId:'data'};
     journal.initialize({scope,hostEpoch:'host',approvedRevisionHash:'a'.repeat(64),source:${childSource},schemaSql,definitionJson:'{}',checkpoint:await readFile(join(directory,'seed.sqlite')),authorize(){}});
     let workerPid;
-    const supervisor=await createDatasetSupervisor({journal,directory:root,runtime:{launch(options){
+    const supervisor=await createDatasetSupervisor({journal,directory:async()=>{await mkdir(root,{recursive:true});return root;},runtime:{launch(options){
       const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:['ignore','ignore','ignore','ipc'],serialization:'advanced',windowsHide:true});workerPid=child.pid;
       child.on('message',options.onMessage);child.on('error',options.onError);child.on('close',options.onExit);return{postMessage(message){child.send(message);},kill(){child.kill('SIGKILL');}};
     }}});

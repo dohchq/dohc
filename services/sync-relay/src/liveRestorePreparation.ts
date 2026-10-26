@@ -1,6 +1,8 @@
 import {encodeNativeRestoreInput,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
-import {resolveLiveRestorePoint, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
+import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {configRecord} from "./deviceLiveHostConfig";
+import {liveValidation} from "./liveValidation.js";
+import {LiveRestoreBusy, type LiveRestoreValidator} from "./liveRestoreValidation.js";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import {parseLiveUpdateDigest} from "@dohc/live-session-contract/live-update-admission";
@@ -9,6 +11,11 @@ import {snapshotHostCoordinate} from "./liveTicketInputs";
 const policyKeys = ["maxStructVisits", "maxValueNodeVisits", "maxDecodedPayloadByteVisits", "maxStructClientGroupVisits",
   "maxDeleteClientGroupVisits", "maxDeleteIntervalVisits", "maxIndexOperations"] as const;
 const reservationBytes = (maxBytes: number, workingReserveBytes: number) => 16 * maxBytes + workingReserveBytes;
+// Timers hold at most a signed 32-bit delay.
+const deadline = (deadlineMs: unknown) => Math.min(authorityInteger(deadlineMs, 1), 2_147_483_647);
+/** One deadline for every run of a validation job. */
+const validationSignal = (signal: AbortSignal | undefined, deadlineMs: unknown) =>
+  AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(deadline(deadlineMs))]);
 
 /** Private operator limits. No public restore permission or shipping default is implied. */
 export function parseLiveRestoreConfig(value: unknown) {
@@ -43,16 +50,18 @@ export class LiveRestorePreparation {
   #operations = 0;
   readonly config: LiveRestoreConfig;
   readonly #reservationBytes: number;
-  constructor(config: LiveRestoreConfig) {
+  readonly #validator: LiveRestoreValidator;
+  constructor(config: LiveRestoreConfig, validator?: LiveRestoreValidator) {
     this.config = parseLiveRestoreConfig(config)!;
     this.#reservationBytes = reservationBytes(this.config.maxBytes, this.config.workingReserveBytes);
+    this.#validator = validator ?? liveValidation.restore(this.config.validation);
   }
 
   #reserve(signal: AbortSignal | undefined): () => void {
     const config = this.config;
     if (signal?.aborted) throw signal.reason;
     if (this.#operations >= config.maxOperations || this.#reservationBytes > config.aggregateBytes - this.#bytes) {
-      throw new Error("Restore preparation capacity is full.");
+      throw new LiveRestoreBusy("Restore preparation capacity is full.");
     }
     this.#bytes += this.#reservationBytes; this.#operations++;
     let released = false;
@@ -79,17 +88,17 @@ export class LiveRestorePreparation {
       if (stopped.kind === "pending") return stopped;
       const {store, connection} = options;
       const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
-      const saved = store.readStopRestoreProposal(input, config.validation);
+      const validation = () => validationSignal(signal, connection.deadlineMs);
+      const saved = await store.readStopRestoreProposal(input, this.#validator, validation());
       if (saved) return {kind: "prepared" as const, proposalDigest: saved.proposalDigest,
         candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs, replayed: true};
-      const selected = store.captureStopRestorePoint(input);
-      const point = resolveLiveRestorePoint(selected, config.validation);
-      const json = JSON.stringify({fence: stopped.receipt, point});
+      const selected = await store.resolveStopRestorePoint(input, this.#validator, validation());
+      const json = JSON.stringify({fence: stopped.receipt, point: selected.point});
       const bytes = encodeNativeRestoreInput(Buffer.from(json), config.maxBytes);
       const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
         deadlineMs: connection.deadlineMs}, "prepare", bytes, config.maxBytes, signal);
       check(); selected.assertCurrent();
-      const recorded = store.recordStopRestoreProposal(input, output.bytes, config.validation, Date.now());
+      const recorded = await store.recordStopRestoreProposal(input, output.bytes, this.#validator, Date.now(), validation());
       return {kind: "prepared" as const, ...recorded};
     });
   }
@@ -99,7 +108,7 @@ export class LiveRestorePreparation {
     const config = this.config, signal = options.signal;
     const input = {...snapshotStopRestoreLookup(options.lookup), host: snapshotHostCoordinate(options.connection.host),
       maxBytes: config.maxBytes, maxEvents: config.maxEvents, maxOutputBytes: config.maxBytes};
-    const deadlineMs = Math.min(authorityInteger(options.connection.deadlineMs, 1), 2_147_483_647);
+    const deadlineMs = deadline(options.connection.deadlineMs);
     const release = this.#reserve(signal), lifetime = new AbortController();
     const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -115,8 +124,10 @@ export class LiveRestorePreparation {
     timer = setTimeout(() => close(new Error("Restore review expired.")), deadlineMs);
     timer.unref();
     try {
-      const review = options.store.readStopRestoreReview(input, config.validation);
+      // Expiry cancels the validation run, so expired content is never returned.
+      const review = await options.store.readStopRestoreReview(input, this.#validator, lifetime.signal);
       if (signal?.aborted) throw signal.reason;
+      lifetime.signal.throwIfAborted();
       if (performance.now() - startedAt >= deadlineMs) throw new Error("Restore review expired.");
       return {review, close: () => close(), invalidated: lifetime.signal, maxOutputBytes: config.maxBytes} as const;
     } catch (error) {
@@ -145,9 +156,10 @@ export class LiveRestorePreparation {
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
       const retained = store.readStopRestoreLifecycle(input);
-      let current = retained ?? (requireReview
-        ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, config.validation, Date.now(), signal)
-        : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now()));
+      const validation = validationSignal(signal, connection.deadlineMs);
+      let current = retained ?? await (requireReview
+        ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, this.#validator, Date.now(), validation)
+        : store.admitStopRestoreProposal(input, proposalDigest, this.#validator, Date.now(), validation));
       const verify = () => {
         check();
         if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {

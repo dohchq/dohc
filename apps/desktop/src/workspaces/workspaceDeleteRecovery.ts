@@ -1,17 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { addAbortListener } from "node:events";
 import { createReadStream } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { OperationRecovery as OperationRecoverySchema, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
+import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { isInside } from "../security/pathContainment";
-import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import { localStateDir, LocalStateFolderError, readOwnedLocalStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 
 export type OperationRecovery = z.infer<typeof OperationRecoverySchema>;
 const UndoResult = HistoryOperationUndoResult.options[1].extend({
@@ -24,7 +26,7 @@ const Record = z.object({
   copies: z.array(z.object({
     path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
   })).optional(),
-  engine: z.object({ materialized: z.boolean(), momentCount: z.number() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
+  engine: z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
 });
 export type RecoveryRecord = z.infer<typeof Record>;
 export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord; noUndo?: string };
@@ -54,67 +56,90 @@ export async function waitForRecovery(operationId: string, signal?: AbortSignal,
 }
 const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
-const invalidRecovery = "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash.";
-export const missingDeleteRecoveryReason = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
+// A record lists each untracked path a delete took, so a large folder makes a large record.
+const MAX_RECORD_BYTES = 64 * 1024 * 1024;
+// Where deleted files can be when dohc does not know which.
+const restoreByHand = `Restore files from History, the system trash, or ${WORKSPACE_TRASH}.`;
+const invalidRecovery = `Cannot undo the delete. Its recovery record is invalid. ${restoreByHand}`;
+export const missingDeleteRecoveryReason = `Cannot undo the delete. Its recovery record is missing or expired. ${restoreByHand}`;
 
-async function trashDir(root: string): Promise<string> {
-  const dir = join(await resolveWorkspaceMetadataDir(root), "trash");
-  await mkdir(dir, { recursive: true });
-  const entry = await lstat(dir);
-  if (!entry.isDirectory() || entry.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) {
-    throw new Error("Cannot undo the delete. The workspace trash must be a real folder inside this workspace.");
-  }
-  return dir;
-}
 // Only recovery metadata expires. Fallback trash contents keep their lifetime.
-const pruned = new Set<string>();
-export function scheduleRecoveryPrune(root: string): void {
-  if (pruned.has(root)) return;
-  pruned.add(root);
-  setImmediate(() => { void prune(root).catch(() => undefined); });
+const prunes = new Map<string, Promise<void>>();
+export function scheduleRecoveryPrune(workspace: LocalStateWorkspace): void {
+  if (prunes.has(workspace.rootPath)) return;
+  prunes.set(workspace.rootPath, new Promise<void>(resolve => setImmediate(resolve)).then(() => prune(workspace)).catch(() => undefined));
 }
-async function prune(root: string): Promise<void> {
-  const dir = await trashDir(root);
-  for (const name of await readdir(dir)) {
-    if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
-    try {
-      const path = join(dir, name), entry = await lstat(path);
-      if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
-        await rm(path, { force: true });
-      }
-    } catch { /* Cleanup cannot affect another delete or its Undo. */ }
-  }
+// Whoever removes a workspace folder, such as a test's cleanup, waits for its prune,
+// which reads the folder on its own schedule.
+export async function waitForRecoveryPrune(root: string): Promise<void> {
+  await prunes.get(root);
 }
-export async function saveRecoveryRecord(root: string, record: { operationId: string }, kind = "delete"): Promise<void> {
-  const dir = await trashDir(root);
+// A removal is a write, so it waits for this open's `.dohc/local` too, but it
+// creates nothing.
+async function prune(workspace: LocalStateWorkspace): Promise<void> {
+  await localStateDir(workspace);
+  await readOwnedLocalStateFolder(workspace.rootPath, "trash", async (dir) => {
+    if (dir === null || dir === "unusable") return;
+    for (const name of await readdir(dir)) {
+      if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
+      try {
+        const path = join(dir, name), entry = await lstat(path);
+        if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
+          await rm(path, { force: true });
+        }
+      } catch { /* Cleanup cannot affect another delete or its Undo. */ }
+    }
+  });
+}
+export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete"): Promise<void> {
+  const dir = await workspaceTrashForWrite(workspace, "save Undo information");
   const path = join(dir, recordName(record.operationId, kind));
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
-    const file = await open(temp, "wx");
+    // 0600 whatever the umask: the reader refuses a record others can write.
+    const file = await open(temp, "wx", 0o600);
     try { await file.writeFile(JSON.stringify(record)); await file.sync(); }
     finally { await file.close(); }
     // Atomic replacement, not a power-loss durability guarantee on Windows.
     await rename(temp, path);
   } finally { await unlink(temp).catch(() => undefined); }
 }
+/**
+ * A recovery record's text, read from the workspace trash. A record decides
+ * where Undo writes and what it puts back, so dohc trusts only a file this
+ * user owns and alone can change, read through one handle, in a trash folder
+ * only this user can change. Any other record is "untrusted", which Undo
+ * treats as invalid: it refuses and changes nothing. `.dohc` and
+ * `.dohc/local` are checked first, and a problem with either is "refused"
+ * with words that fix it. Reads create nothing, and wait for the engine only
+ * on Windows, for an open under way.
+ */
+export async function readRecoveryRecordText(root: string, id: string, kind: "delete" | "move"): Promise<RecoveryRecordRead> {
+  return readOwnedLocalStateFolder(root, "trash", (dir) => recordIn(dir, id, kind)).catch((error: unknown): RecoveryRecordRead => {
+    if (error instanceof LocalStateFolderError) return { status: "refused", reason: error.message };
+    throw error;
+  });
+}
+type RecoveryRecordRead = { status: "missing" } | { status: "untrusted" } | { status: "refused"; reason: string } | { status: "read"; text: string };
+async function recordIn(dir: string | null | "unusable", id: string, kind: "delete" | "move"): Promise<RecoveryRecordRead> {
+  if (dir === null) return { status: "missing" };
+  if (dir === "unusable") return { status: "untrusted" };
+  const path = join(dir, recordName(id, kind));
+  const entry = await info(path);
+  if (!entry || Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return { status: "missing" };
+  const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(() => null);
+  if (read?.status === "missing") return { status: "missing" };
+  return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
+}
 export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
   const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);
-  const invalidRecord = `Its recovery record is invalid.${action === "undo" ? " Restore files from History or the trash." : ""}`;
-  const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
-  if (!metadata) return undefined;
-  const dir = join(metadata, "trash");
-  const folder = await info(dir);
-  if (!folder) return undefined;
-  if (!folder.isDirectory() || folder.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) throw refusal("The workspace trash must be a real folder inside this workspace.");
-  const path = join(dir, recordName(id));
-  const entry = await info(path);
-  if (!entry) return undefined;
-  if (Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return undefined;
-  if (entry.isSymbolicLink()) throw refusal("Its recovery record is a link.");
-  if (!entry.isFile()) throw refusal(invalidRecord);
-  const body = await readFile(path, "utf8");
+  const invalidRecord = `Its recovery record is invalid.${action === "undo" ? ` ${restoreByHand}` : ""}`;
+  const read = await readRecoveryRecordText(root, id, "delete");
+  if (read.status === "missing") return undefined;
+  if (read.status === "refused") throw refusal(read.reason);
+  if (read.status === "untrusted") throw refusal(invalidRecord);
   let record: RecoveryRecord;
-  try { record = Record.parse(JSON.parse(body)); }
+  try { record = Record.parse(JSON.parse(read.text)); }
   catch { throw refusal(invalidRecord); }
   if (record.operationId !== id) throw refusal(invalidRecord);
   const paths = [record.base, ...record.paths, ...record.emptyFolders, ...(record.copies?.map(copy => copy.path) ?? []),
@@ -154,7 +179,7 @@ export async function stageDeleteRecovery(operationId: string, staged: string, b
       ...(invalid ? { noUndo: `Cannot undo the delete. Invalid recovery path: ${invalid}. Restore it from the trash.` } : {}) };
   } catch { return { operationId }; }
 }
-export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan,
+export async function finishDeleteRecovery(workspace: LocalStateWorkspace, plan: DeleteRecoveryPlan,
   { trashed, staged }: { trashed: boolean; staged?: string }): Promise<OperationRecovery> {
   const { operationId, record } = plan;
   try {
@@ -164,18 +189,18 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
       const where = `in the ${systemTrash}`;
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
       record.noUndo = plan.noUndo;
-      await saveRecoveryRecord(root, record).catch(() => undefined);
-      scheduleRecoveryPrune(root);
+      await saveRecoveryRecord(workspace, record).catch(() => undefined);
+      scheduleRecoveryPrune(workspace);
     }
     if (plan.noUndo) {
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
     }
-    await saveRecoveryRecord(root, record);
-    scheduleRecoveryPrune(root);
+    await saveRecoveryRecord(workspace, record);
+    scheduleRecoveryPrune(workspace);
     return { operationId, undo: { available: true } };
   } catch {
     return { operationId, undo: { available: false, paths: record?.paths ?? [],
-      reason: "Delete finished. dohc could not save Undo information. Restore files from History or the trash." } };
+      reason: `Delete finished. dohc could not save Undo information. Restore files from History or ${trashed ? "the system trash" : WORKSPACE_TRASH}.` } };
   }
 }
 const validPath = (path: string, base: string) => {
@@ -189,9 +214,11 @@ async function checkedTarget(root: string, path: string, base: string): Promise<
   if (!target.ok || target.relative !== path) throw new Error(`Cannot undo the delete. ${path} now leads somewhere else.`);
   return target.resolvedAbsolute;
 }
-async function sourcePath(root: string, record: RecoveryRecord, path: string): Promise<string> {
+// The deleted entry's copy in the workspace trash. Nothing pins its bytes:
+// the record names only where it is. Only this user can reach it, because
+// `.dohc/local` is private and the trash is a folder no other user can change.
+async function sourcePath(dir: string, record: RecoveryRecord, path: string): Promise<string> {
   if (!record.staged || path !== record.base && !path.startsWith(`${record.base}/`)) throw new Error(invalidRecovery);
-  const dir = await trashDir(root);
   const source = join(dir, record.staged, path.slice(record.base.length));
   const parent = await realpath(dirname(source));
   if (!isInside(dir, parent)) throw new Error("Cannot undo the delete. Its staged path leads outside the workspace trash.");
@@ -214,7 +241,7 @@ async function alreadyPlaced(source: string, target: string): Promise<boolean> {
 }
 
 // Retrying through a verified handle cannot remove or overwrite a replacement at the path.
-async function copyExclusive(root: string, record: RecoveryRecord, path: string, source: string, target: string, mode: number): Promise<void> {
+async function copyExclusive(workspace: LocalStateWorkspace, record: RecoveryRecord, path: string, source: string, target: string, mode: number): Promise<void> {
   const pending = record.copies?.find(copy => copy.path === path), occupant = await info(target);
   if (pending && occupant && !occupant.isFile()) throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
   const size = (await lstat(source)).size;
@@ -254,7 +281,7 @@ async function copyExclusive(root: string, record: RecoveryRecord, path: string,
       record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
         { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size }];
       // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
-      await saveRecoveryRecord(root, record);
+      await saveRecoveryRecord(workspace, record);
       await file.writeFile(createReadStream(source));
     }
     await file.chmod(mode & 0o7777);
@@ -266,24 +293,28 @@ async function copyExclusive(root: string, record: RecoveryRecord, path: string,
     throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
   }
 }
-export async function undoDeleteRecovery(root: string, record: RecoveryRecord, author: MomentWriteAuthor,
+export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record: RecoveryRecord, author: MomentWriteAuthor,
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
+  const root = workspace.rootPath;
   assertCurrent();
   if (record.noUndo) return { ok: false, reason: record.noUndo };
   const expose = (result: z.infer<typeof UndoResult>): DeleteUndoResult => ({ ...result,
     remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
     requestId: `delete-undo:${record.operationId}`, author });
+  // Undo saves its progress in the trash, so it asks History only where it can.
   if (record.result) {
     if (record.result.tracked.state === "restoring") {
+      await workspaceTrashForWrite(workspace, "undo the delete");
       try {
         const current = await engineUndo();
-        if (current.materialized) { record.result.tracked.state = "restored"; await saveRecoveryRecord(root, record); }
+        if (current.materialized) { record.result.tracked.state = "restored"; await saveRecoveryRecord(workspace, record); }
       } catch { /* A finished Undo keeps its saved result when refresh is unavailable. */ }
     }
     return expose(record.result);
   }
+  const trash = await workspaceTrashForWrite(workspace, "undo the delete");
   const resuming = record.engine !== undefined;
   if (!record.engine) {
     for (const path of [...record.paths, ...record.emptyFolders]) {
@@ -291,14 +322,14 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       const occupant = await info(target);
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
-        const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it. Check the ${systemTrash}.` };
+        const source = await sourcePath(trash, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in ${WORKSPACE_TRASH}, and History has no copy of it. Check the ${systemTrash}.` };
       }
     }
     assertCurrent();
-    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0 };
-    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount };
-    await saveRecoveryRecord(root, record);
+    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0, notRestored: [] };
+    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount, notRestored: [...receipt.notRestored] };
+    await saveRecoveryRecord(workspace, record);
     markChanged();
   }
   const pendingPaths = record.progress ? new Set(record.copies?.map(copy => copy.path)) : undefined;
@@ -306,16 +337,23 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
     restored: record.progress?.restored ?? [], remaining: record.progress?.remaining.filter(item => !pendingPaths?.has(item.path)) ?? [] };
   if (record.progress) record.progress = result;
+  for (const path of record.engine.notRestored ?? []) {
+    if (!result.remaining.some(item => item.path === path)) result.remaining.push({ path,
+      reason: "dohc could not restore this file. Restore it from History." });
+  }
   const keepSource = new Set<string>();
   const linkedModes = new Map<string, number>();
   const place = async (path: string, empty = false): Promise<void> => {
     assertCurrent();
-    const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
+    if (record.engine?.notRestored?.includes(path)) {
+      return;
+    }
+    const trashPath = `${WORKSPACE_TRASH}/${record.staged}${path.slice(record.base.length)}`;
     let retryable = false;
     let folder = empty;
     try {
       const target = await checkedTarget(root, path, record.base);
-      const source = empty ? undefined : await sourcePath(root, record, path);
+      const source = empty ? undefined : await sourcePath(trash, record, path);
       const entry = source === undefined ? undefined : await lstat(source);
       folder = empty || entry?.isDirectory() === true;
       retryable = true;
@@ -328,7 +366,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
         return;
       }
       if (record.copies?.some(copy => copy.path === path)) {
-        await copyExclusive(root, record, path, source!, target, entry!.mode);
+        await copyExclusive(workspace, record, path, source!, target, entry!.mode);
       } else if (!resuming || !await alreadyPlaced(source!, target)) {
         await mkdir(dirname(target), { recursive: true });
         await checkedTarget(root, path, record.base);
@@ -336,7 +374,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
           const destination = await readlink(source!);
           const original = resolve(root, dirname(path), destination);
           const base = join(root, record.base);
-          const referent = isInside(base, original) ? join(await trashDir(root), record.staged!, relative(base, original)) : original;
+          const referent = isInside(base, original) ? join(trash, record.staged!, relative(base, original)) : original;
           const directory = await stat(referent).then(value => value.isDirectory(), () => false);
           await symlink(destination, target, directory ? process.platform === "win32" && isAbsolute(destination) ? "junction" : "dir" : "file");
         } else {
@@ -345,7 +383,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
             if (process.platform === "win32" && (entry!.mode & 0o222) === 0) linkedModes.set(target, entry!.mode & 0o7777);
           } catch (error) {
             if (code(error) === "EEXIST") throw error;
-            await copyExclusive(root, record, path, source!, target, entry!.mode);
+            await copyExclusive(workspace, record, path, source!, target, entry!.mode);
           }
         }
       } else {
@@ -357,7 +395,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       markChanged();
     } catch (error) {
       // An interrupted copy stays journaled and keeps its source until a later Undo succeeds.
-      const sourceMissing = !empty && await sourcePath(root, record, path)
+      const sourceMissing = !empty && await sourcePath(trash, record, path)
         .then(async source => !await info(source)).catch(sourceError => code(sourceError) === "ENOENT");
       const pendingCopy = record.copies?.some(copy => copy.path === path) ?? false;
       if (sourceMissing && record.copies) record.copies = record.copies.filter(copy => copy.path !== path);
@@ -384,11 +422,10 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
   }
   if (record.copies?.length) record.progress = result;
   else { record.result = result; delete record.progress; }
-  await saveRecoveryRecord(root, record);
-  const staged = record.staged
-    ? await trashDir(root).then(dir => join(dir, record.staged!)).catch(() => undefined) : undefined;
+  await saveRecoveryRecord(workspace, record);
+  const staged = record.staged ? join(trash, record.staged) : undefined;
   if (staged) for (const path of result.restored.filter(path => !keepSource.has(path))) {
-    await sourcePath(root, record, path).then(async source => {
+    await sourcePath(trash, record, path).then(async source => {
       if (record.emptyFolders.includes(path)) await rmdir(source);
       else await rm(source, { recursive: true, force: true });
       for (let parent = dirname(source); isInside(staged, parent); parent = dirname(parent)) await rmdir(parent);

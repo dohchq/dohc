@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, PluginKey, TextSelection, type Plugin } from "@tiptap/pm/state";
 import { DecorationSet, EditorView } from "@tiptap/pm/view";
 import { history, undo, redo } from "@tiptap/pm/history";
+import { splitBlock } from "@tiptap/pm/commands";
 import { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import { boldText, codeBlock, codeMarkText, doc, hardBreak, paragraph, schema } from "./testDocs";
 import { detectAutocomplete, makeWikilinkPlugin, wikilinkPluginKey, type WikilinkFile } from "./wikilinkPlugin";
@@ -257,6 +258,32 @@ describe("editor chrome reuse", () => {
     // Before this bound, one character read a top-level block 12.5 million times.
     expect(countCalls(Fragment.prototype, "child", () => view.dispatch(view.state.tr.insertText("x")))).toBeLessThan(blocks * 4);
     expect((plugin.getState(view.state) as DecorationSet).find()).toHaveLength(blocks);
+  });
+
+  it("presses Enter in a 5,000-block document with work linear in its blocks", () => {
+    const blocks = 5000;
+    const plugin = blockControls();
+    const view = mount(doc(...Array.from({ length: blocks }, (_, i) => paragraph(`Paragraph ${i}`))), [history(), plugin]);
+    view.setProps({ handleScrollToSelection: () => true });
+    const middle = view.state.doc.child(0).nodeSize * (blocks / 2) + 3;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, middle)));
+    // DecorationSet.create checks each decoration against each block of the
+    // document it is given.
+    let checks = 0;
+    const create = DecorationSet.create;
+    vi.spyOn(DecorationSet, "create").mockImplementation((document, decorations) => {
+      checks += document.childCount * decorations.length;
+      return create(document, decorations);
+    });
+    const reads = countCalls(Fragment.prototype, "child", () => splitBlock(view.state, view.dispatch));
+    // Before this bound, one Enter made 25 million of these checks.
+    expect(checks).toBeLessThan(blocks * 4);
+    // ProseMirror itself reads each block about six times to split one.
+    expect(reads).toBeLessThan(blocks * 8);
+    expect(view.state.doc.childCount).toBe(blocks + 1);
+    const starts: number[] = [];
+    view.state.doc.forEach((_node, position) => starts.push(position));
+    expect((plugin.getState(view.state) as DecorationSet).find().map((widget) => widget.from)).toEqual(starts);
   });
 
   it("does not reconcile callout titles during selection-only or metadata updates", () => {

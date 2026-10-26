@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   NoticeRow,
@@ -13,6 +14,7 @@ import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "../orphanedDrafts";
 
 it("offers Discard as a separate toast action without dismissing the Notice",()=>{
   const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
@@ -93,6 +95,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
       {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
+      {...(props.onReadSentNotice ? { onReadSentNotice: props.onReadSentNotice } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
@@ -1164,6 +1167,35 @@ describe("notice center", () => {
     );
   });
 
+  it("shows why a Linux .deb did not install, with the command that installs it and its copy, in the toast and the notice", async () => {
+    const ready = {
+      status: "ready" as const,
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest" as const,
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    };
+    const reason = "The update did not install. Run this command in a terminal to install it.";
+    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
+    installUpdate.mockResolvedValueOnce({ accepted: false, reason, state: { ...ready, message: reason, installCommand } });
+    renderNotices();
+    pushUpdate?.(ready);
+    expect(screen.queryByTestId("update-toast-install-command")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Restart" }));
+
+    expect((await screen.findByTestId("update-toast-install-command")).textContent).toBe(installCommand);
+    expect(screen.getByTestId("update-toast").textContent).toContain(reason);
+    expect(screen.getByTestId("update-toast-install-command-copy").getAttribute("aria-label")).toBe("Copy command");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(reason);
+    expect(screen.getByTestId("notice-update-ready-command").textContent).toBe(installCommand);
+    expect(screen.getByTestId("notice-update-ready-command-copy").getAttribute("aria-label")).toBe("Copy command");
+  });
+
   it("shows restart failures in the update notice and toast", async () => {
     installUpdate.mockResolvedValueOnce({
       accepted: false,
@@ -1947,6 +1979,213 @@ describe("notices sent to you", () => {
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
   });
 
+  describe("reading a row", () => {
+    const error = {
+      id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    };
+    const errorProps = (onHideWorkspaceError = vi.fn()) => ({
+      workspaceErrors: [error, { ...error, id: "e2", message: "dohc could not search this workspace.", atMs: 2 }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError,
+    });
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      resetOrphanedDrafts();
+    });
+
+    it("reads a row the pointer rests on, not one it crosses", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("2");
+
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      fireEvent.pointerLeave(screen.getByTestId("notice-e1"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e2"));
+      act(() => vi.advanceTimersByTime(599));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e2");
+      expect(screen.queryByTestId("notice-e2-unread")).toBeNull();
+      expect(screen.getByTestId("notice-e1-unread").textContent).toBe("Unread");
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+      // Reading changes nothing else: the row and its Try again stay.
+      expect(within(screen.getByTestId("notice-e2")).getByRole("button", { name: "Try again" })).toBeTruthy();
+    });
+
+    it("reads a row keyboard focus rests on", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // Moving within the row keeps its rest going.
+      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
+      act(() => vi.advanceTimersByTime(300));
+      expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
+    });
+
+    it("reads nothing once the panel closes mid-rest", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 2 unread");
+    });
+
+    it("reads nothing when the rested row goes away and returns", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("notice-e1").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // A removed row gets no blur, so its rest must stop another way.
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      act(() => vi.advanceTimersByTime(200));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("marks this computer's rows read with Mark all read, and a row that returns is unread again", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+      expect(onHideWorkspaceError.mock.calls).toEqual([["e2"], ["e1"]]);
+      expect(screen.queryByTestId("notice-center-count")).toBeNull();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+      expect(screen.getByTestId("notice-e1")).toBeTruthy();
+
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("reads a row's words as they are when the rest ends", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      const [, second] = errorProps().workspaceErrors;
+      rerender(noticeElement({
+        ...errorProps(onHideWorkspaceError),
+        workspaceErrors: [{ ...error, message: "dohc could not save Trip/day-3.md." }, second!],
+      }));
+      act(() => vi.advanceTimersByTime(300));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e1");
+      expect(screen.queryByTestId("notice-e1-unread")).toBeNull();
+    });
+
+    it("reads a row once when the pointer and focus both rest on it", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a")], onReadSentNotice });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(100));
+      fireEvent.pointerEnter(screen.getByTestId("sent-notice-a"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onReadSentNotice).toHaveBeenCalledOnce();
+    });
+
+    it("keeps an updater error's toast closed once its row is read", () => {
+      renderNotices({ onOpenSettings: vi.fn() });
+      act(() => pushUpdate?.({
+        status: "error",
+        message: "dohc could not check for updates. Try again.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: true,
+        canInstall: false,
+      }));
+      expect(screen.getByTestId("update-toast")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-update-error"));
+      act(() => vi.advanceTimersByTime(600));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("update-toast")).toBeNull();
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-update-error")).toBeTruthy();
+    });
+
+    it("counts a different set-aside edit as unread, even at the same count", async () => {
+      captureOrphanedDraft("ws-status-test", "a.md", "Kept!");
+      renderNotices();
+      await act(async () => {});
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-set-aside-edits"));
+      act(() => vi.advanceTimersByTime(600));
+      expect(screen.queryByTestId("notice-set-aside-edits-unread")).toBeNull();
+
+      await act(async () => {
+        resetOrphanedDrafts();
+        captureOrphanedDraft("ws-status-test", "b.md", "Kept too!");
+      });
+      expect(screen.getByTestId("notice-set-aside-edits-unread")).toBeTruthy();
+    });
+
+    it("opens clipped text in place", () => {
+      // jsdom lays nothing out; make every text box report more than it shows.
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const more = screen.getByTestId("notice-e1-more");
+      expect(more.textContent).toBe("Show more");
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      expect(document.getElementById(more.getAttribute("aria-controls") ?? "")?.textContent).toBe(error.message);
+
+      fireEvent.click(more);
+      expect(more.textContent).toBe("Show less");
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.click(more);
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+
+      // A click on the clipped text opens it too; the second click of a double click does not count.
+      fireEvent.click(screen.getByText(error.message), { detail: 2 });
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(screen.getByText(error.message), { detail: 1 });
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("offers Show more only for clipped text", () => {
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(32);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-e1-more")).toBeNull();
+    });
+
+    it("keeps Show more while the text is hidden", () => {
+      const resized = new Set<() => void>();
+      vi.stubGlobal("ResizeObserver", class {
+        constructor(private readonly callback: () => void) {}
+        observe() { resized.add(this.callback); }
+        disconnect() { resized.delete(this.callback); }
+      });
+      const scroll = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      const client = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
+
+      // Hidden text lays out at no height; it is not text that fits.
+      scroll.mockReturnValue(0);
+      client.mockReturnValue(0);
+      act(() => resized.forEach((callback) => callback()));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
+    });
+  });
+
   it("shows each sender's shape and says who sent it", async () => {
     renderNotices({
       sentNotices: [
@@ -1965,6 +2204,64 @@ describe("notices sent to you", () => {
     expect(shape("automation")?.getAttribute("class")).not.toMatch(/rounded|border/);
     expect(screen.getByTestId("sent-notice-automation").textContent).toContain("From an automation");
     expect(screen.getByTestId("sent-notice-agent").textContent).toContain("From an agent");
+  });
+
+  describe("an agent run that didn't start", () => {
+    const reason = "Couldn't find claude on PATH. Use its full path in the runner command.";
+    const agentRun = (noticeId: string, title: string, body: string) =>
+      sentRow(noticeId, { senderKind: "agent", kind: "agent-run", title, body });
+    const notStarted = agentRun("s", "Your agent's run failed to start", reason);
+    const finished = agentRun("f", "Your agent finished", "");
+    const copiedDetails = async () =>
+      (await navigator.clipboard.readText()).split("\n").find((line) => line.startsWith("Details: "));
+
+    it("shows why in a toast that stays until closed, with Copy beside it", () => {
+      vi.useFakeTimers();
+      try {
+        const onHideSentNoticeToast = vi.fn();
+        renderNotices({ sentNotices: [notStarted], sentNoticeToast: notStarted, onHideSentNoticeToast });
+        const toast = screen.getByTestId("sent-notice-toast");
+        expect(toast.getAttribute("role")).toBe("alert");
+        expect(screen.getByTestId("sent-notice-toast-body").textContent).toBe(reason);
+        expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+        act(() => vi.advanceTimersByTime(60_000));
+        expect(onHideSentNoticeToast).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a finished run's toast fading, with no reason or Copy", () => {
+      vi.useFakeTimers();
+      try {
+        const onHideSentNoticeToast = vi.fn();
+        renderNotices({ sentNotices: [finished], sentNoticeToast: finished, onHideSentNoticeToast });
+        expect(screen.getByTestId("sent-notice-toast").getAttribute("role")).toBe("status");
+        expect(screen.queryByTestId("sent-notice-toast-body")).toBeNull();
+        expect(screen.queryByTestId("sent-notice-toast-copy")).toBeNull();
+        act(() => vi.advanceTimersByTime(6_000));
+        expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("copies the whole reason the row and toast show, even near the length limit in emoji", async () => {
+      const long = agentRun("e", "Your agent's run failed to start", "🙂".repeat(NOTICE_BODY_MAX_CHARS - 1));
+      renderNotices({ sentNotices: [long, finished], sentNoticeToast: long });
+      const body = screen.getByTestId("sent-notice-toast-body");
+      const shown = body.textContent;
+      expect(shown).toBe(long.notice.body);
+      // About four lines, then it scrolls, so the title and controls stay in view.
+      expect(body.className.split(" ")).toEqual(expect.arrayContaining(["max-h-[5.5em]", "overflow-y-auto"]));
+      await userEvent.click(screen.getByTestId("sent-notice-toast-copy"));
+      expect(await copiedDetails()).toBe(`Details: ${shown}`);
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("sent-notice-e").textContent).toContain(shown);
+      await userEvent.click(screen.getByTestId("sent-notice-e-copy"));
+      expect(await copiedDetails()).toBe(`Details: ${shown}`);
+      expect(screen.queryByTestId("sent-notice-f-copy")).toBeNull();
+    });
   });
 
   it("names the Collection folder of a notice from another workspace", async () => {
@@ -2276,6 +2573,51 @@ describe("notices sent to you", () => {
       expect(onHideSentNoticeToast).not.toHaveBeenCalled();
       act(() => vi.advanceTimersByTime(1));
       expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+    });
+
+    // Something finished fades, but not while the person reads it.
+    it("holds a success toast while it is hovered or focused", () => {
+      vi.useFakeTimers();
+      const onHideWorkspaceError = vi.fn();
+      renderNotices({
+        workspaceErrors: [{
+          id: "s1", tone: "success", message: "Moved 4 files to Archived", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+        onHideWorkspaceError,
+      });
+      const toast = screen.getByTestId("workspace-shell-notice");
+      fireEvent.pointerEnter(toast);
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      fireEvent.pointerLeave(toast);
+      act(() => within(toast).getByRole("button", { name: "Dismiss workspace notice" }).focus());
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => (document.activeElement as HTMLElement).blur());
+      act(() => vi.advanceTimersByTime(5_999));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledWith("s1");
+    });
+
+    // A list clamps by whole entries, so none is cut in half. Its count is
+    // true only beside the whole list, so it waits for Show more.
+    it("shows a list's first 3 entries whole, and its count only with the rest", async () => {
+      renderNotices({
+        workspaceErrors: [{
+          id: "e1", title: "250 files weren't imported", message: "a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.",
+          lastLine: "246 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+      });
+      const toast = screen.getByTestId("workspace-shell-error");
+      const body = () => toast.querySelector("p")!;
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.");
+      expect(body().className).not.toContain("line-clamp");
+      expect(within(toast).queryByText("246 more weren't imported.")).toBeNull();
+
+      await userEvent.click(within(toast).getByTestId("workspace-shell-toast-more"));
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.");
+      within(toast).getByText("246 more weren't imported.");
     });
 
     it("opens from the toast or closes it", async () => {

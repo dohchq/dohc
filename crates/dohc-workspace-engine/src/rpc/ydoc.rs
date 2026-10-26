@@ -4,6 +4,8 @@ use crate::events::emit_automation_claimed;
 use crate::events::emit_record_events;
 use crate::lock;
 use crate::rpc::collections::collection_in_band_cap;
+use crate::rpc::dispatch::initial_capture_phase_requires_fence;
+use crate::rpc::error::initial_capture_degraded;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::error::map_owner_outbox;
 use crate::rpc::error::map_runtime;
@@ -82,7 +84,9 @@ pub(crate) struct YdocSession {
     author_settlement: AuthorSettlementQueue,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
-    /// until the session's first settle replaces it.
+    /// until the session's first settle replaces it. With no head, the empty
+    /// file's sha when the open found one or continues a document whose file
+    /// has existed.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -138,6 +142,21 @@ pub(super) struct YdocSessionView {
     pub(super) last_settled_sha: Option<String>,
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+}
+
+/// Whether each part of `path` is on disk under `root` with exactly that name.
+fn names_exactly(root: &std::path::Path, path: &str) -> bool {
+    let mut directory = root.to_path_buf();
+    for name in path.split('/') {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == name) {
+            return false;
+        }
+        directory.push(name);
+    }
+    true
 }
 
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
@@ -225,6 +244,16 @@ struct OwnerYDocOutboxQuarantineParams {
     reason: String,
     #[serde(default)]
     observed_binding: Option<dohc_engine_collab::LiveObjectBinding>,
+    /// Present when delivery received a terminal refusal of the head.
+    #[serde(default)]
+    refusal: Option<dohc_engine_collab::OwnerOutboxRefusal>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxRetryParams {
+    outbox_id: String,
+    binding: dohc_engine_collab::LiveObjectBinding,
 }
 
 #[derive(Deserialize)]
@@ -232,12 +261,20 @@ struct OwnerYDocOutboxQuarantineParams {
 struct YdocOpenParams {
     version_id: String,
     path: String,
+    /// The document this open continues. The open refuses when the path
+    /// names another object. With no head, settles may not create a file the
+    /// document had.
     #[serde(default)]
     expected_object_id: Option<String>,
     #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
+    /// The largest seed this client reads through `versionedText.readBlob`
+    /// when it is past the in-band cap. Without it, such a seed refuses the
+    /// open.
+    #[serde(default)]
+    seed_limit_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -271,6 +308,10 @@ struct YdocOpenResult {
     /// device seeding the same head originates the same base.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_client_id: Option<u32>,
+    /// Set instead of `seed_content` for a seed past the in-band cap: the
+    /// digest the client reads the seed by through `versionedText.readBlob`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_blob_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
 }
@@ -492,6 +533,20 @@ fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
 }
 
 impl EngineService {
+    /// The daemon's reconstruction permit. A rebuild takes it before its
+    /// writer command and moves it into a task that ends with that command,
+    /// so a caller that stops waiting never frees it early.
+    pub(super) async fn reconstruction_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        #[cfg(test)]
+        if self.reconstructions.available_permits() == 0 {
+            self.reconstruction_waits.notify_one();
+        }
+        Arc::clone(&self.reconstructions)
+            .acquire_owned()
+            .await
+            .expect("the reconstruction permit is never closed")
+    }
+
     async fn ydoc_editor_draft(
         &self,
         open: &Arc<OpenWorkspace>,
@@ -568,10 +623,19 @@ impl EngineService {
             binding: Option<dohc_engine_collab::LiveObjectBinding>,
             document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
             accepted_cursor: Option<i64>,
+            kept_snapshot: Option<String>,
         }
         let params: Params = parse(params)?;
+        // A release names its relay cut, a Try again only its kept edits.
         if (action == "release") != params.binding.is_some()
-            || (action == "release") != params.accepted_cursor.is_some()
+            || (action == "release")
+                != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
+            || params.kept_snapshot.as_deref().is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
@@ -608,6 +672,7 @@ impl EngineService {
                 params.binding,
                 params.document,
                 params.accepted_cursor,
+                params.kept_snapshot,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),
@@ -616,8 +681,11 @@ impl EngineService {
             .await
             .map_err(map_runtime)?
             .map_err(map_owner_outbox)?;
+        // A released row says whether its settlement wrote the file, so the
+        // desktop claims recovered edits only when they reached it.
+        let mut materialized = vec![false; rows.len()];
         if action == "release" {
-            for row in &rows {
+            for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
                     continue;
                 }
@@ -673,16 +741,26 @@ impl EngineService {
                         None,
                     )
                     .await
-                    .map_err(map_runtime)?;
+                    .map_err(map_runtime)?
+                    .settled();
                 if settled
-                    .settled()
+                    .as_ref()
                     .is_some_and(|s| s.collection_reconcile_required)
                 {
                     open.request_collection_reconcile();
                 }
+                materialized[index] = settled.is_some_and(|s| s.materialized);
             }
         }
-        Ok(json!({"stops":rows}))
+        let mut stops = json!(rows);
+        if action == "release"
+            && let Some(values) = stops.as_array_mut()
+        {
+            for (value, materialized) in values.iter_mut().zip(materialized) {
+                value["materialized"] = json!(materialized);
+            }
+        }
+        Ok(json!({"stops":stops}))
     }
 
     pub(super) async fn owner_ydoc_outbox_append(
@@ -763,22 +841,108 @@ impl EngineService {
                 "owner-outbox-page-exceeds-wire-limit",
             ));
         }
-        let open = self.open(handle.as_ref())?;
+        // An earlier store open for recovery has no workspace actor; its handle
+        // names the store, prepared once, and its identity. Until it is
+        // prepared, a read answers `preparing`. The read's lease moves into
+        // the worker, so the store stays open for recovery until the worker
+        // ends, even once this request is cancelled. An earlier store is never
+        // written, so its pages are read as they are, and a frozen queue whose
+        // recovery checkpoint was never built at its final cursor refuses the
+        // copy instead of answering a change forever.
+        enum Source {
+            Recovery(crate::rpc::configured_live_host::RecoveryRead),
+            Current(Arc<OpenWorkspace>),
+        }
+        use crate::rpc::configured_live_host::RecoveryPage;
+        let source = match self.recovery_read(handle.as_ref()).transpose()? {
+            Some(RecoveryPage::Preparing) => return Ok(json!({ "kind": "preparing" })),
+            Some(RecoveryPage::Read(read)) => Source::Recovery(read),
+            None => Source::Current(self.open(handle.as_ref())?),
+        };
         let cancellation = OperationCancellation::new(ctx);
-        let read = async move {
+        let token = cancellation.token();
+        let read_page = move |open: Arc<OpenWorkspace>, cursor: Option<_>, outbox_id: String| async move {
             tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)?;
+                let store =
+                    dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
-                    &params.outbox_id,
-                    params.cursor,
+                    &outbox_id,
+                    cursor,
                     max_bytes,
                 )
             })
             .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))
+        };
+        let read = async move {
+            let open = match source {
+                Source::Current(open) => open,
+                Source::Recovery(read) => {
+                    let (outbox_id, cursor) = (params.outbox_id, params.cursor);
+                    return tokio::task::spawn_blocking(move || {
+                        let page = dohc_engine_collab::read_pending_hosted_owner_outbox_page(
+                            crate::lock(&read.store).store(),
+                            &read.workspace_id,
+                            &read.identity,
+                            &outbox_id,
+                            cursor,
+                            max_bytes,
+                        );
+                        // Its store goes before its lease.
+                        drop(read);
+                        page
+                    })
+                    .await
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+                    .map_err(|error| match error {
+                        dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated => {
+                            WireError::new(
+                                ErrorCode::InvalidParams,
+                                "owner-outbox-recovery-checkpoint-unavailable",
+                            )
+                        }
+                        error => map_owner_outbox(error),
+                    });
+                }
+            };
+            let first = read_page(
+                open.clone(),
+                params.cursor.clone(),
+                params.outbox_id.clone(),
+            )
+            .await?;
+            if !matches!(
+                first,
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated)
+            ) {
+                return first.map_err(map_owner_outbox);
+            }
+            // A frozen lineage's recovery checkpoint is built on the writer, once per applied cursor.
+            let permit = self.reconstruction_permit().await;
+            let (actor, workspace_id, outbox_id) = (
+                open.actor.clone(),
+                open.workspace_id.clone(),
+                params.outbox_id.clone(),
+            );
+            tokio::spawn(async move {
+                let _permit = permit;
+                actor
+                    .owner_ydoc_outbox_prepare_recovery_checkpoint(workspace_id, outbox_id, token)
+                    .await
+            })
+            .await
             .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
-            .map_err(map_owner_outbox)
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+            match read_page(open, params.cursor, params.outbox_id).await? {
+                // Another acceptance moved the cursor meanwhile; the reader starts over.
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated) => {
+                    Ok(dohc_engine_collab::OwnerOutboxPageResult::ReadChanged)
+                }
+                page => page.map_err(map_owner_outbox),
+            }
         };
         let pending = tokio::select! {
             biased;
@@ -903,24 +1067,78 @@ impl EngineService {
             .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.quarantine (queued)")
             .await?;
         let open = self.open(Some(&handle))?;
-        open.actor
-            .owner_ydoc_outbox_quarantine(
-                open.workspace_id.clone(),
-                dohc_engine_collab::OwnerOutboxQuarantineInput {
-                    outbox_id: params.outbox_id,
-                    reason: params.reason,
-                    observed_binding: params.observed_binding,
-                },
-                now_ms()?,
-                cancellation.token(),
-            )
-            .await
+        let input = dohc_engine_collab::OwnerOutboxQuarantineInput {
+            outbox_id: params.outbox_id,
+            reason: params.reason,
+            observed_binding: params.observed_binding,
+        };
+        let workspace_id = open.workspace_id.clone();
+        let outcome = match params.refusal {
+            Some(refusal) => {
+                open.actor
+                    .owner_ydoc_outbox_record_refusal(
+                        workspace_id,
+                        input,
+                        refusal,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+            None => {
+                open.actor
+                    .owner_ydoc_outbox_quarantine(
+                        workspace_id,
+                        input,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+        };
+        outcome
             .map_err(|error| match error {
                 RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.quarantine"),
                 error => map_runtime(error),
             })?
             .map_err(map_owner_outbox)?;
         Ok(json!({ "quarantined": true }))
+    }
+
+    /// The owner's Try again for one quarantined outbox. The workspace handle
+    /// is the caller's authority; the engine checks the binding generation.
+    pub(super) async fn owner_ydoc_outbox_retry(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxRetryParams = parse(params)?;
+        validate_owner_outbox_wire_binding(&params.binding)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.retry (queued)")
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let delivery_id = open
+            .actor
+            .owner_ydoc_outbox_retry(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxRetryInput {
+                    outbox_id: params.outbox_id,
+                    binding: params.binding,
+                },
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.retry"),
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({ "retryDeliveryId": delivery_id }))
     }
 
     pub(super) async fn ydoc_open(
@@ -983,7 +1201,7 @@ impl EngineService {
         }
         let capture_phase = lock(&open.capture)
             .as_ref()
-            .map(|driver| driver.status().snapshot().phase)
+            .map(|driver| driver.status_snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
         if probe.head_blob_sha256.is_none() && capture_phase != capture_driver::CapturePhase::Ready
         {
@@ -1008,6 +1226,15 @@ impl EngineService {
                 // its head yet. Refuse before lease acquisition; otherwise a new
                 // absent-lineage session can block capture and turn disk bytes
                 // into a misleading uncaptured-artifact failure.
+                if !initial_capture_phase_requires_fence(capture_phase) {
+                    // Degraded: nothing will wake a caller that waits.
+                    return Err(initial_capture_degraded());
+                }
+                // A running import captures the path next, and its progress
+                // wake tells the caller to open again.
+                if let Some(driver) = lock(&open.capture).as_ref() {
+                    driver.request_import_priority(&params.path);
+                }
                 return Err(initial_capture_updating());
             }
         }
@@ -1058,6 +1285,48 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
+        // With no head, the session expects an empty file when it finds New
+        // File's empty file, or when it continues a document whose file has
+        // existed. Its settles may then replace the file but not create it, so
+        // a file deleted outside dohc stays deleted. An open continues the
+        // document when it names the object, as the desktop's replacement
+        // after a restart does, or resumes the document's Y.Doc state. Any
+        // other open may start a new document at a path whose file was
+        // deleted: it expects nothing, so its first settle creates the file.
+        let open_head_sha = match state.head_blob_sha256.clone() {
+            Some(head) => Some(head),
+            None => {
+                let root = open.root.clone();
+                let path = params.path.clone();
+                // Whether the file is there, whether it is empty, and whether
+                // it is there under exactly this path. A case-insensitive
+                // volume also finds it under another spelling, which names
+                // another document.
+                let file = tokio::task::spawn_blocking(move || {
+                    let metadata = std::fs::symlink_metadata(root.join(&path))
+                        .ok()
+                        .filter(|metadata| metadata.file_type().is_file())?;
+                    Some((metadata.len() == 0, names_exactly(&root, &path)))
+                })
+                .await
+                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                let empty = file.is_some_and(|(empty, _)| empty);
+                let seen = file.is_some_and(|(_, exact)| exact);
+                let continues = params.expected_object_id.is_some() || state.lineage_existing;
+                // A known limit: with no head, the object comes from the path,
+                // so an earlier file at this path counts for a new document
+                // there. Journaled and reopened before its first save, that
+                // document is refused like a deleted file, and Save it again
+                // writes it.
+                let existed = (seen || continues)
+                    && open
+                        .actor
+                        .ydoc_file_has_existed(state.key.clone(), seen)
+                        .await
+                        .map_err(map_runtime)?;
+                (empty || (continues && existed)).then(|| dohc_engine_storage::hex_sha256(b""))
+            }
+        };
         // The read committed the document's pulled edits, so the open runs to
         // its answer, its blob included. If the blob cannot have its egress
         // budget by the deadline, the open answers OVERLOADED without a
@@ -1124,6 +1393,24 @@ impl EngineService {
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
+        // A seed past the in-band cap cannot cross the wire as one string. The
+        // client reads it as a blob when it accepts a seed that large. A
+        // client that can't seed can't edit, so a larger seed refuses the open.
+        let (seed_content, seed_blob_sha256) = match state.seed_content {
+            Some(seed) if seed.len() > MAX_INBAND_CONTENT_BYTES => {
+                if params
+                    .seed_limit_bytes
+                    .is_none_or(|limit| seed.len() > limit)
+                {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        "ydoc-seed-too-large",
+                    ));
+                }
+                (None, Some(dohc_engine_storage::hex_sha256(seed.as_bytes())))
+            }
+            seed => (seed, None),
+        };
         let result = YdocOpenResult {
             owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
@@ -1143,23 +1430,9 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_content: {
-                // A seed past the in-band cap cannot cross the wire as one
-                // string, and a client that can't seed can't edit: refuse the
-                // open outright (blob streaming for large bodies is RPC-D).
-                if state
-                    .seed_content
-                    .as_ref()
-                    .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
-                {
-                    return Err(WireError::new(
-                        ErrorCode::InvalidParams,
-                        "ydoc-seed-exceeds-inband-cap",
-                    ));
-                }
-                state.seed_content
-            },
+            seed_content,
             seed_client_id: state.seed_client_id,
+            seed_blob_sha256,
             artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
                 state
                     .artifact_assets
@@ -1194,7 +1467,7 @@ impl EngineService {
                 first_update_pending: !state.lineage_existing,
                 author_settlement: AuthorSettlementQueue::default(),
                 last_settled_sha: None,
-                open_head_sha: state.head_blob_sha256,
+                open_head_sha,
                 owner_seed_source: state.owner_seed_source,
                 _lease: lease,
             },
@@ -1601,13 +1874,16 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
-        self.ydoc_settle_inner(
-            &cancellation,
-            handle.as_ref(),
-            &params.session_id,
-            params.summary.as_deref(),
-        )
-        .await
+        let settled = self
+            .ydoc_settle_inner(
+                &cancellation,
+                handle.as_ref(),
+                &params.session_id,
+                params.summary.as_deref(),
+            )
+            .await?;
+        serde_json::to_value(settled)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     async fn ydoc_settle_inner(
@@ -1616,7 +1892,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
-    ) -> Result<Value, WireError> {
+    ) -> Result<YdocSettleResult, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
         let settled = open
             .actor
@@ -1659,7 +1935,7 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        serde_json::to_value(YdocSettleResult {
+        Ok(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
             content: settled.content,
@@ -1671,7 +1947,6 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -2035,6 +2310,17 @@ mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_matches_only_its_exact_spelling_on_disk() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        std::fs::create_dir(scratch.path().join("notes")).expect("folder");
+        std::fs::write(scratch.path().join("notes/caseOnly.md"), b"").expect("file");
+        assert!(super::names_exactly(scratch.path(), "notes/caseOnly.md"));
+        for other in ["notes/CASEONLY.md", "Notes/caseOnly.md", "notes/missing.md"] {
+            assert!(!super::names_exactly(scratch.path(), other), "{other}");
+        }
+    }
+
     #[test]
     fn desktop_automation_drafts_do_not_require_server_declarations() {
         let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
@@ -3266,8 +3552,8 @@ mod tests {
             };
             let doc = dohc_engine_collab::Ydoc::wire();
             doc.plaintext_insert(0, "before");
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let base = store
                 .put_binary_blob(&doc.encode_full_state())
                 .expect("base blob");
@@ -3294,8 +3580,8 @@ mod tests {
             } else {
                 None
             };
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let update = store
                 .put_binary_blob(&doc.plaintext_insert(6, " parked"))
                 .expect("update blob");
@@ -3312,7 +3598,7 @@ mod tests {
                 _scratch: scratch,
                 service,
                 handle,
-                db_path: open.db_path.clone(),
+                db_path: open.actor.database_path().to_path_buf(),
                 session,
             };
             assert_eq!(parked.parked(), 1, "the pulled edit starts parked");
@@ -3543,7 +3829,12 @@ mod tests {
                 .expect("workspace open");
             let handle: WorkspaceHandle =
                 serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-            let db_path = service.open(Some(&handle)).expect("open").db_path.clone();
+            let db_path = service
+                .open(Some(&handle))
+                .expect("open")
+                .actor
+                .database_path()
+                .to_path_buf();
             let db = rusqlite::Connection::open(&db_path).expect("engine db");
             db.execute_batch(&format!(
                 "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \

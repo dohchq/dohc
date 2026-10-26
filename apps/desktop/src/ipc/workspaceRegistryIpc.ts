@@ -5,8 +5,10 @@ import {
 } from "@dohc/workspace-core";
 import type {
   CreatedWorkspace,
-  createWorkspaceFolder,
+  createWorkspaceFolderWithFreshness,
+  FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
+import type { Computer } from "../workspaces/syncHistory";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -82,7 +84,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   effectiveHome(): string;
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[], event: Event): WorkspaceSummary[];
-  createWorkspaceFolder: typeof createWorkspaceFolder;
+  createWorkspaceFolder: typeof createWorkspaceFolderWithFreshness;
+  // This installation, which runs a new workspace's schedules.
+  thisComputer(): Computer;
   // Retires every open binding for the workspace, then removes its registry
   // row. The folder on disk is left alone.
   forgetWorkspace(workspaceId: string): Promise<void>;
@@ -91,6 +95,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // New workspace's one default: a workspace made from nothing starts
+  // trusted, in the folder that creation made. Every other way in starts in
+  // Restricted Mode.
+  trustNewWorkspace(workspace: CreatedWorkspace, fresh: FreshWorkspaceFolder): Promise<unknown>;
   refreshNativeWorkspaceSurfaces(): void;
   desktopMarks: {
     mark(name: string): void;
@@ -107,12 +115,14 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    thisComputer,
     forgetWorkspace,
     showItemInFolder,
     openWorkspaceWindow,
     openWorkspaceManager,
     closeWindowOf,
     registerPhysicalWorkspace,
+    trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
   } = dependencies;
@@ -165,9 +175,12 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     assertTrustedSender(event);
     const input = CreateLocalWorkspacePayload.parse(payload);
     desktopMarks.mark("workspace-create-start");
-    const created = await createWorkspaceFolder({
+    // A folder that held files, or a manifest, is an existing folder,
+    // whichever button opened it: creation says whether it made this one.
+    const { workspace: created, fresh } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      computer: thisComputer(),
       kind: input.kind,
     });
     desktopMarks.measureSince("workspace-create", "workspace-create-start");
@@ -175,6 +188,13 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
+    // Before registering, so no window shows the workspace before its trust.
+    // Restricted Mode is what a failed write leaves, and one click undoes it.
+    if (fresh) {
+      await trustNewWorkspace(created, fresh).catch((error: unknown) => {
+        console.warn("[desktop] could not trust a new workspace", error);
+      });
+    }
     registerPhysicalWorkspace(created);
     refreshNativeWorkspaceSurfaces();
     return summary;
@@ -185,9 +205,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const input = AttachWorkspaceFolderPayload.parse(payload);
     // Adopts an existing dohc workspace (manifest identity preserved) or
     // turns the folder into a fresh personal workspace in place.
-    const attached = await createWorkspaceFolder({
+    const { workspace: attached } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      computer: thisComputer(),
       kind: "personal",
     });
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's

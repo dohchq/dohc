@@ -2227,7 +2227,7 @@ it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the displa
     const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
     const listed = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => {
       const row = SHORTCUTS[id];
-      return row.owner === "editor" && (!("platform" in row) || row.platform === platform);
+      return row.owner === "editor" && (!("platforms" in row) || (row.platforms as readonly string[]).includes(platform));
     }).flatMap((id) => shortcutAccelerators(id, platform).map((key) => key.toLowerCase())).sort();
     expect(listed).toEqual(mounted);
     if (platform === "darwin") {

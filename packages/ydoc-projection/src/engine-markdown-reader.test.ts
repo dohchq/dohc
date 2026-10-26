@@ -1,12 +1,13 @@
 import {createHash} from 'node:crypto'
-import {expect, it} from 'vitest'
+import {expect, it, vi} from 'vitest'
 import * as Y from 'yjs'
 import {createEngineMarkdownReader} from './engine-markdown-reader.js'
 import {getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown} from './import-export.js'
-import {yXmlFragmentToProseMirrorRootNode} from 'y-prosemirror'
+import {updateYFragment, yXmlFragmentToProseMirrorRootNode} from 'y-prosemirror'
 import {forgedSources} from './artifact-witness.fixture.js'
 import rows from './engine-markdown-reader.fixture.json'
 import {resolveMarkdownSource} from './artifact-markdown.js'
+import {createLiveMarkdownJournalValidator} from './liveDocumentValidation.js'
 
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000}
@@ -22,6 +23,45 @@ const reader = {
 }
 const document = {workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage'}
 const context = {document, currentPath: 'note.md'}
+
+it.each([
+  'Changed beside the list\n\n- parent\n  - child',
+  'A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child',
+])('constructs an exact native outside fold for %j', source => {
+  const base = markdownToYDoc('Before\n\n- parent\n  - child'), imported = markdownToYDoc(source)
+  try {
+    const result = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw Error(JSON.stringify(result))
+    Y.applyUpdate(base, result.delta)
+    expect(tree(base).eq(tree(imported))).toBe(true)
+    expect(yDocToMarkdown(base)).toBe(source)
+    expect([...base.getMap('meta').keys()].filter(key => key.startsWith('dohcMarkdownSource'))).toEqual([])
+    if (source.includes('**bold**')) {
+      const json = JSON.stringify(tree(base).toJSON())
+      for (const mark of ['bold', 'italic', 'link']) expect(json).toContain(`"type":"${mark}"`)
+    }
+  } finally {base.destroy(); imported.destroy()}
+})
+
+it.each(['* parent\n  * child', '- parent\n    - child', '__bold__',
+  '- first\ncontinuation', '- parent\n  - child\n', '- parent\r\n  - child\r\n'])
+('refuses a non-exact native outside fold for %j', source => {
+  const base = markdownToYDoc('Before')
+  try {
+    expect(reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true}))
+      .toMatchObject({kind: 'refused', reason: 'reading-mismatch'})
+  } finally {base.destroy()}
+})
+
+it('leaves reader-built notes out of native outside folds', () => {
+  const base = markdownToYDoc('Before')
+  try {
+    base.getMap('meta').set('dohcMarkdownSourceReader', 1)
+    expect(reader.construct({...context, source: 'After', checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true}))
+      .toMatchObject({kind: 'refused', reason: 'reading-mismatch'})
+  } finally {base.destroy()}
+})
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 function bind(doc: Y.Doc, source: string) {
   const meta = doc.getMap('meta')
@@ -30,6 +70,121 @@ function bind(doc: Y.Doc, source: string) {
   meta.set('dohcMarkdownSourceProjectionSha256', sha(yDocToMarkdown(doc)))
 }
 function tree(doc: Y.Doc) {return yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema())}
+
+it('marks only engine construction as reader-owned source', () => {
+  const source = '- parent\n  - child\n', doc = markdownToYDoc(source)
+  try {
+    expect(doc.getMap('meta').has('dohcMarkdownSourceReader')).toBe(false)
+    const result = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw Error(JSON.stringify(result))
+    Y.applyUpdate(doc, result.delta)
+    expect(doc.getMap('meta').get('dohcMarkdownSourceReader')).toBe(1)
+  } finally {doc.destroy()}
+})
+
+it('positively proves body expiry while metadata-only staleness still refuses', () => {
+  const source = '- parent\n  - child\n', doc = markdownToYDoc(source)
+  const edited = markdownToYDoc('- changed\n  - child\n')
+  try {
+    bind(doc, source)
+    doc.getMap('meta').set('dohcMarkdownSourceReader', 1)
+    // Exercise a body edit that retains all source metadata.
+    updateYFragment(doc, doc.getXmlFragment('body'), tree(edited), {mapping: new Map(), isOMark: new Map()})
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    expect(reader.prove({...context, source, checkpoint}))
+      .toMatchObject({kind: 'expired', sourceSha256: sha(source), projectionSha256: sha(yDocToMarkdown(doc))})
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('forged'))
+    expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy(); edited.destroy()}
+})
+
+it('strictly proves canonical continuation while fresh unanchored source still holds', () => {
+  const source = '- <https://example.com>\n  - child\n', doc = markdownToYDoc('Earlier')
+  const edited = markdownToYDoc(source + '\nBody edit\n'), original = markdownToYDoc(source)
+  try {
+    const made = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)})
+    if (made.kind !== 'accepted') throw Error(JSON.stringify(made))
+    Y.applyUpdate(doc, made.delta)
+    updateYFragment(doc, doc.getXmlFragment('body'), tree(edited), {mapping: new Map(), isOMark: new Map()})
+    const settled = yDocToMarkdown(doc)
+    expect(reader.prove({...context, source: settled, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('expired')
+    doc.getMap('meta').set('unknown', 'hidden state')
+    expect(reader.prove({...context, source: settled, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+    doc.getMap('meta').delete('unknown')
+    updateYFragment(doc, doc.getXmlFragment('body'), tree(original), {mapping: new Map(), isOMark: new Map()})
+    expect(reader.prove({...context, source: settled, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy(); edited.destroy(); original.destroy()}
+})
+
+it('preserves engine epoch metadata without widening the ordinary journal', () => {
+  const source = '- **parent**\n  - child & text\n', doc = markdownToYDoc(source)
+  try {
+    bind(doc, source)
+    doc.getMap('meta').set('dohcLineageEpoch', 'e'.repeat(64))
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    expect(reader.prove({...context, source, checkpoint}).kind).toBe('accepted')
+    expect(createLiveMarkdownJournalValidator(policy)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])}).kind).toBe('refused')
+    const result = reader.construct({...context, source, checkpoint})
+    expect(result.kind).toBe('accepted')
+    if (result.kind === 'accepted') Y.applyUpdate(doc, result.delta)
+    expect(doc.getMap('meta').get('dohcLineageEpoch')).toBe('e'.repeat(64))
+  } finally {doc.destroy()}
+})
+
+it.each(['epoch', 'E'.repeat(64), '', 1, null])('refuses an invalid engine epoch: %s', epoch => {
+  const doc = markdownToYDoc('Body')
+  try {
+    bind(doc, 'Body'); doc.getMap('meta').set('dohcLineageEpoch', epoch)
+    expect(reader.prove({...context, source: 'Body', checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy()}
+})
+
+it.each([new Error('journal failure'), new RangeError('journal allocation failed')])(
+  'propagates unexpected errors from strict journal validation: %s', error => {
+    const doc = markdownToYDoc('Body')
+    try {
+      bind(doc, 'Body')
+      const checkpoint = Y.encodeStateAsUpdate(doc), on = Y.Doc.prototype.on
+      const trap = vi.spyOn(Y.Doc.prototype, 'on').mockImplementation(function (this: Y.Doc, event, listener) {
+        if (event === 'beforeTransaction') throw error
+        return on.call(this, event, listener)
+      })
+      try {expect(() => reader.prove({...context, source: 'Body', checkpoint})).toThrow(error)}
+      finally {trap.mockRestore()}
+    } finally {doc.destroy()}
+  },
+)
+
+it('constructs and proves an empty source against a version-1 checkpoint', () => {
+  const doc = markdownToYDoc('Earlier')
+  try {
+    const result = reader.construct({...context, source: '', checkpoint: Y.encodeStateAsUpdate(doc)})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw Error(JSON.stringify(result))
+    Y.applyUpdate(doc, result.delta)
+    expect(reader.prove({...context, source: '', checkpoint: Y.encodeStateAsUpdate(doc)}))
+      .toMatchObject({kind: 'accepted', canonical: '', sourceSha256: sha(''), sourceByteLength: 0})
+  } finally {doc.destroy()}
+})
+
+it.each([new RangeError('allocation failed'), new Error('unexpected parser failure')])(
+  'propagates unexpected errors to the process owner: %s', error => {
+    const doc = markdownToYDoc('Body')
+    const source = new TextEncoder().encode('Body')
+    try {
+      bind(doc, 'Body')
+      const checkpoint = Y.encodeStateAsUpdate(doc)
+      const trap = vi.spyOn(Uint8Array.prototype, 'slice').mockImplementation(() => {throw error})
+      // Input access can fail just like parsing or allocation. It must not become a schema verdict.
+      const input = {...context, checkpoint, get source() {return source.slice()}}
+      try {
+        expect(() => bytesReader.construct(input)).toThrow(error)
+        expect(() => bytesReader.prove(input)).toThrow(error)
+      } finally {trap.mockRestore()}
+    } finally {doc.destroy()}
+  },
+)
 
 it('owns source bytes before inspecting the checkpoint', () => {
   const base = markdownToYDoc('Earlier'), source = new TextEncoder().encode('- parent\n  - child\n')
@@ -48,6 +203,18 @@ it('refuses a stale projection hash when source differs from canonical output', 
     bind(doc, source)
     doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('stale'))
     expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy()}
+})
+
+it('does not treat prove success as witness freshness when source equals canonical output', () => {
+  const doc = markdownToYDoc('- **parent**\n  - child & text\n')
+  try {
+    const source = yDocToMarkdown(doc)
+    bind(doc, source)
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('stale'))
+    expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}))
+      .toMatchObject({kind: 'accepted', projectionSha256: sha(source)})
+    expect(doc.getMap('meta').get('dohcMarkdownSourceProjectionSha256')).not.toBe(sha(source))
   } finally {doc.destroy()}
 })
 
@@ -79,9 +246,13 @@ it('owns checkpoint bytes before reading document metadata', () => {
 it.each(rows)('constructs and replays the desktop reading: $name', row => {
   const base = markdownToYDoc(row.earlier, {clientID: 1234})
   const checkpoint = Y.encodeStateAsUpdate(base)
+  if (!row.accepted) {
+    try {expect(reader.construct({...context, source: row.source, checkpoint})).toEqual({kind: 'refused', reason: 'invalid-schema'})}
+    finally {base.destroy()}
+    return
+  }
   const result = reader.construct({...context, source: row.source, checkpoint})
-  if (!row.accepted) expect(result).toEqual({kind: 'refused', reason: 'invalid-schema'})
-  else {
+  {
     expect(result.kind).toBe('accepted')
     if (result.kind !== 'accepted') throw new Error(JSON.stringify(result))
     const replay = new Y.Doc({gc: false}), imported = markdownToYDoc(row.source)
@@ -105,6 +276,36 @@ it.each(rows)('constructs and replays the desktop reading: $name', row => {
   expect(Y.encodeStateAsUpdate(base)).toEqual(checkpoint)
   base.destroy()
 })
+
+it('refuses schema check failures in the reader and its strict journal', () => {
+  const source = '[`code`](https://example.com)', doc = markdownToYDoc(source)
+  try {
+    bind(doc, source)
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    expect(reader.prove({...context, source, checkpoint}))
+      .toEqual({kind: 'refused', reason: 'invalid-schema'})
+    for (const engineReader of [true, false]) {
+      expect(createLiveMarkdownJournalValidator(policy, engineReader)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])}))
+        .toMatchObject({kind: 'refused', reason: 'invalid-schema'})
+    }
+  } finally {doc.destroy()}
+})
+
+it.each([new RangeError('Array buffer allocation failed'), new RangeError('Maximum call stack size exceeded'), new Error('unexpected check failure')])(
+  'keeps resource and unexpected check failures fatal: %s', error => {
+    const doc = markdownToYDoc('Body')
+    bind(doc, 'Body')
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    const trap = vi.spyOn(Object.getPrototypeOf(tree(doc)), 'check').mockImplementation(() => {throw error})
+    try {
+      expect(() => reader.prove({...context, source: 'Body', checkpoint})).toThrow(error)
+      // The relay's journal too: a validator failure retries an owner's edit instead of refusing it.
+      for (const engineReader of [true, false]) {
+        expect(() => createLiveMarkdownJournalValidator(policy, engineReader)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])})).toThrow(error)
+      }
+    } finally {trap.mockRestore(); doc.destroy()}
+  },
+)
 
 it.each(forgedSources)('requires the actual snapshot for the #2116 vector: %s', source => {
   const doc = markdownToYDoc(source)
@@ -200,7 +401,7 @@ it('checks bounds and well-formed source before decoding a checkpoint', () => {
 })
 
 it('refuses malformed checkpoints and unknown public metadata', () => {
-  expect(reader.construct({...context, checkpoint: new Uint8Array([255]), source: 'text'}).kind).toBe('refused')
+  expect(() => reader.construct({...context, checkpoint: new Uint8Array([255]), source: 'text'})).toThrow()
   const doc = markdownToYDoc('- parent\n  - child\n')
   try {
     doc.getMap('meta').set('unrecognized', true)

@@ -186,10 +186,10 @@ describe("account received observations", () => {
     h.list.mockImplementationOnce(() => answer.promise);
     const first = a.refresh();
     const second = a.refresh();
-    expect(second).toBe(first);
+    expect(h.list).toHaveBeenCalledOnce();
     h.advance(500);
     answer.resolve(inventory());
-    await first;
+    expect(await Promise.all([first, second])).toEqual(["requested", "joined"]);
     expect(a.observation()).toMatchObject({ checkedAtMs: 100, freshness: "fresh" });
     expect(h.onLive).toHaveBeenCalledOnce();
     expect(h.store.read(h.scope())?.listedAtMs).toBe(100);

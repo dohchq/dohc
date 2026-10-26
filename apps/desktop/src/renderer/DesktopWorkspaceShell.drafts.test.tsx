@@ -2257,6 +2257,39 @@ describe("set-aside draft recovery", () => {
     expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([first.recordId, second.recordId]);
   });
 
+  it("follows main's drafts while the workspace is open: a new one shows, a rewrite replaces its text, and a removal removes its row", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const first = {recordId: "a".repeat(64), path: "notes/gone.md", objectId: "object", text: "Typed before the delete", updateBase64: "AAA="};
+    const rewritten = {...first, recordId: "b".repeat(64), text: "Typed after the delete", updateBase64: "AAE="};
+    bridge.listLiveDraftRecovery.mockResolvedValue([]);
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledOnce());
+    const copied = async () => {
+      await user.click(screen.getByTestId("recovery-list-copy"));
+      return await navigator.clipboard.readText();
+    };
+
+    // Another workspace's drafts are not this one's.
+    act(() => bridge.emitLiveDraftRecoveryChanged(OTHER_WORKSPACE.workspaceId));
+    bridge.listLiveDraftRecovery.mockResolvedValue([first]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    expect(await copied()).toBe(first.text);
+
+    bridge.listLiveDraftRecovery.mockResolvedValue([rewritten]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await waitFor(async () => expect(await copied()).toBe(rewritten.text));
+    expect(screen.getAllByTestId("recovery-list-row")).toHaveLength(1);
+
+    bridge.listLiveDraftRecovery.mockResolvedValue([]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(4);
+  });
+
   // Most tests capture a draft before the shell mounts, and the draft store
   // reads the platform from the bridge. `renderShell` replaces this stub.
   beforeEach(() => {

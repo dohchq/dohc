@@ -12,6 +12,7 @@ import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
+import { releaseChannelFromArgv } from "./updates/updateMachine";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -25,6 +26,7 @@ import type {
 import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
@@ -41,7 +43,9 @@ import {
   ExitRoundMessage,
   MenuCommand,
   CrashReportChangedEvent,
+  CollectionCopiesLeftChangedEvent,
   NoticesChangedEvent,
+  LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
   FolderAppAnswer,
   ShareHandoffStatus,
@@ -54,6 +58,9 @@ import {
   WorkspacePathOpenFailedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
+  collectionCopiesLeftOperations,
+  workspaceTrustOperations,
+  WorkspaceTrustChangedEvent,
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
@@ -65,6 +72,8 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  chatDispatchPauseOperations,
+  ChatDispatchPausedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
@@ -76,6 +85,7 @@ import {
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
   parseWorkspaceActivityEventForIpc,
+  databaseImportOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { operationBridge } from "./ipc/operationTable";
@@ -141,6 +151,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(sharedChannelOperations, invoke),
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
@@ -151,6 +162,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  releaseChannel: releaseChannelFromArgv(process.argv),
   insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"
@@ -213,8 +225,6 @@ const bridge: DohcDesktopBridge = {
     }
     return paths;
   },
-  readWorkspaceGraph: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
   readWorkspaceDatabase: (payload) =>
@@ -223,8 +233,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabasePage, payload),
   applyDatabaseEdit: (payload) =>
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
-  importToDatabase: (payload) =>
-    ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
+  ...operationBridge(databaseImportOperations, invoke),
   listSites: (payload: ListSitesPayload) =>
     ipcRenderer.invoke(CHANNELS.listSites, payload),
   getSitePackage: (payload: SitePackagePayload) =>
@@ -343,6 +352,12 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.usageRecordStopped, UsageRecordStoppedEvent, () => listener()),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
+  ...operationBridge(collectionCopiesLeftOperations, invoke),
+  onCollectionCopiesLeftChanged: (listener) =>
+    onEvent(CHANNELS.collectionCopiesLeftChanged, CollectionCopiesLeftChangedEvent, () => listener()),
+  ...operationBridge(workspaceTrustOperations, invoke),
+  onWorkspaceTrustChanged: (listener) =>
+    onEvent(CHANNELS.workspaceTrustChanged, WorkspaceTrustChangedEvent, listener),
   onAutomationHoldsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
@@ -531,6 +546,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(chatDispatchNoticeOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
+  onLiveDraftRecoveryChanged: (listener) =>
+    onEvent(CHANNELS.liveDraftRecoveryChanged, LiveDraftRecoveryChangedEvent, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>
@@ -538,6 +555,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentRunStateOperations, invoke),
   onAgentRunState: (listener) =>
     onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
+  ...operationBridge(chatDispatchPauseOperations, invoke),
+  onChatDispatchPaused: (listener) =>
+    onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

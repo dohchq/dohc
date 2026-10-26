@@ -1031,6 +1031,7 @@ impl VersionedTextStore<'_> {
                 &payload_hash,
                 0,
                 input.now_ms,
+                "versioned",
             )?;
             conflict.status = update.status;
             conflict.chosen_from = update.chosen_from;

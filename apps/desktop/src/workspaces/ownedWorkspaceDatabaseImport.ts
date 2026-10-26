@@ -11,7 +11,7 @@ export async function importOwnedWorkspaceDatabase(input: {
   databasePath: string;
   tableName: string;
   signal?: AbortSignal;
-}): Promise<{ path: string; tableName: string; rowCount: number }> {
+}): ReturnType<typeof importToDatabase> {
   const source = await createOwnedWorkspaceFileReader({
     workspace: input.workspace,
     files: input.files,

@@ -1,4 +1,4 @@
-import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { RegistryEntry } from "./registryStore";
 import type { ShareViewFiles } from "./shareViewFiles";
@@ -9,6 +9,13 @@ export function createWorkspaceLinksReader(
   files: () => ShareViewFiles,
 ) {
   return {
+    async edges(workspace: RegistryEntry, input: LinksEdgesInput): Promise<LinksEdgesResult> {
+      const page = shareViewIsPresent(workspace.shareView)
+        ? await files().linksEdges({ kind: "standalone", workspaceId: workspace.workspaceId }, input)
+        : await withAdapter(workspace, adapter => adapter.linkEdges(input));
+      if (!page) throw new Error("Workspace engine is unavailable.");
+      return workspace.shareMounts?.length ? { ...page, mountsCovered: false } : page;
+    },
     async incoming(workspace: RegistryEntry, input: LinksInInput): Promise<LinksInResult> {
       const page = shareViewIsPresent(workspace.shareView)
         ? await files().linksIn({ kind: "standalone", workspaceId: workspace.workspaceId }, input)

@@ -12,9 +12,11 @@ function fixture() {
     assertTrustedSender(event) { if (event.sender === "untrusted") throw new Error("Untrusted IPC sender."); },
     withActiveWorkspace: vi.fn(async () => { throw new Error("Unexpected outer workspace operation."); }),
   } satisfies OperationBoundary<{ sender: string }, never>;
-  registerOperations(boundary, datasetOperations, { dataset: handler });
+  const keep = vi.fn(async () => ({ kept: true }));
+  registerOperations(boundary, datasetOperations, { dataset: handler, keepCollectionsHere: keep });
   const invoke = (event: { sender: string }, payload: unknown) => listeners.get(datasetOperations.dataset.channel)!(event, payload);
-  return { handler, boundary, invoke };
+  const keepHere = (event: { sender: string }, payload: unknown) => listeners.get(datasetOperations.keepCollectionsHere.channel)!(event, payload);
+  return { handler, keep, boundary, invoke, keepHere };
 }
 
 it("refuses an untrusted sender before parsing or calling the dataset handler", async () => {
@@ -57,12 +59,13 @@ it("keeps workspace refusal inside the existing dataset handler", async () => {
   const hostForWorkspace = vi.fn(async () => { throw new Error("Unexpected dataset host."); });
   const handler = createDatasetHandler({
     withWorkspaceOperation, hostForWorkspace,
-    flushSourceCapture: async () => [],
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
     withAdapter: async () => { throw new Error("Unexpected source adapter."); },
     createSources: async () => {},
   });
   registerOperations(f.boundary, datasetOperations, {
     dataset: (request, { event }) => handler(event.sender, request),
+    keepCollectionsHere: f.keep,
   });
   await expect(f.invoke({ sender: "window" }, { action: "list", workspaceId: "elsewhere" }))
     .rejects.toThrow(refusal);
@@ -72,4 +75,13 @@ it("keeps workspace refusal inside the existing dataset handler", async () => {
   expect(work).toBeTypeOf("function");
   expect(hostForWorkspace).not.toHaveBeenCalled();
   expect(f.boundary.withActiveWorkspace).not.toHaveBeenCalled();
+});
+
+it("keeps a workspace's Collections here only inside the sender's open workspace", async () => {
+  const f = fixture();
+  await expect(f.keepHere({ sender: "untrusted" }, { workspaceId: "workspace" })).rejects.toThrow("Untrusted IPC sender.");
+  await expect(f.keepHere({ sender: "window" }, { workspaceId: "workspace" })).rejects.toThrow("Unexpected outer workspace operation.");
+  expect(f.boundary.withActiveWorkspace).toHaveBeenCalledWith({ sender: "window" }, "workspace",
+    "Open this workspace to keep its Collections on this computer.", expect.any(Function));
+  expect(f.keep).not.toHaveBeenCalled();
 });

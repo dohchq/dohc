@@ -25,8 +25,8 @@ for (const worker of ["workspace-database-worker", "document-projection-worker",
     `build output exists: dist/main/${worker}.js`,
   );
 }
-for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
-  check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
+for (const icon of ["build/icon.png", "build/icon.ico", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
+  check(existsSync(join(desktopDir, icon)), `icon exists: ${icon}`);
 }
 check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
@@ -71,6 +71,7 @@ if (config) {
   check(config.productName === "dohc", "productName is dohc");
   check(typeof config.appId === "string" && config.appId.includes("dohc"), `appId carries dohc (${config.appId})`);
   check(config.executableName === "dohc", "executableName is filesystem-safe");
+  check(config.linux?.executableName === "dohc-desktop", "the Linux app's command leaves dohc to the chat CLI");
   check(
     config.linux?.syncDesktopName === true,
     "Linux launcher filename and StartupWMClass sync to desktopName",
@@ -94,7 +95,7 @@ if (config) {
     extraResources.some(
       (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",
     ),
-    "static icon ships as the packaged runtime fallback",
+    "window icon ships as an extraResource",
   );
   for (const theme of ["light", "dark"]) {
     check(
@@ -160,15 +161,43 @@ if (config) {
       `publish URL is release-ready (${publishConfig?.url ?? "missing"})`,
     );
   }
-  const fileExtensions = config.fileAssociations?.flatMap((entry) =>
-    Array.isArray(entry.ext) ? entry.ext : [entry.ext],
-  ) ?? [];
+  // fileAssociations would give each macOS document the full app icon.
+  check(!config.fileAssociations && !config.mac?.fileAssociations, "macOS document types come only from mac.extendInfo");
+  const macTypes = config.mac?.extendInfo?.CFBundleDocumentTypes ?? [];
+  check(
+    macTypes.length > 0 && macTypes.every((type) => type.CFBundleTypeIconSystemGenerated === true),
+    "macOS draws the icon of every dohc document type",
+  );
+  const windowsExtensions = config.win?.fileAssociations?.flatMap((entry) => [entry.ext].flat()) ?? [];
   // Markdown may make dohc its default app; text, CSV and JSON never do.
   const expectedRanks = { md: "Default", markdown: "Default", txt: "Alternate", csv: "Alternate", json: "Alternate" };
   for (const [ext, rank] of Object.entries(expectedRanks)) {
-    check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
-    const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
-    check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
+    check(windowsExtensions.includes(ext), `Windows Open with dohc includes .${ext}`);
+    const ranks = macTypes.filter((type) => type.CFBundleTypeExtensions?.includes(ext)).map((type) => type.LSHandlerRank);
+    check(ranks.length === 1 && ranks[0] === rank, `macOS .${ext} has one document type, ranked ${rank} (${ranks.join(", ") || "missing"})`);
+  }
+  // A Linux desktop entry names types, not extensions.
+  for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
+    check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
+  }
+  // deb.depends replaces electron-builder's default list (app-builder-lib's
+  // FpmTarget.getDefaultDepends), so it repeats that list and adds the
+  // libraries Electron links that the list does not bring. Without one, the
+  // .deb still installs, then the app does not start.
+  for (const dependency of [
+    "libgtk-3-0",
+    "libnotify4",
+    "libnss3",
+    "libxss1",
+    "libxtst6",
+    "xdg-utils",
+    "libatspi2.0-0",
+    "libuuid1",
+    "libsecret-1-0",
+    "libasound2t64 | libasound2",
+    "libgbm1",
+  ]) {
+    check(config.deb?.depends?.includes(dependency), `the .deb depends on ${dependency}`);
   }
   check(
     Array.isArray(config.protocols) &&

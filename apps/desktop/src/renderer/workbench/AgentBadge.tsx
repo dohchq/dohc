@@ -53,16 +53,16 @@ export function isOwnAuthor(
       author.authorOwnerDisplayName === yourName;
 }
 
-/** isOwnAuthor with this window's names, the same function until they change. */
+/** isOwnAuthor with this window's names, the same function until they change. A link holder is never you, whatever name they chose. */
 export function useIsOwnAuthor(): (
-  kind: "human" | "agent" | "automation",
+  kind: "human" | "agent" | "automation" | "link",
   author: AgentAuthor,
   viewerAuthorId: string | undefined,
 ) => boolean {
   const names = useContext(YourNamesContext);
   return useCallback(
     (kind, author, viewerAuthorId) =>
-      kind !== "automation" && isOwnAuthor(kind, author, viewerAuthorId, names),
+      (kind === "human" || kind === "agent") && isOwnAuthor(kind, author, viewerAuthorId, names),
     [names],
   );
 }
@@ -122,7 +122,7 @@ export function AgentBadge(props: {
           <span className="text-muted">
             {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
-          {command ? <span className="break-all font-mono text-[11px] text-muted">Current local command: {command}</span> : null}
+          {command ? <span className="break-all text-[11px] text-muted">Current local command: <code className="font-mono">{command}</code></span> : null}
         </span>
       ) : null}
     </span>

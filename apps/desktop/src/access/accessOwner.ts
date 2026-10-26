@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { AccessAnswer, AccessCollectionRow, AccessObjectRef, type SharingAccessInput } from "@dohc/workspace-contracts/access";
+import { AccessAnswer, AccessCollectionRow, AccessObjectRef, type AccessRefreshResult, type SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 import { createAccessQuery, decodeAccessCursor, encodeAccessCursor, unknownAccess, type AccessRosterObservation } from "./accessQuery";
 import type { RosterObservation } from "../automations/shareRoster";
@@ -39,7 +39,7 @@ export function createAccessOwner<Workspace>(dependencies: {
   scope(workspace: Workspace): string;
   assertCurrent(workspace: Workspace): void;
   permissions(workspace: Workspace, datasetId: string, after?: string): Promise<unknown>;
-  refresh(workspace: Workspace): Promise<void>;
+  refresh(workspace: Workspace): Promise<AccessRefreshResult>;
   nowMs?: () => number;
 }) {
   const query = createAccessQuery(), nowMs = dependencies.nowMs ?? Date.now;
@@ -109,23 +109,43 @@ export function createAccessOwner<Workspace>(dependencies: {
         recipientUserId: account?.userId ?? "", cursorScope: dependencies.scope(workspace),
         coverage: input.lane === "received" ? "received-account" : "granted", cursor: input.cursor }));
     },
-    async refresh(workspace: Workspace): Promise<void> { await dependencies.refresh(workspace); dependencies.assertCurrent(workspace); },
+    async refresh(workspace: Workspace): Promise<AccessRefreshResult> {
+      dependencies.assertCurrent(workspace);
+      const result = await dependencies.refresh(workspace);
+      dependencies.assertCurrent(workspace);
+      return result.status === "unavailable" && !dependencies.account()
+        ? { status: "unavailable", reason: "signed-out" } : result;
+    },
   };
 }
 
-export function accessCliQueries<Workspace>(owner: Pick<ReturnType<typeof createAccessOwner<Workspace>>, "object" | "sharing">,
+export function accessCliQueries<Workspace>(owner: Pick<ReturnType<typeof createAccessOwner<Workspace>>, "object" | "sharing" | "refresh">,
   run: <Result>(work: (workspace: Workspace) => Result | Promise<Result>) => Promise<Result>) {
   return { object: (input: { ref: AccessObjectRef; cursor?: string }) => run(workspace => owner.object(workspace, input)),
-    sharing: (input: z.infer<typeof SharingAccessInput>) => run(workspace => owner.sharing(workspace, input)) };
+    sharing: (input: z.infer<typeof SharingAccessInput>) => run(workspace => owner.sharing(workspace, input)),
+    refresh: () => run(workspace => owner.refresh(workspace)) };
 }
 
 /** The two acquisition owners supply their own pacing and coalescing. */
 export function createAccessAcquisition(dependencies: {
-  roster(workspaceId: string): Promise<void>; received(): Promise<void>;
+  roster(workspaceId: string): Promise<AccessRefreshResult["status"]>;
+  received(): Promise<AccessRefreshResult["status"]>;
 }) {
   return {
-    request(workspaceId: string): Promise<void> {
-      return Promise.all([dependencies.roster(workspaceId), dependencies.received()]).then(() => undefined);
+    async request(workspaceId: string): Promise<AccessRefreshResult> {
+      const statuses = await Promise.all([dependencies.roster(workspaceId), dependencies.received()]);
+      for (const status of ["requested", "joined", "paced"] as const) if (statuses.includes(status)) return { status };
+      return { status: "unavailable", reason: "unreadable" };
     },
   };
+}
+
+export async function refreshAccessObservations(
+  operation: { workspace: { workspaceId: string }; assertCurrent(): void },
+  warmCredentials: () => Promise<unknown>,
+  acquisition: ReturnType<typeof createAccessAcquisition>,
+): Promise<AccessRefreshResult> {
+  await warmCredentials().catch(() => undefined);
+  operation.assertCurrent();
+  return acquisition.request(operation.workspace.workspaceId);
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { before, test } from "node:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +14,9 @@ import { createInstalledDatasetCompiler } from "../src/workspaces/installedDatas
 import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, archiveMember } from "./stage-app-compiler.mjs";
 
 import { PINNED_NODE } from "./pinned-node.mjs";
+import { warmWindowsCompiler } from "./warm-windows-compiler.mjs";
+
+before(warmWindowsCompiler, { timeout: 190000 });
 
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
@@ -34,7 +37,7 @@ test("staging refuses an unpinned executable without running it", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-compiler-bad-pin-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const nodeExecutable = join(root, "node.exe"); await writeFile(nodeExecutable, "not Node");
-  for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"]]) {
+  for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"], ["linux", "x64"]]) {
     await assert.rejects(stageAppCompiler({ platform, arch, nodeExecutable, destination: join(root, "staged") }), /official Node/);
   }
   // dohc has no Intel Mac build, so neither staging nor packaging can make one.
@@ -72,7 +75,7 @@ test("installed macOS and Linux Collection compiler runs electron-builder resour
   await assert.rejects(requireAppCompiler(destination, process.platform, process.arch === "x64" ? "arm64" : "x64"),
     process.platform === "darwin" ? /macOS arm64/ : /does not match/);
   const binary = join(destination, `node_modules/@esbuild/${process.platform}-${process.arch}/bin/esbuild`);
-  for (const executable of [binary, ...(process.platform === "darwin" ? ["node", "compiler-owner"].map(name => join(destination, name)) : [])]) {
+  for (const executable of [binary, ...(PINNED_NODE[`${process.platform}-${process.arch}`] ? ["node", "compiler-owner"].map(name => join(destination, name)) : [])]) {
     assert.equal((await stat(executable)).mode & 0o111, 0o111, `every user can run ${executable}`);
   }
   await build({ entryPoints: [fileURLToPath(new URL("../../../packages/app-backend-runtime/src/dataset-compiler.ts", import.meta.url))],
@@ -83,7 +86,7 @@ test("installed macOS and Linux Collection compiler runs electron-builder resour
   await assert.rejects(requireAppCompiler(destination), /asset changed/);
 });
 
-const appTarget = process.platform !== "linux" && PINNED_NODE[`${process.platform}-${process.arch}`];
+const appTarget = PINNED_NODE[`${process.platform}-${process.arch}`];
 // Three compiles, each allowed bounds.timeoutMs, follow staging and packaging.
 test("installed compiler runs electron-builder resources after relocation and checks packaging identities", { skip: !appTarget, timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-installed-compiler-"));
@@ -146,7 +149,7 @@ test("build Node version does not control the pinned runtime and downloads remai
   await assert.rejects(readPinnedCompilerNode({ platform: "darwin", arch: "arm64", currentNodeExecutable, fetchNode: async url => {
     assert.equal(url, "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz"); return new Response("wrong archive");
   } }), /archive does not match/);
-  for (const target of ["darwin-x64", "linux-x64"]) {
+  for (const target of ["darwin-x64", "linux-arm64"]) {
     const [platform, arch] = target.split("-");
     await assert.rejects(readPinnedCompilerNode({ platform, arch }), { message: `App compiler has no pinned Node for ${target}.` });
   }

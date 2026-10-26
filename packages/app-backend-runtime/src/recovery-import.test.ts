@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { privateFolder } from "./private-folder.test-helper";
 import { mkdtemp, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -54,7 +55,7 @@ async function fixture(large = false, mutable = false){
   }
   async function stage(attachment?: {fileId:string; bytes:Uint8Array; revision:number}) {
     const exportLimits = large ? { maxTotalBytes: 512 * 1024 * 1024 } : limits;
-    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory:join(directory,"exports"),limits:exportLimits,
+    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory: await privateFolder(join(directory, "exports"))(),limits:exportLimits,
       ...(attachment?{attachments:{capture:()=>[{fileId:attachment.fileId,name:"receipt.png",contentType:"image/png",byteLength:attachment.bytes.byteLength,sha256:hash(attachment.bytes),revision:attachment.revision}],open:async function*(){yield attachment.bytes;}}}:{})});
     const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits:exportLimits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,exportLimits)});
     await prepared.dispose(); return staged;

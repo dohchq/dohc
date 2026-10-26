@@ -1,13 +1,13 @@
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
-import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { AppBackendRuntimeError, isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS, type AppOperationRefusal } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, JournalCommit, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
 import { openPersistentAppBackend, PersistentRuntimeError, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
-import { acquireSupervisorOwnership } from "./worker-ownership.js";
+import { acquireSupervisorOwnership, type SupervisorOwnership } from "./worker-ownership.js";
 import { readMigrationPreviewReportPage, type MigrationPreviewReportPage, type MigrationPreviewTableSummary } from "./migration-preview-report.js";
 export type { MigrationPreviewValue, MigrationPreviewChange, MigrationPreviewTableSummary, MigrationPreviewReportPage } from "./migration-preview-report.js";
 
@@ -95,8 +95,19 @@ type Candidate = {
 };
 export interface DatasetSupervisorOptions {
   journal: DatasetJournal;
-  /** Private host-owned directory, never an app-supplied path. */
-  directory: string;
+  /**
+   * The host's private folder for workers, never an app-supplied path. The
+   * supervisor asks until it holds the folder: at creation, then whenever a
+   * worker must start. A host refuses with words a person reads until it has
+   * prepared the folder. It must exist; the supervisor creates nothing
+   * outside it.
+   */
+  directory(): Promise<string>;
+  /**
+   * Runs once, while this supervisor first holds its folder and before it
+   * makes a worker folder: the host's exclusive startup maintenance.
+   */
+  startup?(): void | Promise<void>;
   runtime?: PersistentRuntimeOptions;
   maxWorkers?: number;
   idleMs?: number;
@@ -167,9 +178,27 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   if (!Number.isSafeInteger(replayCacheMs) || replayCacheMs < 0 || replayCacheMs > 60_000) throw new Error("Invalid dataset worker limit.");
   if (!Number.isSafeInteger(reopenWaitCapMs) || reopenWaitCapMs < 0 || reopenWaitCapMs > 24 * 60 * 60_000) throw new Error("Invalid dataset worker limit.");
-  await mkdir(options.directory, { recursive: true });
-  const root = await realpath(options.directory);
-  const ownership=await acquireSupervisorOwnership(root);
+  // The supervisor holds its folder from the first time the host gives it
+  // one: at once when it can, or else when the first worker needs it. Until
+  // then, nothing here writes, and nothing stops another supervisor.
+  let ownership: SupervisorOwnership | undefined, acquiring: Promise<SupervisorOwnership> | undefined;
+  function own(root: string): Promise<SupervisorOwnership> {
+    if (ownership) return Promise.resolve(ownership);
+    return acquiring ??= (async () => {
+      const owner = await acquireSupervisorOwnership(root);
+      try {
+        await options.startup?.();
+        if (closed) throw new Error("dohc closed this workspace's Collections. Open the workspace again.");
+      } catch (error) { owner.close(); throw error; }
+      return ownership = owner;
+    })().finally(() => { acquiring = undefined; });
+  }
+  async function owned(): Promise<SupervisorOwnership> {
+    if (ownership) return ownership;
+    const root = await options.directory();
+    if (closed) throw new Error("dohc closed this workspace's Collections. Open the workspace again.");
+    return own(root);
+  }
   const lanes = new Map<string, Lane>();
   const blockedMaintenance = new Set<string>();
   const maintenanceWarnings = new Set<string>();
@@ -241,7 +270,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       // Account the physical snapshot before SQLite creates it, including its overlap with chunk staging.
       reservations.push(options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:current.capacityBytes,
         sha256:digest(`materialization-reservation-${randomUUID()}`),authorize,account:storage.account}));
-      directory=await ownership.createDirectory();authorize();
+      directory=await (await owned()).createDirectory();authorize();
       path=join(directory,"materialization.sqlite");
       const snapshot=await worker.runtime.snapshot(path);
       if(snapshot.path!==path||snapshot.cursor.revision!==expected.revision||snapshot.cursor.digest!==expected.digest)throw new Error("The Collection changed while dohc saved its records.");
@@ -337,8 +366,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     return candidate;
   }
 
+  // Only a folder the supervisor made is removed, so it holds its folder.
   async function removeDirectory(path: string): Promise<void> {
-    await ownership.removeDirectory(path);
+    await ownership!.removeDirectory(path);
   }
   async function stopWorker(lane: Lane): Promise<void> {
     if (lane.stopping) return lane.stopping;
@@ -388,6 +418,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function openWorker(lane: Lane, input: DatasetAccess, reopen: { admitted: boolean }): Promise<Worker> {
     const wait=reopenWaits.get(JSON.stringify(lane.scope));
     if(wait&&now()<wait.untilMs)throw new DatasetReopenWaitError(wait.untilMs-now());
+    // Before admission, so a host that refuses the folder says why, and the
+    // refusal is not counted as a failed reopen.
+    const owner = await owned();
     let waiting=false;
     const admitWait=()=>{
       if(waiting)return;
@@ -428,7 +461,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       const cache = options.journal.materialization({scope: input.scope, authorize: () => standing(input)});
       async function restore(useCache: boolean): Promise<Worker> {
         const checkpoint = useCache ? cache! : canonical;
-        directory = await ownership.createDirectory();
+        directory = await owner.createDirectory();
         const checkpointPath = join(directory, "checkpoint.sqlite");
         const file=await open(checkpointPath,"wx",0o600),hash=createHash("sha256");
         try {
@@ -448,7 +481,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         }finally{await file.close();}
         standing(input);
         const runtime = await openPersistentAppBackend({ directory, checkpointPath, requireCheckpointCursor:useCache, schemaSql: current.schemaSql, tables: input.tables,
-          ownership:{root:ownership.root,session:ownership.session},
+          ownership:{root:owner.root,session:owner.session},
           scope: { workspaceId: current.cursor.workspaceId, datasetId: current.cursor.datasetId, hostEpoch: current.cursor.hostEpoch,
             approvedRevisionHash: current.cursor.approvedRevisionHash }, cursor: { revision: checkpoint.cursor.revision, digest: checkpoint.cursor.digest },
           databaseBytes: current.capacityBytes, signal }, options.runtime);
@@ -597,6 +630,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
 
   async function prepareMigration(lane:Lane,input:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
+    // Its reservations come before its worker, so the folder, and the startup
+    // maintenance that reclaims stages nothing holds, must come before both.
+    await owned();
     for(const previous of candidates.values())if(previous.result.expected.workspaceId===input.scope.workspaceId&&previous.result.expected.datasetId===input.scope.datasetId)await dropCandidate(previous);
     if(candidates.size+preparingCandidates>=4)throw new Error("Too many Collection changes are waiting for review. Discard one. Then try again.");
     if([...candidates.values()].some(candidate=>candidate.result.expected.workspaceId===input.scope.workspaceId&&candidate.result.expected.datasetId===input.scope.datasetId))throw new Error("This Collection already has a change waiting for review. Discard it first.");
@@ -612,7 +648,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         sha256:digest(`migration-preview-reservation-${randomUUID()}`),authorize:()=>standing(input),account:options.maintenanceStorage.account}));
       worker=await recover(lane,input);standing(input);
       input.signal?.addEventListener("abort",abort,{once:true});
-      directory=await ownership.createDirectory();
+      directory=await (await owned()).createDirectory();
       const path=join(directory,"candidate.sqlite"),reportPath=join(directory,"report.jsonl");
       const migrated=await worker.runtime.migrateCheckpoint({path,reportPath,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
       if(migrated.path!==path||!migrated.report||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("This preview does not match the Collection. Preview the change again.");
@@ -657,7 +693,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(!path) {
         worker=await recover(lane,input);standing(input);
         input.signal?.addEventListener("abort",abort,{once:true});
-        path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
+        path=join(worker.directory,"migrated.sqlite");
         const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
         if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("The changed records do not match the Collection. Preview the change again.");
       }
@@ -787,6 +823,10 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       candidate.reservations.length=0;await dropCandidate(candidate);
     }
   }
+  // A host that can give its folder now has it held, and old workers removed,
+  // before anyone can stage work. One that can't yet gets it at the first worker.
+  const root = await options.directory().catch(() => null);
+  if (root !== null) await own(root);
   return {
     /** Called only after durable dataset deletion reclaimed all checkpoint reservations. */
     retireMigrationCandidates,
@@ -863,7 +903,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       await Promise.all([...maintenance.values()].map(task=>task.done));
       const candidateResults=await Promise.allSettled([...candidates.values()].map(dropCandidate));
       const cleanupResults=await Promise.allSettled([...candidateCleanup]);
-      lanes.clear();ownership.close();
+      await acquiring?.catch(() => undefined);
+      lanes.clear();ownership?.close();
       const failed=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");
       if(failed)throw failed.reason;
       const cleanupFailed=[...candidateResults,...cleanupResults].find((result):result is PromiseRejectedResult=>result.status==="rejected");

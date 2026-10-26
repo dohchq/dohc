@@ -70,7 +70,7 @@ function fixture() {
       };
     }),
     resolveChatDecision: vi.fn<ChatWriteStore["resolveChatDecision"]>(async (input) => {
-      events.push("write");
+      events.push("resolve");
       return { ...input, state: "resolved", atMs: 3 };
     }),
     listReactions: vi.fn<ChatWriteStore["listReactions"]>(async () => {
@@ -108,6 +108,15 @@ function fixture() {
     localUserDisplayName: () => displayName,
     agentDisplayName: async () => "Nova",
     localInstallationId: () => "local-id",
+    // Marks where an answer holds dispatch scans off.
+    async betweenDispatchScans(_workspaceId, write) {
+      events.push("hold");
+      try {
+        return await write();
+      } finally {
+        events.push("release");
+      }
+    },
     ...effects,
   });
   const place = { workspaceId: "workspace", store };
@@ -133,7 +142,10 @@ function fixture() {
       start: () => writes.startThread(place, { writer: AGENT, channelId: "channel", body: "Hi", resolveAttachments: attachments }),
       react: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "added" }),
       toggle: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle" }),
-      decide: () => writes.resolveDecision(place, { threadId: "thread", messageId: "question", resolvedByMessageId: "message" }),
+      answer: () => writes.answer(place, {
+        writer: PERSON, threadId: "thread", body: "Monday", resolveAttachments: attachments,
+        resolves: { messageId: "question", chosenOption: "Monday" },
+      }),
     },
   };
 }
@@ -329,7 +341,7 @@ describe("chat writes", () => {
   });
 
   for (const grant of ["read-only", "ended"] as const) {
-    it.each(["send", "start", "react", "decide"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
+    it.each(["send", "start", "react", "answer"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
       await expect(test.writeEach[kind]()).rejects.toThrow("You can only read this.");
@@ -338,7 +350,7 @@ describe("chat writes", () => {
     });
   }
 
-  it.each(["send", "start", "react", "decide", "file"] as const)("refuses %s in a received share before any store read", async (kind) => {
+  it.each(["send", "start", "react", "answer", "file"] as const)("refuses %s in a received share before any store read", async (kind) => {
     const test = fixture();
     test.row.shareView = {
       shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
@@ -355,7 +367,7 @@ describe("chat writes", () => {
     expectNothingWritten(test);
   });
 
-  it.each(["send", "start", "react", "decide"] as const)("requires the joined account to %s in a joined channel", async (kind) => {
+  it.each(["send", "start", "react", "answer"] as const)("requires the joined account to %s in a joined channel", async (kind) => {
     const test = fixture();
     test.row.sharedChannels = [joined];
     test.setCredentials(null);
@@ -386,7 +398,7 @@ describe("chat writes", () => {
     };
     const cases = [
       ["send", ["wire", "warm", "attachments"]],
-      ["decide", ["wire", "warm"]],
+      ["answer", ["wire", "warm", "attachments"]],
       ["toggle", ["wire", "warm", "reactions"]],
     ] as const;
 
@@ -467,7 +479,7 @@ describe("chat writes", () => {
       expectNothingWritten(test);
     });
 
-    it.each(["send", "decide", "toggle"] as const)("refuses %s when the same account's session is replaced during target resolution", async (kind) => {
+    it.each(["send", "answer", "toggle"] as const)("refuses %s when the same account's session is replaced during target resolution", async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [joined];
       const hold = test.holdAt("wire");
@@ -491,16 +503,32 @@ describe("chat writes", () => {
     });
   });
 
-  it("refuses a decision when the session changed since the reply that resolves it", async () => {
+  it("writes a reply and its answer in one hold of dispatch scans, then wakes dispatch", async () => {
     const test = fixture();
-    const decide = (authorUserId?: string) => test.writes.resolveDecision(test.place, {
-      threadId: "thread", messageId: "question", resolvedByMessageId: "message",
-      reply: authorUserId ? { authorUserId } : {},
+    test.effects.scanChatDispatch.mockImplementation(async () => {
+      test.events.push("scan");
     });
-    await expect(decide("user-0")).rejects.toThrow("Your server session changed. Try again.");
-    await expect(decide()).rejects.toThrow("Your server session changed. Try again.");
-    expectNothingWritten(test);
-    await expect(decide("user-1")).resolves.toMatchObject({ state: "resolved" });
+    const answered = await test.writeEach.answer();
+    expect(test.events).toEqual(["warm", "attachments", "hold", "write", "resolve", "release", "scan"]);
+    expect(test.store.resolveChatDecision).toHaveBeenCalledWith({
+      workspaceId: "workspace", threadId: "thread", messageId: "question",
+      resolvedByMessageId: "message", chosenOption: "Monday",
+    });
+    expect(answered).toMatchObject({ message: { id: "message" }, decision: { state: "resolved" } });
+  });
+
+  it("keeps the reply and leaves the question open when the session changes before the answer", async () => {
+    const test = fixture();
+    const send = test.store.sendMessage.getMockImplementation()!;
+    test.store.sendMessage.mockImplementationOnce(async (input) => {
+      const message = await send(input);
+      test.setCredentials(signedIn("user-1"));
+      return message;
+    });
+    const answered = await test.writeEach.answer();
+    expect(answered).toMatchObject({ message: { id: "message" }, failure: { message: "Your server session changed. Try again." } });
+    expect(test.store.resolveChatDecision).not.toHaveBeenCalled();
+    expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
   });
 
   it("toggles a signed-out reaction under the install's local id without a relay author", async () => {
@@ -568,9 +596,9 @@ describe("chat writes", () => {
     });
   });
 
-  it.each(["react", "decide"] as const)("syncs a %s without projecting bookmarks or scanning dispatch", async (kind) => {
+  it("syncs a reaction without projecting bookmarks or scanning dispatch", async () => {
     const test = fixture();
-    await test.writeEach[kind]();
+    await test.writeEach.react();
     expect(test.effects.queueCloudSync).toHaveBeenCalledWith("workspace");
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "thread" });
     expect(test.effects.projectChatBookmarks).not.toHaveBeenCalled();
@@ -681,7 +709,7 @@ describe("ActorKey local admission", () => {
 
 it("records paused chat writes under the retained relay author", async () => {
   const h = fixture(); h.row.pausedRemote = h.row.remote; delete h.row.remote;
-  await h.writeEach.send(); await h.writeEach.react(); await h.writeEach.decide();
+  await h.writeEach.send(); await h.writeEach.react(); await h.writeEach.answer();
   expect(h.store.sendMessage.mock.calls[0]![0].authorUserId).toBe("user-1");
   expect(h.store.setReaction.mock.calls[0]![0].replicationAuthorId).toBe("user-1");
   h.setCredentials(null);

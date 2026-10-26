@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -42,11 +42,13 @@ export type ShellErrorKind =
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
+  | "chat-restricted"
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
   | "collections-waiting"
+  | "collection-copies-left"
   | "sync-refusal"
   | "import-files"
   | "share-refresh"
@@ -54,11 +56,14 @@ export type ShellErrorKind =
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
+  | "network-share"
   | "file-recovery-unavailable"
   | "kept-files"
+  | "retained-copies"
   | "record-history"
   | "record-history-run"
   | "reports"
+  | "schedule-host"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -80,6 +85,9 @@ export interface ShellError {
   id: string;
   title?: string;
   message: string;
+  // A line after the message that no clamp hides, such as how many more
+  // files a list leaves out.
+  lastLine?: string;
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
@@ -193,6 +201,28 @@ export function useShellError(workspaceId: string) {
     };
     return { label: "Open System Settings", run };
   }, [push]);
+  // Keeps the workspace's Collections on this computer, then runs `then`,
+  // such as the step that was refused. Main asks first when another
+  // computer may have them, and nothing runs when the person cancels. A
+  // failure files its own row.
+  const keepCollectionsHere = useCallback((then: (() => void) | null) => {
+    const owner = currentWorkspace.current;
+    const run = (): void => {
+      bridge().keepCollectionsHere({ workspaceId: owner }).then(({ kept }) => {
+        if (kept && currentWorkspace.current === owner) then?.();
+      }, (error: unknown) => {
+        if (currentWorkspace.current !== owner) return;
+        const { cause } = readError(error);
+        push({
+          message: withErrorWords("dohc could not keep the Collections on this computer.", error),
+          ...(cause ? { details: [["Cause", cause]] } : {}),
+          retry: run,
+          identity: "keep-collections",
+        });
+      });
+    };
+    run();
+  }, [push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
@@ -302,11 +332,13 @@ export function useShellError(workspaceId: string) {
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
-        ...(isPrivacyDenied(error) ? { action: privacySettingsAction } : {}),
+        ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
+          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
+          : {}),
         ...(kind ? { kind } : {}),
       });
     },
-    [push, privacySettingsAction],
+    [push, privacySettingsAction, keepCollectionsHere],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -435,6 +467,23 @@ export function useShellError(workspaceId: string) {
       ),
     [push],
   );
+  // A workspace on a network share: one warning row. Nothing failed, so it
+  // offers no Try again.
+  const reportNetworkShare = useCallback(
+    (notice: { title: string; message: string; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [["Detail", "network-share"]],
+          retry: null,
+          kind: "network-share",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -451,6 +500,21 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // An import that skipped sources: a title, then a line for each one. dohc
+  // wrote every line, so the lines are shown as they are.
+  const reportImportSkips = useCallback(
+    (notice: { title: string; lines: readonly string[]; lastLine?: string; details: ReadonlyArray<ErrorDetailField> }) => {
+      push({
+        title: notice.title,
+        message: notice.lines.join("\n"),
+        ...(notice.lastLine ? { lastLine: notice.lastLine } : {}),
+        details: notice.details,
+        retry: null,
+        kind: "import-files",
+      });
+    },
+    [push],
+  );
   const reportKeptFiles = useCallback(
     (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => {
       if (!notice.paths.length) {
@@ -464,6 +528,33 @@ export function useShellError(workspaceId: string) {
         action: { label: "Show recovery folder", run: openFolder },
         kind: "kept-files",
       }, !notice.toast);
+    },
+    [clearKind, push],
+  );
+  // Old file copies on a drive that cannot tell dohc whether a program
+  // still uses them: one warning per workspace, updated where it stands.
+  // `toast` files it with a toast, once each time the copies pass the size;
+  // otherwise it updates the row, or files it quietly. Null clears it.
+  const showRetainedCopies = useCallback(
+    (notice: {
+      title: string;
+      message: string;
+      action: { label: string; run: () => void };
+      onDismiss: () => void;
+    } | null, toast: boolean) => {
+      if (notice === null) {
+        clearKind("retained-copies");
+        return;
+      }
+      push({
+        tone: "warning",
+        title: notice.title,
+        message: notice.message,
+        retry: null,
+        action: notice.action,
+        onDismiss: notice.onDismiss,
+        kind: "retained-copies",
+      }, toast ? false : "quiet");
     },
     [clearKind, push],
   );
@@ -549,6 +640,30 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // One row for where this workspace's schedules run, while that needs the
+  // person: a warning while another computer runs them, and an error, with
+  // Try again, while none does. A read that says the same keeps its toast's
+  // state; null clears the row.
+  const showScheduleHostNotice = useCallback((notice: {
+    message: string;
+    failed: boolean;
+    cause?: string;
+    retry: () => void;
+    takeOver: () => void;
+  } | null) => {
+    if (notice === null) {
+      clearKind("schedule-host");
+      return;
+    }
+    push({
+      message: notice.message,
+      ...(notice.failed ? {} : { tone: "warning" as const }),
+      ...(notice.cause ? { details: [["Cause", notice.cause]] } : {}),
+      retry: notice.failed ? notice.retry : null,
+      action: { label: "Take over now", run: notice.takeOver, ends: true },
+      kind: "schedule-host",
+    }, "repeat");
+  }, [clearKind, push]);
   const showWarningNotice = useCallback((message: string) => {
     push({message, retry: null, tone: "warning"});
   }, [push]);
@@ -720,7 +835,10 @@ export function useShellError(workspaceId: string) {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
+    reportImportSkips,
+    showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -730,6 +848,7 @@ export function useShellError(workspaceId: string) {
     showDirectWriteNotice,
     showSuccessNotice,
     showWarningNotice,
+    showScheduleHostNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
@@ -740,5 +859,6 @@ export function useShellError(workspaceId: string) {
     retryShellError,
     runShellErrorAction,
     privacySettingsAction,
+    keepCollectionsHere,
   };
 }

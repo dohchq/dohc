@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach } from "vitest";
-import type { MetadataDirResolver } from "./automationRunStore";
+import type { AutomationStoreFolder } from "./automationRunStore";
 
 // Folders for tests, removed after each test.
 
@@ -18,18 +18,23 @@ export async function createTestScratch(prefix: string): Promise<string> {
   return path;
 }
 
-/** A metadata resolver that answers `folderFor(rootPath)`, made unless `create` is false. */
-export function metadataDirAt(folderFor: (rootPath: string) => string): MetadataDirResolver {
-  function resolve(rootPath: string): Promise<string>;
-  function resolve(rootPath: string, options: { create: false }): Promise<string | null>;
-  async function resolve(rootPath: string, options?: { create: false }): Promise<string | null> {
-    const dir = folderFor(rootPath);
-    if (options?.create === false) return (await lstat(dir).catch(() => null)) === null ? null : dir;
-    await mkdir(dir, { recursive: true });
-    return dir;
-  }
-  return resolve;
+/**
+ * A store folder at `path`, which a write finds made, as a host prepares it
+ * before its first write, and a read finds only once something made it.
+ */
+export function storeFolderAt(path: string): AutomationStoreFolder {
+  return {
+    async forWrite() {
+      await mkdir(path, { recursive: true });
+      return path;
+    },
+    async read(work) {
+      return work((await lstat(path).catch(() => null)) === null ? null : path);
+    },
+  };
 }
 
-/** `<rootPath>/.dohc`, as the desktop's resolver answers it. */
-export const testMetadataDir = metadataDirAt((rootPath) => join(rootPath, ".dohc"));
+/** `<rootPath>/.dohc/local`, where the desktop keeps a workspace's run store. */
+export function testStoreFolder(rootPath: string): AutomationStoreFolder {
+  return storeFolderAt(join(rootPath, ".dohc", "local"));
+}

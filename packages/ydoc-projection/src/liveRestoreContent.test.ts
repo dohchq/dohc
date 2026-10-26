@@ -8,6 +8,13 @@ import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
 const budget = {maxBytes: 1_000_000, maxEvents: 20};
+it.each([false, true])("checks a native frozen context before an invalid point with artifact lookup %s", withArtifact => {
+  const input = fixture();
+  input.frozenState = input.accepted.checkpoint;
+  input.point.checkpoint = Uint8Array.of(0);
+  expect(() => compareLiveRestoreContent({...input, artifact: withArtifact ? () => undefined : undefined}, policy, budget))
+    .toThrow("frozen context differs from retained sources");
+});
 const document = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function contentProposalFixture(nativeText?: string) {

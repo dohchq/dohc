@@ -29,6 +29,40 @@ it("stops sync through main without a caller-supplied workspace or identity", as
   expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
 });
 
+it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
+  const kept = { ok: true, keptEdits: [{ path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" }] };
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
+    verb === "liveKeptEdits" ? kept
+      : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" }
+        : verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+          : { ok: true, path: "plan.md" });
+  expect(await executeCli({ argv: ["document", "kept-edits"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "plan.md · server · paused · outbox:delivery:0\n", stderr: "" });
+  expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
+  // An incident names exactly which kept edits to save.
+  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
+  expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Trying again for plan.md\n", stderr: "" });
+  expect(await executeCli({ argv: ["document", "stop-again", "plan.md", "release:a:0"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Stopped live editing for plan.md. dohc wrote your kept edits into the file.\n", stderr: "" });
+  expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
+    ["liveKeptEdits", { cwd: WORKSPACE, actor: "agent" }],
+    ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
+    ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
+    ["retryKeptEdits", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
+    ["stopAgain", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "release:a:0" }],
+  ]);
+  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0", "extra"], env: {}, request })).exitCode).toBe(1);
+  expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md"], env: {}, request }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: retry-kept-edits requires a path and an incident\n" });
+  expect(await executeCli({ argv: ["document", "stop-again", "plan.md"], env: {}, request }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: stop-again requires a path and an incident\n" });
+  const refused = await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "--json"], env: {},
+    request: async () => ({ ok: false, reason: "dohc has no kept edits for this file." }) });
+  expect(refused).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc has no kept edits for this file.\n" });
+});
+
 it("lists Button inspection states and confirmations through the desktop socket", async () => {
   const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
     { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };
@@ -66,12 +100,12 @@ describe("executeCli", () => {
       argv: ["chat", "groups", "--json"],
       cwd: "/workspace",
       env: {},
-      request: async () => ({ groups: [group] }),
+      request: async () => ({ groups: [{ ...group, channelWireId: "wire" }] }),
     });
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [group] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [{ ...group, channelWireId: "wire" }] }, null, 2)}\n`,
     });
   });
 
@@ -92,13 +126,14 @@ describe("executeCli", () => {
     });
   });
 
-  it("materializes stdin and sends agent attribution", async () => {
+  it("preserves multiline Markdown from stdin and sends agent attribution", async () => {
     const requests: CliRequestWithoutToken[] = [];
+    const report = '# Updated "Kyoto"\n\n- Added November packing.\n- It\'s ready. `$HOME` and $(whoami) stay literal.\n';
     const result = await executeCli({
       argv: ["chat", "reply", "th_8f", "--as-agent", "-"],
       cwd: "/workspace/project",
       env: { DOHC_RUN_ID: "run_ambient" },
-      readStdin: async () => "A detailed report\n",
+      readStdin: async () => report,
       request: async (request) => {
         requests.push(request);
         return { threadId: "th_8f2k1c", messageId: "msg_new" };
@@ -115,7 +150,7 @@ describe("executeCli", () => {
           thread: "th_8f",
           attachments: [],
           needsDecision: false,
-          body: "A detailed report\n",
+          body: report,
         },
       },
     ]);
@@ -189,6 +224,25 @@ describe("executeCli", () => {
     expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
   });
 
+  it("waits for a recovery copy the server takes longer than 30 seconds to prepare", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const stateDir = await tempStateDir();
+      // As the socket's deadline would: the reply comes after 40 seconds, unless the deadline is shorter.
+      const transport = vi.fn((_path: string, _body: string, timeoutMs: number | undefined) => new Promise<unknown>((resolve, reject) => {
+        if (timeoutMs !== undefined && timeoutMs < 40_000) setTimeout(() => reject(new Error("desktop app did not respond")), timeoutMs);
+        setTimeout(() => resolve({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+          result: { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" } }), 40_000);
+      }));
+      const pending = executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {},
+        client: { stateDir, transport, platform: "linux" } });
+      await vi.waitFor(() => expect(transport).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect((await pending).exitCode).toBe(0);
+      expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), 420_000);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("passes the ambient run id through every chat write request only", async () => {
     const requests: CliRequestWithoutToken[] = [];
     const request = async (value: CliRequestWithoutToken): Promise<unknown> => {
@@ -204,7 +258,7 @@ describe("executeCli", () => {
           state: "added" as const,
         };
       }
-      return { groups: [group] };
+      return { groups: [{ ...group, channelWireId: "wire" }] };
     };
     const common = {
       cwd: "/workspace",
@@ -595,4 +649,12 @@ it("adds schemaVersion to incoming JSON and keeps an absent subject null", async
   expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
   expect(await executeCli({ argv, env: {}, request: async () => null }))
     .toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
+});
+
+it.each([false, true])("requests Sharing refresh with JSON output %s", async json => {
+  const request = vi.fn(async () => ({ status: "paced" }));
+  const result = await executeCli({ argv: ["access", "refresh", ...(json ? ["--json"] : [])], cwd: WORKSPACE, env: {}, request });
+  expect(request).toHaveBeenCalledExactlyOnceWith({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: WORKSPACE, actor: "human" } });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual(json ? { schemaVersion: CLI_JSON_SCHEMA_VERSION, status: "paced" } : { status: "paced" });
 });

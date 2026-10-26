@@ -17,7 +17,7 @@ use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
@@ -30,7 +30,7 @@ type Registry = HashMap<EngineDbIdentity, Slot>;
 enum Slot {
     Reserving,
     Closing,
-    Active(WorkspaceActor),
+    Active(Box<WorkspaceActor>),
 }
 
 #[derive(Clone, Copy)]
@@ -199,18 +199,20 @@ impl WorkspaceSupervisor {
         root_token: Option<&str>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
-        if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
-            ensure_parent_dir(db_path)?;
-        }
+        let prepared = match mode {
+            ActorOpenMode::ReadWrite | ActorOpenMode::Passive => Some(prepare_store(db_path)?),
+            ActorOpenMode::ReadOnly => None,
+        };
+        let store_path = prepared.as_ref().map_or(db_path, |prepared| &prepared.path);
         let mut dead: Option<WorkspaceActor> = None;
         let identity;
         {
             let mut guard = lock(&self.registry);
             identity = match mode {
                 ActorOpenMode::ReadWrite | ActorOpenMode::Passive => {
-                    EngineDbIdentity::resolve_or_create(db_path)?
+                    EngineDbIdentity::resolve_or_create(store_path)?
                 }
-                ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(db_path)?,
+                ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(store_path)?,
             };
             loop {
                 let action = match guard.get(&identity) {
@@ -246,7 +248,7 @@ impl WorkspaceSupervisor {
                     }
                     Action::Evict => {
                         if let Some(Slot::Active(actor)) = guard.remove(&identity) {
-                            dead = Some(actor);
+                            dead = Some(*actor);
                         }
                         guard.insert(identity.clone(), Slot::Reserving);
                         break;
@@ -265,11 +267,12 @@ impl WorkspaceSupervisor {
         // Release the evicted actor's worker outside the lock.
         drop(dead);
 
+        let store_path = store_path.to_path_buf();
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
                 if let Some(token) = root_token {
                     WorkspaceActor::spawn_root_bound(
-                        db_path.to_path_buf(),
+                        store_path,
                         identity.clone(),
                         1,
                         now_ms,
@@ -277,11 +280,11 @@ impl WorkspaceSupervisor {
                         work,
                     )
                 } else {
-                    WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
+                    WorkspaceActor::spawn(store_path, identity.clone(), 1, now_ms, work)
                 }
             }
             ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
-                db_path.to_path_buf(),
+                store_path,
                 identity.clone(),
                 1,
                 now_ms,
@@ -289,9 +292,10 @@ impl WorkspaceSupervisor {
                 work,
             ),
             ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
+                WorkspaceActor::spawn_read_only(store_path, identity.clone(), 1, work)
             }
         };
+        let spawned = spawned.map(|actor| actor.holding(prepared));
         let store_freshly_created = spawned
             .as_ref()
             .is_ok_and(WorkspaceActor::store_was_freshly_created);
@@ -307,11 +311,11 @@ impl WorkspaceSupervisor {
     /// generation. Generation continuity is preserved even if the predecessor's
     /// worker panicked (a dead predecessor is treated as already-closed).
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
-        ensure_parent_dir(db_path)?;
+        let prepared = prepare_store(db_path)?;
 
         let (old, next_generation, mode, identity) = {
             let mut guard = lock(&self.registry);
-            let identity = EngineDbIdentity::resolve_or_create(db_path)?;
+            let identity = EngineDbIdentity::resolve_or_create(&prepared.path)?;
             // Wait out any in-flight reservation/close for this identity.
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
@@ -336,7 +340,7 @@ impl WorkspaceSupervisor {
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
-            db_path.to_path_buf(),
+            prepared.path.clone(),
             identity.clone(),
             next_generation,
             now_ms,
@@ -344,6 +348,7 @@ impl WorkspaceSupervisor {
             None,
             None,
         );
+        let spawned = spawned.map(|actor| actor.holding(Some(prepared)));
         self.finalize_reservation(identity, spawned)
     }
 
@@ -355,6 +360,13 @@ impl WorkspaceSupervisor {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
             return Ok(None);
         };
+        Ok(self.begin_close_identity(&identity))
+    }
+
+    /// [`Self::begin_close`] for the actor keyed by `identity`, as its handle
+    /// carries it, whatever the workspace's path names now.
+    pub fn begin_close_identity(&self, identity: &EngineDbIdentity) -> Option<WorkspaceClose<'_>> {
+        let identity = identity.clone();
         let actor = {
             let mut guard = lock(&self.registry);
             while guard.get(&identity).is_some_and(Slot::is_busy) {
@@ -363,25 +375,30 @@ impl WorkspaceSupervisor {
             match guard.remove(&identity) {
                 Some(Slot::Active(actor)) => {
                     guard.insert(identity.clone(), Slot::Closing);
-                    Some(actor)
+                    Some(*actor)
                 }
                 _ => None,
             }
         };
-        let Some(actor) = actor else {
-            return Ok(None);
-        };
-        Ok(Some(WorkspaceClose {
+        Some(WorkspaceClose {
             supervisor: self,
             identity,
-            actor: Some(actor),
+            actor: Some(actor?),
             marker_active: true,
-        }))
+        })
     }
 
     /// Close the actor for `db_path`, if open. Returns whether one was closed.
     pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
         let Some(closing) = self.begin_close(db_path)? else {
+            return Ok(false);
+        };
+        closing.finish().map(|()| true)
+    }
+
+    /// [`Self::close`] for the actor keyed by `identity`.
+    pub fn close_identity(&self, identity: &EngineDbIdentity) -> Result<bool, RuntimeError> {
+        let Some(closing) = self.begin_close_identity(identity) else {
             return Ok(false);
         };
         closing.finish().map(|()| true)
@@ -403,7 +420,7 @@ impl WorkspaceSupervisor {
                     Some(Slot::Active(actor)) => {
                         guard.insert(identity.clone(), Slot::Closing);
                         closing.push(identity);
-                        Some(actor)
+                        Some(*actor)
                     }
                     _ => None,
                 })
@@ -463,7 +480,7 @@ impl WorkspaceSupervisor {
         let result = match spawned {
             Ok(actor) => {
                 let handle = actor.handle();
-                guard.insert(identity, Slot::Active(actor));
+                guard.insert(identity, Slot::Active(Box::new(actor)));
                 Ok(handle)
             }
             Err(err) => {
@@ -485,27 +502,281 @@ enum Action {
     Reserve,
 }
 
-fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
-    let parent = db_path.parent().ok_or(RuntimeError::Identity {
-        reason: "engine.db path has no parent directory",
-        source: None,
+/// A store [`prepare_store`] made ready: the path SQLite opens it by and, on
+/// a Mac and Linux, the folder that path goes through.
+pub(crate) struct PreparedStore {
+    pub(crate) path: PathBuf,
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    _folder: std::os::fd::OwnedFd,
+}
+
+/// Create the store's folder and keep it and the store private before
+/// SQLite opens anything there.
+fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
+    let (Some(parent), Some(name)) = (db_path.parent(), db_path.file_name()) else {
+        return Err(RuntimeError::Identity {
+            reason: "engine.db path has no parent directory",
+            source: None,
+        });
+    };
+    // Owner-only on Unix, so other users cannot reach the store. Windows has
+    // no mode; ACLs govern access there. On macOS a mode does not limit an ACL
+    // entry, so each open also removes any the folder has. A refusal for a
+    // volume that keeps them, or for what is at a path, reaches the wire by
+    // its own code. `shown` is the folder's path as a refusal names it.
+    #[cfg(target_vendor = "apple")]
+    let (folder, shown) = {
+        let (base, relative) = checked_from(parent);
+        (
+            dohc_macos_files::ensure_private_dir(base, relative),
+            relative,
+        )
+    };
+    // Linux opens each folder without following a link, refuses another
+    // user's, and holds the store's folder open.
+    #[cfg(target_os = "linux")]
+    let (folder, shown) = {
+        let (base, relative) = checked_from(parent);
+        (
+            dohc_linux_files::held::private_dir(base, relative),
+            relative,
+        )
+    };
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    let (folder, shown) = {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        let folder = builder
+            .create(parent)
+            .and_then(|()| open_store_folder(parent));
+        (folder, parent)
+    };
+    #[cfg_attr(not(unix), allow(clippy::let_unit_value))]
+    let folder = folder.map_err(|err| RuntimeError::Identity {
+        reason: "could not create engine.db parent directory",
+        source: Some(err),
     })?;
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    // Owner-only on Unix (matches the TS engine's `.dohc/engine` 0o700 so a
-    // world-searchable directory never exposes workspace contents); a no-op on
-    // Windows, where ACLs govern access.
+    // On Linux, SQLite opens the store and creates its journals through the
+    // descriptor held for the folder checked here, so a folder put at its
+    // name since then is not reached. Without that path the open is refused
+    // before any store file is made.
+    #[cfg(target_os = "linux")]
+    let held = dohc_linux_files::held::held_path(std::os::fd::AsFd::as_fd(&folder), shown)
+        .map_err(|err| RuntimeError::Identity {
+            reason: "could not keep the engine store private",
+            source: Some(err),
+        })?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        #[cfg(target_vendor = "apple")]
+        let local = dohc_macos_files::is_local(std::os::fd::AsFd::as_fd(&folder));
+        #[cfg(not(target_vendor = "apple"))]
+        let local = Ok(true);
+        local
+            .and_then(|local| restrict_store_files(&folder, shown, name, local))
+            .map_err(|err| RuntimeError::Identity {
+                reason: "could not keep the engine store private",
+                source: Some(err),
+            })?;
     }
-    builder
-        .create(parent)
-        .map_err(|err| RuntimeError::Identity {
-            reason: "could not create engine.db parent directory",
-            source: Some(err),
+    // On a Mac, SQLite opens the store and creates its journals through the
+    // folder checked here, so a folder put at its name since then is not
+    // reached. A network volume, and one that ignores owners, keep the plain
+    // path: a mode keeps no other user out there. Any other volume that can't
+    // reach the folder by its ID is refused.
+    #[cfg(target_vendor = "apple")]
+    {
+        let by_id =
+            dohc_macos_files::path_by_id(&folder, shown).map_err(|err| RuntimeError::Identity {
+                reason: "could not keep the engine store private",
+                source: Some(err),
+            })?;
+        Ok(PreparedStore {
+            path: by_id.map_or_else(|| db_path.to_owned(), |dir| dir.join(name)),
+            _folder: folder,
         })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PreparedStore {
+            path: held.join(name),
+            _folder: folder,
+        })
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    {
+        let _ = (folder, shown, name);
+        Ok(PreparedStore {
+            path: db_path.to_owned(),
+        })
+    }
+}
+
+/// The folder the store's folder is checked from, and the store's folder
+/// below it. In a workspace, `.dohc` is checked as well as the folder.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn checked_from(parent: &Path) -> (&Path, &Path) {
+    let depth = if parent.ends_with(".dohc/engine") {
+        2
+    } else {
+        1
+    };
+    let base = parent.ancestors().nth(depth).unwrap_or(Path::new(""));
+    let relative = parent.strip_prefix(base).unwrap_or(parent);
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    (base, relative)
+}
+
+#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "linux"))))]
+fn open_store_folder(parent: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    Ok(rustix::fs::open(parent, flags, Mode::empty())?)
+}
+
+#[cfg(not(unix))]
+fn open_store_folder(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Give the store `name` in `folder`, and any journal beside it, mode 0600
+/// and, on a Mac, no ACL entries, and create a missing store with mode 0600
+/// so SQLite gives its journals that mode too. A mode and an ACL belong to
+/// the file, not its name, so a hard link another user made while the
+/// store's folder was open to them reads nothing afterwards. A link at any of
+/// these names, or anything but a file, is refused on every volume. On a
+/// Mac, so is a file another user owns on a local volume, before its ACL or
+/// mode changes. The files are never opened for reading or writing: closing
+/// such a descriptor would drop the locks SQLite holds on them. On a volume
+/// that is not `local`, such as a network share, nothing is created or
+/// changed: its modes, owners and ACLs are its server's. A refusal names the
+/// file under `shown`, the folder's path.
+#[cfg(unix)]
+fn restrict_store_files(
+    folder: &std::os::fd::OwnedFd,
+    shown: &Path,
+    name: &std::ffi::OsStr,
+    local: bool,
+) -> std::io::Result<()> {
+    restrict_store_files_with(folder, shown, name, local, None, |_| {})
+}
+
+/// [`restrict_store_files`], with seams for the user the files must belong
+/// to on a Mac, `None` for the folder's owner, which the caller has made
+/// sure is this process's user, and for the moment just before each change
+/// of mode.
+#[cfg(unix)]
+fn restrict_store_files_with(
+    folder: &std::os::fd::OwnedFd,
+    shown: &Path,
+    name: &std::ffi::OsStr,
+    local: bool,
+    owner: Option<u32>,
+    before_chmod: impl Fn(&std::ffi::OsStr),
+) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    #[cfg(target_vendor = "apple")]
+    let owner = match owner {
+        Some(owner) => owner,
+        None => rustix::fs::fstat(folder)?.st_uid,
+    };
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = owner;
+    if local {
+        let create = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
+        match rustix::fs::openat(
+            folder,
+            name,
+            create | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        ) {
+            Ok(_) | Err(rustix::io::Errno::EXIST) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut file = name.to_owned();
+        file.push(suffix);
+        let stat = match rustix::fs::statat(folder, &file, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(err) => return Err(err.into()),
+        };
+        let kind = FileType::from_raw_mode(stat.st_mode);
+        if kind != FileType::RegularFile {
+            return Err(not_a_store_file(shown.join(&file), kind));
+        }
+        if !local {
+            continue;
+        }
+        #[cfg(target_vendor = "apple")]
+        if stat.st_uid != owner {
+            return Err(std::io::Error::other(dohc_macos_files::NotPrivate {
+                path: shown.join(&file),
+                reason: dohc_macos_files::NotPrivateReason::OtherOwner,
+            }));
+        }
+        #[cfg(target_vendor = "apple")]
+        dohc_macos_files::remove_acl_entries_in(folder, shown, &file)?;
+        if stat.st_mode & 0o077 != 0 {
+            before_chmod(&file);
+            // A journal another process removed since the check needs nothing.
+            match chmod_private(folder, &file) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                changed => changed?,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The refusal of the store file at `path`, which is a link or not a file.
+/// On a Mac it names the file and why, which the desktop shows.
+#[cfg(target_vendor = "apple")]
+fn not_a_store_file(path: std::path::PathBuf, kind: rustix::fs::FileType) -> std::io::Error {
+    use dohc_macos_files::NotPrivateReason;
+    let reason = if kind == rustix::fs::FileType::Symlink {
+        NotPrivateReason::Link
+    } else {
+        NotPrivateReason::NotFile
+    };
+    std::io::Error::other(dohc_macos_files::NotPrivate { path, reason })
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn not_a_store_file(_path: std::path::PathBuf, _kind: rustix::fs::FileType) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "an engine store file is a link or not a file",
+    )
+}
+
+/// Give `name` in `folder` mode 0600. On a Mac this never follows a link at
+/// the name. Linux has no such call, so there a link put at the name since
+/// the caller's check is followed; only a user who can write the store's
+/// folder could put one there.
+#[cfg(unix)]
+fn chmod_private(folder: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Mode};
+    #[cfg(target_vendor = "apple")]
+    let flags = AtFlags::SYMLINK_NOFOLLOW;
+    #[cfg(not(target_vendor = "apple"))]
+    let flags = AtFlags::empty();
+    Ok(rustix::fs::chmodat(
+        folder,
+        name,
+        Mode::RUSR | Mode::WUSR,
+        flags,
+    )?)
 }
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock
@@ -523,6 +794,395 @@ fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Reg
 mod tests {
     use super::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
+    #[cfg(target_vendor = "apple")]
+    use dohc_macos_files::NotPrivateReason;
+
+    /// A workspace folder whose ACL passes read and search to everyone must
+    /// not pass them to the engine's folder or its store (#2207).
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_new_store_takes_none_of_its_workspace_folders_acl() {
+        let acl_lines = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(listing.status.success());
+            String::from_utf8(listing.stdout).unwrap().lines().count() - 1
+        };
+        let scratch = ScratchDir::new().unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow read,execute,file_inherit,directory_inherit",
+            ])
+            .arg(scratch.path())
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        let engine = db.parent().unwrap();
+        let mut created = vec![scratch.path().join(".dohc"), engine.to_path_buf()];
+        created.extend(
+            std::fs::read_dir(engine)
+                .unwrap()
+                .map(|e| e.unwrap().path()),
+        );
+        assert!(created.contains(&db));
+        for path in &created {
+            assert_eq!(acl_lines(path), 0, "{}", path.display());
+        }
+        supervisor.close(&db).unwrap();
+    }
+
+    /// A folder put at `.dohc/engine` after the engine checked the real one
+    /// gets neither the store nor its journals. They open in the checked
+    /// folder, wherever it has moved (#2375).
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    #[test]
+    fn a_store_opens_in_the_folder_the_engine_checked() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let prepared = super::prepare_store(&db).unwrap();
+        let engine = db.parent().unwrap();
+        let moved = scratch.path().join(".dohc/moved");
+        std::fs::rename(engine, &moved).unwrap();
+        std::fs::create_dir(engine).unwrap();
+        let path = prepared.path.clone();
+        let identity = crate::identity::EngineDbIdentity::resolve_or_create(&path).unwrap();
+        let actor = crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None)
+            .unwrap()
+            .holding(Some(prepared));
+        assert_eq!(std::fs::read_dir(engine).unwrap().count(), 0);
+        for file in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+            assert!(moved.join(file).exists(), "{file}");
+        }
+        drop(actor);
+    }
+
+    /// Where the engine can't reach its checked folder through the descriptor
+    /// it holds, as without `/proc`, the open is refused, naming the folder,
+    /// and nothing is made in it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_store_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {
+        use dohc_linux_files::held::{not_held, test_support::with_fds};
+        let scratch = ScratchDir::new().unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor = WorkspaceSupervisor::new();
+        let refused = with_fds(&scratch.path().join("no-fds"), || supervisor.open(&db, 0));
+        let err = match refused {
+            Err(crate::RuntimeError::Identity {
+                source: Some(err), ..
+            }) => err,
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("the store opened by its name"),
+        };
+        let refused = not_held(&err).expect("a typed refusal");
+        assert_eq!(refused.path, std::path::Path::new(".dohc/engine"));
+        assert_eq!(supervisor.actor_count(), 0);
+        let engine = db.parent().unwrap();
+        let left: Vec<_> = std::fs::read_dir(engine)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    #[cfg(unix)]
+    fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        name.into()
+    }
+
+    /// A store an earlier build left 0644 with the ACL entry its folder
+    /// passed on, and a hard link another user made while that folder was
+    /// open to them, reads as its owner's alone under both names after the
+    /// next open, and so do its journals. Once the link is gone, it opens.
+    #[cfg(unix)]
+    #[test]
+    fn an_open_keeps_an_old_store_private_under_every_name() {
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(target_vendor = "apple")]
+        let has_entries = |path: &std::path::Path| {
+            let listing = std::process::Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8(listing.stdout).unwrap().lines().count() > 1
+        };
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+        let linked = scratch.path().join("kept-by-another-user");
+        std::fs::hard_link(&db, &linked).unwrap();
+        let files = [
+            db.clone(),
+            with_suffix(&db, "-wal"),
+            with_suffix(&db, "-shm"),
+        ];
+        for file in files.iter().filter(|file| file.exists()) {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            #[cfg(target_vendor = "apple")]
+            {
+                let added = std::process::Command::new("/bin/chmod")
+                    .args(["+ai", "group:everyone allow read"])
+                    .arg(file)
+                    .status()
+                    .unwrap();
+                assert!(added.success());
+                assert!(has_entries(file));
+            }
+        }
+        // The engine refuses a hard-linked store, after making it private.
+        assert!(matches!(
+            supervisor.open(&db, 0),
+            Err(crate::RuntimeError::WorkspaceHardlinked)
+        ));
+        for file in files.iter().chain([&linked]).filter(|file| file.exists()) {
+            assert_eq!(mode(file), 0o600, "{}", file.display());
+            #[cfg(target_vendor = "apple")]
+            assert!(!has_entries(file), "{}", file.display());
+        }
+        std::fs::remove_file(&linked).unwrap();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+    }
+
+    /// A new store starts at mode 0600, so SQLite gives its journals 0600
+    /// too.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_store_and_its_journals_are_private_from_the_first_open() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        let wal = with_suffix(&db, "-wal");
+        assert!(wal.exists());
+        for file in [db.clone(), wal, with_suffix(&db, "-shm")] {
+            assert_eq!(mode(&file), 0o600, "{}", file.display());
+        }
+        supervisor.close(&db).unwrap();
+    }
+
+    /// A folder holding `engine.db` at 0644 and an empty `-wal` at 0644,
+    /// and that folder open for reading.
+    #[cfg(unix)]
+    fn old_store(scratch: &ScratchDir) -> (std::path::PathBuf, std::os::fd::OwnedFd) {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = scratch.path().join("engine");
+        std::fs::create_dir(&folder).unwrap();
+        let db = folder.join("engine.db");
+        for file in [db.clone(), with_suffix(&db, "-wal")] {
+            std::fs::write(&file, b"").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let open = std::os::fd::OwnedFd::from(std::fs::File::open(&folder).unwrap());
+        (db, open)
+    }
+
+    /// On a network volume a link at a store file is still refused, and
+    /// otherwise nothing is created or changed.
+    #[cfg(unix)]
+    #[test]
+    fn on_a_network_volume_links_are_refused_and_nothing_changes() {
+        let scratch = ScratchDir::new().unwrap();
+        let (db, folder) = old_store(&scratch);
+        let name = db.file_name().unwrap();
+        let wal = with_suffix(&db, "-wal");
+        std::fs::remove_file(&wal).unwrap();
+        std::os::unix::fs::symlink(scratch.path().join("elsewhere"), &wal).unwrap();
+        let shown = std::path::Path::new("engine");
+        let err = super::restrict_store_files(&folder, shown, name, false).unwrap_err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            dohc_macos_files::not_private(&err),
+            Some(&dohc_macos_files::NotPrivate {
+                path: "engine/engine.db-wal".into(),
+                reason: dohc_macos_files::NotPrivateReason::Link,
+            })
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        let _ = err;
+        std::fs::remove_file(&wal).unwrap();
+        super::restrict_store_files(&folder, shown, name, false).unwrap();
+        assert_eq!(mode(&db), 0o644);
+        std::fs::remove_file(&db).unwrap();
+        super::restrict_store_files(&folder, shown, name, false).unwrap();
+        assert!(!db.exists(), "a store is created on a network volume");
+    }
+
+    /// A store file another user owns on a local volume, as `sudo` can leave
+    /// one, is refused by name before its ACL or mode changes. Making one
+    /// needs root, so the seam expects another owner instead. A network
+    /// volume's owners are its server's, so there it passes unchanged.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_store_file_another_user_owns_is_refused_and_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let scratch = ScratchDir::new().unwrap();
+        let (db, folder) = old_store(&scratch);
+        let name = db.file_name().unwrap();
+        let shown = std::path::Path::new(".dohc/engine");
+        let other = Some(std::fs::metadata(&db).unwrap().uid() + 1);
+        let changed = |_: &std::ffi::OsStr| panic!("changed another user's store file");
+        let err = super::restrict_store_files_with(&folder, shown, name, true, other, changed)
+            .unwrap_err();
+        assert_eq!(
+            dohc_macos_files::not_private(&err),
+            Some(&dohc_macos_files::NotPrivate {
+                path: ".dohc/engine/engine.db".into(),
+                reason: NotPrivateReason::OtherOwner,
+            })
+        );
+        assert_eq!(mode(&db), 0o644);
+        super::restrict_store_files_with(&folder, shown, name, false, other, changed).unwrap();
+        assert_eq!(mode(&db), 0o644);
+    }
+
+    /// A journal another process removes between the check and the mode
+    /// change needs nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_removed_before_its_mode_change_is_skipped() {
+        let scratch = ScratchDir::new().unwrap();
+        let (db, folder) = old_store(&scratch);
+        let wal = with_suffix(&db, "-wal");
+        let remove = |name: &std::ffi::OsStr| {
+            if name.to_string_lossy().ends_with("-wal") {
+                std::fs::remove_file(&wal).unwrap();
+            }
+        };
+        let shown = std::path::Path::new("engine");
+        let name = db.file_name().unwrap();
+        super::restrict_store_files_with(&folder, shown, name, true, None, remove).unwrap();
+        assert_eq!(mode(&db), 0o600);
+    }
+
+    /// A journal swapped for a link after it was checked is not followed: the
+    /// mode change lands on the link, never on the file it names.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_link_swapped_in_before_the_mode_change_is_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().unwrap();
+        let folder = scratch.path().join("engine");
+        std::fs::create_dir(&folder).unwrap();
+        let db = folder.join("engine.db");
+        let wal = with_suffix(&db, "-wal");
+        std::fs::write(&wal, b"").unwrap();
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let unrelated = scratch.path().join("unrelated");
+        std::fs::write(&unrelated, b"mine").unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let swap = |name: &std::ffi::OsStr| {
+            if name.to_string_lossy().ends_with("-wal") {
+                std::fs::remove_file(&wal).unwrap();
+                std::os::unix::fs::symlink(&unrelated, &wal).unwrap();
+            }
+        };
+        let open = std::os::fd::OwnedFd::from(std::fs::File::open(&folder).unwrap());
+        let shown = std::path::Path::new("engine");
+        let name = db.file_name().unwrap();
+        super::restrict_store_files_with(&open, shown, name, true, None, swap).unwrap();
+        assert_eq!(mode(&unrelated), 0o644);
+        assert_eq!(mode(&db), 0o600, "the missing store is created private");
+    }
+
+    /// A link at the store or at a journal is refused before SQLite opens
+    /// anything, and the file it names is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_store_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        supervisor.open(&db, 0).unwrap();
+        supervisor.close(&db).unwrap();
+        let unrelated = scratch.path().join("unrelated");
+        std::fs::write(&unrelated, b"mine").unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(with_suffix(&db, suffix));
+        }
+        let wal = with_suffix(&db, "-wal");
+        std::os::unix::fs::symlink(&unrelated, &wal).unwrap();
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (".dohc/engine/engine.db-wal".into(), NotPrivateReason::Link)
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"mine");
+        assert_eq!(mode(&unrelated), 0o644);
+
+        std::fs::remove_file(&wal).unwrap();
+        let real = scratch.path().join("real.db");
+        std::fs::rename(&db, &real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&real, &db).unwrap();
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (".dohc/engine/engine.db".into(), NotPrivateReason::Link)
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
+        assert_eq!(mode(&real), 0o644);
+
+        // A folder where a journal belongs is not a file.
+        std::fs::remove_file(&db).unwrap();
+        std::fs::rename(&real, &db).unwrap();
+        std::fs::create_dir(&wal).unwrap();
+        let refused = supervisor.open(&db, 0).err();
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(
+            not_private(refused),
+            (
+                ".dohc/engine/engine.db-wal".into(),
+                NotPrivateReason::NotFile
+            )
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(refused.is_some());
+    }
+
+    /// The path and reason a refused open names.
+    #[cfg(target_vendor = "apple")]
+    fn not_private(refused: Option<crate::RuntimeError>) -> (std::path::PathBuf, NotPrivateReason) {
+        match refused {
+            Some(crate::RuntimeError::Identity {
+                source: Some(err), ..
+            }) => {
+                let refused = dohc_macos_files::not_private(&err);
+                let refused = refused.unwrap_or_else(|| panic!("{err}"));
+                (refused.path.clone(), refused.reason)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn independent_supervisors_refuse_a_second_writer_then_allow_reopen() {

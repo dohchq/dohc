@@ -62,7 +62,7 @@ test("online snapshots of a relay under constant writes, verified offline with o
     }
     // Docker Desktop cannot bind every host path, so the bundles reach the containers through a volume.
     const runtime = join(scratch, "node_modules", "@dohc", "app-backend-runtime");
-    for (const bundle of ["relay-deployment.js", "relay-snapshot.js"]) cpSync(join(root, "services/sync-relay/dist", bundle), join(scratch, bundle));
+    cpSync(join(root, "services/sync-relay/dist"), scratch, { recursive: true });
     cpSync(join(root, "packages/app-backend-runtime/dist"), join(runtime, "dist"), { recursive: true });
     cpSync(join(root, "packages/app-backend-runtime/package.json"), join(runtime, "package.json"));
     writeFileSync(join(scratch, "package.json"), '{"type":"module"}\n');

@@ -55,18 +55,18 @@ async fn root_bound_replay_composes_real_domains_end_to_end() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
 
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -181,18 +181,18 @@ async fn root_bound_replay_composes_real_domains_end_to_end() {
         .expect("workspace close");
     assert_eq!(closed.result["closed"], true);
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                8,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect("matching shadow stamp must reopen");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            8,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect("matching shadow stamp must reopen");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("reopened handle");
     transport
@@ -316,18 +316,18 @@ async fn a_ts_v1_fingerprint_is_refused_before_binding() {
     let db_path = engine_db_path(&scratch).expect("db path");
     write_fingerprint_db(&db_path, 1).expect("foreign v1 fixture");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect_err("foreign fingerprint must fail");
+    let error = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect_err("foreign fingerprint must fail");
     assert_eq!(error.code, ErrorCode::Internal);
 }
 
@@ -373,18 +373,18 @@ async fn an_existing_store_under_an_unbound_root_is_refused() {
     assert_eq!(initial.2, 0);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect_err("an existing store under an unbound root must be refused");
+    let error = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect_err("an existing store under an unbound root must be refused");
     assert_eq!(error.code, ErrorCode::InvalidParams);
     assert_eq!(error.message, "engine database is bound to another root");
 
@@ -444,18 +444,18 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
 
     let unbound = ScratchDir::new().expect("unbound root");
     copy_store_snapshot(&source_db, &engine_db_path(&unbound).expect("unbound db"));
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                3,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&unbound), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect_err("a copied database under an unbound root must be refused");
+    let error = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            3,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&unbound), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect_err("a copied database under an unbound root must be refused");
     assert_eq!(error.message, "engine database is bound to another root");
 
     let other = ScratchDir::new().expect("other root");
@@ -468,18 +468,18 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
         .await
         .expect("close other");
     copy_store_snapshot(&source_db, &engine_db_path(&other).expect("other db"));
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                6,
-                "workspace.open",
-                None,
-                json!({ "rootDir": root_string(&other), "workspaceId": "ws-shadow" }),
-            ),
-        )
-        .await
-        .expect_err("a copied database under another root's binding must be refused");
+    let error = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            6,
+            "workspace.open",
+            None,
+            json!({ "rootDir": root_string(&other), "workspaceId": "ws-shadow" }),
+        ),
+    )
+    .await
+    .expect_err("a copied database under another root's binding must be refused");
     assert_eq!(error.message, "engine database is bound to another root");
 }
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -34,8 +34,10 @@ async function fixture(){const directory=await mkdtemp(join(tmpdir(),"dohc-expor
 
 it.each(["bound", "file IO"])("keeps authority active after %s export failure", async kind => {
   const f = await fixture(), limits = { maxTotalBytes: kind === "bound" ? 1 : 10 * 1024 * 1024 };
-  const transfers = createLocalDatasetTransfers({ ...f, workspaceId: f.scope.workspaceId, exportDirectory: join(f.directory, "exports"), assertCurrent: f.authorize, limits,
-    exportRecovery: async () => { if (kind === "file IO") throw new Error("disk refused"); return prepareDatasetRecoveryExport({ ...f, directory: join(f.directory, "exports"), limits }); } });
+  const directory = join(f.directory, "exports");
+  await mkdir(directory);
+  const transfers = createLocalDatasetTransfers({ ...f, workspaceId: f.scope.workspaceId, inExportDirectory: (read) => read(directory), assertCurrent: f.authorize, limits, fenced: () => undefined,
+    exportRecovery: async () => { if (kind === "file IO") throw new Error("disk refused"); return prepareDatasetRecoveryExport({ ...f, directory, limits }); } });
   const target = { async importRecovery(): Promise<never> { throw new Error("Target must not be called"); } };
   await expect(transfers.transfer({ datasetId: id(1), targetOrigin: "https://relay.example", target })).rejects.toThrow(kind === "bound" ? "larger than the space reserved" : "disk refused");
   expect(transfers.status(id(1))).toBeNull();
@@ -45,7 +47,8 @@ it.each(["bound", "file IO"])("keeps authority active after %s export failure", 
 it.each(["record", "permission", "lifecycle", "attempt"])("refuses changed %s metadata before fencing a prepared archive", async kind => {
   const f = await fixture(), limits = { maxTotalBytes: 10 * 1024 * 1024 };
   const directory = join(f.directory, "exports");
-  const transfers = createLocalDatasetTransfers({ ...f, workspaceId: f.scope.workspaceId, exportDirectory: directory, assertCurrent: f.authorize, limits,
+  await mkdir(directory);
+  const transfers = createLocalDatasetTransfers({ ...f, workspaceId: f.scope.workspaceId, inExportDirectory: (read) => read(directory), assertCurrent: f.authorize, limits, fenced: () => undefined,
     exportRecovery: async () => {
       const prepared = await prepareDatasetRecoveryExport({ ...f, directory, limits });
       if (kind === "record") f.commit();

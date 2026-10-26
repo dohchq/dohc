@@ -43,8 +43,8 @@ where
     }
 }
 
-pub async fn call_with_busy_retry(
-    transport: &InProcessTransport<EngineService>,
+pub async fn call_with_busy_retry<S: dohc_engine_protocol::transport::EngineService>(
+    transport: &InProcessTransport<S>,
     context: RequestContext,
     input: Request,
 ) -> Result<dohc_engine_protocol::wire::Response, WireError> {
@@ -114,22 +114,22 @@ pub async fn call(
     .result
 }
 
-pub async fn call_keyed(
-    transport: &InProcessTransport<EngineService>,
+pub async fn call_keyed<S: dohc_engine_protocol::transport::EngineService>(
+    transport: &InProcessTransport<S>,
     handle: &WorkspaceHandle,
     id: u64,
     method: &str,
     key: &str,
     params: Value,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            keyed_request(id, method, Some(handle.clone()), key, params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        keyed_request(id, method, Some(handle.clone()), key, params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} request {id} failed: {error:?}"))
+    .result
 }
 
 pub async fn call_error(

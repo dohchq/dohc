@@ -10,6 +10,7 @@ import {
 } from "react";
 import { IconButton } from "./controls";
 import { isComposingKey } from "./keys";
+import { focusedElementIn } from "./focusedElement";
 import { useDismiss } from "./useDismiss";
 
 export type MenuItem = {
@@ -100,8 +101,6 @@ export const MENU_LABEL = "min-w-0 flex-1 truncate";
 export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
 /** The detail after a row's title, in the rest of the row. */
 export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
-/** A path as a row's detail, in the metadata voice. */
-export const MENU_PATH = "min-w-0 flex-1 truncate font-mono text-[11px] text-subtle";
 /** The line a list shows when nothing matches. */
 export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
 
@@ -114,7 +113,7 @@ export function movedPointer(event: { movementX: number; movementY: number }): b
   return event.movementX !== 0 || event.movementY !== 0;
 }
 /** A row's shortcut, after its label. Hidden from the row's name; the row says it with aria-keyshortcuts. */
-export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+export const MENU_SHORTCUT = "shrink-0 font-sans text-[12px] text-subtle";
 
 /**
  * The key that runs a menu's destructive row, labelled as the keyboard in
@@ -308,8 +307,11 @@ export function Menu(props: {
     if (props.closeOnPick !== false) close();
     item.onSelect();
   };
-  const typing = () => document.activeElement instanceof HTMLInputElement && !!list.current?.contains(document.activeElement);
-  const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
+  const typing = () => {
+    const focused = focusedElementIn(list.current);
+    return focused instanceof HTMLInputElement && !!list.current?.contains(focused);
+  };
+  const current = () => rowElements.current.findIndex((row) => row === focusedElementIn(row));
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
     if (inField && isComposingKey(event)) return;
@@ -430,7 +432,7 @@ export function Menu(props: {
                     className="h-7 w-full rounded-md border border-line bg-bg pl-2 pr-7 text-[13px] text-ink placeholder:text-subtle"
                   />
                   {/* Enter submits every field; the key says so at its end. */}
-                  <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-mono text-[10px] leading-[14px] text-subtle">↵</kbd>
+                  <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-sans text-[10px] leading-[14px] text-subtle">↵</kbd>
                   {field.hint ? <p className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p> : null}
                 </div>
               );

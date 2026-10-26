@@ -101,7 +101,7 @@ fn secret_key_is_not_minted_in_a_replacement_root_after_plaintext_read() {
 fn secret_changed_ingest_consumes_an_engine_self_write() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
-    let key = create_key_file(scratch.path()).expect("secret key");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &FilesNoFaults)

@@ -49,7 +49,7 @@ it("labels a chat outside the bounded page unknown through the owner instead of 
   const store = { listChannelsPage: async () => ({ channels: [], nextCursor: "more" }), getChannelWireId: async () => null };
   const owner = createAccessOwner({ resolve: (_w: string, ref) => resolveAccessObject(workspace, ref, {
     filePathForObjectId: async () => null, locatePath: async () => null, hasChat: wire => hasAccessChat("w", wire, store) }),
-    account: () => null, scope: () => "scope", assertCurrent: () => undefined, refresh: async () => undefined,
+    account: () => null, scope: () => "scope", assertCurrent: () => undefined, refresh: async () => ({ status: "requested" }),
     roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }), received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
     permissions: async () => { throw Error("unused"); } });
   expect(await owner.object("w", { ref: { kind: "chat", channelWireId: "unvisited" } })).toMatchObject({ freshness: "unknown", visibility: "unknown", coverage: { complete: false } });

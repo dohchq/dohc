@@ -7,10 +7,19 @@ pub enum RestoreDeliveryOrigin {
     Owner { id: String },
 }
 
+/// Journal point authenticated before committing the restore fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRestoreSelection {
+    pub journal_cursor: i64,
+    pub receipt_digest: String,
+}
+
 /// Supplied by an authenticated operation adapter after relay old-cut ACK.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreFence {
+    pub point: NativeRestoreSelection,
     pub operation_id: String,
     pub relay_database_namespace: String,
     pub old_binding: LiveObjectBinding,
@@ -28,6 +37,26 @@ pub struct NativeRestoreFenceReceipt {
     pub local_head_sequence: i64,
     pub recorded_at_ms: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeRestoreRefusalReason {
+    BindingChanged,
+    ReaderUnavailable,
+    SourceUnavailable,
+    SourceTooLarge,
+    IncompleteWitness,
+}
+
+/// The writer found no saved fence and refused before its first fence write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRestoreRefusal {
+    pub operation: NativeRestoreFence,
+    pub reason: NativeRestoreRefusalReason,
+}
+
+const SELECTED_POINT_REPLAY_BYTES: usize = crate::limits::MAX_YDOC_UPDATE_BYTES * 5;
 
 // This document lineage's settlements whose moments have not reached the relay:
 // local moments above the origin's pushed cursor, then settlements a retained
@@ -53,16 +82,22 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
     }
 }
 
+pub(crate) fn latest_generation(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<(i64, bool)>, CollabError> {
+    conn.query_row(
+        CURRENT_GENERATION,
+        params![key.workspace_id, key.version_id, key.object_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))
+}
+
 /// Fresh sessions capture this value; queued work must retain its original value.
 pub fn current_generation(conn: &Connection, key: &DocKey) -> Result<Option<i64>, CollabError> {
-    let row: Option<(i64, bool)> = conn
-        .query_row(
-            CURRENT_GENERATION,
-            params![key.workspace_id, key.version_id, key.object_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))?;
+    let row = latest_generation(conn, key)?;
     match row {
         None => Ok(None),
         Some((generation, true)) if (1..=SAFE).contains(&generation) => Ok(Some(generation)),
@@ -112,6 +147,8 @@ pub(crate) fn require_registration(
 
 impl NativeRestoreFence {
     pub(super) fn validate(&self) -> Result<(), ApplicationError> {
+        integer(self.point.journal_cursor, 0, SAFE)?;
+        digest(&self.point.receipt_digest)?;
         identifier(&self.operation_id, 512)?;
         identifier(&self.relay_database_namespace, 512)?;
         identifier(&self.host_id, 1024)?;
@@ -223,12 +260,13 @@ impl ApplicationOwner {
     pub fn fence_restore(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, input, coordinate, now_ms, faults, false)
+        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, false)
     }
 
     /// The authenticated host adapter holds its current connection output guard.
@@ -236,17 +274,20 @@ impl ApplicationOwner {
     pub fn fence_restore_after_reconnect(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, input, coordinate, now_ms, faults, true)
+        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fence_restore_inner(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         input: NativeRestoreFence,
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
@@ -267,6 +308,27 @@ impl ApplicationOwner {
             coordinate,
             binding: b.clone(),
             live: true,
+        };
+        let selected = store.read_with(|conn| {
+            if !accepted_history::may_have_reader(conn, &held)? {
+                return Ok(None);
+            }
+            let read = conn.unchecked_transaction().map_err(read_sql)?;
+            accepted_history::read_selected_point(
+                &read,
+                &held,
+                &input.point,
+                &mut restore_content::Budget {
+                    remaining: SELECTED_POINT_REPLAY_BYTES,
+                },
+                accepted_history::CHECKPOINT_EVENTS as usize,
+            )
+            .map(|history| Some(history.doc))
+        });
+        // Saved fences replay independently of history; preserve transaction error precedence.
+        let (selected, mut selection_error) = match selected {
+            Ok(doc) => (doc, None),
+            Err(error) => (None, Some(error)),
         };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
         let outcome = store.write_with(faults, |tx| {
@@ -298,6 +360,9 @@ impl ApplicationOwner {
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
+            let refused = |reason| ApplicationError::RestoreRefused(Box::new(NativeRestoreRefusal {
+                operation: input.clone(), reason,
+            }));
             let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
             require_hosted_ready(tx, &key)?;
             require_registration(tx,&key,&held.namespace,b)?;
@@ -306,7 +371,7 @@ impl ApplicationOwner {
                 binding == *b && available && (coordinate == held.coordinate
                     || (after_reconnect && coordinate.host_id == held.coordinate.host_id))
             }) {
-                return Err(ApplicationError::Interrupted);
+                return Err(refused(NativeRestoreRefusalReason::BindingChanged));
             }
             // A settlement moment's before-image is publishable only while its
             // generation is current. Refuse until the relay acknowledged this
@@ -322,6 +387,32 @@ impl ApplicationOwner {
             if terminal != input.terminal || sequence != input.applied_sequence || marker.head_update_seq < sequence {
                 return Err(ApplicationError::Conflict);
             }
+            let current = durable::load_doc_in(tx, &key)?;
+            if let Some(error) = selection_error.take() {
+                return Err(error);
+            }
+            accepted_history::require_selected_terminal(tx, &held, &input.point)?;
+            // A new reader-bearing append after the preflight needs a fresh attempt.
+            if selected.is_none() && accepted_history::may_have_reader(tx, &held)? {
+                return Err(ApplicationError::Interrupted);
+            }
+            let needed = if selected.as_ref().is_some_and(|doc| doc.has_reader_source()) { selected.as_ref() }
+                else if current.has_reader_source() { Some(&current) } else { None };
+            if let Some(doc) = needed {
+                let reference = doc.markdown_source_reference().ok_or_else(|| refused(NativeRestoreRefusalReason::IncompleteWitness))?;
+                if doc.markdown_source(&reference).is_none() {
+                    return Err(refused(NativeRestoreRefusalReason::IncompleteWitness));
+                }
+                if resolver.is_none() {
+                    return Err(refused(NativeRestoreRefusalReason::ReaderUnavailable));
+                }
+                crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+                    .map_err(|error| match error {
+                        CollabError::MarkdownReaderUnavailable => refused(NativeRestoreRefusalReason::SourceUnavailable),
+                        CollabError::ConfiguredByteBudgetExceeded => refused(NativeRestoreRefusalReason::SourceTooLarge),
+                        error => error.into(),
+                    })?;
+            }
             let receipt = NativeRestoreFenceReceipt {
                 operation: input.clone(),
                 local_head_sequence: marker.head_update_seq,
@@ -331,6 +422,13 @@ impl ApplicationOwner {
                 "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,previous_operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?,previous],
             ).map_err(write_sql)?;
+            crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, b).map_err(|error| match error {
+                crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
+                crate::OwnerOutboxError::AcceptedStateIncomplete => {
+                    ApplicationError::AcceptedStateIncomplete
+                }
+                _ => ApplicationError::Corrupt,
+            })?;
             let changed = tx.execute(
                 "UPDATE live_device_application_bindings SET available=0,restore_fence_generation=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
                 params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,input.new_fence],

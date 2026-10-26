@@ -67,6 +67,7 @@ describe("renderer reload admission", () => {
       catalog: { list: async () => [], get: catalogGet },
       lifecycle: siteLifecycle,
       isSharedView: () => false,
+      assertMayRunAppCode: async () => undefined,
       execute: vi.fn(async () => {
         throw new Error("site execution must not start");
       }),

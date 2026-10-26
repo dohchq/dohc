@@ -54,7 +54,8 @@ export async function runBounded(tasks, execute, concurrency = 2) {
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
 // `repositoryTests` is the repository lane's script: every repository test, or "test:repo:tree" for the ones that read the source tree.
 // `full` runs each desktop unit test file in a worker of its own, so a test that passes only after another file in a shared worker fails.
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", full = false, stop } = {}) {
+// `onlyPackage` runs one package's steps as a full run does, without the repository lane. The desktop release tests the desktop package this way.
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", full = false, onlyPackage = null, stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
@@ -164,6 +165,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const recorded = readTestRecord(record);
       const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
       if (flaky.length) row.flaky = flaky;
+      // What a vitest test threw on a try that failed, which its log no longer shows once a retry or a run alone passes.
+      const errors = recorded.filter(test => (test.flaky || test.failed) && test.error);
+      if (errors.length) row.testErrors = Object.fromEntries(errors.map(test => [test.test, test.error]));
       // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
       const last = readLog(row.retryLog ?? row.log);
       const failed = [...new Set([...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : []), ...failedAlone])]
@@ -183,11 +187,12 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
     // A change confined to some packages runs only their tests and their dependents'.
     const relativePackages = packages.map(pkg => ({ ...pkg, path: relative(repoRoot, pkg.path).replaceAll("\\", "/") }));
-    const only = changed && affectedPackages(changed, relativePackages, packageReferences(repoRoot, relativePackages));
+    const only = onlyPackage !== null ? [onlyPackage] : changed && affectedPackages(changed, relativePackages, packageReferences(repoRoot, relativePackages));
     const planned = testPlan(packages);
     if (!planned.length) throw new Error("No workspace package tests were discovered.");
     // A change confined to some packages runs only their tests and their dependents'.
     const tasks = only ? planned.filter(task => only.includes(task.name)) : planned;
+    if (onlyPackage !== null && !tasks.length) throw new Error(`No workspace package named ${onlyPackage} has tests.`);
     if (only) report.skippedPackages = planned.filter(task => !only.includes(task.name)).map(task => task.name);
     report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
     save();
@@ -197,7 +202,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = command("repository", ["run", repositoryTests], { rerun: repoRoot });
+    const repositoryChecks = onlyPackage !== null ? null : command("repository", ["run", repositoryTests], { rerun: repoRoot });
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
@@ -222,6 +227,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const runRepository = async () => {
       await repositoryChecks;
       const tasks = await plan;
+      // Desktop-only release preflight shares a four-CPU hosted runner. Its
+      // Windows compiler owner must compile C# before its deadline expires.
+      if (onlyPackage === "@dohc/desktop") await packages;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: desktopRoot });
       }
@@ -258,11 +266,12 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const interrupted = await cancellation.dispose();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     const desktop = report.packages?.some(task => task.name === "@dohc/desktop");
-    const stopped = stopper.unfinished(report.steps, ["repository", ...(report.packages ?? []).map(task => task.name),
+    const stopped = stopper.unfinished(report.steps, [...(onlyPackage !== null ? [] : ["repository"]), ...(report.packages ?? []).map(task => task.name),
       ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
     if (stopped) report.stopped = stopped;
-    report.flaky = report.steps.flatMap(step => [...(step.flaky ?? []).map(test => ({ step: step.name, test })),
-      ...(step.passedAlone ?? []).map(test => ({ step: step.name, test, passedAlone: true }))]);
+    const error = (step, test) => step.testErrors?.[test] ? { error: step.testErrors[test] } : {};
+    report.flaky = report.steps.flatMap(step => [...(step.flaky ?? []).map(test => ({ step: step.name, test, ...error(step, test) })),
+      ...(step.passedAlone ?? []).map(test => ({ step: step.name, test, passedAlone: true, ...error(step, test) }))]);
     report.failed = report.steps.flatMap(step => (step.failed ?? []).map(test => ({ step: step.name, test })));
     report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();
@@ -272,6 +281,8 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
   const args = process.argv.slice(2);
   const outputIndex = args.indexOf("--output");
-  testWorkspace({ prepared: args.includes("--prepared"), ...(outputIndex >= 0 ? { output: resolve(args[outputIndex + 1]) } : {}) })
+  const packageIndex = args.indexOf("--package");
+  testWorkspace({ prepared: args.includes("--prepared"), ...(outputIndex >= 0 ? { output: resolve(args[outputIndex + 1]) } : {}),
+    ...(packageIndex >= 0 ? { onlyPackage: args[packageIndex + 1] ?? "" } : {}) })
     .catch(error => { console.error(error.message); process.exitCode ??= 1; });
 }

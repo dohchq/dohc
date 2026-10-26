@@ -49,8 +49,8 @@ pub use bounds::{
 };
 pub use capture::{
     BatchIngestResult, CaptureApplyResult, CaptureError, CaptureSink, CapturedIngest,
-    HeldObservation, IngestOutcome, RespelledRetire, apply_reconcile_plan,
-    apply_reconcile_plan_cancellable, apply_then_ack,
+    HeldObservation, ImportPriority, IngestOutcome, RespelledRetire, RetireOutcome,
+    apply_reconcile_plan, apply_reconcile_plan_cancellable, apply_then_ack,
 };
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::{FilesError, PRIVACY_DENIED, privacy_denied};

@@ -68,8 +68,8 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
     let hold = call(&transport, &handle, 12, "capture.hold", json!({})).await["holdId"].clone();
     std::fs::rename(root.join("notes.txt"), root.join("moved.txt")).expect("move text");
     std::fs::rename(root.join("photo.bin"), root.join("photo-moved.bin")).expect("move binary");
-    std::fs::create_dir_all(root.join(".dohc/trash")).expect("trash");
-    std::fs::rename(root.join("docs"), root.join(".dohc/trash/docs")).expect("trash folder");
+    std::fs::create_dir_all(root.join(".dohc/local/trash")).expect("trash");
+    std::fs::rename(root.join("docs"), root.join(".dohc/local/trash/docs")).expect("trash folder");
     let moves = [("notes.txt", "moved.txt"), ("photo.bin", "photo-moved.bin")];
     for (id, (from, to)) in (13_u64..).zip(moves) {
         let params = json!({
@@ -116,7 +116,7 @@ async fn held_capture_leaves_one_authored_row_per_moved_or_deleted_file() {
     let moved = std::fs::read(root.join("photo-moved.bin")).expect("binary");
     assert_eq!(moved, [0, 1, 2, 3, 255]);
     assert!(!root.join("photo.bin").exists());
-    let trashed = std::fs::read(root.join(".dohc/trash/docs/a.txt")).expect("trashed");
+    let trashed = std::fs::read(root.join(".dohc/local/trash/docs/a.txt")).expect("trashed");
     assert_eq!(trashed, b"a");
 
     let params = json!({ "holdId": hold });
@@ -209,14 +209,22 @@ async fn a_binary_delete_rolled_back_after_its_file_returns_keeps_its_bytes_with
     let author = json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person-1" });
 
     let hold = call(&transport, &handle, 12, "capture.hold", json!({})).await["holdId"].clone();
-    std::fs::create_dir_all(root.join(".dohc/trash")).expect("trash");
-    std::fs::rename(root.join("photo.bin"), root.join(".dohc/trash/photo.bin")).expect("stage");
+    std::fs::create_dir_all(root.join(".dohc/local/trash")).expect("trash");
+    std::fs::rename(
+        root.join("photo.bin"),
+        root.join(".dohc/local/trash/photo.bin"),
+    )
+    .expect("stage");
     let params = json!({
         "versionId": "main", "path": "photo.bin", "onlyIfAbsentOnDisk": true,
         "origin": "api", "author": author, "captureHoldId": hold,
     });
     let deleted = call(&transport, &handle, 13, "versionedText.delete", params).await;
-    std::fs::rename(root.join(".dohc/trash/photo.bin"), root.join("photo.bin")).expect("put back");
+    std::fs::rename(
+        root.join(".dohc/local/trash/photo.bin"),
+        root.join("photo.bin"),
+    )
+    .expect("put back");
     let params = json!({
         "versionId": "main", "path": "photo.bin", "mutationMomentId": deleted["moment"]["momentId"],
         "origin": "api", "author": author,
@@ -439,4 +447,83 @@ async fn history_operation_rpc_fence_reconciles_typing_and_uses_envelope_key() {
         result["compensationOperationId"]
     );
     call(&transport, &handle, 107, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_after_outside_write_at_old_path_refuses_without_stalling_capture() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    write_file(scratch.path(), "old.md", b"Moved content.\n");
+    let (transport, handle) = open(&scratch).await;
+    reconcile_until_settled(&transport, &handle, 100).await;
+    let operation = "dohc-operation:outside-write";
+    let hold = call(
+        &transport,
+        &handle,
+        101,
+        "capture.hold",
+        json!({"operationId":operation}),
+    )
+    .await["holdId"]
+        .clone();
+    std::fs::rename(scratch.path().join("old.md"), scratch.path().join("new.md")).unwrap();
+    call_keyed(
+        &transport,
+        &handle,
+        102,
+        "versionedText.rename",
+        "rename",
+        json!({"versionId":"main","origin":"api","fromPath":"old.md","toPath":"new.md","captureHoldId":hold}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        103,
+        "capture.release",
+        json!({"holdId":hold}),
+    )
+    .await;
+    write_file(scratch.path(), "old.md", b"Outside content KEEP.\n");
+
+    // Desktop Undo reads the operation's History page before attempting Undo.
+    let started = std::time::Instant::now();
+    let page = call(
+        &transport,
+        &handle,
+        104,
+        "history.page",
+        json!({"workspaceId":WORKSPACE_ID,"operationId":operation}),
+    )
+    .await;
+    println!("History page after outside write: {:?}", started.elapsed());
+    assert_eq!(page["moments"].as_array().unwrap().len(), 1);
+    let started = std::time::Instant::now();
+    let refusal = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            105,
+            "history.undo",
+            Some(handle.clone()),
+            "undo-outside-write",
+            json!({"operationId":operation}),
+        ),
+    )
+    .await
+    .expect_err("the outside file occupies the old path");
+    println!(
+        "Undo after outside write: {:?} {refusal:?}",
+        started.elapsed()
+    );
+    assert!(refusal.message.contains("old path occupied"), "{refusal:?}");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
+        "Outside content KEEP.\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("new.md")).unwrap(),
+        "Moved content.\n"
+    );
+    call(&transport, &handle, 106, "workspace.close", json!({})).await;
 }

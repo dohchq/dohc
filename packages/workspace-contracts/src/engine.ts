@@ -1,3 +1,5 @@
+import type { ChatLinksEngineInput, ChatLinksEnginePage } from "./chatLinks";
+import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "./chatFileMentions";
 import type { AutomationRunAttribution } from "./collection";
 
 type WorkspaceObjectId = string;
@@ -109,11 +111,19 @@ export function refuseCallerOperationId(id: string | undefined): void {
   if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
 }
 
-export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
-export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean }
+export interface HistoryOperation { operationId: string; versionId: string; momentCount: number; kind: "file-duplicate" | null }
+export interface HistoryUndoResult extends Omit<HistoryOperation, "kind"> { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
+export interface HistoryLinkRewriteResult {
+  documents: number;
+  links: number;
+  unchecked: string[];
+  uncheckedCount: number;
+  complete: boolean;
+}
 export interface HistoryOperationsStore {
   readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
   undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
+  rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryLinkRewriteResult>;
 }
 
 // A recorded moment can also say that a live document session settled it.
@@ -404,6 +414,10 @@ export interface ChatMessageAppendPayload {
   // Local CLI writes are replicated so every device can exclude them from
   // agent dispatch. Absent preserves the pre-CLI wire shape.
   origin?: "cli";
+  // A link message's link, present only with `authorKind: "link"`. Such a
+  // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
+  linkGrantId?: string;
+  linkPrincipalId?: string;
   body: string;
   createdAtMs: number;
 }
@@ -687,11 +701,15 @@ export type ChatChannelKind = "channel" | "dm" | "agent";
 export type ChatChannelType = "posts" | "chat" | "both";
 
 // An automation posts only through the automation executor, which names
-// itself with `ChatMessageAutomationInput`. Only people and agents react.
+// itself with `ChatMessageAutomationInput`. A link holder posts only through
+// the relay, which names the link grant and link principal; nothing on this
+// computer writes a link author. Only people and agents react.
 type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string }
-  | { kind: "automation"; displayName: string };
+  | { kind: "automation"; displayName: string }
+  | { kind: "link"; displayName: string; grantId: string; principalId: string };
+type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
 export interface ChatMessageAutomationInput {
@@ -827,13 +845,6 @@ interface ChatAttachment {
   headingAnchor?: string;
   headingOccurrence?: number;
   createdAtMs: number;
-}
-
-export interface ChatFileMention {
-  attachment: ChatAttachment;
-  message: ChatMessage;
-  thread: ChatThread;
-  channel?: ChatChannel;
 }
 
 export interface ChatMessage {
@@ -1050,7 +1061,7 @@ export interface LinkedChatStore {
     automation?: ChatMessageAutomationInput;
     title?: string;
     lane?: ChatThreadLane;
-    author: ChatActor;
+    author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
@@ -1103,7 +1114,7 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    author: ChatActor;
+    author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
@@ -1149,11 +1160,8 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
   ): Promise<ChatAttachment[]>;
-  listFileMentions(input: {
-    workspaceId: WorkspaceId;
-    objectId?: WorkspaceObjectId;
-    pathHint?: string;
-  }): Promise<ChatFileMention[]>;
+  linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
+  fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1467,6 +1475,7 @@ export type SecretFileStoreErrorCode =
   | "invalid-version"
   | "invalid-workspace"
   | "key-corrupt"
+  | "key-install-unsupported"
   | "moment-not-found"
   | "not-secret-path"
   | "state-corrupt";

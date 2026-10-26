@@ -1,7 +1,9 @@
 name: Desktop Release
+# The scheduled nightly job finds its run by the commit it requested.
+run-name: Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
 
-# Releases start only by dispatch and run only on self-hosted runners.
-# Cloud runners stay off (AGENTS.md). This workflow builds Windows and Linux.
+# Releases start only by dispatch and build Windows and Linux on pinned
+# GitHub-hosted images. The scheduled nightly dispatches the same workflow.
 # The release owner adds the macOS files to the published release with
 # `pnpm release:macos` on a Mac (docs/engineering/desktop-release.md).
 on:
@@ -20,9 +22,9 @@ on:
         required: false
         type: string
       platforms:
-        description: Platforms to build
+        description: Platforms to build. A published nightly needs windows-linux.
         required: true
-        default: windows
+        default: windows-linux
         type: choice
         options:
           - windows
@@ -33,6 +35,10 @@ on:
         required: true
         default: true
         type: boolean
+      commit:
+        description: Build only if main is at this commit. The scheduled nightly job sets it.
+        required: false
+        type: string
 
 # A second dispatch on a channel waits. Cancelling a publish in progress
 # could leave a release with only some of its files.
@@ -47,8 +53,8 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
-    timeout-minutes: 40
+    runs-on: ${{ inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025' }}
+    timeout-minutes: 90
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
       version: ${{ steps.release.outputs.version }}
@@ -59,6 +65,19 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
+      # The scheduled nightly job requests the commit its verification passed.
+      # If main moved since, nothing builds or publishes.
+      - name: Check the requested commit
+        if: inputs.commit != ''
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          if [[ "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::main is at $GITHUB_SHA, not the requested commit $REQUESTED_COMMIT. Nothing builds."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -74,6 +93,24 @@ jobs:
         run: |
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
+
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -123,13 +160,13 @@ jobs:
       - name: Desktop typecheck
         run: pnpm --filter @dohc/desktop typecheck
 
+      # The desktop package's unit and script tests run through the PR gate's
+      # runner, with its rules. A test that fails runs once more, and a test
+      # that fails both tries must pass when its file runs alone.
       - name: Desktop tests
         env:
           DOHC_REQUIRE_ENGINE_E2E: "1"
-        run: pnpm --filter @dohc/desktop test:unit --maxWorkers=4
-
-      - name: Desktop script tests
-        run: pnpm --filter @dohc/desktop test:scripts
+        run: node scripts/verification/js-tests.mjs --prepared --package @dohc/desktop
 
   # The release action reuses an existing release with the same tag, published
   # or draft, and turns it back into a draft while it uploads. A dispatch must
@@ -139,7 +176,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
@@ -154,7 +191,9 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Keep published update platforms
+      # Publish checks these rules again, because a run can publish after
+      # midnight UTC or be re-run.
+      - name: Check publication rules
         if: needs.preflight.outputs.dry_run != 'true'
         shell: bash
         env:
@@ -164,8 +203,8 @@ jobs:
         run: |
           set -euo pipefail
           gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq '.[] | {draft, assets: [.assets[] | {name}]}' > release-history.jsonl
-          node scripts/check-desktop-release-platforms.mjs \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
             --channel "$RELEASE_CHANNEL" \
             --platforms "$RELEASE_PLATFORMS" \
             --releases release-history.jsonl
@@ -205,11 +244,9 @@ jobs:
       - unused-version
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Windows and WSL share the same PC for this selection.
-      max-parallel: ${{ inputs.platforms == 'windows-linux' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
@@ -228,6 +265,24 @@ jobs:
         run: |
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
+
+      # GitHub's images carry only the newest stable Rust, and the build checks
+      # rust-toolchain.toml's version without installing it.
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -250,10 +305,11 @@ jobs:
       # chunk ID into each file and uploads its source map, which the
       # installer leaves out, so PostHog can show the original lines. The
       # package ships the files with those IDs. A build with a PostHog key
-      # fails here if the upload cannot run.
+      # fails here if the upload cannot run. A dry run only installs and runs
+      # the CLI.
       - name: Upload source maps
-        if: needs.preflight.outputs.dry_run != 'true'
         env:
+          DOHC_SOURCE_MAPS_DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
           DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
@@ -299,8 +355,7 @@ jobs:
 
           echo "require=$require" >> "$GITHUB_OUTPUT"
 
-      # Each platform's signing secrets reach only its own target's job.
-      # Linux receives none.
+      # Only Windows steps receive signing secrets.
       - name: Package smoke
         env:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
@@ -310,7 +365,6 @@ jobs:
       - name: Package desktop
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
           WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
@@ -339,6 +393,48 @@ jobs:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
+      # A workspace the newest published nightly wrote must open under this
+      # package's engine with its files and history intact. It runs on every
+      # nightly, so a new engine migration never ships unchecked.
+      - id: previous-nightly
+        name: Choose the previous nightly
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {tag_name, draft, published_at, assets: [.assets[] | {name}]}' > "${RUNNER_TEMP}/nightly-history.jsonl"
+          node scripts/select-upgrade-nightly.mjs --releases "${RUNNER_TEMP}/nightly-history.jsonl" --github-output
+
+      - name: Engine upgrade check
+        if: runner.os == 'Linux' && steps.previous-nightly.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_NIGHTLY: ${{ steps.previous-nightly.outputs.tag }}
+          DOHC_TEST_ENGINE_BINARY: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/workspace-engine/dohc-workspace-engine
+          DOHC_REQUIRE_UPGRADE_E2E: "1"
+        run: |
+          set -euo pipefail
+          # Outside apps/desktop/release, so the upload never includes it.
+          download="${RUNNER_TEMP}/previous-nightly"
+          rm -rf "$download"
+          mkdir "$download"
+          gh release download "$PREVIOUS_NIGHTLY" --repo "$GITHUB_REPOSITORY" --pattern '*.AppImage' --dir "$download"
+          appimages=("$download"/*.AppImage)
+          (( ${#appimages[@]} == 1 )) || { echo "::error::${PREVIOUS_NIGHTLY} has ${#appimages[@]} AppImages; expected one."; exit 1; }
+          chmod +x "${appimages[0]}"
+          (cd "$download" && "${appimages[0]}" --appimage-extract > /dev/null)
+          export DOHC_UPGRADE_PREVIOUS_ENGINE="$download/squashfs-root/resources/workspace-engine/dohc-workspace-engine"
+          if [[ ! -x "$DOHC_UPGRADE_PREVIOUS_ENGINE" ]]; then
+            echo "::error::${PREVIOUS_NIGHTLY}'s AppImage has no executable engine at resources/workspace-engine/dohc-workspace-engine."
+            exit 1
+          fi
+          echo "Opening a workspace from ${PREVIOUS_NIGHTLY} with this package's engine."
+          pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts
+
       - name: Windows packaged smoke
         if: runner.os == 'Windows'
         shell: pwsh
@@ -364,7 +460,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
@@ -374,6 +470,28 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      # This job holds the channel's concurrency lock, so no other release on
+      # the channel can publish between this check and the publish step.
+      - name: Check publication rules
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {draft, tag_name, published_at, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-publication.mjs \
+            --channel "$RELEASE_CHANNEL" \
+            --platforms "$RELEASE_PLATFORMS" \
+            --releases release-history.jsonl
 
       - name: Download packaged artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

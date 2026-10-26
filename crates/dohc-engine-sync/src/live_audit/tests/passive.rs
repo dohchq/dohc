@@ -786,8 +786,8 @@ fn passive_generation_steps_only_with_the_restore_application_and_refuses_old_ro
                 checkpoint_digest: checkpoint_digest.clone(),
                 checkpoint_bytes,
                 proof: json!({"admitted":restored.admitted.metadata,"candidateDigest":restored.admitted.metadata.accepted.receipt.update_digest,
-            "checkpointDigest":checkpoint_digest,"preparation":{"fence":{"operation":{"operationId":"restore-op","relayDatabaseNamespace":"relay",
-                "oldBinding":source.binding,"hostId":"host","newFence":2,"origin":{"kind":"bootstrap","id":"bootstrap"},
+            "checkpointDigest":checkpoint_digest,"preparation":{"point":{"journalCursor":0,"receiptDigest":source.binding.lineage_claim_id},"fence":{"operation":{"operationId":"restore-op","relayDatabaseNamespace":"relay",
+                "point":{"journalCursor":0,"receiptDigest":source.binding.lineage_claim_id},"oldBinding":source.binding,"hostId":"host","newFence":2,"origin":{"kind":"bootstrap","id":"bootstrap"},
                 "terminal":first.admitted.metadata.accepted.receipt,"appliedSequence":1},"localHeadSequence":1,"recordedAtMs":3}}}),
             });
             let extra = dohc_engine_collab::Ydoc::wire();
@@ -802,6 +802,17 @@ fn passive_generation_steps_only_with_the_restore_application_and_refuses_old_ro
                 apply_page(&mut replica, "ws", 1, &[bad], &NoFaults),
                 Err(ApplicationError::Conflict)
             ));
+            for (field, value) in [
+                ("journalCursor", json!(7)),
+                ("receiptDigest", json!("f".repeat(64))),
+            ] {
+                let mut bad = restored.clone();
+                bad.restore.as_mut().unwrap().proof["preparation"]["point"][field] = value;
+                assert!(matches!(
+                    apply_page(&mut replica, "ws", 1, &[bad], &NoFaults),
+                    Err(ApplicationError::Conflict)
+                ));
+            }
             if native_source {
                 let before = measurement_vector(&doc);
                 let checkpoint = extra.encode_full_state();
@@ -906,7 +917,7 @@ fn passive_generation_steps_only_with_the_restore_application_and_refuses_old_ro
                 restore.proof["checkpointDigest"] = json!(restore.checkpoint_digest);
                 restore.proof["sourceRanges"] = json!([]);
                 restore.proof["preparation"]["fence"] = json!({"operation":{"operationId":"second-restore-op","relayDatabaseNamespace":"relay",
-                    "oldBinding":restored.admitted.metadata.accepted.binding,"hostId":"host","newFence":3,"origin":{"kind":"bootstrap","id":"bootstrap"},
+                    "point":{"journalCursor":0,"receiptDigest":source.binding.lineage_claim_id},"oldBinding":restored.admitted.metadata.accepted.binding,"hostId":"host","newFence":3,"origin":{"kind":"bootstrap","id":"bootstrap"},
                     "terminal":restored.admitted.metadata.accepted.receipt,"appliedSequence":2},"localHeadSequence":2,"recordedAtMs":4});
                 apply_page(&mut replica, "ws", 2, &[second], &NoFaults).unwrap();
             }
@@ -1240,6 +1251,8 @@ fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
         known_text_shas: String::new(),
         position: None,
         cursor: None,
+        since: None,
+        incarnation: String::new(),
     };
     let before = collect_current_view(&replica, "ws", &request).unwrap();
     assert_eq!(before.texts[0].text, canonical);
@@ -1286,6 +1299,8 @@ fn measure_current_view_lanes() {
         known_text_shas: String::new(),
         position: None,
         cursor: None,
+        since: None,
+        incarnation: String::new(),
     };
     for bytes in [50_000, 1_000_000] {
         let text = "x".repeat(bytes);

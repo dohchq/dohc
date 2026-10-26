@@ -24,6 +24,8 @@ const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 export const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 export const NATIVE_RESTORE_STATUS = { prepare: "prepared", apply: "applied", settle: "settled", resume: "resumed" } as const;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
+// The desktop's digest of the kept edits a Stop's release took.
+const KEPT_SNAPSHOT = /^[0-9a-f]{64}$/;
 // Global cap on chunks received by active streams. Unknown-length streams retain
 // those Buffers; known-length streams do not, but keep the same tiny-chunk flood
 // refusal until FIN.
@@ -811,19 +813,37 @@ export class EngineClient implements EngineTransport {
     if (rows.length !== 1 || (typeof target !== "string" && (rows[0]!.document.objectId !== target.objectId || rows[0]!.document.mainVersionId !== target.mainVersionId))) throw new TypeError("Invalid Stop response.");
     return rows[0]!;
   }
-  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], acceptedCursor: number, signal?: AbortSignal) {
-    if (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) throw new TypeError("Invalid retirement cursor.");
-    const rows = await this.ownerLiveStop(request, "release", {binding,acceptedCursor}, signal);
-    if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
-    return rows[0]!;
+  /**
+   * Releases a Stop at the relay's retirement cursor, recording the kept
+   * edits it takes when a snapshot is given. With only a snapshot it is a Try
+   * again: it settles a release that already took exactly those edits, and
+   * starts none.
+   */
+  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"],
+    release: {acceptedCursor: number; keptSnapshot?: string} | {keptSnapshot: string}, signal?: AbortSignal) {
+    const acceptedCursor = "acceptedCursor" in release ? release.acceptedCursor : undefined, keptSnapshot = release.keptSnapshot;
+    if (acceptedCursor !== undefined && (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0)) throw new TypeError("Invalid retirement cursor.");
+    if (keptSnapshot !== undefined && !KEPT_SNAPSHOT.test(keptSnapshot)) throw new TypeError("Invalid kept edits snapshot.");
+    const rows = await this.ownerLiveStop(request, "release", {binding,...(acceptedCursor === undefined ? {} : {acceptedCursor}),...(keptSnapshot === undefined ? {} : {keptSnapshot})}, signal);
+    const row = rows[0], materialized = row?.materialized;
+    if (rows.length !== 1 || !row || row.state !== "released" || materialized === undefined || JSON.stringify(row.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
+    return {...row, materialized};
   }
   async ownerYDocStopRetired(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal): Promise<void> {
     const rows=await this.ownerLiveStop(request,"retired",{document},signal);
     if (rows.length) throw new TypeError("Invalid retirement response.");
   }
-  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal): Promise<void> {
-    const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
-    if (rows.length) throw new TypeError("Invalid Stop cancellation response.");
+  /**
+   * Clears the document's Stop and returns it, whatever its state; undefined
+   * when it had none. It names the document, so another document that took
+   * its old path keeps its own Stop.
+   */
+  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "clear", {document}, signal);
+    if (rows.length > 1 || (rows[0] && (rows[0].document.objectId !== document.objectId || rows[0].document.mainVersionId !== document.mainVersionId))) {
+      throw new TypeError("Invalid Stop cancellation response.");
+    }
+    return rows[0];
   }
   async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {
     return this.ownerLiveStop(request, "list", {}, signal);
@@ -833,8 +853,12 @@ export class EngineClient implements EngineTransport {
     const value = response.result as {stops?: unknown};
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
-      if (!row || typeof row !== "object" || Object.keys(row).filter(key => key !== "deferred").sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown};
+      // Only a release says whether settlement wrote the file.
+      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized"] : ["deferred", "keptSnapshot"];
+      if (!row || typeof row !== "object" || Object.keys(row).filter(key => !optional.includes(key)).sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown};
+      if (r.materialized !== undefined && typeof r.materialized !== "boolean") throw new TypeError("Invalid Stop materialization.");
+      if (r.keptSnapshot !== undefined && (typeof r.keptSnapshot !== "string" || !KEPT_SNAPSHOT.test(r.keptSnapshot) || r.binding === null)) throw new TypeError("Invalid Stop kept edits.");
       if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
       const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
       if (!d || Object.keys(d).sort().join()!=="currentPath,mainVersionId,objectId" || typeof d.currentPath!=="string" || !validateUserWritePath(d.currentPath).ok) throw new TypeError("Invalid Stop document.");
@@ -847,7 +871,9 @@ export class EngineClient implements EngineTransport {
         if (!d || Object.keys(d).sort().join()!=="editable,unsentEdits" || !Number.isSafeInteger(d.unsentEdits) || d.unsentEdits<0 || typeof d.editable!=="boolean" || !binding || r.state!=="released" || r.retirementOwed) throw new TypeError("Invalid deferred Stop.");
         deferred={unsentEdits:d.unsentEdits,editable:d.editable};
       }
-      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {})};
+      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {}),
+        ...(typeof r.keptSnapshot === "string" ? {keptSnapshot:r.keptSnapshot} : {}),
+        ...(typeof r.materialized === "boolean" ? {materialized:r.materialized} : {})};
     });
   }
 
@@ -1701,9 +1727,9 @@ export class EngineClient implements EngineTransport {
    * daemon's answer: `CANCELLED` or `DEADLINE_EXCEEDED` means the work did not
    * happen, and a result means the work landed before the daemon could stop it.
    * A live application acknowledgement (apply, settle, restore fence, native
-   * restore, owner activation capture) stopped after its work landed gets no
-   * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
-   * the outcome is unknown.
+   * restore, owner activation capture) stopped after its work landed, and
+   * before the daemon started to write it, gets no answer. It ends at its own
+   * deadline with `EngineRequestDeadlineError`, and the outcome is unknown.
    */
   async cancelRequest(callerId: number): Promise<void> {
     const pending = [...this.pending.entries()].find(

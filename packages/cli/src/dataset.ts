@@ -171,6 +171,16 @@ const description = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export type AddressedDatasetDescription = z.infer<typeof description>;
+/**
+ * A list on a computer that doesn't keep the workspace's Collections. It
+ * holds the Collections on `server`, which this computer asked, and
+ * `computer` keeps the others. `sameName`: that computer has this one's name.
+ */
+export const DatasetListElsewhere = z.object({
+  server: z.string().url().max(2048),
+  computer: z.object({ label: z.string().min(1).max(64), sameName: z.boolean() }).strict(),
+}).strict();
+export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -184,7 +194,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor, datasetPath: resultDatasetPath.nullable(), sourceError: z.string().max(1024).optional() }).strict(),
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
-  z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
+  z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),

@@ -114,6 +114,9 @@ const bridge = {
     runActive = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
+  readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
+  setChatDispatchPaused: vi.fn(async () => undefined),
+  onChatDispatchPaused: vi.fn(() => () => undefined),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -124,7 +127,8 @@ const bridge = {
   }),
   installUpdate: vi.fn(async (): Promise<{
     accepted: boolean;
-    state: SettingsUpdateState;
+    reason?: string;
+    state: SettingsUpdateState | (typeof readyUpdateState & { installCommand: string });
   }> => ({
     accepted: updateReady,
     state: updateReady ? readyUpdateState : idleUpdateState,
@@ -151,6 +155,13 @@ const bridge = {
   openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
+  requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
+  restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => {
+    workspaceTrusted = false;
+    return { workspaceId, trusted: false };
+  }),
+  onWorkspaceTrustChanged: vi.fn(() => () => undefined),
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   setTitlebarTheme: vi.fn(async () => undefined),
   onUserSettingsChanged: vi.fn(
@@ -179,7 +190,10 @@ function stubClipboard() {
   });
 }
 
+let workspaceTrusted = false;
+
 beforeEach(() => {
+  workspaceTrusted = false;
   runActive = false;
   updateReady = false;
   // vi.clearAllMocks() clears calls, not implementations: restore the fake
@@ -199,6 +213,34 @@ afterEach(() => {
 });
 
 describe("SettingsDialog", () => {
+  it("shows this workspace's trust in Privacy, asks main to trust it, and restricts it again", async () => {
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    const control = await screen.findByTestId("workspace-trust-control");
+    const restricted = within(control).getByRole("radio", { name: "Restricted Mode" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+
+    // The person chose Stay in Restricted Mode in main's dialog.
+    await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
+    expect(bridge.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+
+    // The person chose Trust workspace.
+    workspaceTrusted = true;
+    await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
+    await waitFor(() => expect(within(control).getByRole("radio", { name: "Trusted" }).getAttribute("aria-checked")).toBe("true"));
+
+    await userEvent.click(restricted);
+    expect(bridge.restrictWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
+  });
+
+  it("has no trust row in a shared view", async () => {
+    render(<SettingsDialog workspaceIsReady sharedView workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    await screen.findByTestId(settingsSectionPin("privacy"));
+    expect(screen.queryByTestId("settings-row-workspace-trust")).toBeNull();
+    expect(bridge.readWorkspaceTrust).not.toHaveBeenCalled();
+  });
+
   it("shows a failed-open state instead of loading workspace settings", async () => {
     const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection: "agents" as const,
       workspaceIsReady: false, workspaceOpenFailed: true, onClose: vi.fn() };
@@ -256,6 +298,7 @@ describe("SettingsDialog", () => {
     expect(order).toEqual([
       "settings-nav-general",
       "settings-nav-appearance",
+      "settings-nav-keyboard",
       "settings-nav-agents",
       "settings-row-current-workspace",
       "settings-nav-files",
@@ -588,7 +631,7 @@ describe("SettingsDialog", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("drops the History rail and Current workspace rows, and the Keyboard section", async () => {
+  it("drops the History rail and Current workspace rows", async () => {
     const view = render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
     );
@@ -599,7 +642,45 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     const general = await screen.findByTestId(settingsSectionPin("general"));
     expect(general.textContent).not.toContain("Current workspace");
-    expect(screen.queryByTestId("settings-nav-keyboard")).toBeNull();
+  });
+
+  it("finds the Keyboard page by a shortcut's name", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    await user.type(search, "bold");
+    const nav = screen.getByTestId("settings-sidebar").querySelector("nav")!;
+    expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid)).toEqual(["settings-nav-keyboard"]);
+    // The page shows the shortcut the search named, under its heading.
+    const page = () => screen.getByTestId(settingsSectionPin("keyboard"));
+    expect(within(page()).getAllByRole("heading").map((heading) => heading.textContent)).toEqual(["Document"]);
+    expect(page().textContent).toBe("DocumentBoldCtrlB");
+
+    // A name another section also answers to lists both.
+    await user.clear(search);
+    await user.type(search, "sidebar");
+    expect([...nav.querySelectorAll("button")].map((item) => item.dataset.testid))
+      .toEqual(["settings-nav-appearance", "settings-nav-keyboard", "settings-nav-workbench"]);
+
+    // A search that found the page by its own words shows every shortcut.
+    await user.clear(search);
+    await user.type(search, "keys");
+    expect(within(page()).getAllByRole("heading").map((heading) => heading.textContent))
+      .toEqual(["Workbench", "Document", "Find field", "Command palette and Go to"]);
+  });
+
+  it("finds no Keyboard page for a shortcut this computer does not list", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    // The test renderer loaded with no macOS platform and no dev tools.
+    const search = await screen.findByTestId(desktopPins.settingsSearch);
+    for (const query of ["paragraph", "dev tools"]) {
+      await user.clear(search);
+      await user.type(search, query);
+      expect(screen.getByTestId(desktopPins.settingsEmptySearch).textContent).toBe(`No settings match "${query}".`);
+    }
   });
 
   it("shows the window zoom as a percentage and steps it through settings", async () => {
@@ -1396,7 +1477,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
       throw cause;
@@ -1420,7 +1501,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={vi.fn()} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
@@ -1441,7 +1522,7 @@ describe("SettingsDialog", () => {
     const recovery = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     bridge.getAgentRunStatus
       .mockResolvedValueOnce({ activeRun: { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" }, lastRun: null })
@@ -1464,7 +1545,7 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
@@ -1500,7 +1581,7 @@ describe("SettingsDialog", () => {
   it("reports an agent history mutation refusal through the notice hook", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.startAgentRun.mockRejectedValueOnce(cause);
     render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
@@ -1547,7 +1628,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
       throw cause;
@@ -1604,7 +1685,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1786,7 +1867,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     try {
       bridge.endAgentRun.mockImplementationOnce(async () => {
         runActive = false;
@@ -1820,7 +1901,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("dohc could not read this workspace's agent run history. Check .dohc/agent-runs.json, then try again.");
+    const cause = new Error("dohc could not read this workspace's agent run history. Check .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1859,7 +1940,7 @@ describe("SettingsDialog", () => {
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
     const recovery = deferred<{ activeRun: null; lastRun: null }>();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
+    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.endAgentRun.mockRejectedValueOnce(cause);
     bridge.getAgentRunStatus
       .mockImplementationOnce(async () => ({
@@ -2224,6 +2305,29 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
+    updateReady = true;
+    const reason = "dohc did not get permission to install the update. Run this command in a terminal to install it.";
+    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
+    bridge.installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      reason,
+      state: { ...readyUpdateState, message: reason, installCommand },
+    });
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe("ready"),
+    );
+    expect(screen.queryByTestId("desktop-updates-install-command")).toBeNull();
+
+    await user.click(screen.getByTestId("install-update-button"));
+
+    await waitFor(() => expect(screen.getByTestId("desktop-updates-status").textContent).toBe(reason));
+    expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);
+    expect(screen.getByTestId("desktop-updates-install-command-copy").getAttribute("aria-label")).toBe("Copy install command");
+  });
+
   it("persists the attachment location and hides the folder name for same-folder", async () => {
     const user = userEvent.setup();
     render(
@@ -2296,9 +2400,9 @@ describe("SettingsDialog", () => {
   // happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/local/settings.local.json. Then restart dohc.";
     const refusal =
-      "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
+      "dohc did not save workspace settings. dohc cannot read /x/.dohc/local/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered" as const,
@@ -2503,6 +2607,75 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("agents");
     expect((screen.getByTestId("settings-search") as HTMLInputElement).value).toBe("");
     expect(setUp).not.toHaveBeenCalled();
+  });
+
+  // Main refuses a save or reset until this workspace's engine open has
+  // prepared .dohc/local. The person reads why, the control shows what is on
+  // disk, and Try again sends the same change.
+  it("says why a workspace settings save was refused, and Try again sends it again", async () => {
+    const words =
+      "dohc did not save this workspace's settings because it can't keep this computer's settings out of iCloud Drive. Restart dohc to try again.";
+    const refused = new Error(
+      `Error invoking remote method 'desktop:set-workspace-settings': LocalStateUnavailableError: ${words}`,
+    );
+    bridge.setWorkspaceSettings.mockRejectedValueOnce(refused);
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    const select = await screen.findByTestId("attachment-location-select");
+    await user.selectOptions(select, "global-folder");
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
+    expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
+      `Settings error: ${words}`,
+    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
+    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("per-document"));
+
+    await act(async () => {
+      await onError.mock.calls[0]![2]();
+    });
+    expect(bridge.setWorkspaceSettings).toHaveBeenCalledTimes(2);
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { files: { attachmentLocation: "global-folder" } },
+    });
+  });
+
+  it("says why a workspace settings reset was refused, and Try again resets", async () => {
+    const words =
+      "dohc did not reset this workspace's settings because the workspace has not finished opening. Try again when it opens.";
+    const refused = new Error(
+      `Error invoking remote method 'desktop:reset-workspace-settings': LocalStateUnavailableError: ${words}`,
+    );
+    bridge.resetWorkspaceSettings.mockRejectedValueOnce(refused);
+    const onError = vi.fn();
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Reset workspace" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
+    await act(async () => {
+      await onError.mock.calls[0]![2]();
+    });
+    expect(bridge.resetWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
   it("hands every workspace settings answer to the shell", async () => {

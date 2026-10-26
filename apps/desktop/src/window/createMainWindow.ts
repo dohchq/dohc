@@ -17,10 +17,7 @@ import {
   type NavigationPolicy,
 } from "../security/electronSecurity";
 import { isLoopbackHostname } from "../security/loopback";
-import {
-  resolveDesktopIconDirectory,
-  resolveSystemThemeIconPath,
-} from "../systemThemeIcon";
+import { resolveDesktopIconDirectory } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import { installTextContextMenu } from "./textContextMenu";
@@ -239,6 +236,8 @@ export type WindowRole = "workspace" | "manager";
 
 export function createMainWindow(options?: {
   beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
+  currentRendererDocumentId?: (sender: WebContents) => string | undefined;
+  prepareForRendererReload?: (sender: WebContents, rendererDocumentId: string) => Promise<boolean>;
   // The renderer crashed too often to reload again.
   afterRendererCrashLoop?: () => void;
   // The manager is a smaller window that renders only the workspace
@@ -256,17 +255,13 @@ export function createMainWindow(options?: {
   // than its own file, which may be older.
   chromeTheme ??= placement.theme;
   const theme = chromeTheme;
-  // The executable and Wayland launcher keep the static packaging icon. Live
-  // Windows/X11 window icons follow the OS appearance where the shell allows.
+  // Windows and Linux windows show the app icon's paper tile, which reads on
+  // light and dark taskbars alike.
   const iconDirectory = resolveDesktopIconDirectory({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     moduleDirectory: import.meta.dirname,
   });
-  const iconPath = resolveSystemThemeIconPath(
-    iconDirectory,
-    nativeTheme.shouldUseDarkColors,
-  );
 
   const window = new BrowserWindow({
     show: false,
@@ -274,7 +269,7 @@ export function createMainWindow(options?: {
     minWidth: role === "manager" ? MANAGER_WINDOW_SIZE.width : MIN_WINDOW_SIZE.width,
     minHeight: role === "manager" ? MANAGER_WINDOW_SIZE.height : MIN_WINDOW_SIZE.height,
     backgroundColor: palette[theme].bg,
-    ...(iconPath ? { icon: iconPath } : {}),
+    icon: join(iconDirectory, "icon.png"),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
     // strip); the OS draws only its window controls.
     ...(process.platform === "darwin"
@@ -314,6 +309,24 @@ export function createMainWindow(options?: {
       : undefined,
     options?.afterRendererCrashLoop,
   );
+
+  // On commit, retire only the document current when navigation started.
+  // The reload IPC and crash recovery retire it before navigation starts.
+  let navigatingDocumentId: string | undefined;
+  window.webContents.on("did-start-navigation", (event) => {
+    if (!event.isMainFrame || event.isSameDocument) return;
+    navigatingDocumentId = options?.currentRendererDocumentId?.(window.webContents);
+  });
+  window.webContents.on("did-navigate", async () => {
+    const documentId = navigatingDocumentId;
+    navigatingDocumentId = undefined;
+    if (documentId === undefined) return;
+    try {
+      await options?.prepareForRendererReload?.(window.webContents, documentId);
+    } catch (error) {
+      console.error("[desktop] renderer navigation cleanup failed:", error);
+    }
+  });
 
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except

@@ -32,12 +32,12 @@ it.each(["moment.append", "ydoc.update"])("consumes matching and mismatched reco
   }
 });
 
-it.each(["moment.append", "ydoc.update"])("drops a %s recording claim even when account lookup fails", async opKind => {
+it.each(["moment.append", "ydoc.update"])("drops a %s recording claim and credits the account as Unnamed when account lookup fails", async opKind => {
   const content = opKind === "ydoc.update" ? delta("owner") : {momentId: "moment"};
   const [op] = await parseAuthenticatedLogOps([{originSeq: 0, opKind, recordedAtMs: 1,
     payload: {...content, authorContext: {kind: "account", accountId: "owner"}}}], "owner", () => {throw new Error("offline");});
   expect(op?.payloadJson).toBe(stableJsonStringify(content));
-  expect(op?.admittedAuthorSnapshot).toBeUndefined();
+  expect(op?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "owner", humanName: "Unnamed"}]);
 });
 
 it("consumes a leftover recording claim beside declared moment authors without admitting it", async () => {

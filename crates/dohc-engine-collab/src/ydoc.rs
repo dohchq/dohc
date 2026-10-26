@@ -50,6 +50,7 @@ mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
 mod restore_copy;
+mod wikilinks;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
@@ -72,6 +73,19 @@ const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
+pub(crate) const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
+
+pub(crate) fn reader_source_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        MARKDOWN_SOURCE_META_KEY
+            | MARKDOWN_SOURCE_SHA_META_KEY
+            | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY
+            | MARKDOWN_SOURCE_READER_META_KEY
+            | FRONTMATTER_SOURCE_META_KEY
+            | MARKDOWN_CRLF_META_KEY
+    ) || key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
+}
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -564,6 +578,12 @@ impl Ydoc {
         })
     }
 
+    pub fn has_reader_source(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        meta.get(&txn, MARKDOWN_SOURCE_READER_META_KEY).is_some()
+    }
+
     /// Resolve exact Markdown only after its lightweight projection witness
     /// matches. This avoids cloning and hashing stale source after a document
     /// edit, and never returns bytes the versioned text store cannot hold.
@@ -688,6 +708,15 @@ impl Ydoc {
     }
 
     pub(crate) fn validate_public_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
+        self.validate_public_baseline_as(bytes, false)
+    }
+
+    /// Schema/budget checks only. Exact output also requires the strict reader proof.
+    pub(crate) fn validate_reader_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
+        self.validate_public_baseline_as(bytes, true)
+    }
+
+    fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         self.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -720,10 +749,15 @@ impl Ydoc {
                     )
             );
             let item_record = matches!(
-                (key, value),
+                (key, &value),
                 (key, Out::Any(Any::String(_))) if key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
             );
-            if !valid && !item_record {
+            let reader_meta = reader
+                && matches!(
+                    (key, &value),
+                    (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
+                );
+            if !valid && !item_record && !reader_meta {
                 return Err(invalid());
             }
         }
@@ -1276,12 +1310,49 @@ impl Ydoc {
         )
     }
 
+    /// Check a reader fold on a clone. Reader witnesses cannot authorize this path.
+    pub fn native_fold_candidate(&self, update: &[u8]) -> Result<Ydoc, CollabError> {
+        crate::validate_replay_parity(self, update)?;
+        let candidate = Ydoc::wire();
+        candidate.apply(&self.encode_full_state())?;
+        candidate.apply(update)?;
+        let epoch = candidate.lineage_epoch_tag();
+        if candidate.has_pending_dependencies() || epoch != self.lineage_epoch_tag() {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        let meta = candidate.doc.get_or_insert_map(ROOT_META);
+        let txn = candidate.doc.transact();
+        if (epoch.is_none() && meta.contains_key(&txn, LINEAGE_EPOCH_META_KEY))
+            || [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ]
+            .iter()
+            .any(|key| meta.contains_key(&txn, key))
+        {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        drop(txn);
+        // Public schema validation excludes the engine's private lineage tag.
+        let public = Ydoc::wire();
+        public.apply(&candidate.encode_full_state())?;
+        public
+            .doc
+            .get_or_insert_map(ROOT_META)
+            .remove(&mut public.doc.transact_mut(), LINEAGE_EPOCH_META_KEY);
+        public.validate_public_baseline(&public.encode_full_state())?;
+        public.project(ContentKind::Richdoc)?;
+        Ok(candidate)
+    }
+
     /// Replace an outside fold's frontmatter without rebuilding its body.
     /// The caller checks the settled body and proves this source against the
     /// retained XML before journaling the returned update.
     pub fn replace_frontmatter_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
-        self.stage_source_preserving_edit_bounded(markdown, None, false, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, false, false, None, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut transaction = staged.doc.transact_mut();
@@ -1391,6 +1462,7 @@ impl Ydoc {
                             MARKDOWN_SOURCE_META_KEY,
                             MARKDOWN_SOURCE_SHA_META_KEY,
                             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                            MARKDOWN_SOURCE_READER_META_KEY,
                         ] {
                             meta.remove(txn, key);
                         }
@@ -1563,7 +1635,7 @@ impl Ydoc {
             .ok_or(CollabError::FrontmatterEditRefused)?
             .insert(key.to_owned(), value.clone());
         self.validate_frontmatter_edit(&current, &[key], Some(markdown))?;
-        self.stage_source_preserving_edit(markdown, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, true, true, None, |staged| {
             let _ = staged.write_frontmatter_value(key, &value);
             Ok(())
         })
@@ -1596,10 +1668,16 @@ impl Ydoc {
         markdown: &str,
         point: &Ydoc,
         max_bytes: usize,
+        reader_client: Option<u64>,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), true, |staged| {
-            restore_copy::copy(point, staged, max_bytes)
-        })
+        self.stage_source_preserving_edit_bounded(
+            markdown,
+            Some(max_bytes),
+            true,
+            true,
+            reader_client,
+            |staged| restore_copy::copy(point, staged, max_bytes),
+        )
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -1725,7 +1803,7 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, None, true, edit)
+        self.stage_source_preserving_edit_bounded(markdown, None, true, false, None, edit)
     }
 
     fn stage_source_preserving_edit_bounded(
@@ -1733,8 +1811,13 @@ impl Ydoc {
         markdown: &str,
         budget: Option<usize>,
         retain_matching_source: bool,
+        reader_edit: bool,
+        reader_client: Option<u64>,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
+        if self.has_reader_source() && retain_matching_source && !reader_edit {
+            return Err(CollabError::MarkdownReaderUnavailable);
+        }
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
             return Err(CollabError::ProjectionTooLarge {
                 actual: markdown.len(),
@@ -1743,7 +1826,7 @@ impl Ydoc {
         }
 
         let before = self.doc.transact().state_vector();
-        let staged = Ydoc::wire();
+        let staged = reader_client.map_or_else(Ydoc::wire, Ydoc::with_client_id);
         let capacity_error = || CollabError::ConfiguredByteBudgetExceeded;
         let encoder_error = |remaining: usize| {
             if remaining < crate::limits::MAX_YDOC_UPDATE_BYTES {
@@ -1771,13 +1854,16 @@ impl Ydoc {
         edit(&staged)?;
         staged.keep_frontmatter_source_of(markdown)?;
         let projection = staged.project_richdoc()?;
-        if !retain_matching_source && projection == markdown {
+        if reader_client.is_some() && staged.has_reader_source() {
+            // Restore proves the copied witness against its selected stored artifact.
+        } else if !retain_matching_source && projection == markdown {
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut txn = staged.doc.transact_mut();
             for key in [
                 MARKDOWN_SOURCE_META_KEY,
                 MARKDOWN_SOURCE_SHA_META_KEY,
                 MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
             ] {
                 meta.remove(&mut txn, key);
             }
@@ -2555,6 +2641,68 @@ fn thematic_break(line: &str) -> bool {
         && thematic_break_body(line)
 }
 
+/// The heading level of a setext underline as marked reads one: up to three
+/// spaces, a run of `=` or `-`, then spaces. A thematic break such as `---`
+/// stays a rule.
+fn setext_underline(line: &str) -> Option<i64> {
+    let rest = line.trim_start_matches(' ');
+    let level = match rest.as_bytes().first()? {
+        b'=' => 1,
+        b'-' => 2,
+        _ => return None,
+    };
+    let run = rest.trim_end_matches(' ');
+    (line.len() - rest.len() <= 3
+        && run.bytes().all(|byte| byte == run.as_bytes()[0])
+        && !thematic_break(line))
+    .then_some(level)
+}
+
+/// How marked reads the line above a setext underline: as heading text, or
+/// as text when the line could start another block. This reader does not
+/// follow an empty heading (`None`).
+fn setext_text(line: &str) -> Option<bool> {
+    if setext_heading_text(line).is_empty() {
+        return None;
+    }
+    let rest = line.trim_start_matches(' ');
+    // marked keeps block HTML, and a `<...>` that ends the line, out of a
+    // heading. Any other tag stays in its text. Its `<!` block needs a
+    // letter, a comment or CDATA after it.
+    let html = rest.strip_prefix('<').is_some_and(|tag| {
+        let block = match tag.strip_prefix('!') {
+            Some(bang) => {
+                bang.starts_with(|c: char| c.is_ascii_alphabetic())
+                    || bang.starts_with("--")
+                    || bang
+                        .get(..7)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[CDATA["))
+            }
+            None => html_block(rest),
+        };
+        block
+            || tag
+                .find('>')
+                .is_some_and(|end| end > 0 && end + 1 == tag.len())
+    });
+    let divider = rest.contains('|')
+        && rest
+            .bytes()
+            .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' '));
+    Some(
+        !(html
+            || divider
+            || rest.starts_with(['\t', '#'])
+            || block_start(line, true, true).is_some()),
+    )
+}
+
+/// The heading text marked keeps: the line without the whitespace it trims.
+/// The importer protects a list item's tabs, so they stay.
+fn setext_heading_text(line: &str) -> &str {
+    line.trim_matches(|character| character != '\t' && is_js_whitespace(character))
+}
+
 #[inline(never)]
 fn thematic_break_body(line: &str) -> bool {
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
@@ -2650,11 +2798,18 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
     let mut quote_depth = 0;
     let mut list_indent = 0;
     let mut list_column = 0;
+    // Only the file reading reads indented code. The other readings must
+    // still rebuild the documents they built, so they normalize these tabs.
+    let opaque_code = reading == MarkdownReading::Source;
     for line in body.split_inclusive('\n') {
         let mut quoted = line;
         let mut quotes = 0;
         while fence.is_none() || quotes < quote_depth {
-            let Some(rest) = quoted.trim_start_matches(' ').strip_prefix('>') else {
+            let text = quoted.trim_start_matches(' ');
+            if opaque_code && fence.is_none() && !in_list && quoted.len() - text.len() >= 4 {
+                break;
+            }
+            let Some(rest) = text.strip_prefix('>') else {
                 break;
             };
             quoted = rest.strip_prefix(' ').unwrap_or(rest);
@@ -2665,6 +2820,18 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
             in_list = false;
             fence = None;
             quote_depth = quotes;
+        }
+        // Outside a list, a line indented four columns is indented code or
+        // a lazy line, so its quote markers and tabs are its text.
+        if opaque_code
+            && fence.is_none()
+            && !in_list
+            && !quoted.trim().is_empty()
+            && indented_code_line(quoted.trim_end_matches('\n'))
+        {
+            output.push_str(line);
+            blank = false;
+            continue;
         }
         if let Some((character, width, list)) = fence {
             let rest = quoted.trim_start_matches([' ', '\t']);
@@ -2870,6 +3037,70 @@ enum FileFold {
     Strict,
 }
 
+/// Whether marked's block tokenizer starts block HTML at this line.
+fn html_block(line: &str) -> bool {
+    let Some(tag) = line.strip_prefix('<') else {
+        return false;
+    };
+    let line = line.trim_end_matches([' ', '\t']);
+    let tag = tag.trim_end_matches([' ', '\t']);
+    if tag.starts_with(['!', '?']) {
+        return true;
+    }
+    let tag = tag.strip_prefix('/').unwrap_or(tag);
+    let name = tag
+        .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
+        .next()
+        .unwrap_or("");
+    let tail = &tag[name.len()..];
+    let named_block = TABLE_ENDING_HTML
+        .split_ascii_whitespace()
+        .any(|block| name.eq_ignore_ascii_case(block));
+    if named_block && (tail.is_empty() || tail.starts_with([' ', '>']) || tail.starts_with("/>")) {
+        return true;
+    }
+    for raw in ["script", "pre", "style", "textarea"] {
+        if !line.starts_with("</")
+            && name.eq_ignore_ascii_case(raw)
+            && (tail.is_empty()
+                || tail
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c == '>' || is_js_whitespace(c)))
+        {
+            return true;
+        }
+        // Marked excludes these prefixes from standalone custom tags.
+        if name
+            .get(..raw.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(raw))
+        {
+            return false;
+        }
+    }
+    // Marked permits underscores in custom tag names. Keep this local:
+    // the existing inline reader has its own spelling contract.
+    let opening: std::borrow::Cow<'_, str> = if name.contains('_')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && !line.starts_with("</")
+    {
+        std::borrow::Cow::Owned(format!("<x{tail}"))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    };
+    html_tag_end(&opening, false).is_some_and(|end| opening[end..].trim().is_empty())
+        || line
+            .strip_prefix("</")
+            .and_then(|tag| tag.strip_suffix('>'))
+            .is_some_and(|tag| {
+                let name = tag.trim_end_matches(is_js_whitespace);
+                name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            })
+}
+
 /// Whether outside Markdown's additional item blocks belong to the proved
 /// subset. This does not enable strict-fold admission or authorize a witness.
 pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
@@ -2926,71 +3157,6 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
             }
             _ => !in_item,
         })
-    }
-
-    fn html_block(line: &str) -> bool {
-        let Some(tag) = line.strip_prefix('<') else {
-            return false;
-        };
-        let line = line.trim_end_matches([' ', '\t']);
-        let tag = tag.trim_end_matches([' ', '\t']);
-        if tag.starts_with(['!', '?']) {
-            return true;
-        }
-        let tag = tag.strip_prefix('/').unwrap_or(tag);
-        let name = tag
-            .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
-            .next()
-            .unwrap_or("");
-        let tail = &tag[name.len()..];
-        let named_block = TABLE_ENDING_HTML
-            .split_ascii_whitespace()
-            .any(|block| name.eq_ignore_ascii_case(block));
-        if named_block
-            && (tail.is_empty() || tail.starts_with([' ', '>']) || tail.starts_with("/>"))
-        {
-            return true;
-        }
-        for raw in ["script", "pre", "style", "textarea"] {
-            if !line.starts_with("</")
-                && name.eq_ignore_ascii_case(raw)
-                && (tail.is_empty()
-                    || tail
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c == '>' || is_js_whitespace(c)))
-            {
-                return true;
-            }
-            // Marked excludes these prefixes from standalone custom tags.
-            if name
-                .get(..raw.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(raw))
-            {
-                return false;
-            }
-        }
-        // Marked permits underscores in custom tag names. Keep this local:
-        // the existing inline reader has its own spelling contract.
-        let opening: std::borrow::Cow<'_, str> = if name.contains('_')
-            && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            && !line.starts_with("</")
-        {
-            std::borrow::Cow::Owned(format!("<x{tail}"))
-        } else {
-            std::borrow::Cow::Borrowed(line)
-        };
-        html_tag_end(&opening, false).is_some_and(|end| opening[end..].trim().is_empty())
-            || line
-                .strip_prefix("</")
-                .and_then(|tag| tag.strip_suffix('>'))
-                .is_some_and(|tag| {
-                    let name = tag.trim_end_matches(is_js_whitespace);
-                    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                        && name
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                })
     }
 
     // The source parser retains some blocks as text. Line shapes close
@@ -3334,6 +3500,58 @@ fn parse_markdown_blocks_at<'src>(
             }
             // An unclosed fence is not a code block: fall through to text.
         }
+        // Indented code cannot interrupt a paragraph, and a quote or list
+        // item right before it takes it as a lazy line. Inside an item, and
+        // in other readings, it stays refused below.
+        if reading == MarkdownReading::Source
+            && !in_list
+            && indented_code_line(line)
+            && (index == 0
+                || blank_line(lines[index - 1])
+                || matches!(
+                    blocks.last(),
+                    Some(
+                        MdBlock::Heading { .. }
+                            | MdBlock::Rule
+                            | MdBlock::CodeBlock { .. }
+                            | MdBlock::Table { .. }
+                    )
+                ))
+        {
+            let start = index;
+            index += 1;
+            loop {
+                while lines.get(index).is_some_and(|line| blank_line(line)) {
+                    index += 1;
+                }
+                if !lines
+                    .get(index)
+                    .is_some_and(|line| indented_code_line(line))
+                {
+                    break;
+                }
+                index += 1;
+            }
+            // marked also ends a line at a lone carriage return.
+            *refused |= lines[start..index].iter().any(|line| line.contains('\r'));
+            let mut content = lines[start..index]
+                .iter()
+                .map(|line| {
+                    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+                    match spaces {
+                        0 => line.strip_prefix('\t').unwrap_or(line),
+                        _ => &line[spaces.min(4)..],
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.truncate(content.trim_end_matches('\n').len());
+            blocks.push(MdBlock::CodeBlock {
+                language: String::new(),
+                content,
+            });
+            continue;
+        }
         *refused |= (in_list
             || matches!(
                 line.trim_start_matches(' ').as_bytes(),
@@ -3351,7 +3569,8 @@ fn parse_markdown_blocks_at<'src>(
             index += 1;
             continue;
         }
-        if reading == MarkdownReading::Source && block_start(line, true, true).is_none() {
+        if reading == MarkdownReading::Source && !in_list && block_start(line, true, true).is_none()
+        {
             if let Some(underline) = lines
                 .get(index + 1)
                 .map(|line| line.trim_end_matches([' ', '\t']))
@@ -3427,15 +3646,36 @@ fn parse_markdown_blocks_at<'src>(
             MarkdownReading::Source
         };
         let mut para = vec![line];
+        let mut heading = None;
         index += 1;
         while index < lines.len() {
             let next = lines[index];
+            if in_list && next.trim_end_matches([' ', '\t']) == "-" {
+                heading = Some((2, para.join("\n")));
+                break;
+            }
+            // The file reading also takes marked's other underlines. Every
+            // other reading keeps them as text, so a document it built still
+            // proves its file.
+            if let Some(level) =
+                setext_underline(next).filter(|_| in_list && reading == MarkdownReading::Source)
+            {
+                // marked reads every line above the underline as one heading,
+                // which the projector cannot write back as one.
+                match setext_text(para[0]) {
+                    Some(true) if para.len() == 1 => {
+                        heading = Some((level, setext_heading_text(line).to_owned()));
+                        break;
+                    }
+                    Some(false) => {}
+                    _ => *refused = true,
+                }
+            }
             if blank_line(next)
                 || thematic_break(next)
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
-                || (in_list && next.trim_end_matches([' ', '\t']) == "-")
                 || list_marker(next, paragraph_reading).is_some_and(|marker| {
                     (!marker.text.trim().is_empty() || matches!(marker.kind, ListKind::Task(_)))
                         && (!matches!(marker.kind, ListKind::Ordered(_))
@@ -3450,15 +3690,8 @@ fn parse_markdown_blocks_at<'src>(
             para.push(next);
             index += 1;
         }
-        if in_list
-            && lines
-                .get(index)
-                .is_some_and(|line| line.trim_end_matches([' ', '\t']) == "-")
-        {
-            blocks.push(MdBlock::Heading {
-                level: 2,
-                text: para.join("\n"),
-            });
+        if let Some((level, text)) = heading {
+            blocks.push(MdBlock::Heading { level, text });
             index += 1;
             continue;
         }
@@ -5583,6 +5816,17 @@ fn escape_markdown_block_syntax(
         }
     }
     Ok(output.into_string())
+}
+
+/// Whether marked reads this line as indented code: four spaces, or a tab
+/// after fewer, then text. It strips up to four spaces or that one tab.
+fn indented_code_line(line: &str) -> bool {
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    let rest = &line[spaces.min(4)..];
+    match spaces {
+        4.. => !rest.is_empty(),
+        _ => rest.strip_prefix('\t').is_some_and(|text| !text.is_empty()),
+    }
 }
 
 fn indented_code_leading_entity(markdown: &str) -> Option<&'static str> {

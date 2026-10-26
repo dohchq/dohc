@@ -1,15 +1,4 @@
-import { DohcMark } from "@dohc/brand";
-import {
-  ChevronDown,
-  Cloud,
-  FileText,
-  GitBranch,
-  MoreHorizontal,
-  Search,
-  Settings,
-  Share2,
-  X,
-} from "lucide-react";
+import { Layers } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -18,19 +7,42 @@ import {
   useRef,
   useState,
 } from "react";
+import type {
+  SyncStatusResult,
+  WorkspaceSummary,
+} from "../../desktop/src/ipc/bridgeContract";
+import { CommandPalette, type Command } from "../../desktop/src/renderer/CommandPalette";
+import { COMMAND_ROWS } from "../../desktop/src/renderer/commands/commandRows";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "../../desktop/src/renderer/editor/MarkdownEditor";
+import {
+  DocumentControls,
+  ViewActions,
+} from "../../desktop/src/renderer/fileInspectorUi";
+import { FrontmatterAsWritten } from "../../desktop/src/renderer/FrontmatterAsWritten";
 import { PageIdentity } from "../../desktop/src/renderer/PageIdentity";
+import { PropertiesPanel } from "../../desktop/src/renderer/PropertiesPanel";
+import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
+import { Titlebar } from "../../desktop/src/renderer/Titlebar";
 import {
   applyFrontmatter,
   parseFrontmatter,
 } from "../../desktop/src/renderer/markdown/frontmatter";
 import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
+import { EditorTabs } from "../../desktop/src/renderer/workbench/EditorTabs";
+import { EmptyEditorGroup } from "../../desktop/src/renderer/workbench/EmptyEditorGroup";
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
+import { EditorGroupFrame } from "../../desktop/src/renderer/workbench/tabRowActions";
+import { WorkspaceSyncStatus } from "../../desktop/src/renderer/workbench/WorkspaceSyncStatus";
 import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
-import { DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
+import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
+import {
+  DEMO_EDITOR_GROUP_ID,
+  DemoSidebar,
+  type DemoWorkspaceDocument,
+} from "./DemoSidebar";
 import { DEMO_PANEL_IDS, isDemoPanelId, type DemoPanelId } from "./demoPanels";
 import {
   configureDemoDesktopBridge,
@@ -53,6 +65,24 @@ type SaveState = "saved" | "saving";
 
 const STORAGE_KEY = "dohc-marketing-demo-documents-v2";
 const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v1";
+
+
+const DEMO_WORKSPACE: WorkspaceSummary = {
+  workspaceId: "marketing-demo",
+  rootPath: "personal",
+  kind: "personal",
+  mode: "local-first",
+};
+
+// The demo keeps every edit in this browser and has no sync to report.
+const DEMO_SYNC_STATUS: SyncStatusResult = {
+  state: "synced",
+  pendingChangeCount: 0,
+  lastSyncedAtMs: null,
+  historyRecordingUnavailable: false,
+  historyShareView: false,
+  liveSessionsGeneration: 0,
+};
 
 const DEMO_DOCUMENTS: DemoDocument[] = [
   {
@@ -211,8 +241,36 @@ function initialSidebarVisible(): boolean {
   return window.matchMedia("(min-width: 721px)").matches;
 }
 
+
+// The demo records no versions, so it names Main without the picker's menu.
+function DemoVersion() {
+  return (
+    <span
+      title="You're working in the Main version"
+      className="flex h-7 min-w-0 items-center gap-1.5 px-2 text-[13px] text-muted"
+    >
+      <Layers size={12} aria-hidden className="shrink-0" />
+      <span className="min-w-0 truncate">Main</span>
+    </span>
+  );
+}
+
+const SESSION_ONLY_MESSAGES = {
+  workspace: "This browser does not let the demo store files. Your edits last until you close this tab.",
+  assets: "This browser does not let the demo store images. Your images last until you close this tab.",
+} as const;
+
+// The demo has no editing pipeline, so no tab ever holds a set-aside draft.
+const NO_PATHS: ReadonlySet<string> = new Set();
+
 export function ProductDemo() {
-  const { shellErrors, reportShellFailure, hideShellError, dismissShellError } = useShellError("marketing-demo");
+  const {
+    shellErrors,
+    reportShellFailure,
+    reportButtonError,
+    hideShellError,
+    dismissShellError,
+  } = useShellError("marketing-demo");
   const reportFailureMessage = useCallback(
     (message: string) => reportShellFailure({ message }),
     [reportShellFailure],
@@ -222,6 +280,9 @@ export function ProductDemo() {
   const [activePath, setActivePath] = useState(
     () => Object.keys(drafts)[0] ?? DEMO_DOCUMENTS[0].path,
   );
+  const [openTabs, setOpenTabs] = useState(() => Object.keys(drafts).slice(0, 5));
+  const [recentPaths, setRecentPaths] = useState<string[]>([]);
+  const [palette, setPalette] = useState<"commands" | "quick-open" | null>(null);
   const [activeActivity, setActiveActivity] =
     useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
@@ -229,14 +290,11 @@ export function ProductDemo() {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
-  const [assetsPersistAcrossSessions, setAssetsPersistAcrossSessions] =
-    useState(demoWorkspaceAssetsPersistAcrossSessions);
-  const [workspacePersistsAcrossSessions, setWorkspacePersistsAcrossSessions] =
-    useState(localStorageIsAvailable);
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const saveFrame = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
   const draftsRef = useRef(drafts);
+  const sessionOnly = useRef<keyof typeof SESSION_ONLY_MESSAGES | null>(null);
 
   const updateDrafts = useCallback(
     (update: (current: Record<string, string>) => Record<string, string>) => {
@@ -248,6 +306,22 @@ export function ProductDemo() {
     [],
   );
 
+  // One notice says how long this browser keeps the demo. Losing files
+  // outranks losing images, so a later image notice never replaces it.
+  const reportSessionOnly = useCallback(
+    (scope: keyof typeof SESSION_ONLY_MESSAGES) => {
+      if (sessionOnly.current === "workspace" || sessionOnly.current === scope) return;
+      sessionOnly.current = scope;
+      reportShellFailure({
+        tone: "warning",
+        identity: "demo-storage",
+        message: SESSION_ONLY_MESSAGES[scope],
+      });
+    },
+    [reportShellFailure],
+  );
+
+  const editorOpen = openTabs.includes(activePath);
   const activeFullText = drafts[activePath] ?? "";
   const activeBody = parseFrontmatter(activeFullText).body;
   const documents = useMemo<DemoWorkspaceDocument[]>(
@@ -275,6 +349,20 @@ export function ProductDemo() {
       })),
     [documents],
   );
+  const fileEntries = useMemo(
+    () =>
+      new Map(
+        documents.map((document) => [
+          document.path,
+          {
+            path: document.path,
+            kind: "file" as const,
+            ...(document.icon ? { icon: document.icon } : {}),
+          },
+        ]),
+      ),
+    [documents],
+  );
 
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(currentTheme()));
@@ -286,11 +374,13 @@ export function ProductDemo() {
   }, []);
 
   useEffect(() => {
-    const markSessionOnly = () => setAssetsPersistAcrossSessions(false);
+    if (!localStorageIsAvailable()) reportSessionOnly("workspace");
+    if (!demoWorkspaceAssetsPersistAcrossSessions()) reportSessionOnly("assets");
+    const markSessionOnly = () => reportSessionOnly("assets");
     window.addEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
     return () =>
       window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
-  }, []);
+  }, [reportSessionOnly]);
 
   useEffect(
     () => () => {
@@ -301,12 +391,12 @@ export function ProductDemo() {
   );
 
   useEffect(() => {
-    if (!persistDrafts(drafts)) setWorkspacePersistsAcrossSessions(false);
-  }, [drafts]);
+    if (!persistDrafts(drafts)) reportSessionOnly("workspace");
+  }, [drafts, reportSessionOnly]);
 
   useEffect(() => {
-    if (!persistFolders(emptyFolders)) setWorkspacePersistsAcrossSessions(false);
-  }, [emptyFolders]);
+    if (!persistFolders(emptyFolders)) reportSessionOnly("workspace");
+  }, [emptyFolders, reportSessionOnly]);
 
   const composeCurrentDocument = useCallback(
     (path = activePath, fallback = drafts[path] ?? "") => {
@@ -328,6 +418,14 @@ export function ProductDemo() {
     saveFrame.current = null;
   }, []);
 
+  // Stores the open editor's text before it closes or another document
+  // replaces it, so no edit waits on a frame that never comes.
+  const flushActiveDraft = useCallback(() => {
+    cancelPendingSave();
+    if (editorOpen) storeDraft(activePath, composeCurrentDocument());
+    setSaveState("saved");
+  }, [activePath, cancelPendingSave, composeCurrentDocument, editorOpen, storeDraft]);
+
   const scheduleSave = useCallback(() => {
     setSaveState("saving");
     if (saveFrame.current !== null) cancelAnimationFrame(saveFrame.current);
@@ -344,17 +442,54 @@ export function ProductDemo() {
     }, 650);
   }, [activePath, composeCurrentDocument, storeDraft]);
 
+  const showDocument = useCallback((path: string) => {
+    setOpenTabs((current) => (current.includes(path) ? current : [...current, path]));
+    setRecentPaths((current) => [path, ...current.filter((entry) => entry !== path)].slice(0, 20));
+    setShowSource(false);
+    setActivePath(path);
+    setSaveState("saved");
+  }, []);
+
   const openDocument = useCallback(
     (path: string) => {
-      if (path === activePath) return;
-      cancelPendingSave();
-      storeDraft(activePath, composeCurrentDocument());
-      setShowSource(false);
-      setActivePath(path);
-      setSaveState("saved");
+      if (path === activePath && editorOpen) return;
+      flushActiveDraft();
+      showDocument(path);
     },
-    [activePath, cancelPendingSave, composeCurrentDocument, storeDraft],
+    [activePath, editorOpen, flushActiveDraft, showDocument],
   );
+
+  // Closing the active tab shows its neighbour, as the desktop does; closing
+  // the last one leaves the group empty.
+  const closeTab = useCallback(
+    (path: string) => {
+      const index = openTabs.indexOf(path);
+      if (index < 0) return;
+      const remaining = openTabs.filter((tab) => tab !== path);
+      if (path === activePath) {
+        flushActiveDraft();
+        setShowSource(false);
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        if (next) setActivePath(next);
+      }
+      setOpenTabs(remaining);
+    },
+    [activePath, flushActiveDraft, openTabs],
+  );
+
+  const closeAllTabs = useCallback(() => {
+    flushActiveDraft();
+    setShowSource(false);
+    setOpenTabs([]);
+  }, [flushActiveDraft]);
+
+  const moveTab = useCallback((path: string, toIndex: number) => {
+    setOpenTabs((current) => {
+      const next = current.filter((tab) => tab !== path);
+      next.splice(toIndex, 0, path);
+      return next;
+    });
+  }, []);
 
   const openWikilink = useCallback(
     (target: string) => {
@@ -368,15 +503,8 @@ export function ProductDemo() {
     [knownFiles, openDocument],
   );
 
-  const flushActiveDraft = useCallback(async () => {
-    cancelPendingSave();
-    storeDraft(activePath, composeCurrentDocument());
-    setSaveState("saved");
-  }, [activePath, cancelPendingSave, composeCurrentDocument, storeDraft]);
-
   const createDocument = useCallback(() => {
-    cancelPendingSave();
-    storeDraft(activePath, composeCurrentDocument());
+    flushActiveDraft();
     const workspacePaths = new Set(
       collectWorkspacePaths([
         ...Object.keys(draftsRef.current),
@@ -393,10 +521,8 @@ export function ProductDemo() {
       path,
       `---\ntitle: Quick note ${index}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`,
     );
-    setShowSource(false);
-    setActivePath(path);
-    setSaveState("saved");
-  }, [activePath, cancelPendingSave, composeCurrentDocument, emptyFolders, storeDraft]);
+    showDocument(path);
+  }, [emptyFolders, flushActiveDraft, showDocument, storeDraft]);
 
   const createDocumentAtPath = useCallback(
     (path: string) => {
@@ -410,11 +536,9 @@ export function ProductDemo() {
       // Explorer calls onOpenFile immediately after the bridge resolves, before
       // React has published the new documents prop. Select it here so the new
       // file still opens in that same interaction.
-      setShowSource(false);
-      setActivePath(path);
-      setSaveState("saved");
+      showDocument(path);
     },
-    [storeDraft],
+    [showDocument, storeDraft],
   );
 
   const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
@@ -447,15 +571,24 @@ export function ProductDemo() {
       }
       return filtered;
     });
+    const remainingTabs = openTabs.filter((tab) => !isPathAtOrBelow(tab, path));
+    setOpenTabs(remainingTabs);
     if (isPathAtOrBelow(activePath, path)) {
-      setActivePath(Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path);
+      // The next open tab takes over, as when the tab closes; with none left
+      // the editor group is empty.
+      const index = Math.max(0, openTabs.indexOf(activePath));
+      setActivePath(
+        remainingTabs[Math.min(index, remainingTabs.length - 1)] ??
+          Object.keys(next)[0] ??
+          DEMO_DOCUMENTS[0].path,
+      );
       setShowSource(false);
       setSourceText("");
     }
     setEmptyFolders((current) =>
       current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
     );
-  }, [activePath, updateDrafts]);
+  }, [activePath, openTabs, updateDrafts]);
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
@@ -503,6 +636,79 @@ export function ProductDemo() {
     [activeActivity],
   );
 
+  const toggleSidebar = useCallback(() => setSidebarVisible((current) => !current), []);
+
+  const showNeighbourTab = useCallback(
+    (step: 1 | -1) => {
+      const index = openTabs.indexOf(activePath);
+      const next = openTabs[(index + step + openTabs.length) % openTabs.length];
+      if (next) openDocument(next);
+    },
+    [activePath, openDocument, openTabs],
+  );
+
+  // The desktop's commands the demo can run, under the desktop's names.
+  const commands = useMemo<Command[]>(() => {
+    const command = (id: keyof typeof COMMAND_ROWS, run: () => void) => ({
+      id,
+      label: COMMAND_ROWS[id].label,
+      run,
+    });
+    return [
+      command("new-file", createDocument),
+      command("quick-open", () => setPalette("quick-open")),
+      command("toggle-sidebar", toggleSidebar),
+      ...(editorOpen
+        ? [
+            command("close-tab", () => closeTab(activePath)),
+            command("toggle-markdown-source", toggleSource),
+          ]
+        : []),
+      ...(openTabs.length > 1
+        ? [
+            command("next-tab", () => showNeighbourTab(1)),
+            command("previous-tab", () => showNeighbourTab(-1)),
+          ]
+        : []),
+      ...DEMO_PANEL_IDS.map((view) =>
+        command(`show-${view}`, () => {
+          setActiveActivity(view);
+          setSidebarVisible(true);
+        }),
+      ),
+    ];
+  }, [
+    activePath,
+    closeTab,
+    createDocument,
+    editorOpen,
+    openTabs.length,
+    showNeighbourTab,
+    toggleSidebar,
+    toggleSource,
+  ]);
+
+  // Shell shortcuts work while focus is in the demo. A browser keeps some
+  // for itself, such as closing its own tab.
+  const runShortcut = useCallback(
+    (event: React.KeyboardEvent) => {
+      const id = matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform);
+      const run =
+        id === "command-palette" ? () => setPalette("commands")
+        : id === "quick-open" ? () => setPalette("quick-open")
+        : id === "toggle-sidebar" ? toggleSidebar
+        : id === "new-file" ? createDocument
+        : id === "close-tab" && editorOpen ? () => closeTab(activePath)
+        : id === "next-tab" ? () => showNeighbourTab(1)
+        : id === "previous-tab" ? () => showNeighbourTab(-1)
+        : null;
+      if (!run) return;
+      event.preventDefault();
+      run();
+    },
+    [activePath, closeTab, createDocument, editorOpen, showNeighbourTab, toggleSidebar],
+  );
+
   const createFolder = useCallback((path: string) => {
     setEmptyFolders((current) =>
       current.includes(path) ? current : [...current, path],
@@ -532,30 +738,24 @@ export function ProductDemo() {
       className="demo-window"
       data-theme={theme}
       data-sidebar-visible={sidebarVisible}
+      onKeyDown={runShortcut}
     >
-      <header className="demo-titlebar">
-        <span className="demo-brand">
-          <DohcMark size={14} />
-          <span>dohc</span>
-        </span>
-        <button className="demo-workspace" type="button">
-          personal <ChevronDown size={12} aria-hidden />
-        </button>
-        <button
-          className="demo-command"
-          type="button"
-          onClick={() => selectActivity("search")}
-        >
-          <Search size={12} aria-hidden />
-          <span>Search files...</span>
-          <kbd>Ctrl P</kbd>
-        </button>
-        <span className="demo-window-controls" aria-hidden>
-          <span className="demo-window-control" />
-          <span className="demo-window-control" />
-          <span className="demo-window-control" />
-        </span>
-      </header>
+      <Titlebar
+        workspace={DEMO_WORKSPACE}
+        workspaces={[DEMO_WORKSPACE]}
+        onSwitchWorkspace={() => undefined}
+        onQuickOpen={() => setPalette("quick-open")}
+        version={<DemoVersion />}
+        workspaceStatus={
+          <WorkspaceSyncStatus syncStatus={DEMO_SYNC_STATUS} failedSaves={0} />
+        }
+        primarySidebar={{ visible: sidebarVisible, onToggle: toggleSidebar }}
+      />
+      <span className="demo-window-controls" aria-hidden>
+        <span className="demo-window-control" />
+        <span className="demo-window-control" />
+        <span className="demo-window-control" />
+      </span>
 
       <div className="demo-workbench">
         <ActivityBar
@@ -567,6 +767,26 @@ export function ProductDemo() {
           onSelectView={(view) => {
             if (isDemoPanelId(view)) selectActivity(view);
           }}
+          notices={
+            <NoticeCenter
+              workspaceId="marketing-demo"
+              syncStatus={null}
+              agentActive={false}
+              conflictSummaries={[]}
+              onOpenHistory={() => selectActivity("history")}
+              onOpenSettings={() => undefined}
+              onOpenConflicts={() => undefined}
+              onRefreshShareView={() => undefined}
+              onRebuildEngineStore={() => undefined}
+              workspaceErrors={shellErrors.map((error) => ({
+                ...error,
+                details: error.message,
+                canRetry: false,
+              }))}
+              onHideWorkspaceError={hideShellError}
+              onDismissWorkspaceError={dismissShellError}
+            />
+          }
         />
 
         <DemoSidebar
@@ -574,128 +794,127 @@ export function ProductDemo() {
           visible={sidebarVisible}
           documents={documents}
           folders={emptyFolders}
-          activePath={activePath}
+          activePath={editorOpen ? activePath : null}
+          openTabs={openTabs}
           onOpenDocument={openDocument}
+          onCloseTab={closeTab}
+          onCloseAllTabs={closeAllTabs}
+          onOpenTabsChange={setOpenTabs}
           onCreateDocument={createDocument}
-          onBeforeChanges={flushActiveDraft}
+          onBeforeChanges={async () => flushActiveDraft()}
           onError={reportFailureMessage}
         />
 
-        <section className="demo-editor-column" aria-label="Editable dohc document demo">
-          <div className="demo-tabs">
-            <div className="demo-tab">
-              <FileText size={13} aria-hidden />
-              <span className="demo-tab-name">{filename(activePath)}</span>
-              <button className="demo-tab-close" type="button" aria-label={`Close ${filename(activePath)}`}>
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-            <div className="demo-tabs-fill" />
-            <button className="demo-icon-button" type="button" aria-label="All open tabs" title="All open tabs">
-              <ChevronDown size={13} aria-hidden />
-            </button>
-          </div>
-          <div className="demo-editor-header">
-            <FileText size={13} aria-hidden />
-            <span className="demo-doc-name">{filename(activePath)}</span>
-            <span className="demo-doc-kind">document</span>
-            <Share2 size={13} aria-hidden />
-            <button
-              className={`demo-header-button${showSource ? "" : " is-active"}`}
-              type="button"
-              onClick={() => showSource && toggleSource()}
-            >
-              Styled
-            </button>
-            <button
-              className={`demo-header-button${showSource ? " is-active" : ""}`}
-              type="button"
-              onClick={() => !showSource && toggleSource()}
-            >
-              Source
-            </button>
-            <button className="demo-icon-button" type="button" aria-label="Document menu" title="Document menu">
-              <MoreHorizontal size={14} aria-hidden />
-            </button>
-          </div>
-          {showSource ? (
-            <textarea className="demo-source" value={sourceText} readOnly spellCheck={false} aria-label="Read-only markdown source" />
-          ) : null}
-          <div
-            className="demo-editor-pane"
-            data-dohc-doc-pane=""
-            hidden={showSource}
-          >
-            <div className="group/topmatter">
-              <PageIdentity
-                body={activeFullText}
-                onChange={updateIdentity}
-                filenameStem={filenameStem(activePath)}
-                onEnterBody={() => editorRef.current?.focus("start")}
+        <main className="flex min-w-0 flex-1 flex-col bg-bg">
+          <EditorGroupFrame
+            tabs={(actionsRef) => (
+              <EditorTabs
+                actionsRef={actionsRef}
+                groupId={DEMO_EDITOR_GROUP_ID}
+                groupNumber={1}
+                tabs={openTabs.map((path) => ({ path }))}
+                activeTab={editorOpen ? activePath : null}
+                activeTabDirty={saveState === "saving"}
+                files={fileEntries}
+                recoveryPaths={NO_PATHS}
+                onActivate={(_groupId, path) => openDocument(path)}
+                onClose={(_groupId, path) => closeTab(path)}
+                onContextMenu={() => undefined}
+                onMove={(_groupId, path, toIndex) => moveTab(path, toIndex)}
+                onMoveToGroup={() => undefined}
+                onCreateGroupRight={() => undefined}
               />
-            </div>
-            <MarkdownEditor
-              key={activePath}
-              ref={editorRef}
-              value={activeBody}
-              onDirty={scheduleSave}
-              workspaceId="marketing-demo"
-              path={activePath}
-              knownFiles={knownFiles}
-              onOpenWikilink={openWikilink}
-              resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
-              collab={null}
-            />
-          </div>
-        </section>
+            )}
+          >
+            {editorOpen ? (
+              <>
+                <ViewActions
+                  actions={
+                    <DocumentControls
+                      toggle={{
+                        label: showSource ? "WYSIWYG" : "Source",
+                        testId: "markdown-edit-toggle",
+                        onClick: toggleSource,
+                      }}
+                      menu={{
+                        workspaceId: "marketing-demo",
+                        suggestedName: filenameStem(activePath),
+                        reportError: reportButtonError,
+                        getMarkdown: () => composeCurrentDocument(),
+                      }}
+                    />
+                  }
+                />
+                {showSource ? (
+                  <textarea
+                    className="demo-source"
+                    value={sourceText}
+                    readOnly
+                    spellCheck={false}
+                    aria-label="Read-only markdown source"
+                  />
+                ) : null}
+                <div
+                  className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+                  data-dohc-doc-pane=""
+                  hidden={showSource}
+                >
+                  <div className="group/topmatter">
+                    <PageIdentity
+                      body={activeFullText}
+                      onChange={updateIdentity}
+                      filenameStem={filenameStem(activePath)}
+                      onEnterBody={() => editorRef.current?.focus("start")}
+                    />
+                    <PropertiesPanel body={activeFullText} onChange={updateIdentity} />
+                    <FrontmatterAsWritten markdown={activeFullText} propertiesShown />
+                  </div>
+                  <MarkdownEditor
+                    key={activePath}
+                    ref={editorRef}
+                    value={activeBody}
+                    onDirty={scheduleSave}
+                    workspaceId="marketing-demo"
+                    path={activePath}
+                    knownFiles={knownFiles}
+                    onOpenWikilink={openWikilink}
+                    resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
+                    collab={null}
+                  />
+                </div>
+              </>
+            ) : (
+              <EmptyEditorGroup
+                platform={window.dohcDesktop?.platform}
+                create={{ markdown: createDocument }}
+                recent={recentPaths}
+                files={documents}
+                onOpen={openDocument}
+              />
+            )}
+          </EditorGroupFrame>
+        </main>
       </div>
-
-      <footer className="demo-statusbar">
-        <span>personal</span>
-        <span
-          className="demo-status-local"
-          title={
-            !workspacePersistsAcrossSessions
-              ? "Workspace changes will remain available for this browser session only."
-              : !assetsPersistAcrossSessions
-                ? "Image assets will remain available for this browser session only."
-                : undefined
-          }
-        >
-          Local / {saveState}
-          {!workspacePersistsAcrossSessions
-            ? " / workspace session-only"
-            : !assetsPersistAcrossSessions
-              ? " / assets session-only"
-              : ""}
-        </span>
-        <span className="demo-status-right">
-          <NoticeCenter
-            workspaceId="marketing-demo"
-            syncStatus={null}
-            agentActive={false}
-            conflictSummaries={[]}
-            onOpenHistory={() => selectActivity("history")}
-            onOpenSettings={() => undefined}
-            onOpenConflicts={() => undefined}
-            onRefreshShareView={() => undefined}
-            onRebuildEngineStore={() => undefined}
-            workspaceErrors={shellErrors.map((error) => ({
-              ...error,
-              details: error.message,
-              canRetry: false,
-            }))}
-            onHideWorkspaceError={hideShellError}
-            onDismissWorkspaceError={dismissShellError}
-          />
-          <span className="demo-status-details">
-            <Cloud size={12} aria-hidden />
-            Connect sync
-            <GitBranch size={12} aria-hidden /> Main
-            <Settings size={12} aria-hidden /> Settings
-          </span>
-        </span>
-      </footer>
+      {palette ? (
+        <div className="demo-overlay">
+          {palette === "quick-open" ? (
+            <QuickOpenPalette
+              files={documents}
+              recent={recentPaths}
+              pinned={[]}
+              onOpenPath={openDocument}
+              onClose={() => setPalette(null)}
+            />
+          ) : (
+            <CommandPalette
+              testId="command-palette"
+              toggleShortcut="command-palette"
+              commands={commands}
+              onClose={() => setPalette(null)}
+            />
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

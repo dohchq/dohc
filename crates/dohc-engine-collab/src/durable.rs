@@ -276,8 +276,8 @@ pub struct SettleOutcome {
 /// The outcome of a session close (regime-dependent).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloseOutcome {
-    /// Replicated (or persist-closed-state) close: the lineage was compacted and
-    /// kept durable.
+    /// Replicated (or persist-closed-state) close: the lineage stays durable.
+    /// Compaction may be skipped, including to retain a pristine seed witness.
     Compacted(CompactOutcome),
     /// Local-only close: the CRDT rows were pruned to the bare marker.
     Pruned {
@@ -1235,7 +1235,7 @@ fn below_threshold(pending: i64, threshold: u32) -> bool {
 /// the same converged content as the un-compacted log. Below threshold this is
 /// a no-op.
 ///
-/// `threshold` of 0 forces a compaction (used by replicated close).
+/// `threshold` of 0 forces a compaction, except for a pristine replicated seed.
 pub fn maybe_compact(
     store: &mut EngineStore,
     key: &DocKey,
@@ -1266,6 +1266,15 @@ pub fn maybe_compact(
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
     if persisted.doc.has_missing_updates() {
+        return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
+    }
+    // Keep the seed witness across closes so an unedited reopen can prove
+    // the file already holds its content, even when projection normalizes it.
+    if persisted.marker.regime == Regime::Replicated
+        && persisted.marker.head_update_seq == 1
+        && persisted.marker.head_snapshot_seq == 0
+        && read_pristine_seed_lineage_source(store, key)?.is_some()
+    {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
 
@@ -2490,6 +2499,27 @@ pub fn encode_origination_base_in_tx(
     if doc.has_missing_updates() {
         return Ok(None);
     }
+    // A rolled-back first append must propose the same E lineage on retry.
+    // Re-encoding JSON mark attributes can change their map order and hash.
+    if doc.has_reader_source() && marker.head_update_seq == 1 && marker.head_snapshot_seq == 0 {
+        let seed: Option<String> = tx.query_row(
+            "SELECT update_blob_sha256 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=1 AND is_seed=1",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+        ).optional().map_err(map_sql)?;
+        if let Some(seed) = seed {
+            let bytes = binary_blob_for_gate(tx, &seed)?;
+            let original = Ydoc::wire();
+            original.apply(&bytes)?;
+            if !original.has_missing_updates()
+                && crate::replay_parity::structurally_equal_v2(&doc, &original)?
+            {
+                return Ok(Some(OriginationBase {
+                    base: bytes,
+                    state_vector: doc.encode_state_vector(),
+                }));
+            }
+        }
+    }
     Ok(Some(OriginationBase {
         base: doc.encode_full_state(),
         state_vector: doc.encode_state_vector(),
@@ -2637,6 +2667,7 @@ pub struct CloseProjection {
 /// has to write them. A doc with no edits (`head_update_seq == 0`) has nothing
 /// to lose. The close hook asks the same question before it claims a lineage
 /// for the relay, so a dirty close keeps refusing instead of claiming.
+/// Unload also uses this check in every regime.
 pub fn local_close_is_covered(
     store: &EngineStore,
     key: &DocKey,
@@ -2692,13 +2723,13 @@ pub fn local_close_is_covered(
             {
                 return Ok(true);
             }
-            // Third proof: a seed-only lineage whose recorded source
+            // Third proof: a pristine seed lineage whose recorded source
             // is still the captured head. The projection sha cannot match —
             // projecting normalizes — but everything the doc contains was
             // imported from bytes the captured head (and the version store's
             // moment for it) still holds, so the prune discards a cache of
             // the file, not content.
-            let seed_source = seed_only_lineage_source(conn, key)?;
+            let seed_source = pristine_seed_lineage_source(conn, key)?;
             Ok(seed_source.is_some()
                 && (seed_source == captured_head_sha(conn, key)?
                     || seed_source.as_deref()
@@ -2780,8 +2811,8 @@ pub fn close_session(
     }
     let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime == Regime::Replicated || persist_closed_state {
-        // Force a compaction (threshold 0) so the lineage is a single snapshot +
-        // no trailing updates, and never prune it.
+        // Request compaction even below the normal threshold. A pristine
+        // replicated seed keeps its witness; the lineage is never pruned.
         return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
             TxnOutcome::Committed(outcome) => {
                 TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
@@ -3036,100 +3067,62 @@ pub fn read_last_settled_sha(
     store.read_with(|conn| last_settled_sha(conn, key))
 }
 
-/// The captured head sha a SEED-ONLY lineage imported, or `None` when the
-/// lineage is anything else.
+/// The captured head sha for a pristine seed lineage, local or sync-promoted.
 ///
-/// `Some(sha)` proves, from durable state alone, that the doc's entire
-/// history is one client-declared seed update importing the captured head
-/// `sha`: local-only regime, exactly one update in the log (and the head
-/// pointers agreeing), no snapshots, never settled. While the captured head
-/// still holds `sha`, the doc's canonical content IS that file's content —
-/// the live Y.Doc stays canonical, and there is nothing to write on settle
-/// and nothing a prune could lose. Every doubt (a second update, a snapshot,
-/// a prior settle, a replicated regime, no recorded seed source) answers
-/// `None`, and the caller falls back to writing exactly as before.
-pub fn seed_only_lineage_source(
+/// Sync promotion claims the seed as the replicated base:
+/// the original seed update remains at sequence 1 and the claimed full-state
+/// base is the sole sequence-0 snapshot. Any later update, compaction, settle,
+/// replacement, or incomplete claim makes the witness unavailable.
+pub fn pristine_seed_lineage_source(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT d.seed_source_sha256 FROM ydoc_docs d \
-         WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
-           AND d.regime = 'local-only' \
-           AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
-           AND d.last_settled_sha IS NULL \
-           AND d.seed_source_sha256 IS NOT NULL \
-           AND (SELECT COUNT(*) FROM ydoc_updates u \
-                 WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
-                   AND u.object_id = ?3) = 1 \
-           AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
-                 WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
-                   AND s.object_id = ?3)",
+             WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
+               AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
+               AND d.last_settled_sha IS NULL \
+               AND d.seed_source_sha256 IS NOT NULL \
+               AND (SELECT COUNT(*) FROM ydoc_updates u \
+                     WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
+                       AND u.object_id = ?3) = 1 \
+               AND ( \
+                 (d.regime = 'local-only' \
+                   AND d.lineage_claim_status = 'unclaimed' \
+                   AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                       AND s.object_id = ?3)) \
+                 OR \
+                 (d.regime = 'replicated' \
+                   AND d.lineage_claim_status = 'exact' \
+                   AND d.lineage_claim_id IS NOT NULL \
+                   AND (SELECT COUNT(*) FROM ydoc_snapshots s \
+                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                       AND s.object_id = ?3) = 1 \
+                   AND EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                       AND s.object_id = ?3 AND s.up_to_seq = 0)) \
+               )",
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-        |r| r.get::<_, Option<String>>(0),
+        |row| row.get::<_, Option<String>>(0),
     )
     .optional()
     .map_err(map_sql)
     .map(Option::flatten)
 }
 
-/// Store-level [`seed_only_lineage_source`].
-pub fn read_seed_only_lineage_source(
-    store: &EngineStore,
-    key: &DocKey,
-) -> Result<Option<String>, CollabError> {
-    store.read_with(|conn| seed_only_lineage_source(conn, key))
-}
-
-/// The captured head sha for a pristine seed lineage that collection adoption
-/// may amend without replacing any intervening document edit.
-///
-/// Unlike [`read_seed_only_lineage_source`], this also recognizes the exact
-/// shape produced when sync promotion claims that seed as the replicated base:
-/// the original seed update remains at sequence 1 and the claimed full-state
-/// base is the sole sequence-0 snapshot. Any later update, compaction, settle,
-/// replacement, or incomplete claim makes the witness unavailable.
+/// Store-level [`pristine_seed_lineage_source`].
 pub fn read_pristine_seed_lineage_source(
     store: &EngineStore,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
-    store.read_with(|conn| {
-        conn.query_row(
-            "SELECT d.seed_source_sha256 FROM ydoc_docs d \
-                 WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
-                   AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
-                   AND d.last_settled_sha IS NULL \
-                   AND d.seed_source_sha256 IS NOT NULL \
-                   AND (SELECT COUNT(*) FROM ydoc_updates u \
-                         WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
-                           AND u.object_id = ?3) = 1 \
-                   AND ( \
-                     (d.regime = 'local-only' \
-                       AND d.lineage_claim_status = 'unclaimed' \
-                       AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
-                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
-                           AND s.object_id = ?3)) \
-                     OR \
-                     (d.regime = 'replicated' \
-                       AND d.lineage_claim_status = 'exact' \
-                       AND d.lineage_claim_id IS NOT NULL \
-                       AND (SELECT COUNT(*) FROM ydoc_snapshots s \
-                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
-                           AND s.object_id = ?3) = 1 \
-                       AND EXISTS (SELECT 1 FROM ydoc_snapshots s \
-                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
-                           AND s.object_id = ?3 AND s.up_to_seq = 0)) \
-                   )",
-            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(map_sql)
-        .map(Option::flatten)
-    })
+    store.read_with(|conn| pristine_seed_lineage_source(conn, key))
 }
 
-fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
+pub(crate) fn last_settled_sha(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT last_settled_sha FROM ydoc_docs \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",

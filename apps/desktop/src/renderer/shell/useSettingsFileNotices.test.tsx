@@ -47,7 +47,7 @@ describe("settingsFileNotice", () => {
     const reset: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", warning: "dohc replaced workspace settings.",
     };
-    expect(settingsFileNotice(".dohc/settings.local.json", reset)).toBeNull();
+    expect(settingsFileNotice(".dohc/local/settings.local.json", reset)).toBeNull();
   });
 });
 
@@ -83,6 +83,10 @@ describe("useSettingsFileNotices", () => {
     rerender({ userSettings: user([{ key: "accent", reason: "unknown" }]), ready: true });
     await waitFor(() => expect(result.current.shellErrors).toHaveLength(2));
     expect(getWorkspaceSettings).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+    // The row names the file where this computer keeps the workspace's settings.
+    expect(result.current.shellErrors.find((row) => row.kind === "workspace-settings-file")?.message).toBe(
+      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    );
 
     // The same settings arriving again do not bring back a dismissed row.
     const userRow = result.current.shellErrors[0]!;
@@ -103,7 +107,7 @@ describe("useSettingsFileNotices", () => {
     const broken: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
-      warning: "Workspace settings could not be read. dohc is using default settings. Fix /w/.dohc/settings.local.json. Or select Reset workspace in Advanced to replace it.",
+      warning: "Workspace settings could not be read. dohc is using default settings. Fix /w/.dohc/local/settings.local.json. Or select Reset workspace in Advanced to replace it.",
     };
     const bridge = {
       getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => broken),

@@ -1142,7 +1142,7 @@ async fn assert_open_document_artifact_recovery_inner(
         .to_owned();
     if local_edit {
         a_id += 1;
-        let resync = ProtocolEngineService::call(
+        let resync = service_call_with_busy_retry(
             a_service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),
             request(
@@ -1190,7 +1190,7 @@ async fn assert_open_document_artifact_recovery_inner(
     if integrated {
         // Drain u1 into the live CRDT and publish the merged local/remote projection.
         a_id += 1;
-        let resync = ProtocolEngineService::call(
+        let resync = service_call_with_busy_retry(
             a_service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),
             request(
@@ -4315,22 +4315,22 @@ async fn remote_changes_answer_the_durable_count_without_a_relay() {
     let mut id = 0;
     for _ in 0..2 {
         id += 1;
-        let opened = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    id,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": WORKSPACE,
-                        "captureMode": "none",
-                    }),
-                ),
-            )
-            .await
-            .expect("open workspace");
+        let opened = call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE,
+                    "captureMode": "none",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
         let handle: WorkspaceHandle =
             serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
         assert_eq!(
@@ -4378,7 +4378,7 @@ async fn refusal_notices_list_and_dismiss_without_a_relay() {
     let mut id = 0;
     for pass in 0..2 {
         id += 1;
-        let opened = transport.call(RequestContext::unbounded(), request(id, "workspace.open", None,
+        let opened = call_with_busy_retry(&transport,RequestContext::unbounded(), request(id, "workspace.open", None,
             json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"ws-refusal","captureMode":"none"}))).await.unwrap();
         let handle: WorkspaceHandle =
             serde_json::from_value(opened.result["workspace"].clone()).unwrap();

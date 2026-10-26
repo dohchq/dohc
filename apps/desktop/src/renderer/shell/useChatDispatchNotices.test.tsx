@@ -21,12 +21,13 @@ function setup() {
     },
     registerChatDispatchNotices: register, dismissChatDispatchNotice: dismiss,
   });
+  const trust = vi.fn();
   const mount = (workspaceId = "a", ready = true) => renderHook((props) => {
     const errors = useShellError(props.workspaceId);
-    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind);
+    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, trust);
     return errors;
   }, { initialProps: { workspaceId, ready } });
-  return { store, register, dismiss, mount, listeners, removed };
+  return { store, register, dismiss, mount, listeners, removed, trust };
 }
 const notice = (reason: ChatDispatchNotice["reason"], message: string = `Agent dispatch notice: ${reason}.`) => ({ reason, threadId: "thread", message });
 
@@ -108,4 +109,30 @@ it("clears forgotten workspace rows in every subscribed window", async () => {
   act(() => h.store.clearWorkspace("a"));
   expect(first.result.current.shellErrors).toEqual([]);
   expect(second.result.current.shellErrors).toEqual([]);
+});
+
+it("shows a held request as a warning that opens the trust dialog, and takes it back once trusted", async () => {
+  const h = setup();
+  h.store.report("a", notice("restricted", "In Restricted Mode, dohc does not start agents in this workspace."));
+  const hook = h.mount();
+  await act(async () => {});
+  const row = hook.result.current.shellErrors[0]!;
+  expect(row).toMatchObject({ tone: "warning", kind: "chat-restricted", action: { label: "Trust workspace" } });
+  act(() => row.action!.run());
+  expect(h.trust).toHaveBeenCalledOnce();
+  // The row stays while the person may still choose Stay in Restricted Mode.
+  expect(hook.result.current.shellErrors).toHaveLength(1);
+  act(() => h.store.clear("a", "restricted"));
+  expect(hook.result.current.shellErrors).toEqual([]);
+});
+
+it("does not open the trust dialog from a row left by another workspace", async () => {
+  const h = setup();
+  h.store.report("a", notice("restricted"));
+  const hook = h.mount();
+  await act(async () => {});
+  const row = hook.result.current.shellErrors[0]!;
+  hook.rerender({ workspaceId: "b", ready: true });
+  act(() => row.action!.run());
+  expect(h.trust).not.toHaveBeenCalled();
 });

@@ -95,6 +95,24 @@ fn request(path: &str) -> Request {
         checkpoint: vec![0, 0],
     }
 }
+
+#[test]
+fn identity_mismatch_stays_unavailable_without_rehashing() {
+    let (_directory, config) = fixture("ok");
+    let original = fs::read(&config.bundle).unwrap();
+    fs::write(&config.bundle, b"wrong build").unwrap();
+    let mut reader = Reader::new(Some(config.clone()));
+    assert!(matches!(
+        run(reader.request(request("note.md"))),
+        Err(Failure::Unavailable)
+    ));
+    fs::write(&config.bundle, original).unwrap();
+    assert!(matches!(
+        run(reader.request(request("note.md"))),
+        Err(Failure::Unavailable)
+    ));
+    finish(&mut reader);
+}
 fn wait(reader: &Reader, predicate: impl Fn(&State) -> bool) {
     let end = Instant::now() + Duration::from_secs(15);
     let mut s = reader.shared.state.lock().unwrap();
@@ -237,7 +255,6 @@ fn invalid_configuration_or_identity_is_unavailable() {
         "protocol",
         "schema",
         "embedded-identity",
-        "startup-crash",
     ] {
         let (dir, mut c) = fixture(fault);
         match fault {
@@ -277,6 +294,16 @@ fn invalid_configuration_or_identity_is_unavailable() {
         fail(run(reader.request(request("ok"))), Failure::Unavailable);
         finish(&mut reader);
     }
+}
+#[test]
+fn startup_crashes_allow_a_fresh_fenced_retry() {
+    let (_dir, config) = fixture("startup-crash");
+    let mut reader = Reader::new(Some(config));
+    for _ in 0..2 {
+        fail(run(reader.request(request("ok"))), Failure::Crashed);
+    }
+    assert_eq!(reader.shared.state.lock().unwrap().lifecycle.0, 2);
+    finish(&mut reader);
 }
 #[test]
 fn crashes_and_restarts() {
@@ -510,6 +537,23 @@ fn construct_and_prove_return_checked_success() {
 }
 
 #[test]
+fn expiry_is_a_complete_checkpoint_bound_proof_and_never_a_construction() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    let mut prove = request("expired");
+    prove.method = Method::Prove;
+    let checkpoint = wire::sha(&prove.checkpoint);
+    assert!(
+        matches!(run(reader.request(prove)), Ok(Outcome::Expired { checkpoint_sha256, .. }) if checkpoint_sha256 == checkpoint)
+    );
+    fail(run(reader.request(request("expired"))), Failure::Crashed);
+    let mut prove = request("expired-delta");
+    prove.method = Method::Prove;
+    fail(run(reader.request(prove)), Failure::Crashed);
+    finish(&mut reader);
+}
+
+#[test]
 fn drop_reaps_active_child() {
     let (_dir, c) = fixture("ok");
     let reader = Reader::new(Some(c));
@@ -576,7 +620,7 @@ fn startup_timeout_idle_and_cancel() {
         ..Deadlines::default()
     };
     let mut reader = Reader::with_deadlines(Some(c), d);
-    fail(run(reader.request(request("ok"))), Failure::Unavailable);
+    fail(run(reader.request(request("ok"))), Failure::TimedOut);
     finish(&mut reader);
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::with_deadlines(Some(c), d);
@@ -656,7 +700,7 @@ fn startup_deadline() {
         },
     );
     let future = reader.request(request("ok"));
-    fail(deadline_result(&mut reader, future), Failure::Unavailable);
+    fail(deadline_result(&mut reader, future), Failure::TimedOut);
     finish(&mut reader);
 }
 #[test]

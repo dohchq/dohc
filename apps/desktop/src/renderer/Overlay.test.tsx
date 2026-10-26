@@ -8,6 +8,7 @@ import { Menu } from "./ui/Menu";
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("Overlay", () => {
@@ -56,6 +57,74 @@ describe("Overlay", () => {
     );
 
     fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes on ⌘W on macOS, before the menu can close the tab behind it", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    const notPrevented = fireEvent.keyDown(document, { key: "w", code: "KeyW", metaKey: true });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(notPrevented).toBe(false);
+  });
+
+  it("takes ⌘W on macOS even without a close action", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    render(
+      <Overlay>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    expect(fireEvent.keyDown(document, { key: "w", code: "KeyW", metaKey: true })).toBe(false);
+  });
+
+  it("stays open on Ctrl+W on Windows", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "win32" });
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    fireEvent.keyDown(document, { key: "w", code: "KeyW", ctrlKey: true });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stays open on a press outside its panel", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <input aria-label="Name" />
+      </Overlay>,
+    );
+
+    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes a picker on a press outside its panel", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose} closeOnBackdrop>
+        <button type="button">Result</button>
+      </Overlay>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Result" }));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -126,7 +195,7 @@ describe("Overlay", () => {
     expect(document.activeElement).toBe(last);
   });
 
-  it("includes editable regions and skips hidden or inherited-disabled controls", () => {
+  it("includes editable regions and skips hidden, inert, or inherited-disabled controls", () => {
     render(
       <Overlay onClose={() => undefined}>
         <fieldset disabled>
@@ -137,6 +206,9 @@ describe("Overlay", () => {
         </button>
         <div contentEditable data-testid="editable-region" />
         <button type="button">Last</button>
+        <div inert>
+          <button type="button">Held action</button>
+        </div>
       </Overlay>,
     );
     const editor = screen.getByTestId("editable-region");
@@ -232,16 +304,16 @@ describe("Overlay with toasts above it", () => {
   });
 });
 
-function FocusDialog({ removeOpener = false }: { removeOpener?: boolean }) {
+function FocusDialog({ removeOpener = false, picker = false }: { removeOpener?: boolean; picker?: boolean }) {
   const [open, setOpen] = useState(false);
   return <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
     {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
-    {open && <Overlay onClose={() => setOpen(false)}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
+    {open && <Overlay onClose={() => setOpen(false)} closeOnBackdrop={picker}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
   </section>;
 }
 
 it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (action) => {
-  render(<StrictMode><FocusDialog /></StrictMode>);
+  render(<StrictMode><FocusDialog picker={action === "backdrop"} /></StrictMode>);
   const opener = screen.getByText("Open dialog");
   opener.focus();
   fireEvent.click(opener);

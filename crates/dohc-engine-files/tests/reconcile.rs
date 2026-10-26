@@ -9,9 +9,9 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
-    IngestOutcome, IngestReason, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds,
-    ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource, WatchEvent,
-    apply_then_ack,
+    IngestOutcome, IngestReason, ManifestEntry, ReconcileController, ReconcileRun, RetireOutcome,
+    ScanBounds, ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource,
+    WatchEvent, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::io::ErrorKind;
@@ -42,8 +42,8 @@ impl CaptureSink for AcceptAll {
         })
     }
 
-    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
-        Ok(())
+    fn retire(&mut self, _path: &str) -> Result<RetireOutcome, CaptureError> {
+        Ok(RetireOutcome::Retired)
     }
 }
 

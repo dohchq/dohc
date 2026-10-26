@@ -181,7 +181,9 @@ test("a file linked mention reveals an unmounted historical message", async () =
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);
     await expect(rail.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
-    await page.getByTestId("chat-file-mention").filter({ hasText: "Long file conversation" }).click();
+    // The chat's link to topic.md is a row in About's Links, below the thread.
+    await page.getByTestId("linked-chat-back").click();
+    await page.getByTestId("about-links").getByTestId("chat-file-mention").filter({ hasText: "Long file conversation" }).click();
     await expect(rail.locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();
     await expect(rail.getByTestId("linked-chat-message-body").filter({ hasText: "heliotrope historical target" })).toBeInViewport();
   } finally {
@@ -226,7 +228,8 @@ test("a file linked mention opens the exact unmounted DM message", async () => {
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
     await page.getByTestId(activityPin("explorer")).click();
     await explorerRow(page, "topic.md").click();
-    await page.getByTestId("chat-file-mention").filter({ hasText: "reader@dohc.test" }).click();
+    await openAboutPanel(page);
+    await page.getByTestId("about-links").getByTestId("chat-file-mention").filter({ hasText: "reader@dohc.test" }).click();
     await expect(page.getByTestId("chats-dm-view").locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();
   } finally {
     await relay?.stop();

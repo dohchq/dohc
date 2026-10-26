@@ -49,6 +49,9 @@ export function ChatLane(props: {
   // What a picked agent's offer says. The lane does not read its dispatch.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   workspacePath?: string;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -220,6 +223,7 @@ export function ChatLane(props: {
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
         if (current !== token.current) return;
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         loadSequence.current += 1;
         listRef.current?.scrollToEnd();
         setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
@@ -242,6 +246,7 @@ export function ChatLane(props: {
           ticket,
         }]);
         if (current !== token.current) return;
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         loadSequence.current += 1;
         listRef.current?.scrollToEnd();
         setThreadId(result.thread.id);
@@ -256,25 +261,25 @@ export function ChatLane(props: {
     } finally {
       if (current === token.current) setSending(false);
     }
-  }, [channelId, composer, load, loading, onError, poll, props.locked, reactions, sending, threadId, workspaceId]);
+  }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, sending, threadId, workspaceId]);
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     if (!threadId || sending || loading || props.locked) return;
     const current = token.current;
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({ workspaceId, threadId, body: option });
+      const result = await bridge().sendChatMessage({
+        workspaceId, threadId, body: option,
+        resolves: { messageId: decision.messageId, chosenOption: option },
+      });
       if (current !== token.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
       listRef.current?.scrollToEnd();
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-      const resolved = await bridge().resolveChatDecision({
-        workspaceId, threadId, messageId: decision.messageId,
-        resolvedByMessageId: result.message.id, chosenOption: option,
-      });
-      if (current !== token.current) return;
-      loadSequence.current += 1;
-      setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved.decision : entry));
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
+      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that poll."), result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
       onError(ipcErrorMessage(error, "Could not answer that poll."), error);
@@ -284,7 +289,7 @@ export function ChatLane(props: {
         void load(true);
       }
     }
-  }, [threadId, sending, loading, props.locked, workspaceId, onError, load]);
+  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load]);
 
   const threadReactions = threadId ? reactions.view(threadId) : null;
   const reactionControls = useMemo<ChatReactionControls | undefined>(() => threadId && threadReactions

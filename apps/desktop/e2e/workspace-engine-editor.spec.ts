@@ -50,7 +50,7 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
 
 // The kept typing's notice: its toast, then its row in Notices.
 function recoveryToast(page: import("@playwright/test").Page) {
-  return page.getByTestId("workspace-shell-notice").filter({hasText: "Typing kept in History"});
+  return page.getByTestId("workspace-shell-notice").filter({hasText: "Text kept in History"});
 }
 
 async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDesktopApp>>, rootPath: string, workspaceId: string, path: string, human: string, external: string, open: "notice" | "history") {
@@ -74,11 +74,11 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   expect(await readFile(join(rootPath,path), "utf8")).toContain(external);
   if (open === "notice") {
     const toast = recoveryToast(page);
-    await expect(toast).toContainText(`The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`, {timeout: 30_000});
+    await expect(toast).toContainText(`The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`, {timeout: 30_000});
     await toast.getByTestId("workspace-shell-error-action").click();
     await expect(page.getByTestId(activityPin("history"))).toHaveAttribute("aria-current", "page");
     await expect(page.getByTestId("engine-moment-diff-page")).toHaveAttribute("data-moment-id", recoveryId);
-    await expect(page.getByTestId("engine-diff-source")).toHaveText("Typing kept");
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Text kept");
   } else {
     await openHistoryView(page);
     await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
@@ -101,7 +101,7 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   // The restore cleared the recovery, so its notice goes too.
   await expect(recoveryToast(page)).toHaveCount(0);
   await page.getByTestId("notice-center-toggle").click();
-  await expect(page.locator("[data-notice-row]").filter({hasText: "Typing kept in History"})).toHaveCount(0);
+  await expect(page.locator("[data-notice-row]").filter({hasText: "Text kept in History"})).toHaveCount(0);
   await page.getByTestId("notice-center-toggle").click();
 }
 
@@ -282,7 +282,8 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     await page.getByTestId("markdown-editor").click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    // The outside-write signal can reach main before or after the refused save.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", /^(error|changed-on-disk)$/);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
@@ -333,22 +334,23 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
     await page.getByTestId("markdown-editor").click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    // The outside-write signal can reach main before or after the refused save.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", /^(error|changed-on-disk)$/);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
     // Workbench state lives in the workspace, independently of the Electron profile.
     // Remove only this test's reopen intent so capture has no renderer lease.
-    await rm(join(temp.rootPath, ".dohc", "ui-state.json"), { force: true });
+    await rm(join(temp.rootPath, ".dohc", "local", "ui-state.json"), { force: true });
     desktop = await launchDesktopApp({workspace: { ...temp, baseDir: join(temp.baseDir, "fresh-profile") }});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
     // This existing read flushes capture before an editor can hold a lease.
     await desktop.page.evaluate(async ({ workspaceId, path }) => {
       const api = (window as unknown as { dohcDesktop: {
-        listChatFileMentions(input: { workspaceId: string; path: string }): Promise<unknown>;
+        chatFileMentionsPage(input: { workspaceId: string; subject: { path: string } }): Promise<unknown>;
       } }).dohcDesktop;
-      await api.listChatFileMentions({ workspaceId, path });
+      await api.chatFileMentionsPage({ workspaceId, subject: { path } });
     }, { workspaceId: workspace.workspaceId, path });
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
     await openEngineDoc(desktop.page, path);

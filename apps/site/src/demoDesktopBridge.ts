@@ -246,7 +246,7 @@ type DemoDesktopBridge = Pick<
   | "getUpdateState"
   | "searchWorkspace"
   | "cancelWorkspaceSearch"
-  | "readWorkspaceGraph"
+  | "linksEdges"
   | "createWorkspaceFile"
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
@@ -274,12 +274,13 @@ type DemoDesktopBridge = Pick<
   | "listChatThreadAttachments"
   | "chatRunRecordsForThread"
   | "chatDispatchStateForThread"
+  | "readChatDispatchPaused"
+  | "onChatDispatchPaused"
   | "markChatThreadRead"
   | "createChatChannel"
   | "startChannelThread"
   | "sendChatMessage"
   | "setChatReaction"
-  | "resolveChatDecision"
   | "stopAgentRun"
   | "resumeThreadDispatch"
   | "openExternalUrl"
@@ -288,6 +289,7 @@ type DemoDesktopBridge = Pick<
   | "leaveSharedChannel"
   | "revokeRelayShare"
   | "startDm"
+  | "exportDocumentFile"
 >;
 
 export type DemoSearchOptions = {
@@ -452,26 +454,13 @@ const demoBridge = {
     return { status: "accepted" as const };
   },
   async cancelWorkspaceSearch() {},
-  async readWorkspaceGraph() {
-    const nodes = context.documents.map((document, index) => ({
-      path: document.path,
-      title: document.title,
-      incoming: index === 0 ? Math.max(0, context.documents.length - 1) : 1,
-      outgoing: index === 0 ? Math.max(0, context.documents.length - 1) : 1,
-    }));
-    const edges = context.documents.slice(1).map((document) => ({
-      source: context.documents[0]?.path ?? document.path,
-      target: document.path,
-      kind: "wikilink" as const,
-    }));
-    return {
-      nodes,
-      edges,
-      unresolvedLinks: 0,
-      scannedFileCount: nodes.length,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    };
+  async linksEdges() {
+    // Explicit sample data for the demo, independent of the engine index.
+    return { versionId: "demo", files: context.documents.slice(0, 50).map(document => ({
+      objectId: document.path, path: document.path, title: document.title,
+    })), entries: context.documents.slice(1, 50).map((document, ordinal) => ({
+      source: context.documents[0]?.path ?? document.path, target: document.path, kind: "wikilink" as const, ordinal,
+    })), unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
     const filePaths = context.documents.map((document) => document.path);
@@ -686,6 +675,12 @@ const demoBridge = {
   async chatDispatchStateForThread() {
     return { liveRunId: null, pendingCount: 0, paused: false };
   },
+  async readChatDispatchPaused() {
+    return { paused: false };
+  },
+  onChatDispatchPaused() {
+    return () => {};
+  },
   async markChatThreadRead() {
     return { lastReadSequence: 2, revision: 1 };
   },
@@ -720,9 +715,6 @@ const demoBridge = {
       },
     };
   },
-  async resolveChatDecision() {
-    throw new Error("No open decision in the demo");
-  },
   async stopAgentRun() {},
   async resumeThreadDispatch() {},
   async openExternalUrl(payload: { url: string }) {
@@ -748,6 +740,31 @@ const demoBridge = {
   },
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
+  },
+  // A browser saves an export as a download. A PDF opens the browser's print
+  // dialog, where the person saves it as a PDF.
+  async exportDocumentFile(payload: { suggestedName: string; content: string; kind: "markdown" | "html" | "pdf" }) {
+    if (payload.kind === "pdf") {
+      const frame = document.createElement("iframe");
+      frame.sandbox.add("allow-same-origin", "allow-modals");
+      frame.style.cssText = "position: fixed; width: 0; height: 0; border: 0";
+      frame.srcdoc = payload.content;
+      document.body.append(frame);
+      await new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+      frame.contentWindow?.addEventListener("afterprint", () => frame.remove(), { once: true });
+      frame.contentWindow?.print();
+      return { path: null };
+    }
+    const markdown = payload.kind === "markdown";
+    const url = URL.createObjectURL(
+      new Blob([payload.content], { type: markdown ? "text/markdown" : "text/html" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${payload.suggestedName}.${markdown ? "md" : "html"}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { path: null };
   },
 } satisfies DemoDesktopBridge;
 

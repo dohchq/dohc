@@ -1,3 +1,4 @@
+import { DuplicateWorkspaceFilePayload, DuplicateWorkspaceFileResult } from "./bridgeContract";
 import {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -51,6 +52,12 @@ export const workspaceFileOperations = {
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
     payload: CreateWorkspaceFolderPayload, result: CreateWorkspaceFileResult,
+  },
+  duplicateWorkspaceFile: {
+    capabilityId: "file.duplicate", channel: "desktop:duplicate-workspace-file",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {check: "workspaceFileMutationOwner.runAdmittedMutation + duplicateWorkspaceFile/withExclusiveWorkspaceOperation", reason: "The mutation owner admits the workspace and holds the same mutation lease as moves."},
+    payload: DuplicateWorkspaceFilePayload, result: DuplicateWorkspaceFileResult,
   },
   moveWorkspacePath: {
     capabilityId: "file.move", channel: "desktop:move-workspace-path",

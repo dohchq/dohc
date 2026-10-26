@@ -269,7 +269,7 @@ export function AgentsMcpSettings(props: {
         description="The local folder exposed to this workspace-scoped MCP server."
         testId="settings-row-workspace-path"
       >
-        <code className="max-w-sm truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
+        <code title={workspacePath} className="max-w-70 truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
           {workspacePath}
         </code>
       </SettingRow>

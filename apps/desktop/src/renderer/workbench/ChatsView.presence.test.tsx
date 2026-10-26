@@ -85,11 +85,12 @@ const agentThreadRecord: ChannelThreadRecord = {
 };
 
 const bridgeMock = {
+  readChatDispatchPaused: vi.fn(),
+  onChatDispatchPaused: vi.fn(),
   listChatChannels: vi.fn(),
   listChannelThreads: vi.fn(),
   listChatMessages: vi.fn(),
   listChatThreadDecisions: vi.fn(),
-  resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
   chatRunRecordsForThread: vi.fn(),
   markChatThreadRead: vi.fn(),
@@ -199,6 +200,8 @@ beforeEach(() => {
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
   bridgeMock.onWorkspaceActivity.mockReturnValue(() => undefined);
+  bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: false });
+  bridgeMock.onChatDispatchPaused.mockReturnValue(() => undefined);
   bridgeMock.onCloudSessionChanged.mockReturnValue(() => undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });
   bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });

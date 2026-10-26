@@ -11,8 +11,12 @@ import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
+import type { CollectionsRefusalError } from "./collectionsHolder";
+import { ipcWireError, SERVER_COLLECTIONS_UNAVAILABLE } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
+import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
+import type { AutomationPressActor } from "@dohc/workspace-engine-client";
 
 type RuntimeDatasetHost = ReturnType<typeof createDatasetHost>;
 
@@ -46,7 +50,25 @@ export interface OwnerDatasetData {
   file(input: Extract<DatasetRequest, { action: "file" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; bytesBase64: string }>;
   permissions?(input: Extract<DatasetRequest, { action: "permissions" }>): Promise<DatasetPermissionsPage>;
   setGrant?(input: Extract<DatasetRequest, { action: "setGrant" | "removeGrant" }>): Promise<void>;
+  /** Presses a button on the server, which runs its automation. The owner's route only. */
+  press?(input: DatasetServerPressInput): Promise<CollectionAutomationPress>;
 }
+
+/** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
+export type RemoteDatasetData = OwnerDatasetData & Required<Pick<OwnerDatasetData, "permissions" | "press">>;
+
+/** A press the server runs: who pressed is the server's to know; an agent that pressed for them is provenance. */
+export interface DatasetServerPressInput {
+  datasetId: string; table: string; field: string; recordId: string; pressId: string;
+  /** The names of the actions the person was told can't be undone and chose to run. */
+  confirmed: readonly string[];
+  by: AutomationPressActor;
+}
+const PressAnswer = z.union([
+  z.object({ busy: z.literal(true) }).strict(),
+  z.object({ busy: z.literal(false), claimId: z.string().min(1).max(256),
+    settled: z.object({ outcome: z.enum(["done", "skipped", "failed", "ended"]), error: z.string().max(4096).nullable() }).strict().nullable() }).strict(),
+]);
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const artifacts = z.object({
@@ -63,7 +85,7 @@ export function createRemoteDatasetData(input: {
   shareId?: string;
   currentCredentialGeneration(): number; assertCurrent(): void;
   relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
-}): OwnerDatasetData {
+}): RemoteDatasetData {
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration,
     currentGeneration: input.currentCredentialGeneration, assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
   const base = input.shareId === undefined ? `/sync/${encodeURIComponent(input.workspaceId)}/datasets` : `/sync/shares/${encodeURIComponent(input.shareId)}/datasets`;
@@ -119,6 +141,12 @@ export function createRemoteDatasetData(input: {
       if (value.after) query.set("after", value.after);
       if (value.limit) query.set("limit", String(value.limit));
       return DatasetPermissionsPage.parse(await request(`${path(value.datasetId)}/permissions${query.size ? `?${query}` : ""}`));
+    },
+    async press(value) {
+      if (input.shareId !== undefined) throw new Error("Open the original workspace to press this button.");
+      const { datasetId, table, field, recordId, pressId, confirmed, by } = value;
+      return PressAnswer.parse(await request(`${path(datasetId)}/press`, { table, field, recordId, pressId, confirmed: [...confirmed],
+        ...(by.kind === "agent" ? { agent: { originId: by.originId, depth: by.depth } } : {}) }));
     },
     async setGrant(value) {
       const result = await request(`${path(value.datasetId)}/grants`, value.action === "setGrant"
@@ -234,6 +262,48 @@ export function createRemoteDatasetData(input: {
       return { file: result.file, bytesBase64: result.bytesBase64 };
     },
   };
+}
+
+/**
+ * The server didn't give the list of a workspace's Collections, on a
+ * computer that doesn't keep the workspace's own. Its first line says where
+ * those are. The rest is the server's error as it would cross IPC alone, so
+ * a window shows both as before and the CLI prints both.
+ */
+export class ServerCollectionsUnavailableError extends Error {
+  override name = "ServerCollectionsUnavailableError";
+  readonly code = SERVER_COLLECTIONS_UNAVAILABLE;
+  readonly computerLabel: string | null;
+  constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
+    const wire = ipcWireError(cause);
+    super(`${elsewhere.message}\n${wire instanceof Error && wire.name === "Error" ? wire.message : String(wire)}`, { cause });
+    this.computerLabel = elsewhere.computerLabel;
+  }
+}
+
+/**
+ * A workspace's Collections on this computer's signed-in server, for a
+ * computer that doesn't keep the workspace's own. Every request goes to the
+ * server that issued `credentials` and follows no redirect. A workspace or
+ * Collection that server doesn't have may be one the other computer keeps,
+ * so it refuses with `elsewhere`, as those Collections do here.
+ */
+export function createServerCollectionsData(input: Omit<Parameters<typeof createRemoteDatasetData>[0], "shareId" | "relayJson"> & {
+  /** "missing" when the server answers that it has no such workspace or Collection for this account. */
+  relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }>;
+  elsewhere: CollectionsRefusalError;
+}): RemoteDatasetData {
+  const { elsewhere, relayJson, ...remote } = input;
+  if (!remote.credentials.relayUrl) throw elsewhere;
+  const data = createRemoteDatasetData({ ...remote, async relayJson(credentials, path, init) {
+    const answer = await relayJson(credentials, path, { ...init, redirect: "error" });
+    if (answer.kind === "missing") throw elsewhere;
+    return answer.body;
+  } });
+  return { ...data, async list(page) {
+    try { return await data.list(page); }
+    catch (error) { throw error === elsewhere || remote.signal.aborted ? error : new ServerCollectionsUnavailableError(elsewhere, error); }
+  } };
 }
 
 /** Owner-authenticated streaming target for the durable local-to-shared transfer coordinator. */

@@ -28,6 +28,11 @@ pub const COLLECTIONS_PROJECTED_EVENT: &str = "collections.projected";
 /// ordinary notice, which a full queue sheds.
 pub const CAPTURE_INITIAL_SETTLED_EVENT: &str = "capture.initialSettled";
 
+/// Wake-up after a fresh import commits more files. A caller refused because
+/// its file was not captured yet opens it again. Delivered like
+/// `capture.initialSettled`, which still follows the whole import.
+pub const CAPTURE_IMPORT_PROGRESS_EVENT: &str = "capture.importProgress";
+
 /// Sent once per workspace per engine process when a placement there had to
 /// fall back to a check-then-rename, because the drive has no atomic rename
 /// that refuses to replace. The payload names the workspace. Delivery can be
@@ -93,7 +98,8 @@ struct RetainedWakes {
             dohc_engine_files::observation::ObservationCursor,
         >,
     >,
-    initial_settled: Mutex<std::collections::BTreeSet<String>>,
+    /// (event name, workspace id): one pending capture wake of each kind.
+    workspaces: Mutex<std::collections::BTreeSet<(&'static str, String)>>,
     /// The current subscriber came from `subscribe_with_wakes`.
     subscribed: AtomicBool,
     wake: tokio::sync::Notify,
@@ -125,9 +131,9 @@ impl EngineEventReceiver {
                     payload: json!({ "workspaceId": workspace_id, "cursor": cursor }),
                 });
             }
-            if let Some(workspace_id) = lock(&wakes.initial_settled).pop_first() {
+            if let Some((name, workspace_id)) = lock(&wakes.workspaces).pop_first() {
                 return Some(EngineEventNotice {
-                    name: CAPTURE_INITIAL_SETTLED_EVENT.to_owned(),
+                    name: name.to_owned(),
                     payload: json!({ "workspaceId": workspace_id }),
                 });
             }
@@ -144,8 +150,9 @@ impl EngineEventReceiver {
 }
 
 impl EngineEvents {
-    /// `subscribe`, plus the retained wakes: `workspace.filesChanged` and
-    /// `capture.initialSettled`, delivered before ordinary notices.
+    /// `subscribe`, plus the retained wakes: `workspace.filesChanged`,
+    /// `capture.initialSettled` and `capture.importProgress`, delivered before
+    /// ordinary notices.
     pub fn subscribe_with_wakes(&self) -> EngineEventReceiver {
         let ordinary = self.subscribe();
         self.wakes.subscribed.store(true, Ordering::Release);
@@ -168,21 +175,27 @@ impl EngineEvents {
         lock(&self.wakes.files).remove(&(workspace.to_owned(), generation.to_owned()));
     }
 
-    /// Announce that `workspace` left its initial capture phase. A receiver
-    /// from `subscribe_with_wakes` keeps one wake per workspace until it takes
-    /// it; any other subscriber gets an ordinary notice. A wake stays after
-    /// its workspace closes: removing it by workspace could take a reopened
-    /// workspace's newer settle, and a stale wake only makes the client retry
-    /// a read.
+    /// Announce that `workspace` left its initial capture phase.
     pub(crate) fn emit_initial_settled(&self, workspace: &str) {
+        self.emit_workspace_wake(CAPTURE_INITIAL_SETTLED_EVENT, workspace);
+    }
+
+    /// Announce that `workspace`'s fresh import committed more files.
+    pub(crate) fn emit_import_progress(&self, workspace: &str) {
+        self.emit_workspace_wake(CAPTURE_IMPORT_PROGRESS_EVENT, workspace);
+    }
+
+    /// A receiver from `subscribe_with_wakes` keeps one wake of each kind per
+    /// workspace until it takes it; any other subscriber gets an ordinary
+    /// notice. A wake stays after its workspace closes: removing it by
+    /// workspace could take a reopened workspace's newer wake, and a stale
+    /// wake only makes the client retry a read.
+    fn emit_workspace_wake(&self, name: &'static str, workspace: &str) {
         if !self.wakes.subscribed.load(Ordering::Acquire) {
-            self.emit(
-                CAPTURE_INITIAL_SETTLED_EVENT,
-                json!({ "workspaceId": workspace }),
-            );
+            self.emit(name, json!({ "workspaceId": workspace }));
             return;
         }
-        lock(&self.wakes.initial_settled).insert(workspace.to_owned());
+        lock(&self.wakes.workspaces).insert((name, workspace.to_owned()));
         self.wakes.wake.notify_one();
     }
 
@@ -384,7 +397,7 @@ mod tests {
         for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY {
             assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
         }
-        assert!(lock(&events.wakes.initial_settled).is_empty());
+        assert!(lock(&events.wakes.workspaces).is_empty());
         // The two settles arrived once: the next notice is the ordinary one.
         events.emit("ordinary", json!({}));
         assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
@@ -406,16 +419,42 @@ mod tests {
         assert_eq!(settled, ["a", "b"]);
     }
 
+    #[tokio::test]
+    async fn import_progress_coalesces_beside_the_settle_through_a_full_notice_queue() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_wakes();
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY + 10 {
+            events.emit("ordinary", json!({}));
+        }
+        for _ in 0..3 {
+            events.emit_import_progress("workspace");
+        }
+        events.emit_initial_settled("workspace");
+        let mut wakes = Vec::new();
+        for _ in 0..2 {
+            let wake = receiver.recv().await.unwrap();
+            assert_eq!(wake.payload, json!({ "workspaceId": "workspace" }));
+            wakes.push(wake.name);
+        }
+        wakes.sort();
+        assert_eq!(
+            wakes,
+            [CAPTURE_IMPORT_PROGRESS_EVENT, CAPTURE_INITIAL_SETTLED_EVENT]
+        );
+        assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
+        assert!(lock(&events.wakes.workspaces).is_empty());
+    }
+
     #[test]
     fn initial_settle_without_retained_wakes_is_an_ordinary_notice_or_nothing() {
         let events = EngineEvents::default();
         // No subscriber: shed like every notice, and nothing is kept.
         events.emit_initial_settled("workspace");
-        assert!(lock(&events.wakes.initial_settled).is_empty());
+        assert!(lock(&events.wakes.workspaces).is_empty());
         let mut rx = events.subscribe();
         events.emit_initial_settled("workspace");
         assert_eq!(rx.try_recv().unwrap().name, CAPTURE_INITIAL_SETTLED_EVENT);
-        assert!(lock(&events.wakes.initial_settled).is_empty());
+        assert!(lock(&events.wakes.workspaces).is_empty());
     }
     use serde_json::Value;
     use serde_json::json;

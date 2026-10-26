@@ -33,8 +33,8 @@ describe("engineMomentSummary", () => {
       ),
     ).toBe("Merged version Draft into Main");
     expect(
-      engineMomentSummary(moment({ id: "m2", summary: "Reconciled offline edits" })),
-    ).toBe("Reconciled offline edits");
+      engineMomentSummary(moment({ id: "m2", summary: "Changed while dohc was closed" })),
+    ).toBe("Changed while dohc was closed");
   });
 
   it("names only the admitted after path for a rename", () => {
@@ -61,8 +61,8 @@ describe("engineOriginLabel", () => {
   });
 
   it("names kept typing whether or not its notice is still open", () => {
-    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
-    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery")).toBe("Text kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Text kept");
   });
 });
 
@@ -234,20 +234,20 @@ describe("groupTimeline", () => {
         id: "m3",
         path: "b.md",
         momentOrder: 3,
-        summary: "Reconciled offline edits",
+        summary: "Changed while dohc was closed",
         correlationId: "reconcile-1",
       }),
       moment({
         id: "m2",
         path: "a.md",
         momentOrder: 2,
-        summary: "Reconciled offline edits",
+        summary: "Changed while dohc was closed",
         correlationId: "reconcile-1",
       }),
       moment({ id: "m1", momentOrder: 1 }),
     ]);
     expect(groups).toHaveLength(2);
-    expect(groups[0].summary).toBe("Reconciled offline edits");
+    expect(groups[0].summary).toBe("Changed while dohc was closed");
     expect(groups[0].moments.map((entry) => entry.path)).toEqual(["b.md", "a.md"]);
     expect(groups[1].moments.map((entry) => entry.id)).toEqual(["m1"]);
   });

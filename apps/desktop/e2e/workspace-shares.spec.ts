@@ -465,7 +465,7 @@ confidentialTest.describe("View link lifecycle", () => {
       const linkLogResponse = await readViewLink(
         relay.baseUrl,
         oldCapability,
-        "/sync/link/log?since=0&limit=500",
+        "/sync/link/log?since=0&limit=500&current=true",
       );
       expect(linkLogResponse.status).toBe(200);
       const linkLog = JSON.parse(linkLogResponse.body) as {
@@ -473,13 +473,13 @@ confidentialTest.describe("View link lifecycle", () => {
       };
       const selectedOp = linkLog.ops?.find(
         (op) =>
-          op.opKind === "moment.append" &&
-          (op.payload?.payloadAfterPath === "shared.md" || op.payload?.path === "shared.md"),
+          op.opKind === "file.current" &&
+          (op.payload?.file as Record<string, unknown> | undefined)?.path === "shared.md",
       );
       if (selectedOp === undefined) {
         throw new Error("The shipped link log did not include the selected file.");
       }
-      const selectedDigest = selectedOp.payload?.payloadAfterBlobSha256;
+      const selectedDigest = (selectedOp.payload?.file as Record<string, unknown> | undefined)?.blobSha256;
       if (typeof selectedDigest !== "string") {
         throw new Error("The selected file operation did not name its content.");
       }

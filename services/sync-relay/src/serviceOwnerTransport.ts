@@ -31,7 +31,7 @@ export function serviceOwnerTransport(options: {
     const response=await client.sendRequest({...request,workspace,method:"liveApplication.ownerState",
       params:{registrationId:id,sessionId:capture.sessionId}},signal);
     check(signal);
-    const state=configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+    const state=configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState","retryDeliveryId"]);
     const sequence=authorityInteger(state.expectedLocalSequence),pendingBytes=authorityInteger(state.pendingBytes);
     if(state.throughCursor!==null) {
       authorityInteger(state.throughCursor);
@@ -40,7 +40,7 @@ export function serviceOwnerTransport(options: {
     } else if(adopted || sequence!==capture.source.nativeHeadSequence)throw new Error("Service owner activation changed.");
     if(state.outboxId!==null && (typeof state.outboxId!=="string" || !state.outboxId))throw new Error("Invalid native owner outbox.");
     outboxId=state.outboxId===null?undefined:String(state.outboxId);
-    return {pendingBytes,throughCursor:state.throughCursor===null?null:authorityInteger(state.throughCursor),outboxState:state.outboxState};
+    return {pendingBytes,throughCursor:state.throughCursor===null?null:authorityInteger(state.throughCursor),outboxState:state.outboxState,retryDeliveryId:state.retryDeliveryId};
   };
   const sendRequest:EngineClient["sendRequest"]=async(request,signal)=>{
     check(signal);
@@ -68,18 +68,20 @@ export function serviceOwnerTransport(options: {
       const state=await readState(request,signal);
       if(request.method==="liveApplication.ownerOutbox") {
         if(!adopted)throw new Error("Native adoption must finish before outbox delivery.");
-        return {id:request.id,result:{outboxId:outboxId??null,pendingBytes:state.pendingBytes,state:state.outboxState} as never};
+        return {id:request.id,result:{outboxId:outboxId??null,pendingBytes:state.pendingBytes,state:state.outboxState,retryDeliveryId:state.retryDeliveryId} as never};
       }
       const capture=session();
       return {id:request.id,result:{adoptionId:capture.activationId,expectedLocalSequence:capture.source.nativeHeadSequence,
         throughCursor:state.throughCursor??0,sessionId:capture.sessionId}};
     }
     if(request.method==="liveApplication.quarantineOwnerOutbox") {
-      const params=configRecord(request.params,["registrationId","reason"]);
+      const params=configRecord(request.params,["registrationId","reason","deliveryId","refusalKey"]);
       registration(params.registrationId);
       if(!adopted || !outboxId)throw new Error("Service owner outbox is unavailable.");
-      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict")throw new Error("Invalid owner quarantine reason.");
-      const response=await client.sendRequest({...request,method:"ydoc.ownerOutbox.quarantine",params:{outboxId,reason:params.reason}},signal);
+      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict" && params.reason!=="capacity-refused" && params.reason!=="invalid-update")throw new Error("Invalid owner quarantine reason.");
+      if(typeof params.deliveryId!=="string" || !params.deliveryId || typeof params.refusalKey!=="string" || !params.refusalKey)throw new Error("Invalid owner refusal.");
+      const response=await client.sendRequest({...request,method:"ydoc.ownerOutbox.quarantine",
+        params:{outboxId,reason:params.reason,refusal:{deliveryId:params.deliveryId,key:params.refusalKey}}},signal);
       check(signal);return response;
     }
     if(request.method==="liveApplication.readOwnerOutbox" || request.method==="liveApplication.acknowledgeOwnerOutbox") {

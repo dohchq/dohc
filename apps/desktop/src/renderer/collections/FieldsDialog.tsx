@@ -1,8 +1,9 @@
 import { useState } from "react";
-import type { CollectionSchema } from "@dohc/workspace-contracts";
+import { X } from "lucide-react";
+import type { CollectionFieldType, CollectionSchema } from "@dohc/workspace-contracts";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
-import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import {
   draftToField,
   emptyFieldDraft,
@@ -68,11 +69,13 @@ export function FieldsDialog(props: {
   buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
   /** Opens the automation builder with the trigger set to this button. */
   onChooseButtonAutomation?: (field: string) => void;
+  /** The type a new field starts with. The dialog then opens on its name. */
+  addType?: CollectionFieldType;
   onClose: () => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editOptions, setEditOptions] = useState("");
-  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft());
+  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft("", props.addType));
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const fieldNames = props.schema.fields.map((field) => field.name);
@@ -110,7 +113,12 @@ export function FieldsDialog(props: {
         data-testid="collection-fields-dialog"
         className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
-        <h2 className="m-0 text-sm font-semibold text-ink">Fields</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Fields</h2>
+          <IconButton aria-label="Close" title="Close" onClick={props.onClose}>
+            <X size={14} aria-hidden />
+          </IconButton>
+        </div>
         <div className="flex flex-col gap-1">
           {props.schema.fields.length === 0 ? (
             <span className="text-sm text-muted">
@@ -188,6 +196,7 @@ export function FieldsDialog(props: {
             disabled={pending}
             relationTargets={props.relationTargets}
             types={FIELD_TYPES_WITH_BUTTON}
+            autoFocus={props.addType !== undefined}
             onChange={setDraft}
           />
           <SecondaryButton

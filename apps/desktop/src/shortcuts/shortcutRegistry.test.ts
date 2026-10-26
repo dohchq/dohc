@@ -5,7 +5,7 @@ import { MENU_COMMANDS, isEditorMenuCommand } from "../ipc/channels";
 import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import {
-  SHORTCUTS, hasPrimaryModifier, matchShellShortcut, matchShellShortcutChord, shortcutAccelerators, shortcutKeys, shortcutText, shortcutTitle,
+  SHORTCUTS, hasPrimaryModifier, matchShellShortcut, matchShellShortcutChord, shortcutAccelerators, shortcutChords, shortcutKeys, shortcutText, shortcutTitle,
   type ShortcutId,
 } from "./shortcutRegistry";
 
@@ -21,13 +21,14 @@ function menu(platform: NodeJS.Platform) {
 }
 
 describe("shortcut menu contract", () => {
-  it.each(["win32", "darwin"] as const)("derives every explicit %s menu accelerator, including aliases", (platform) => {
+  it.each(["win32", "darwin", "linux"] as const)("derives every explicit %s menu accelerator, including aliases", (platform) => {
     const { items, sendCommand, stepZoom } = menu(platform);
     const expected: string[] = [];
     for (const [id, row] of Object.entries(SHORTCUTS)) {
       // macOS's Edit > Find also shows the editor's find keys.
       const findItem = platform === "darwin" && isEditorMenuCommand(id);
       if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native" && !findItem) continue;
+      if ("platforms" in row && !(row.platforms as readonly string[]).includes(platform)) continue;
       for (const [index, accelerator] of shortcutAccelerators(id as ShortcutId, platform).entries()) {
         expected.push(accelerator);
         const matches = items.filter((item) => item.accelerator === accelerator);
@@ -45,7 +46,7 @@ describe("shortcut menu contract", () => {
           item.click!(undefined!, undefined!, undefined!);
           expect(stepZoom).toHaveBeenCalledExactlyOnceWith(id === "zoom-in" ? "in" : id === "zoom-out" ? "out" : "reset");
         } else {
-          expect(item.role).toBe("close");
+          expect(item.role).toBe(id === "quit" ? "quit" : "close");
         }
         expect(item.visible === false).toBe(index > 0);
       }
@@ -126,7 +127,7 @@ describe("shortcut menu contract", () => {
   it("uses B2 command ids for palette actions and keeps the existing non-palette owners explicit", () => {
     const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor" && row.owner !== "history-restore").map(([id]) => id);
     expect(nonPalette.sort()).toEqual([
-      "close-window", "command-palette", "dev-panel",
+      "close-window", "quit", "command-palette", "dev-panel",
       "find-close", "find-next", "find-previous", "find-again-next", "find-again-previous",
       "palette-accept", "palette-dismiss", "palette-move",
     ].sort());
@@ -156,6 +157,25 @@ describe("shortcut display", () => {
     expect(shortcutTitle("dev-panel", platform)).toBe(mac ? "⇧⌘D" : "Ctrl+Shift+D");
     expect(["find-previous", "find-next", "find-close"].map((id) => shortcutTitle(id as ShortcutId, platform)))
       .toEqual(mac ? ["⇧↩", "↩", "esc"] : ["Shift+Enter", "Enter", "Esc"]);
+  });
+
+  it.each(["win32", "darwin", "linux"])("draws each of a row's %s chords", (platform) => {
+    const mac = platform === "darwin";
+    expect(shortcutChords("command-palette", platform)).toEqual(mac ? [["⇧", "⌘", "P"], ["⌘", "K"]] : [["Ctrl", "Shift", "P"], ["Ctrl", "K"]]);
+    expect(shortcutChords("zoom-in", platform)).toEqual(mac ? [["⌘", "="], ["⌘", "+"], ["⌘", "Num +"]] : [["Ctrl", "="], ["Ctrl", "+"], ["Ctrl", "Num +"]]);
+    expect(shortcutChords("next-tab", platform)).toEqual(mac ? [["⌃", "Tab"], ["⇧", "⌘", "]"]] : [["Ctrl", "Tab"], ["Ctrl", "Page Down"]]);
+    expect(shortcutChords("editor-backspace-word", platform)).toEqual([mac ? ["⌘", "⌫"] : ["Ctrl", "Backspace"]]);
+    // A row's keys stand for its first chord in a chip; every chord shows on its own.
+    expect(shortcutChords("palette-move", platform)).toEqual([["↑"], ["↓"]]);
+    expect(shortcutChords("palette-dismiss", platform)).toEqual([[mac ? "esc" : "Esc"]]);
+  });
+
+  it("answers another layout's name for a chord without listing it", () => {
+    for (const platform of ["win32", "darwin"]) {
+      expect(shortcutAccelerators("editor-undo", platform)).toEqual(["CommandOrControl+Z", "CommandOrControl+Я"]);
+      expect(shortcutChords("editor-undo", platform)).toEqual([[platform === "darwin" ? "⌘" : "Ctrl", "Z"]]);
+      expect(shortcutChords("editor-redo", platform).map((keys) => keys.at(-1))).toEqual(["Z", "Y"]);
+    }
   });
 
   it("gives Replace ⌥⌘F on macOS, where ⌘H hides the app", () => {

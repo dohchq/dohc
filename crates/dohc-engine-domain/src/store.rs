@@ -18,11 +18,14 @@ mod capture_write;
 mod delete_rename;
 mod file_resolution;
 pub use file_resolution::{FileResolution, FileResolveTarget};
+mod duplicate;
+pub use duplicate::{DuplicateFile, duplicate_file_in_tx, is_duplicate_in};
 mod operations;
 pub use operations::{
     OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
-    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
-    undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_compensation_moments_in,
+    undo_correlation_id, undo_member_in_tx, undo_member_moment_id, undo_progress_key,
+    undo_request_fingerprint, validate_operation_id,
 };
 mod history;
 pub use history::{
@@ -956,24 +959,8 @@ impl<'a> VersionedTextStore<'a> {
     /// to the main version (`versions-get-active-version`). Fails closed if
     /// neither resolves.
     pub fn get_active_version(&self, workspace_id: &str) -> Result<VersionRecord, DomainError> {
-        self.store.read_with(|conn| {
-            let active_id: Option<String> = conn
-                .query_row(
-                    "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
-                    params![workspace_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            let version_id = match active_id {
-                Some(id) if version_exists(conn, workspace_id, &id)? => id,
-                _ => workspace_main_version_id(conn, workspace_id)?
-                    .ok_or(DomainError::WorkspaceNotFound)?,
-            };
-            get_version(conn, workspace_id, &version_id)?.ok_or(DomainError::StateCorrupt {
-                reason: "active version row resolves to no version",
-            })
-        })
+        self.store
+            .read_with(|conn| get_active_version_in(conn, workspace_id))
     }
 
     // -------------------------------------------------------------- named version
@@ -1160,7 +1147,7 @@ impl<'a> VersionedTextStore<'a> {
                 &input.from_version_id,
                 &input.new_version_id,
             )?;
-            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
+            record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms, "versioned")?;
             after(tx, &record)?;
             Ok::<_, DomainError>(record.clone())
         })?;
@@ -1183,6 +1170,7 @@ impl<'a> VersionedTextStore<'a> {
         let ws = workspace_id.to_owned();
         let ver = version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
+            ensure_no_pending_undo_in(tx, &ws)?;
             tx.execute(
                 "INSERT INTO active_versions (workspace_id, version_id) VALUES (?1, ?2) \
                  ON CONFLICT(workspace_id) DO UPDATE SET version_id = excluded.version_id",
@@ -1289,6 +1277,30 @@ fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainErr
         });
     }
     Ok(())
+}
+
+/// Resolve the active version within the caller's transaction or read snapshot.
+pub fn get_active_version_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<VersionRecord, DomainError> {
+    let active_id: Option<String> = conn
+        .query_row(
+            "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let version_id = match active_id {
+        Some(id) if version_exists(conn, workspace_id, &id)? => id,
+        _ => {
+            workspace_main_version_id(conn, workspace_id)?.ok_or(DomainError::WorkspaceNotFound)?
+        }
+    };
+    get_version(conn, workspace_id, &version_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "active version row resolves to no version",
+    })
 }
 
 /// Whether `version_id` is the workspace version mirrored by the working tree.
@@ -1413,7 +1425,7 @@ pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
-pub(crate) fn validate_moment_metadata(
+pub fn validate_moment_metadata(
     metadata_origin: &str,
     summary: Option<&str>,
     correlation_id: Option<&str>,
@@ -2286,6 +2298,17 @@ pub fn text_blob_sha256(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     hex(&hasher.finalize())
+}
+
+/// A pending Undo owns its version until every member has settled.
+pub fn ensure_no_pending_undo_in(conn: &Connection, ws: &str) -> Result<(), DomainError> {
+    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests r INDEXED BY idx_engine_requests_kind JOIN history_undo_plans p ON p.request_id=r.request_id WHERE r.kind='history-undo-pending' AND p.workspace_id=?1)",[ws],|r|r.get(0)).map_err(DomainError::sql_corrupt)?;
+    if pending {
+        return Err(DomainError::InvalidInput {
+            reason: "An Undo is still running. Switch versions when it finishes.",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

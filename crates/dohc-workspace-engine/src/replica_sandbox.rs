@@ -129,6 +129,10 @@ mod linux {
 
     fn filter() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         use libc::*;
+        // libc 0.2.189 omits this constant on AArch64; Linux numbers it 452 there too.
+        #[cfg(target_arch = "aarch64")]
+        #[allow(non_upper_case_globals)]
+        const SYS_fchmodat2: c_long = 452;
         let mut rules = BTreeMap::new();
         for syscall in [
             SYS_fchmod,
@@ -203,6 +207,25 @@ mod linux {
             SYS_lookup_dcookie,
             SYS_syslog,
             SYS_vhangup,
+            // IPC objects are shared across the IPC namespace and Landlock does not mediate them.
+            SYS_shmget,
+            SYS_shmat,
+            SYS_shmdt,
+            SYS_shmctl,
+            SYS_msgget,
+            SYS_msgsnd,
+            SYS_msgrcv,
+            SYS_msgctl,
+            SYS_semget,
+            SYS_semop,
+            SYS_semtimedop,
+            SYS_semctl,
+            SYS_mq_open,
+            SYS_mq_unlink,
+            SYS_mq_timedsend,
+            SYS_mq_timedreceive,
+            SYS_mq_notify,
+            SYS_mq_getsetattr,
         ] {
             rules.insert(syscall, vec![]);
         }
@@ -343,6 +366,55 @@ mod linux {
                 .unwrap()
                 .success()
         );
+    }
+
+    /// Under the filter a replica runs with, which refuses mode changes, a
+    /// replica opens its workspace again once the workspace's folders and
+    /// store are private: the root binding, this computer's folder and the
+    /// store all open. The filter holds only for the thread that applies it
+    /// and the threads it starts.
+    #[test]
+    fn a_replica_reopens_its_workspace_under_the_filter() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let root = scratch.path().to_path_buf();
+        replica_open(&root).unwrap();
+        let program = filter().unwrap();
+        let reopened = std::thread::spawn(move || {
+            seccompiler::apply_filter(&program).unwrap();
+            replica_open(&root)
+        })
+        .join()
+        .unwrap();
+        assert!(reopened.is_ok(), "{reopened:?}");
+    }
+
+    /// Open the workspace at `root` as a replica does, passively, then close
+    /// it.
+    #[cfg(test)]
+    fn replica_open(root: &Path) -> Result<(), String> {
+        use dohc_engine_protocol::transport::{EngineService as _, RequestContext};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let service = crate::EngineService::replica(root).map_err(|e| e.to_string())?;
+        let request = dohc_engine_protocol::wire::Request {
+            id: 1,
+            method: "workspace.open".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: serde_json::json!({
+                "rootDir": root,
+                "workspaceId": "replica",
+                "relay": {"socketPath": root.join("relay.sock"), "bearerToken": "lease"},
+            }),
+        };
+        let opened = runtime.block_on(service.call(RequestContext::unbounded(), request));
+        let db = root.join(".dohc/engine/engine.db");
+        let _ = dohc_engine_runtime::WorkspaceSupervisor::global().close(&db);
+        opened.map(drop).map_err(|e| format!("{e:?}"))
     }
 }
 

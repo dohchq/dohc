@@ -13,13 +13,15 @@ export interface ViewMeta {
   };
   lastSettledAtMs: number | null;
   lastSettledKnown: boolean;
+  /** A Group link's channel. The share's answer without one confirms the link has none. */
+  channel?: { channelWireId: string };
 }
 
 export interface RelayOp {
   relaySeq: number;
-  opKind: "workspace.init" | "moment.append" | "version.create";
+  opKind: "workspace.init" | "moment.append" | "version.create" | "file.current" | "files.reset";
   payload: unknown;
-  recordedAtMs: number;
+  recordedAtMs?: number;
 }
 
 export interface SharedFile {
@@ -433,9 +435,28 @@ export function foldLogOps(
   files: FileAccumulator,
   ops: readonly RelayOp[],
 ): void {
+  let objectPaths: Map<string, string> | undefined;
   for (const op of ops) {
     const payload = asRecord(op.payload);
     if (!payload) continue;
+    if (op.opKind === "file.current" && isReceivedObject(payload.objectId)) {
+      const file = payload.file === null ? null : storedFile(payload.file);
+      if (payload.file !== null && (!file || file.objectId !== payload.objectId)) continue;
+      if (!objectPaths && file && files.get(file.path)?.objectId === payload.objectId) {
+        files.set(file.path, file);
+        continue;
+      }
+      objectPaths ??= new Map([...files.values()].flatMap(file =>
+        file.objectId ? [[file.objectId, file.path] as const] : []));
+      const previous = objectPaths.get(payload.objectId);
+      if (previous && files.get(previous)?.objectId === payload.objectId) files.delete(previous);
+      objectPaths.delete(payload.objectId);
+      if (file) {
+        files.set(file.path, file);
+        objectPaths.set(payload.objectId, file.path);
+      }
+      continue;
+    }
     if (op.opKind === "version.create" && Array.isArray(payload.forkSnapshots)) {
       for (const snapshot of payload.forkSnapshots) {
         const file = storedFile(snapshot);

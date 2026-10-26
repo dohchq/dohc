@@ -39,7 +39,10 @@ type UserSettingsChange = {
 export function createSettingsIpc<
   Sender,
   Event extends { sender: Sender },
-  Operation extends { readonly workspace: { readonly rootPath: string }; assertCurrent(): void },
+  Operation extends {
+    readonly workspace: { readonly workspaceId: string; readonly rootPath: string };
+    assertCurrent(): void;
+  },
 >(dependencies: {
   stateDir(): string;
   setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
@@ -254,24 +257,28 @@ export function createSettingsIpc<
 
     getWorkspaceSettings: async (_input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await readWorkspaceSettingsFile(operation.workspace.rootPath),
+        await readWorkspaceSettingsFile(operation.workspace),
       ),
 
+    // A save or reset before the engine prepared .dohc/local is refused with
+    // words that say why, and writes nothing. Only on Windows does a read wait
+    // for it, and only for an open under way.
     setWorkspaceSettings: async (input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await saveWorkspaceSettingsFile(operation.workspace.rootPath, input.patch),
+        await saveWorkspaceSettingsFile(operation.workspace, input.patch),
       ),
 
     resetWorkspaceSettings: async (_input, { operation }) =>
       WorkspaceSettingsResult.parse(
-        await resetWorkspaceSettingsFile(operation.workspace.rootPath),
+        await resetWorkspaceSettingsFile(operation.workspace),
       ),
 
-    // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
-    // cannot write .dohc through writeWorkspaceText (reserved path) — this
-    // narrow pair is the only writer, same pattern as agent-runs.json. Both
-    // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
-    // ("no saved state"), never an error.
+    // Per-workspace workbench UI state (.dohc/local/ui-state.json). The
+    // renderer cannot write .dohc through writeWorkspaceText (reserved path),
+    // so this narrow pair is the only writer. Both directions are zod-bounded;
+    // a corrupt/foreign on-disk file reads as null ("no saved state"), never
+    // an error. A write is refused unless the engine's current open of the
+    // workspace prepared .dohc/local.
     getWorkspaceUiState: async (_input, { operation }) => {
       const parsed = GetWorkspaceUiStateResult.safeParse(
         await readUiStateFile(operation.workspace.rootPath),
@@ -279,7 +286,7 @@ export function createSettingsIpc<
       return parsed.success ? parsed.data : null;
     },
 
-    setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace.rootPath, input.state),
+    setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace, input.state),
   } satisfies OperationHandlers<typeof settingsOperations, Event, Operation>;
 
   return {

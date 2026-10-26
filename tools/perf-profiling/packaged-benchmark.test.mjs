@@ -913,7 +913,7 @@ test('a press uses its own saved run', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-automation-press-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const automation = automationOf('document', 'find-500');
-  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  const folder = join(root, '.dohc', 'local', 'automations', 'runs', 'f1');
   await mkdir(folder, { recursive: true });
   const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
     kind: 'header', version: 9, claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
@@ -994,7 +994,7 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
 test('journal byte samples read only bounded headers and stat progress after appends and rewrites', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-automation-byte-sample-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  const folder = join(root, '.dohc', 'local', 'automations', 'runs', 'f1');
   await mkdir(folder, { recursive: true });
   const path = join(folder, 'run-c1.json');
   const automation = automationOf('document', 'baseline');
@@ -1050,7 +1050,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   assert.deepEqual(await readRunJournal(root, automation), []);
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
   // The engine names the Collection by an object id, so the folder and id come from the saved header.
-  const runs = join(root, '.dohc', 'automations', 'runs');
+  const runs = join(root, '.dohc', 'local', 'automations', 'runs');
   const elsewhere = join(runs, 'f0');
   await mkdir(elsewhere, { recursive: true });
   await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }) + '\n');

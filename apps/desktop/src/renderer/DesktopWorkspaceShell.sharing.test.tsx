@@ -301,6 +301,13 @@ describe("adding a share to this workspace", () => {
 describe("active file sharing", () => {
   it("opens the relay share dialog for the active inspector path and returns a code", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true,
+      workspaceSyncConnected: true,
+    }));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -310,6 +317,8 @@ describe("active file sharing", () => {
 
     const dialog = await screen.findByTestId("share-dialog");
     expect(within(dialog).getByText("a.md")).toBeTruthy();
+    await waitFor(() => expect(dialog.querySelector("[inert]")).toBeNull());
+    expect(within(dialog).queryByTestId("share-setup")).toBeNull();
 
     await user.type(within(dialog).getByTestId("share-email"), "friend@dohc.test");
     await user.click(within(dialog).getByTestId("share-create"));
@@ -322,6 +331,95 @@ describe("active file sharing", () => {
       access: "view",
       paths: ["a.md"],
     });
+  });
+
+  it("opens the same dialog from the palette's Share… for the active file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).getAllByRole("option").map((row) => row.textContent)).toEqual(["Share…"]);
+    await user.keyboard("{Enter}");
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+  });
+
+  // main offers the Explorer's Share… on a workspace that does not sync, and
+  // the dialog says how to set up sync.
+  it("opens the same dialog from the Explorer menu's Share… on a workspace that does not sync", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false,
+    }));
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Share…", id: "share" }]);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const row = (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === "a.md");
+    if (!row) throw new Error("a.md row missing");
+    fireEvent.contextMenu(row);
+    await user.click(await screen.findByTestId("explorer-menu-item-share"));
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+    expect((await within(dialog).findByTestId("share-setup")).dataset.reason).toBe("not-synced");
+  });
+
+  // The palette hides Share… whenever the toolbar draws no Share file.
+  it.each<[string, Workspace | undefined, string[]]>([
+    ["no editor shows a file", undefined, []],
+    ["the workspace is a shared view", SHARE_VIEW, ["a.md"]],
+    ["the file is in a received share", undefined, ["shared-with-me/sam/a.md"]],
+  ])("offers no Share… when %s", async (_name, workspace, tabs) => {
+    const bridge = (workspace ? makeShareBridge : makeBridge)(Promise.resolve(storedStateWithTabs(tabs)));
+    const user = userEvent.setup();
+    renderShell(bridge, workspace);
+    if (workspace) await settleShareView();
+    if (tabs.length > 0) await screen.findByTestId("file-inspector");
+    expect(screen.queryByTestId("file-share")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).queryAllByRole("option")).toEqual([]);
+    expect(within(palette).getByText("No matching commands")).toBeTruthy();
+  });
+
+  // Share reads the same facts as About's Access, and its one action opens
+  // the place that fixes the cause, where About's would.
+  it.each([
+    [
+      "does not sync",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false },
+      "not-synced", "Set up sync", "settings-section-cloud",
+    ],
+    [
+      "is not connected to its server",
+      { connected: false, email: "", serverUrl: "", workspaceSynced: true, workspaceServerUrl: "https://sync.example.org" },
+      "signed-out", "Connect server", "cloud-server-url",
+    ],
+  ] as const)("says why before the form when the workspace %s", async (_case, status, reason, action, opens) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("file-share"));
+
+    const setup = await within(await screen.findByTestId("share-dialog")).findByTestId("share-setup");
+    expect(setup.dataset.reason).toBe(reason);
+    if (reason === "signed-out") expect(setup.textContent).toContain("Not connected to sync.example.org");
+    await user.click(within(setup).getByRole("button", { name: action }));
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
   });
 });
 
@@ -1301,7 +1399,7 @@ describe("shared view chats surface", () => {
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -1439,9 +1537,7 @@ describe("shared view chats surface", () => {
   // The graph's chat-mentions toggle, on its own. The test above proves the
   // panel is gone, and the panel's own gate hides it whatever this toggle
   // reads — so reverting this gate alone changed nothing any pin could see.
-  // It is the most expensive one to lose: `includeChatMentions: true` is what
-  // sends readWorkspaceGraph through requireEngineCapture, so an ungated
-  // toggle fails the whole graph — a surface a shared view legitimately has.
+  // Chat access stays independent of the file graph.
   it("offers no chat mentions in the graph on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
@@ -1453,13 +1549,10 @@ describe("shared view chats surface", () => {
     // The graph itself still works — that is the point.
     expect((await screen.findAllByTestId("graph-file-row")).length).toBeGreaterThan(0);
     expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
-    expect(bridge.readWorkspaceGraph).toHaveBeenCalledWith({
+    expect(bridge.linksEdges).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      includeChatMentions: false,
     });
-    expect(bridge.readWorkspaceGraph).not.toHaveBeenCalledWith(
-      expect.objectContaining({ includeChatMentions: true }),
-    );
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
   });
 
   // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever
@@ -1552,11 +1645,8 @@ describe("shared view chats surface", () => {
     expect(screen.getByTestId("about-rail")).toBeTruthy();
   });
 
-  // The last ungated chat call. Linked mentions ride on every markdown open
-  // and every window refocus, and `listChatFileMentions` goes through
-  // requireEngineCapture like every other Chats call — so a shared view was
-  // still issuing one refused call per file open. Its own `.catch` swallowed
-  // the refusal, which is exactly why nothing caught it.
+  // This shell does not expose Chats for received views. The page reader can
+  // read projected share rows, but opening a file must not request them here.
   it("asks for no chat mentions when a shared view opens a file", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
@@ -1565,7 +1655,7 @@ describe("shared view chats surface", () => {
     // really mounted.
     await screen.findByTestId("tab-b.md");
     await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -1575,9 +1665,9 @@ describe("shared view chats surface", () => {
 
     await screen.findByTestId("tab-b.md");
     await waitFor(() =>
-      expect(bridge.listChatFileMentions).toHaveBeenCalledWith({
+      expect(bridge.chatFileMentionsPage).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
-        path: "b.md",
+        subject: {path: "b.md"},
       }),
     );
   });
@@ -1620,9 +1710,8 @@ describe("chats surface after a failed capture build", () => {
     historyRecordingUnavailable: true,
   };
 
-  // Main's real answers once the capture build failed: every Chats call goes
-  // through requireEngineCapture, which has no capture to hand it. The stored
-  // layout shows the Chats view on the left and About on the right.
+  // Owned-workspace chat reads need a working capture. The stored layout
+  // shows the Chats view on the left and About on the right.
   function makeFailedCaptureBridge() {
     const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
@@ -1631,7 +1720,7 @@ describe("chats surface after a failed capture build", () => {
       "listChatChannels",
       "listChannelThreads",
       "listFileChats",
-      "listChatFileMentions",
+      "chatFileMentionsPage",
       "syncDms",
     ] as const) {
       bridge[call].mockRejectedValue(
@@ -1680,10 +1769,8 @@ describe("chats surface after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The linked-mentions panel rides every markdown open, and
-  // listChatFileMentions goes through requireEngineCapture like every other
-  // Chats call. Its own `.catch` swallows the refusal, which is why nothing
-  // caught it (the last ungated call, from the other cause).
+  // An owned workspace with failed capture must not request chat pages when
+  // a file opens. File links remain available independently.
   it("asks for no chat mentions when a file opens", async () => {
     const bridge = makeFailedCaptureBridge();
     renderShell(bridge);
@@ -1692,7 +1779,7 @@ describe("chats surface after a failed capture build", () => {
     // really mounted.
     await screen.findByTestId("tab-b.md");
     await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -1769,8 +1856,9 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 
     // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await screen.findByTestId("command-palette");
-    await user.keyboard("mcp{Enter}");
+    const palette = await screen.findByTestId("command-palette");
+    await user.keyboard("mcp");
+    await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>

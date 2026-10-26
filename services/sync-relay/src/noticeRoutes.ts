@@ -19,7 +19,7 @@ import {
   type NoticeMarksResponse,
   type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import { badRequest, relayError } from "./errors";
 import { parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";

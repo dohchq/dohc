@@ -1,7 +1,7 @@
+import type { GraphNode } from "../workbench/graphData";
 import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
-  WorkspaceGraphResult,
 } from "../../ipc/bridgeContract";
 import type { ChatsNav } from "../workbench/ChatsView";
 
@@ -67,7 +67,7 @@ export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenT
 }
 
 export function graphChatOpenTarget(
-  node: WorkspaceGraphResult["nodes"][number],
+  node: GraphNode,
 ): ChatOpenTarget {
   if (node.kind !== "chat-thread" || !node.threadId) return { surface: "overview" };
   const thread = {

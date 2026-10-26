@@ -42,7 +42,8 @@ pub struct BlobEgress {
 pub struct ServiceResponse {
     pub response: Response,
     pub blob_egress: Option<BlobEgress>,
-    /// Retains input reservations and fences an acknowledgement at the writer.
+    /// Retains input reservations until the writer releases them, and fences
+    /// an acknowledgement at the writer.
     pub output_guard: Option<Arc<dyn OutputGuard>>,
 }
 
@@ -58,14 +59,24 @@ impl ServiceResponse {
 
 /// A service-owned response lifetime, checked immediately before output.
 pub trait OutputGuard: std::fmt::Debug + Send + Sync {
-    fn is_current(&self) -> bool;
+    /// Whether the response may still be written, whatever its request's
+    /// cancel says: nothing retired it and its deadline has not passed.
+    fn is_current_ignoring_cancel(&self) -> bool;
     fn cancel_signal(&self) -> CancelSignal;
     fn retirement_signal(&self) -> CancelSignal {
         self.cancel_signal()
     }
+    /// Whether the response may still be written and its request still wants it.
+    fn is_current(&self) -> bool {
+        self.is_current_ignoring_cancel() && !self.cancel_signal().is_cancelled()
+    }
     /// Serialize one nonblocking output poll with synchronous owner retirement.
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
-        if !self.is_current() {
+    /// A response that has started passes `cancellable: false`, so its
+    /// request's cancel no longer stops it. Retirement and the deadline do.
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
+        if !self.is_current_ignoring_cancel()
+            || (cancellable && self.cancel_signal().is_cancelled())
+        {
             return false;
         }
         action();
@@ -74,6 +85,10 @@ pub trait OutputGuard: std::fmt::Debug + Send + Sync {
     fn deadline(&self) -> Option<Instant> {
         None
     }
+    /// Drops the input reservations the response retains. The writer calls it
+    /// before the client can read the whole response, so a client that acts
+    /// on the response never finds them still held.
+    fn release(&self) {}
 }
 
 /// Resources that must retire synchronously when their connection closes.

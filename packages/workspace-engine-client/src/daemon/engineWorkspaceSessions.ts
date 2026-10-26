@@ -4,6 +4,7 @@ import {
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
   isWorkspaceUpdatingRefusal,
+  isYdocFileNotReadRefusal,
   isYdocOpenOperationCrashedRefusal,
   isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
@@ -57,6 +58,8 @@ export type ShareMountEngineWorkspace = EngineWorkspace & {
 export interface EngineWorkspaceBinding {
   client: EngineDaemonClient;
   workspace: WorkspaceHandle;
+  /** The open prepared `.dohc/local` for this computer's state. */
+  localStateReady: boolean;
 }
 
 export interface EngineDaemonClientSource {
@@ -65,7 +68,9 @@ export interface EngineDaemonClientSource {
   onClientChanged?(handler: () => void): () => void;
 }
 
-const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
+// The import's progress wakes a document that waits for its own file; the
+// settle wakes every other fenced read.
+const INITIAL_CAPTURE_WAKE_EVENTS = new Set(["capture.importProgress", "capture.initialSettled"]);
 // Matches the daemon's EARLY_IMPORT_APPLY_DEADLINE. Initial capture is
 // separate from the much shorter budget for recovering a failed transport.
 const INITIAL_CAPTURE_WAIT_MS = 120_000;
@@ -74,11 +79,11 @@ type StoreBusyRetryState = { deadline?: number; attempts: number };
 
 class InitialCaptureBindingChangedError extends Error {}
 
-function isInitialCaptureSettledEvent(
+function isInitialCaptureWake(
   event: Event,
   workspaceId: string,
 ): boolean {
-  if (event.name !== INITIAL_CAPTURE_SETTLED_EVENT) return false;
+  if (!INITIAL_CAPTURE_WAKE_EVENTS.has(event.name)) return false;
   if (typeof event.payload !== "object" || event.payload === null) return false;
   return (event.payload as { workspaceId?: unknown }).workspaceId === workspaceId;
 }
@@ -93,6 +98,11 @@ interface SessionEntry {
   opening: {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
+    // Settles once this open's step is over: its binding is published, or it
+    // failed or was superseded.
+    settled: Promise<void>;
+    // Settles when its daemon request starts, after the workspace is prepared.
+    requested: Promise<void>;
   } | null;
   closing: Promise<void> | null;
   retiring: boolean;
@@ -261,6 +271,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
     isWorkspaceUpdatingRefusal(error) ||
+    isYdocFileNotReadRefusal(error) ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
     isYdocArtifactAssetsInvalidRefusal(error) ||
@@ -448,19 +459,79 @@ export class EngineWorkspaceSessions {
     }
   }
 
-  /** Uses an existing binding without opening or reconnecting a workspace. */
-  async runIfOpen<T>(
-    workspace: EngineWorkspace,
-    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
-  ): Promise<T | null> {
+  /**
+   * The current open of a workspace at `rootPath` that prepared its
+   * `.dohc/local`, once each open of one already under way settles, or null,
+   * for a caller that knows only the root. The engine binds one workspace to
+   * a root. Its `current` says whether that binding is still current, so the
+   * engine has held the folder since. Never opens.
+   */
+  async localStateOpenAt(rootPath: string): Promise<{ current(): boolean } | null> {
+    const workspaces: EngineWorkspace[] = [];
+    for (const [key, entry] of this.entries) {
+      if (entry.rootPath !== rootPath) continue;
+      workspaces.push(typeof key === "symbol"
+        ? { workspaceId: entry.workspaceId, rootPath, attachmentId: key }
+        : { workspaceId: entry.workspaceId, rootPath });
+    }
+    await Promise.all(workspaces.map((workspace) => this.openInProgress(workspace)));
+    for (const workspace of workspaces) {
+      const binding = this.currentBinding(workspace);
+      if (binding?.localStateReady) return { current: () => this.currentBinding(workspace) === binding };
+    }
+    return null;
+  }
+
+  /**
+   * The workspace's binding while it is current: its open finished, and it is
+   * not closing, retiring or rebuilding, and is on the current client. A new
+   * open makes a new binding. Never opens or reconnects a workspace.
+   */
+  currentBinding(workspace: EngineWorkspace): EngineWorkspaceBinding | null {
     const key = this.sessionKey(workspace);
     const entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
       entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
       !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
+    return entry.binding;
+  }
+
+  /**
+   * The open of this workspace already under way, or null when none is, or
+   * the session is closing or rebuilding. Settles when the open does, with its
+   * binding published. It also settles if the workspace's preparation outlasts
+   * the open deadline, or if the daemon request outlasts that deadline from
+   * when it started, so at most two deadlines in all. Never opens, and never
+   * counts as a run, so a caller inside a run can wait on it: a close waits
+   * for runs.
+   */
+  openInProgress(workspace: EngineWorkspace): Promise<void> | null {
+    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry?.opening || entry.closing || entry.retiring ||
+      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
+    const { settled, requested } = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
+    return new Promise<void>((resolve) => {
+      let done = false, timer: ReturnType<typeof setTimeout>;
+      const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+      const wait = () => { timer = setTimeout(finish, deadlineMs); timer.unref?.(); };
+      wait();
+      // The daemon request's own deadline starts with it, after preparation.
+      void requested.then(() => { if (done) return; clearTimeout(timer); wait(); });
+      void settled.then(finish);
+    });
+  }
+
+  /** Uses an existing binding without opening or reconnecting a workspace. */
+  async runIfOpen<T>(
+    workspace: EngineWorkspace,
+    operation: (binding: EngineWorkspaceBinding) => Promise<T>,
+  ): Promise<T | null> {
+    const binding = this.currentBinding(workspace);
+    const entry = this.entries.get(this.sessionKey(workspace));
+    if (!binding || !entry) return null;
     entry.activeRuns += 1;
     try {
-      return await operation(entry.binding);
+      return await operation(binding);
     } finally {
       this.release(entry);
     }
@@ -500,8 +571,8 @@ export class EngineWorkspaceSessions {
           this.activeBudget() !== undefined &&
           binding.client.onEvent
         ) {
-          // Subscribe before the operation: settlement can occur while the
-          // daemon's refusal is travelling back to this client.
+          // Subscribe before the operation: capture can progress or settle
+          // while the daemon's refusal is travelling back to this client.
           initialCaptureWake = new Promise<void | "rebind">((resolve) => {
             unsubscribeClientChanged = this.source.onClientChanged?.(() => {
               try {
@@ -511,7 +582,7 @@ export class EngineWorkspaceSessions {
               }
             });
             unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
-              if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
+              if (!isInitialCaptureWake(event, workspace.workspaceId)) return;
               let current = false;
               try {
                 current =
@@ -628,8 +699,8 @@ export class EngineWorkspaceSessions {
     checkBinding();
     const bindingSignal = entry.captureWaitController.signal;
     try {
-      // Settlement notifications are advisory. At the bound, allow one
-      // final fenced read; another capture refusal cannot start a new wait.
+      // Capture wakes are advisory. At the bound, allow one final fenced
+      // read; another capture refusal cannot start a new wait.
       const exit = await Effect.runPromiseExit(Effect.raceFirst(
         Effect.promise(() => wake),
         Effect.as(Effect.sleep(deadline - started), "deadline" as const),
@@ -1172,13 +1243,19 @@ export class EngineWorkspaceSessions {
       }
       if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
-      const promise = this.openWithClient(client, workspace);
-      entry.opening = { client, promise };
+      let settle!: () => void, request!: () => void;
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      const requested = new Promise<void>((resolve) => { request = resolve; });
+      const promise = this.openWithClient(client, workspace, request);
+      entry.opening = { client, promise, settled, requested };
       let binding: EngineWorkspaceBinding;
       try {
         binding = await this.untilFirstOpenAbandoned(entry, promise);
       } finally {
         if (entry.opening?.promise === promise) entry.opening = null;
+        // Waiters run after this step, which publishes the binding below
+        // without an await.
+        settle();
       }
       if (this.source.currentClient() !== client) {
         // Not awaited, and that is the point. This is cleanup for a client
@@ -1254,8 +1331,10 @@ export class EngineWorkspaceSessions {
   private async openWithClient(
     client: EngineDaemonClient,
     workspace: EngineWorkspace,
+    requested: () => void,
   ): Promise<EngineWorkspaceBinding> {
     await this.prepareWorkspace(workspace.rootPath);
+    requested();
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
     const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
@@ -1283,7 +1362,11 @@ export class EngineWorkspaceSessions {
       { deadlineMs: this.workspaceOpenDeadlineMs },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
-    return { client, workspace: opened.workspace as WorkspaceHandle };
+    return {
+      client,
+      workspace: opened.workspace as WorkspaceHandle,
+      localStateReady: opened.localStateReady === true,
+    };
   }
 
   private async prepareWorkspace(rootPath: string): Promise<void> {
@@ -1302,9 +1385,10 @@ export class EngineWorkspaceSessions {
         const engineDirectory = join(dohcDirectory, "engine");
         // The daemon binds the root to its database on first open; this only
         // makes sure the directories it writes into are real folders inside
-        // the workspace.
-        await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD);
-        await this.ensureRealDirectory(engineDirectory, realRoot, DOHC_ENGINE_GUARD);
+        // the workspace. The daemon creates its own folder, so on a Mac the
+        // folder takes none of the workspace folder's ACL entries.
+        await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD, true);
+        await this.ensureRealDirectory(engineDirectory, realRoot, DOHC_ENGINE_GUARD, false);
       })();
       this.preparations.set(rootPath, preparation);
       const release = () => {
@@ -1324,18 +1408,24 @@ export class EngineWorkspaceSessions {
   //
   // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
   // dangling symlink squat raises ENOENT. When something is at the path, the
-  // checks below name it; when nothing is, the mkdir itself failed.
+  // checks below name it; when nothing is, the mkdir itself failed. With
+  // `create` false, a missing directory passes.
   private async ensureRealDirectory(
     directory: string,
     realRoot: string,
     guard: DohcPathGuard,
+    create: boolean,
   ): Promise<void> {
-    try {
-      await mkdir(directory);
-    } catch (error) {
-      if (!(await lstat(directory).catch(() => null))) throw error;
+    let info = await lstat(directory).catch(() => null);
+    if (!info) {
+      if (!create) return;
+      try {
+        await mkdir(directory);
+      } catch (error) {
+        if (!(await lstat(directory).catch(() => null))) throw error;
+      }
+      info = await lstat(directory);
     }
-    const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) {
       throw new Error(notARealFolderRefusal(guard, info));
     }

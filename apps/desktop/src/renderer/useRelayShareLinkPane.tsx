@@ -381,13 +381,22 @@ function LinkAccessChoice(props: {
   onChange: (access: LinkAccess) => void;
 }) {
   return (
-    <SegmentedControl
-      label={props.ariaLabel}
-      value={props.access}
-      options={LINK_ACCESS_OPTIONS.filter((option) => props.supported.includes(option.value))}
-      disabled={props.disabled}
-      onChange={props.onChange}
-    />
+    <>
+      <SegmentedControl
+        label={props.ariaLabel}
+        value={props.access}
+        options={LINK_ACCESS_OPTIONS.filter((option) =>
+          props.supported.includes(option.value),
+        )}
+        disabled={props.disabled}
+        onChange={props.onChange}
+      />
+      {props.access === "edit" && (
+        <p className="m-0 text-[11px] leading-relaxed text-subtle">
+          People who can edit can see the full History.
+        </p>
+      )}
+    </>
   );
 }
 

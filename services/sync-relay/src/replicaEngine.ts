@@ -100,8 +100,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         } while (page.hasMore);
       };
       return { pid: child.pid, exited: termination, close,
-        async currentView(selectors,knownTextShas,position,cursor) {
-          return decodeReplicaCurrentView(await request("replica.cut",{selectors,knownTextShas:knownTextShas.join(""),position:position??null,cursor:cursor??null}));
+        async currentView(selectors,knownTextShas,position,cursor,since) {
+          return decodeReplicaCurrentView(await request("replica.cut",{selectors,knownTextShas:knownTextShas.join(""),position:position??null,cursor:cursor??null,since:since??null,incarnation:lease.incarnation}));
         }, async pull() {
         await pullOrdinary();
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));

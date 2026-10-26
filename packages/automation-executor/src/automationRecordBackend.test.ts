@@ -15,7 +15,7 @@ import { runDatasetAutomation, type DatasetRunClaim, type DatasetAutomationRunDe
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { undoAutomationRuns, automationUndoReach } from "./automationUndo";
 import { planDatasetUndo, type DatasetUndoHost } from "./datasetAutomationUndo";
-import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createTestScratch, testStoreFolder } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ReachRoster } from "./automationReach";
 import type { AutomationTarget } from "./automationTargets";
@@ -56,7 +56,7 @@ const set = (dataset: boolean, records: string, value = "Closed") => '      - se
 
 async function fixture(sourceDataset = false, targetDataset = true) {
   const scratch = await createTestScratch("static-automation-");
-  const store = createAutomationRunStore(scratch, testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(scratch));
   let currentRoster: Exclude<ReachRoster, { kind: "unknown" }> = roster;
   const targets = new Map<string, AutomationTarget>();
   const rows = new Map<string, Map<string | number, Row>>();

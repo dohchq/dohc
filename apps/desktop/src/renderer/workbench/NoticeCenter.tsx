@@ -2,8 +2,8 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -37,6 +37,9 @@ export type Notice = {
   tone: "danger" | "warning" | "success" | "neutral";
   title: string;
   body: string;
+  // A line after the body that no clamp hides, such as how many more
+  // files a list leaves out.
+  lastLine?: string;
   actions?: readonly NoticeAction[];
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -48,6 +51,10 @@ export type Notice = {
   copyText?: string;
   copyLabel?: string;
   filePaths?: readonly string[];
+  // A terminal command the body asks the person to run, shown with its copy.
+  command?: string;
+  // Closes the notice's toast once its row is read. The row stays.
+  onRead?: () => void;
   Icon: typeof Bell;
 };
 
@@ -63,6 +70,7 @@ export interface WorkspaceErrorNotice {
   id: string;
   title?: string;
   message: string;
+  lastLine?: string;
   details: string;
   filePaths?: readonly string[];
   atMs: number;
@@ -107,11 +115,17 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// What Copy puts on the clipboard for a failed run's notice.
+// A failed automation run, or an agent run that says why it didn't start. Its
+// toast shows the body and stays until closed, and Copy sits beside its text.
+const isFailure = (notice: NoticeRow): boolean =>
+  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
+// What Copy puts on the clipboard for a failed run's notice. The notice store
+// already bounds the body, so Copy keeps all of the text the person sees.
 const failureDetails = (notice: NoticeRow): string =>
   errorDetails([
     ["Notice", notice.title],
-    ["Details", notice.body],
+    ["Details", notice.body, Number.POSITIVE_INFINITY],
     ["Automation", notice.target?.automation ?? ""],
     ["Run", notice.target?.run ?? ""],
     ["Time", new Date(notice.createdAtMs).toISOString()],
@@ -131,21 +145,23 @@ const SENDER_NAME = {
   agent: "From an agent",
   automation: "From an automation",
 } as const;
-function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
+// A toast sets the mark on its text's first line; a row passes its own place.
+function SenderMark(props: { kind: NoticeRow["senderKind"]; className?: string }) {
+  const place = props.className ?? "mt-0.5 shrink-0";
   if (props.kind === null) {
-    return <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+    return <Info size={14} aria-hidden className={`${place} text-subtle`} />;
   }
   if (props.kind === "automation") {
     return (
-      <span className="mt-0.5 shrink-0">
-        <Zap size={14} aria-hidden data-sender-shape="zap" className="text-muted" />
+      <span className={place}>
+        <Zap size={14} aria-hidden data-sender-shape="zap" className="block text-muted" />
         <span className="sr-only">{SENDER_NAME.automation}</span>
       </span>
     );
   }
   const person = props.kind === "person";
   return (
-    <span className="mt-0.5 shrink-0">
+    <span className={place}>
       <span
         aria-hidden
         data-sender-shape={person ? "round" : "square"}
@@ -171,6 +187,141 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
   "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+// A row's first line is as tall as its tallest control, so a title that
+// wraps leaves its controls where they were.
+const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
+
+// A row counts as read once the pointer or keyboard focus rests on it this
+// long: longer than crossing a row on the way to another, about when a
+// tooltip would show.
+const READ_REST_MS = 600;
+
+type RestSource = "pointer" | "focus";
+type RestHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onPointerLeave" | "onFocus" | "onBlur">;
+
+// A read row of this computer's is remembered by what it says, so one whose
+// words or time change is unread again.
+const localReadKey = (workspaceId: string, notice: Notice): string =>
+  JSON.stringify([workspaceId, notice.id, notice.timeMs ?? null, notice.title, notice.body]);
+
+// Every row keeps this column at its left edge, so unread rows line up and a
+// row that turns read does not move.
+function UnreadMark(props: { unread: boolean; testId: string; className?: string }) {
+  return (
+    <span className={`-ml-1.5 flex w-1.5 shrink-0 items-center ${props.className ?? "h-6"}`}>
+      {props.unread ? (
+        <span data-testid={props.testId} className="block size-1.5 rounded-full bg-accent">
+          <span className="sr-only">Unread</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// A notice's title and text, in its row or its toast, clipped to fit. A
+// click on clipped text, or Show more, shows all of it in place, wrapped
+// and selectable. A body with one fact per line shows its first 3 facts
+// whole, so none is cut in half; prose clamps at 3 lines.
+function NoticeText(props: {
+  title: string;
+  // The title's weight and color.
+  titleClass: string;
+  body: string;
+  // Off for a body that is already shown whole.
+  clamp?: boolean;
+  // A last line shown with the whole body, such as how many more files a
+  // list leaves out.
+  after?: string;
+  onOpenChange?: (open: boolean) => void;
+  testId: string;
+  children: (text: { title: ReactNode; body: ReactNode }) => ReactNode;
+}) {
+  const id = useId();
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const bodyRef = useRef<HTMLParagraphElement>(null);
+  const [open, setOpen] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const clamp = props.clamp ?? true;
+  const facts = props.body.split("\n");
+  const byFacts = clamp && facts.length > 1;
+  const { onOpenChange } = props;
+  const show = (next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  };
+  useLayoutEffect(() => {
+    if (open) return;
+    const title = titleRef.current;
+    const body = bodyRef.current;
+    // A pixel of slack: rounding alone can make fitting text look a pixel over.
+    // Hidden text has no height, so it keeps what it last showed.
+    const measure = () => {
+      if (title?.clientHeight === 0) return;
+      setClipped(
+        (title !== null && title.scrollHeight > title.clientHeight + 1) ||
+        (clamp && !byFacts && body !== null && body.scrollHeight > body.clientHeight + 1),
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    if (title) observer.observe(title);
+    if (body) observer.observe(body);
+    return () => observer.disconnect();
+  }, [open, clamp, byFacts, props.title, props.body]);
+  const hidden = clipped || (byFacts && facts.length > 3);
+  // A click that ends a selection, or the second of a double click, opens nothing.
+  const openOnClick = hidden && !open
+    ? (event: MouseEvent<HTMLElement>) => {
+        if (event.detail > 1 || window.getSelection()?.isCollapsed === false) return;
+        show(true);
+      }
+    : undefined;
+  const pointer = open ? " cursor-text" : openOnClick ? " cursor-pointer" : "";
+  return props.children({
+    title: (
+      <span
+        ref={titleRef}
+        id={`${id}-title`}
+        title={props.title}
+        onClick={openOnClick}
+        className={`min-w-0 my-1 whitespace-pre-line wrap-anywhere text-[12px] leading-4 ${props.titleClass}${open ? "" : " line-clamp-2"}${pointer}`}
+      >
+        {props.title}
+      </span>
+    ),
+    body: (
+      <>
+        {props.body ? (
+          <p
+            ref={bodyRef}
+            id={`${id}-body`}
+            onClick={openOnClick}
+            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
+          >
+            {byFacts && !open ? facts.slice(0, 3).join("\n") : props.body}
+          </p>
+        ) : null}
+        {props.after && (open || !hidden) ? (
+          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
+        ) : null}
+        {hidden || open ? (
+          <button
+            type="button"
+            data-testid={`${props.testId}-more`}
+            aria-expanded={open}
+            aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
+            onClick={() => show(!open)}
+            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+          >
+            {open ? "Show less" : "Show more"}
+            <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${open ? " rotate-180" : ""}`} />
+          </button>
+        ) : null}
+      </>
+    ),
+  });
+}
 
 // The one notice for every step a narrower share stopped. It names each
 // automation it will dismiss, with its file, and who cannot reach what.
@@ -200,7 +351,7 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
 
 // The notice, and the ⚡ panel, when dohc cannot read which steps were allowed.
 export const AUTOMATION_HOLDS_UNREADABLE =
-  "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
+  "dohc cannot read .dohc/local/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
 
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
@@ -353,22 +504,52 @@ export function WorkspaceErrorToast(props: {
   onRetry?: (id: string) => void;
   onHide?: (id: string) => void;
 }) {
-  const { error } = props;
+  const { error, onHide } = props;
   // A success or a warning is a notice: nothing failed.
   const notice = error.tone !== undefined;
+  // A toast for something finished fades, but not while the person reads it.
+  const [pointer, setPointer] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const [open, setOpen] = useState(false);
+  const fades = error.tone === "success" && !error.stays;
+  const held = pointer || focus || open;
+  useEffect(() => {
+    if (!fades || held || !onHide) return;
+    const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [fades, held, onHide, error.id]);
   return (
     <div
       data-testid={notice ? "workspace-shell-notice" : "workspace-shell-error"}
       role={notice ? "status" : "alert"}
+      onPointerEnter={() => setPointer(true)}
+      onPointerLeave={() => setPointer(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocus(false);
+      }}
       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
     >
-      {error.tone === "success"
-        ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" />
-        : <AlertTriangle size={14} aria-hidden className={`mt-0.5 shrink-0 ${error.tone === "warning" ? "text-warning" : "text-danger"}`} />}
-      <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-        {error.title ? <span className="block font-medium">{error.title}</span> : null}
-        <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
+      <span className="flex h-6 shrink-0 items-center">
+        {error.tone === "success"
+          ? <CheckCircle2 size={14} aria-hidden className="text-success" />
+          : <AlertTriangle size={14} aria-hidden className={error.tone === "warning" ? "text-warning" : "text-danger"} />}
       </span>
+      <NoticeText
+        title={error.title ?? error.message}
+        titleClass={error.title ? "font-medium text-ink" : "text-ink"}
+        body={error.title ? error.message : ""}
+        after={error.lastLine}
+        onOpenChange={setOpen}
+        testId="workspace-shell-toast"
+      >
+        {(text) => (
+          <div className="min-w-0 flex-1 select-text">
+            <div className="flex min-w-0">{text.title}</div>
+            {text.body}
+          </div>
+        )}
+      </NoticeText>
       {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
       {error.actionLabel && props.onAction ? (
         <button
@@ -423,6 +604,8 @@ export function WorkspaceErrorToast(props: {
 // One row under "On this computer". The states page renders it too.
 export function LocalNoticeRow(props: {
   notice: Notice;
+  unread: boolean;
+  rest?: RestHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onAction: (action: NoticeAction) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -434,74 +617,92 @@ export function LocalNoticeRow(props: {
       data-notice-row=""
       tabIndex={-1}
       onKeyDown={props.onKeyDown}
+      {...props.rest}
       className={ROW_CLASS}
     >
-      <notice.Icon
-        size={14}
-        aria-hidden
-        className={`mt-0.5 shrink-0 ${toneClass(notice.tone)}`}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[12px] font-medium text-ink">
-            {notice.title}
-          </span>
-          {(notice.actions ?? []).map((action, index) => (
-            <button
-              key={action.label}
-              type="button"
-              disabled={action.disabled}
-              onClick={() => props.onAction(action)}
-              className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50`}
-            >
-              {action.label}
-            </button>
-          ))}
-          {notice.copyText !== undefined && !notice.filePaths?.length ? (
-            <CopyButton
-              iconOnly
-              pinName
-              label={notice.copyLabel ?? "Copy error details"}
-              testId={`notice-${notice.id}-copy`}
-              getText={() => notice.copyText ?? ""}
-            />
-          ) : null}
-          {notice.onDismiss ? (
-            <button
-              type="button"
-              data-testid={`notice-${notice.id}-dismiss`}
-              aria-label="Dismiss notice"
-              onClick={props.onDismiss}
-              className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
-            >
-              <X size={11} aria-hidden />
-            </button>
-          ) : null}
-        </div>
-        <p className={`m-0 mt-0.5 ${notice.filePaths !== undefined ? "" : "line-clamp-3 "}text-[11px] leading-snug text-muted`}>
-          {notice.body}
-        </p>
-        {notice.filePaths?.length ? (
-          <div className="mt-1 flex items-start gap-2">
-            <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
-              {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
-              {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
-            </ul>
-            {notice.copyText !== undefined ? (
-              <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
-                testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
+      <UnreadMark unread={props.unread} testId={`notice-${notice.id}-unread`} />
+      <span className="flex h-6 w-4 shrink-0 items-center justify-center">
+        <notice.Icon size={14} aria-hidden className={toneClass(notice.tone)} />
+      </span>
+      <NoticeText
+        title={notice.title}
+        titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
+        body={notice.body}
+        clamp={notice.filePaths === undefined}
+        after={notice.lastLine}
+        testId={`notice-${notice.id}`}
+      >
+        {(text) => (
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-start gap-2">
+              {text.title}
+              <span className={ROW_CONTROLS_CLASS}>
+                {(notice.actions ?? []).map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    disabled={action.disabled}
+                    onClick={() => props.onAction(action)}
+                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+                  >
+                    {action.label}
+                  </button>
+                ))}
+                {notice.copyText !== undefined && !notice.filePaths?.length ? (
+                  <CopyButton
+                    iconOnly
+                    pinName
+                    label={notice.copyLabel ?? "Copy error details"}
+                    testId={`notice-${notice.id}-copy`}
+                    getText={() => notice.copyText ?? ""}
+                  />
+                ) : null}
+                {notice.onDismiss ? (
+                  <button
+                    type="button"
+                    data-testid={`notice-${notice.id}-dismiss`}
+                    aria-label="Dismiss notice"
+                    onClick={props.onDismiss}
+                    className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                  >
+                    <X size={11} aria-hidden />
+                  </button>
+                ) : null}
+              </span>
+            </div>
+            {text.body}
+            {notice.command ? (
+              <div className="mt-1 flex items-start gap-2">
+                <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
+                  {notice.command}
+                </code>
+                <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
+                  getText={() => notice.command ?? ""} />
+              </div>
+            ) : null}
+            {notice.filePaths?.length ? (
+              <div className="mt-1 flex items-start gap-2">
+                <ul className="m-0 min-w-0 flex-1 list-none p-0 text-[12px] text-muted">
+                  {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
+                  {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
+                </ul>
+                {notice.copyText !== undefined ? (
+                  <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
+                    testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
+                ) : null}
+              </div>
+            ) : null}
+            {notice.timeMs !== undefined ? (
+              <time
+                dateTime={new Date(notice.timeMs).toISOString()}
+                className="mt-1 block text-[10px] text-subtle"
+              >
+                {relativeTime(notice.timeMs)}
+              </time>
             ) : null}
           </div>
-        ) : null}
-        {notice.timeMs !== undefined ? (
-          <time
-            dateTime={new Date(notice.timeMs).toISOString()}
-            className="mt-1 block font-mono text-[10px] text-subtle"
-          >
-            {relativeTime(notice.timeMs)}
-          </time>
-        ) : null}
-      </div>
+        )}
+      </NoticeText>
     </li>
   );
 }
@@ -588,6 +789,8 @@ export function NoticeCenter(props: {
   // Try again on a failed run's notice. The shell asks first when the run
   // would start over, and reports why it did not run.
   onRetrySentNotice?: (notice: NoticeRow) => void;
+  // Marks one notice read: the pointer or keyboard focus rested on its row.
+  onReadSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
   // someone dismisses it.
@@ -744,11 +947,6 @@ export function NoticeCenter(props: {
     updateState?.status === "ready"
       ? `${updateState.version ?? "unknown"}:${updateState.message}`
       : null;
-  const updateToastVisible =
-    updateActionError !== null ||
-    (updateState?.status === "ready" &&
-      readyUpdateKey !== null &&
-      readyUpdateKey !== dismissedUpdateToastKey);
 
   // Derived from the status, never accumulated: a snapshot that repeats
   // itself renders the same notice, and delivery that recovers to active (or
@@ -868,11 +1066,10 @@ export function NoticeCenter(props: {
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);
+      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
-          result.state.status === "error"
-            ? result.state.message
-            : "Could not restart into the update.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
         );
       } else {
         setUpdateActionError(null);
@@ -933,6 +1130,7 @@ export function NoticeCenter(props: {
           ? { action: { label: "Send report", onClick: props.onSendCrashReport } }
           : {}),
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
+        onRead: () => setClosedCrashRevision(crashReport.revision),
         timeMs: crashReport.atMs,
         copyText: crashReport.text,
         copyLabel: "Copy report",
@@ -951,6 +1149,7 @@ export function NoticeCenter(props: {
         tone: error.tone ?? "danger",
         title: error.title ?? error.message,
         body: error.title ? error.message : "",
+        ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -970,6 +1169,9 @@ export function NoticeCenter(props: {
         ],
         ...(props.onDismissWorkspaceError
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
+          : {}),
+        ...(!error.seen && props.onHideWorkspaceError
+          ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
           : {}),
         timeMs: error.atMs,
         copyText: error.filePaths?.length === 0 ? undefined : error.details,
@@ -1029,6 +1231,7 @@ export function NoticeCenter(props: {
         title: liveDelivery.title,
         body: liveDelivery.body,
         ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
+        onRead: () => setDismissedLiveDeliveryKey(liveDeliveryKey),
         copyText: liveDeliveryDetails,
         Icon: liveDelivery.Icon,
       });
@@ -1045,6 +1248,7 @@ export function NoticeCenter(props: {
         ...(onOpenLiveDocuments
           ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }] }
           : {}),
+        onRead: () => setDismissedRefusalsKey(refusalsKey),
         copyText: refusalsDetails,
         Icon: AlertTriangle,
       });
@@ -1130,6 +1334,7 @@ export function NoticeCenter(props: {
           setDismissedDeclines((current) =>
             new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
           ),
+        onRead: () => closeDecline(declined),
         copyText: sharingDeclinedDetails(props.workspaceId, declined),
         Icon: AlertTriangle,
       });
@@ -1210,6 +1415,7 @@ export function NoticeCenter(props: {
         tone: "neutral",
         title: "Update ready",
         body: updateActionError ?? updateState.message,
+        ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
         ...(updateState.canInstall
           ? {
               actions: [{
@@ -1253,6 +1459,7 @@ export function NoticeCenter(props: {
     props.onRetryWorkspaceError,
     props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
+    props.onHideWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,
@@ -1268,6 +1475,7 @@ export function NoticeCenter(props: {
     liveDelivery,
     liveDeliveryAction,
     liveDeliveryDetails,
+    liveDeliveryKey,
     onOpenLiveDocuments,
     refusalsDetails,
     refusalsKey,
@@ -1288,9 +1496,103 @@ export function NoticeCenter(props: {
       allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
-  // This computer's rows count while they stand; sent rows while unread.
   const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0);
-  const count = localCount + unreadSent;
+  // This computer's rows read in this window. A row that goes and comes back
+  // is unread again.
+  const [localRead, setLocalRead] = useState<ReadonlySet<string>>(new Set());
+  const setAsideKey = recoveryRows.length > 0
+    ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.map((row) => [row.path, row.draft.id])])
+    : null;
+  useEffect(() => {
+    const present = new Set(notices.map((notice) => localReadKey(props.workspaceId, notice)));
+    if (setAsideKey !== null) present.add(setAsideKey);
+    setLocalRead((current) => {
+      const kept = [...current].filter((key) => present.has(key));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [notices, props.workspaceId, setAsideKey]);
+  const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
+  const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
+  const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
+  // The update toast closes once its row is read.
+  const updateRow = notices.find((notice) => notice.id === "update-ready" || notice.id === "update-error");
+  const updateToastVisible = updateRow !== undefined && unreadNotices.includes(updateRow) &&
+    (updateActionError !== null || readyUpdateKey !== dismissedUpdateToastKey);
+  // Every row counts until it is read.
+  const count = unreadLocal + unreadSent;
+  const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
+  // Reading a row of this computer's keeps the row and closes its toast.
+  const readLocal = (rows: readonly Notice[], setAside: boolean) => {
+    setLocalRead((current) => {
+      const next = new Set(current);
+      for (const row of rows) next.add(localReadKey(props.workspaceId, row));
+      if (setAside && setAsideKey !== null) next.add(setAsideKey);
+      return next;
+    });
+    for (const row of rows) row.onRead?.();
+  };
+  // How to read each unread row as it is now, by a name that stays with the
+  // row while its words change. A rest that ends reads what the row says then.
+  const readers = new Map<string, () => void>();
+  for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], false));
+  if (setAsideUnread) readers.set("set-aside", () => readLocal([], true));
+  for (const { notice } of sentNotices) {
+    if (notice.readAtMs === null && props.onReadSentNotice) {
+      readers.set(`sent:${sentKey(sentAccount, notice)}`, () => props.onReadSentNotice?.(notice));
+    }
+  }
+  const latestReaders = useRef(readers);
+  // The row the pointer rests on and the row holding focus, each waiting to
+  // be read. Closing the panel reads neither.
+  const rests = useRef<Record<RestSource, { row: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
+  const stopRest = (by: RestSource) => {
+    const rest = rests.current[by];
+    if (rest) clearTimeout(rest.timer);
+    rests.current[by] = null;
+  };
+  // A row that goes away or is read stops its rest, which a removed row
+  // cannot do by blur or pointer leave. A row that returns waits again.
+  useLayoutEffect(() => {
+    latestReaders.current = readers;
+    for (const by of ["pointer", "focus"] as const) {
+      const row = rests.current[by]?.row;
+      if (row !== undefined && !readers.has(row)) stopRest(by);
+    }
+  });
+  useEffect(() => {
+    const current = rests.current;
+    return () => {
+      if (current.pointer) clearTimeout(current.pointer.timer);
+      if (current.focus) clearTimeout(current.focus.timer);
+      current.pointer = null;
+      current.focus = null;
+    };
+  }, [open]);
+  const restReads = (row: string): RestHandlers => {
+    const start = (by: RestSource) => {
+      if (rests.current[by]?.row === row) return;
+      stopRest(by);
+      const timer = setTimeout(() => {
+        rests.current[by] = null;
+        // One read per rest, even when the pointer and focus both wait on the row.
+        const other = by === "pointer" ? "focus" : "pointer";
+        if (rests.current[other]?.row === row) stopRest(other);
+        latestReaders.current.get(row)?.();
+      }, READ_REST_MS);
+      rests.current[by] = { row, timer };
+    };
+    const end = (by: RestSource) => {
+      if (rests.current[by]?.row === row) stopRest(by);
+    };
+    return {
+      onPointerEnter: () => start("pointer"),
+      onPointerLeave: () => end("pointer"),
+      onFocus: () => start("focus"),
+      onBlur: (event: FocusEvent<HTMLElement>) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) end("focus");
+      },
+    };
+  };
   // The newest error whose toast is still open. One at a time: the rest
   // wait in Notices with the count. The list is in arrival order, so two
   // messages in the same millisecond show the later one.
@@ -1302,11 +1604,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  useEffect(() => {
-    if (errorToast?.tone !== "success" || errorToast.stays || !props.onHideWorkspaceError) return;
-    const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
-    return () => clearTimeout(timer);
-  }, [errorToast?.id, errorToast?.tone, errorToast?.stays, props.onHideWorkspaceError]);
   // Open Notices hides the toasts.
   const shownErrorToastId = open ? null : (errorToast?.id ?? null);
   const { onWorkspaceErrorShown } = props;
@@ -1317,7 +1614,8 @@ export function NoticeCenter(props: {
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
   // A failure's toast stays until it is closed; any other fades.
-  const sentToastFades = sentToast !== null && sentToast.notice.kind !== "automation-failed";
+  const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
+  const sentToastFades = sentToast !== null && !sentToastFails;
   useEffect(() => {
     if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
@@ -1382,6 +1680,7 @@ export function NoticeCenter(props: {
         <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <WorkspaceErrorToast
+              key={errorToast.id}
               error={errorToast}
               onAction={props.onWorkspaceErrorAction}
               onRetry={props.onRetryWorkspaceError}
@@ -1397,6 +1696,16 @@ export function NoticeCenter(props: {
               <SenderMark kind={sentToast.notice.senderKind} />
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
+                {/* About four lines, then it scrolls, so a long reason never
+                    pushes the title and controls out of a short window. */}
+                {sentToastFails && sentToast.notice.body ? (
+                  <span
+                    data-testid="sent-notice-toast-body"
+                    className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                  >
+                    {sentToast.notice.body}
+                  </span>
+                ) : null}
               </span>
               {(retriesRun(sentToast.notice) || sentToast.retryable) && props.onRetrySentNotice ? (
                 <button
@@ -1411,7 +1720,7 @@ export function NoticeCenter(props: {
                   Try again
                 </button>
               ) : null}
-              {sentToast.notice.kind === "automation-failed" ? (
+              {sentToastFails ? (
                 <CopyButton
                   key={sentToastKey}
                   iconOnly
@@ -1613,7 +1922,18 @@ export function NoticeCenter(props: {
               role="status"
               className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <span>{updateActionError ?? updateState?.message}</span>
+              <span className="min-w-0">
+                {updateActionError ?? updateState?.message}
+                {updateState?.installCommand ? (
+                  <code data-testid="update-toast-install-command" className="mt-1 block select-text break-all font-mono text-[11px] text-muted">
+                    {updateState.installCommand}
+                  </code>
+                ) : null}
+              </span>
+              {updateState?.installCommand ? (
+                <CopyButton iconOnly pinName label="Copy command" testId="update-toast-install-command-copy"
+                  getText={() => updateState.installCommand ?? ""} />
+              ) : null}
               {updateState?.canInstall ? (
                 <button
                   type="button"
@@ -1675,16 +1995,17 @@ export function NoticeCenter(props: {
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />
-            <span className="font-semibold uppercase tracking-wide text-muted">
+            <span className="text-sm font-semibold text-ink">
               Notices
             </span>
-            {unreadSent > 0 && props.onReadAllSentNotices ? (
+            {canReadAll ? (
               <button
                 type="button"
                 data-testid="notice-center-read-all"
                 onClick={() => {
                   centerRef.current?.focus();
-                  props.onReadAllSentNotices?.();
+                  readLocal(unreadNotices, true);
+                  if (unreadSent > 0) props.onReadAllSentNotices?.();
                 }}
                 className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
@@ -1694,7 +2015,7 @@ export function NoticeCenter(props: {
             {count > 0 ? (
               <span
                 data-testid="notice-center-count"
-                className={`${unreadSent > 0 && props.onReadAllSentNotices ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
+                className={`${canReadAll ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
               >
                 {count}
               </span>
@@ -1709,7 +2030,7 @@ export function NoticeCenter(props: {
               </div>
             )
           ) : (
-            <div className="min-h-0 max-h-80 overflow-y-auto">
+            <div className="min-h-0 max-h-[28rem] overflow-y-auto">
               {localCount > 0 ? (
                 <section data-testid="notice-group-local">
                   <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
@@ -1718,17 +2039,21 @@ export function NoticeCenter(props: {
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
-                  className="border-b border-line px-3 py-2"
+                  {...restReads("set-aside")}
+                  className="flex gap-2 border-b border-line px-3 py-2"
                 >
-                  <p className="m-0 text-[12px] font-medium text-ink">
-                    {recoveryRows.length === 1
-                      ? "1 set-aside edit is waiting"
-                      : `${recoveryRows.length} set-aside edits are waiting`}
-                  </p>
-                  <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                    Copy an edit to keep its text. Dismiss deletes it for good.
-                  </p>
-                  <RecoveryList rows={recoveryRows} />
+                  <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
+                  <div className="min-w-0 flex-1">
+                    <p className={`m-0 text-[12px] ${setAsideUnread ? "font-medium text-ink" : "text-muted"}`}>
+                      {recoveryRows.length === 1
+                        ? "1 set-aside edit is waiting"
+                        : `${recoveryRows.length} set-aside edits are waiting`}
+                    </p>
+                    <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                      Copy an edit to keep its text. Dismiss deletes it for good.
+                    </p>
+                    <RecoveryList rows={recoveryRows} />
+                  </div>
                 </section>
               ) : null}
             <ul className="m-0 list-none p-0">
@@ -1736,6 +2061,8 @@ export function NoticeCenter(props: {
                 <LocalNoticeRow
                   key={notice.id}
                   notice={notice}
+                  unread={unreadNotices.includes(notice)}
+                  rest={restReads(`local:${notice.id}`)}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
@@ -1773,7 +2100,7 @@ export function NoticeCenter(props: {
                       const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
                         ? () => props.onRetrySentNotice?.(notice)
                         : undefined;
-                      const copies = notice.kind === "automation-failed";
+                      const copies = isFailure(notice);
                       const running = runningKey === key;
                       // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
                       const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"
@@ -1789,100 +2116,97 @@ export function NoticeCenter(props: {
                           data-notice-row=""
                           tabIndex={-1}
                           onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
+                          {...restReads(`sent:${key}`)}
                           className={ROW_CLASS}
                         >
-                          <SenderMark kind={notice.senderKind} />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span
-                                title={notice.title}
-                                className={`truncate text-[12px] ${unread ? "font-medium text-ink" : "text-muted"}`}
-                              >
-                                {notice.title}
-                              </span>
-                              {unread ? (
-                                <span data-testid={`sent-notice-${notice.noticeId}-unread`} className="shrink-0">
-                                  <span aria-hidden className="block size-1.5 rounded-full bg-accent" />
-                                  <span className="sr-only">Unread</span>
-                                </span>
-                              ) : null}
-                              {runNow ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-run-now`}
-                                  aria-busy={running || undefined}
-                                  disabled={runningKey !== null}
-                                  onClick={runNow}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                                >
-                                  {running ? "Starting…" : "Run now"}
-                                </button>
-                              ) : null}
-                              {retry ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-retry`}
-                                  onClick={retry}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                                >
-                                  Try again
-                                </button>
-                              ) : null}
-
-                              {openNotice ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-open`}
-                                  aria-busy={busy || undefined}
-                                  onClick={openNotice}
-                                  className={`${runNow || retry ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50`}
-                                >
-                                  {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
-                                </button>
-                              ) : null}
-                              {copies ? (
-                                <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
-                                  <CopyButton
-                                    iconOnly
-                                    pinName
-                                    label="Copy error details"
-                                    testId={`sent-notice-${notice.noticeId}-copy`}
-                                    getText={() => failureDetails(notice)}
-                                  />
-                                </span>
-                              ) : null}
-                              {dismissNotice ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-dismiss`}
-                                  aria-label="Dismiss notice"
-                                  onClick={(event) => {
-                                    focusPastRow(event.currentTarget);
-                                    dismissNotice();
-                                  }}
-                                  className={`${openNotice || runNow || retry || copies ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
-                                >
-                                  <X size={11} aria-hidden />
-                                </button>
-                              ) : null}
-                            </div>
-                            {notice.body ? (
-                              <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
-                                {notice.body}
-                              </p>
-                            ) : null}
-                            <p className="m-0 mt-1 flex min-w-0 gap-2 font-mono text-[10px] text-subtle">
-                              <time dateTime={new Date(notice.createdAtMs).toISOString()}>
-                                {relativeTime(notice.createdAtMs)}
-                              </time>
-                              {folder ? <span className="truncate">{folder}</span> : null}
-                            </p>
-                            {note ? (
-                              <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
-                                {note}
-                              </p>
-                            ) : null}
-                          </div>
+                          <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
+                          <span className="flex h-6 w-4 shrink-0 items-center justify-center">
+                            <SenderMark kind={notice.senderKind} className="shrink-0" />
+                          </span>
+                          <NoticeText
+                            title={notice.title}
+                            titleClass={unread ? "font-medium text-ink" : "text-muted"}
+                            body={notice.body}
+                            testId={`sent-notice-${notice.noticeId}`}
+                          >
+                            {(text) => (
+                              <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 items-start gap-2">
+                                  {text.title}
+                                  <span className={ROW_CONTROLS_CLASS}>
+                                    {runNow ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                        aria-busy={running || undefined}
+                                        disabled={runningKey !== null}
+                                        onClick={runNow}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+                                      >
+                                        {running ? "Starting…" : "Run now"}
+                                      </button>
+                                    ) : null}
+                                    {retry ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                        onClick={retry}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                                      >
+                                        Try again
+                                      </button>
+                                    ) : null}
+                                    {openNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-open`}
+                                        aria-busy={busy || undefined}
+                                        onClick={openNotice}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50"
+                                      >
+                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                      </button>
+                                    ) : null}
+                                    {copies ? (
+                                      <CopyButton
+                                        iconOnly
+                                        pinName
+                                        label="Copy error details"
+                                        testId={`sent-notice-${notice.noticeId}-copy`}
+                                        getText={() => failureDetails(notice)}
+                                      />
+                                    ) : null}
+                                    {dismissNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-dismiss`}
+                                        aria-label="Dismiss notice"
+                                        onClick={(event) => {
+                                          focusPastRow(event.currentTarget);
+                                          dismissNotice();
+                                        }}
+                                        className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                                      >
+                                        <X size={11} aria-hidden />
+                                      </button>
+                                    ) : null}
+                                  </span>
+                                </div>
+                                {text.body}
+                                <p className="m-0 mt-1 flex min-w-0 gap-2 text-[10px] text-subtle">
+                                  <time dateTime={new Date(notice.createdAtMs).toISOString()}>
+                                    {relativeTime(notice.createdAtMs)}
+                                  </time>
+                                  {folder ? <span className="truncate">{folder}</span> : null}
+                                </p>
+                                {note ? (
+                                  <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
+                                    {note}
+                                  </p>
+                                ) : null}
+                              </div>
+                            )}
+                          </NoticeText>
                         </li>
                       );
                     })}

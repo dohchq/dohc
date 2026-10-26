@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
 import { existsSync, type Stats } from "node:fs";
 import { classifyPath, hasEngineIgnoredSegment } from "@dohc/workspace-core";
 import {
+  chmod,
   lstat,
   mkdtemp,
   mkdir,
@@ -9,14 +11,16 @@ import {
   rm,
   readdir,
   readFile,
+  realpath,
   stat,
   symlink,
+  truncate,
   utimes,
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
@@ -24,6 +28,7 @@ import {
   collectZipEntries,
   couldBeLengthRefusal,
   copyIntoWorkspace,
+  createDurableFile,
   createFile,
   createFolder,
   removeEmptyWorkspaceFolder,
@@ -31,14 +36,22 @@ import {
   extractFrontmatterIcon,
   getWorkspaceListingMetadata,
   importDroppedPaths,
+  ImportSkips,
   listFiles,
   movePath,
+  nameSkip,
+  prepareWorkspaceMove,
   prepareWorkspaceDelete,
   screenDroppedPaths,
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
+import { forceStoredNameListing } from "../testing/storedNameListing";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
+import { deferred } from "../testing/deferred";
 
 let root: string;
 
@@ -266,6 +279,58 @@ describe("createFile", () => {
     await symlink(outside, join(root, "link"), "dir");
     await expect(createFile(root, "link/evil.md", "")).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(outside, "evil.md"))).toBe(false);
+  });
+});
+
+describe("createDurableFile", () => {
+  // The process stops halfway through writing: the final name must not hold a cut-off file.
+  it("keeps the final name empty until the complete bytes are linked there", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const halfWritten = deferred(), stopped = deferred();
+    const open = async (path: string, flags: string, mode?: number) => {
+      const handle = await actual.open(path, flags, mode);
+      if (flags !== "wx") return handle;
+      return {
+        writeFile: async (data: string) => {
+          await handle.writeFile(data.slice(0, data.length / 2));
+          halfWritten.resolve();
+          await stopped.promise;
+          throw new Error("dohc stopped");
+        },
+        sync: () => handle.sync(),
+        close: () => handle.close(),
+      };
+    };
+    const creating = createDurableFile(root, "notes/kept.md", "complete recovery text", { open });
+    await halfWritten.promise;
+    expect(existsSync(join(root, "notes/kept.md"))).toBe(false);
+    const [temporary, ...others] = await readdir(join(root, "notes"));
+    expect(others).toEqual([]);
+    expect(hasEngineIgnoredSegment(`notes/${temporary}`, process.platform)).toBe(true);
+    stopped.resolve();
+    await expect(creating).rejects.toThrow("dohc stopped");
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  it("refuses on a drive without hard links and never writes the final name directly", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const opened: string[] = [];
+    const open = async (path: string, flags: string, mode?: number) => {opened.push(path); return actual.open(path, flags, mode);};
+    const link = async () => {throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });};
+    await expect(createDurableFile(root, "notes/kept.md", "complete recovery text", { open, link }))
+      .rejects.toThrow("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.");
+    expect(opened.filter((path) => basename(path) === "kept.md")).toEqual([]);
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  it("writes a new file of any size and never replaces an existing one", async () => {
+    const text = "x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1);
+    expect(await createDurableFile(root, "notes/./large.md", text)).toBe("notes/large.md");
+    expect(await readFile(join(root, "notes/large.md"), "utf8")).toBe(text);
+    await writeFile(join(root, "keep.md"), "original");
+    await expect(createDurableFile(root, "keep.md", "replacement")).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(root, "keep.md"), "utf8")).toBe("original");
+    expect((await readdir(root)).filter((name) => hasEngineIgnoredSegment(name, process.platform))).toEqual([]);
   });
 });
 
@@ -510,6 +575,304 @@ describe("createFolder", () => {
 });
 
 describe("movePath", () => {
+  describe("stored move and delete names", () => {
+    const platform = process.platform;
+    let ignoresCase: boolean;
+    beforeEach(async () => {
+      ignoresCase = await caseInsensitiveFs();
+      Object.defineProperty(process, "platform", { value: "linux" });
+      const original = fsPromises.realpath.bind(fsPromises);
+      vi.spyOn(fsPromises, "realpath").mockImplementation(async path => {
+        const resolved = await original(path);
+        return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+      });
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      Object.defineProperty(process, "platform", { value: platform });
+    });
+
+    it("prepares an alias source and delete with their stored names", async context => {
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "Notes.md"), "body");
+      if (!ignoresCase) context.skip("this disk keeps case apart");
+      expect(await prepareWorkspaceMove(root, "docs/notes.md", "archive.md")).toMatchObject({ physicalFromPath: "Docs/Notes.md" });
+      expect(await prepareWorkspaceDelete(root, "docs/notes.md")).toBe("Docs/Notes.md");
+    });
+
+    it("keeps the stored parent for a case-only rename through an alias parent", async context => {
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "notes.md"), "body");
+      if (!ignoresCase) context.skip("this disk keeps case apart");
+      expect(await prepareWorkspaceMove(root, "docs/notes.md", "docs/Notes.md")).toMatchObject({
+        physicalFromPath: "Docs/notes.md", physicalToPath: "Docs/Notes.md", visibleResultPath: "docs/Notes.md",
+      });
+      await expect(movePath(root, "docs/notes.md", "docs/Notes.md")).resolves.toBe("docs/Notes.md");
+      expect(await readdir(join(root, "Docs"))).toEqual(["Notes.md"]);
+    });
+
+    for (const native of [false, true]) {
+      it(`allows an alias source parent when the destination keeps its stored name with ${native ? "native" : "Linux"} realpath`, async context => {
+        await mkdir(join(root, "Docs"));
+        await writeFile(join(root, "Docs", "a.md"), "body");
+        if (!ignoresCase) context.skip("this disk keeps case apart");
+        if (native) {
+          vi.restoreAllMocks();
+          Object.defineProperty(process, "platform", { value: platform });
+        }
+        await expect(movePath(root, "docs/a.md", "Docs/b.md")).resolves.toBe("Docs/b.md");
+        expect(await readdir(join(root, "Docs"))).toEqual(["b.md"]);
+      });
+    }
+
+    it("lets a missing source parent reach the missing source refusal", async context => {
+      if (ignoresCase) context.skip("this disk ignores case");
+      await mkdir(join(root, "docs"));
+      await expect(prepareWorkspaceMove(root, "Docs/a.md", "docs/a.md")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    for (const destination of ["docs/a.md", "docs/b.md"]) {
+      for (const native of [false, true]) {
+        it(`refuses a parent case change to ${destination} with ${native ? "native" : "Linux"} realpath`, async context => {
+          await mkdir(join(root, "Docs"));
+          await writeFile(join(root, "Docs", "a.md"), "body");
+          if (!ignoresCase) context.skip("this disk keeps case apart");
+          if (native) {
+            vi.restoreAllMocks();
+            Object.defineProperty(process, "platform", { value: platform });
+          }
+          const mutation = vi.spyOn(fsPromises, "rename");
+          const message = `dohc did not move Docs/a.md to ${destination}. The folder is named Docs, not docs. Use that name, or rename the folder first.`;
+          await expect(prepareWorkspaceMove(root, "Docs/a.md", destination)).rejects.toThrow(message);
+          await expect(movePath(root, "Docs/a.md", destination)).rejects.toThrow(message);
+          expect(mutation).not.toHaveBeenCalled();
+        });
+      }
+    }
+
+    for (const operation of ["move", "delete"] as const) {
+      for (const missing of [false, true]) {
+        it(`refuses ${operation} when the stored identity is ${missing ? "missing" : "unknown"}`, async () => {
+          await writeFile(join(root, "a.md"), "body");
+          if (missing) {
+            const original = fsPromises.lstat.bind(fsPromises);
+            vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+              if (options?.bigint) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+              return original(path, options);
+            });
+          } else {
+            forceStoredNameListing(join(root, "a.md"));
+            vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+          }
+          const change = operation === "move" ? prepareWorkspaceMove(root, "a.md", "b.md") : prepareWorkspaceDelete(root, "a.md");
+          await expect(change).rejects.toThrow(operation === "move" ? "dohc could not tell which files or folders on disk"
+            : "dohc did not delete a.md. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again.");
+          expect(await readFile(join(root, "a.md"), "utf8")).toBe("body");
+        });
+      }
+    }
+
+    it("lists each Linux endpoint's own folders once per admission", async () => {
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "a.md"), "body");
+      const listing = vi.spyOn(fsPromises, "readdir");
+      // A disk that keeps case apart answers without listing.
+      const endpoint = ignoresCase ? [root, join(root, "Docs")] : [];
+      await prepareWorkspaceMove(root, "Docs/a.md", "new/deep/b.md");
+      expect(listing.mock.calls.map(([path]) => String(path))).toEqual(endpoint);
+      listing.mockClear();
+      await prepareWorkspaceDelete(root, "Docs/a.md");
+      expect(listing.mock.calls.map(([path]) => String(path))).toEqual(endpoint);
+      listing.mockClear();
+      await writeFile(join(root, "Docs", "b.md"), "other");
+      await expect(prepareWorkspaceMove(root, "Docs/a.md", "Docs/b.md")).rejects.toThrow("Destination already exists");
+      expect(listing.mock.calls.map(([path]) => String(path)).sort()).toEqual([...endpoint, ...endpoint, ...endpoint].sort());
+    });
+
+    it("refuses an unknown parent identity before making a local move", async context => {
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "a.md"), "body");
+      if (!ignoresCase) context.skip("this disk keeps case apart");
+      vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+      const mutation = vi.spyOn(fsPromises, "rename");
+      await expect(movePath(root, "Docs/a.md", "docs/b.md")).rejects.toThrow("dohc could not tell which files or folders on disk");
+      expect(mutation).not.toHaveBeenCalled();
+    });
+
+    for (const parent of ["Docs/sub", "base/Docs/sub"]) {
+      it(`names the first changed folder in ${parent}`, async context => {
+        await mkdir(join(root, parent), { recursive: true });
+        await writeFile(join(root, parent, "a.md"), "body");
+        if (!ignoresCase) context.skip("this disk keeps case apart");
+        const from = `${parent.replace("Docs", "dOCS")}/a.md`, to = `${parent.replace("Docs", "docs")}/b.md`;
+        await expect(movePath(root, from, to)).rejects.toThrow(
+          `dohc did not move ${from} to ${to}. The folder is named Docs, not docs. Use that name, or rename the folder first.`);
+      });
+    }
+
+    it("allows a new distinct parent when this disk keeps case apart", async context => {
+      if (ignoresCase) context.skip("this disk ignores case");
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "a.md"), "body");
+      await expect(movePath(root, "Docs/a.md", "docs/b.md")).resolves.toBe("docs/b.md");
+      expect(await readFile(join(root, "docs", "b.md"), "utf8")).toBe("body");
+    });
+  });
+
+  it.runIf(process.platform === "win32")("prepares an ordinary delete without listing folders on Windows", async () => {
+    await mkdir(join(root, "docs"));
+    await writeFile(join(root, "docs", "a.md"), "body");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    try {
+      expect(await prepareWorkspaceDelete(root, "docs/a.md")).toBe("docs/a.md");
+      expect(listing).not.toHaveBeenCalled();
+    } finally { listing.mockRestore(); }
+  });
+
+  it("refuses a case-only rename when the disk silently keeps the old capitals", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const noOp = vi.spyOn(fsPromises, "rename").mockResolvedValue(undefined);
+    try {
+      await expect(movePath(root, "docs/plans", "docs/Plans")).rejects.toThrow(
+        "dohc did not rename docs/plans to docs/Plans. This disk kept the name plans. Rename it to another name first, then to Plans.",
+      );
+      expect(await readdir(join(root, "docs"))).toEqual(["plans"]);
+      expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      noOp.mockRestore();
+    }
+  });
+
+  it("prepares and commits an ordinary move with only Linux spelling listings", async () => {
+    await mkdir(join(root, "docs", "drafts"), { recursive: true });
+    await writeFile(join(root, "docs", "drafts", "a.md"), "body");
+    const listsSpellings = process.platform === "linux" && await caseInsensitiveFs();
+    const listing = vi.spyOn(fsPromises, "readdir");
+    try {
+      await prepareWorkspaceMove(root, "docs/drafts/a.md", "archive/deep/a.md");
+      await expect(movePath(root, "docs/drafts/a.md", "archive/deep/a.md")).resolves.toBe("archive/deep/a.md");
+      if (listsSpellings) {
+        expect(listing.mock.calls.map(([path]) => String(path))).toEqual([
+          root, join(root, "docs"), join(root, "docs", "drafts"),
+          root, join(root, "docs"), join(root, "docs", "drafts"),
+        ]);
+      } else expect(listing).not.toHaveBeenCalled();
+      expect(await readFile(join(root, "archive", "deep", "a.md"), "utf8")).toBe("body");
+    } finally {
+      listing.mockRestore();
+    }
+  });
+
+  it("uses equal realpaths without listing folders until checking the renamed leaf", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    if ((await realpath(join(root, "docs", "Plans"))).endsWith(`${sep}Plans`)) context.skip("realpath keeps lookup case");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let listingsBeforeRename: number | undefined;
+    const renaming = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      listingsBeforeRename = listing.mock.calls.length;
+      return originalRename(from, to);
+    });
+    try {
+      await prepareWorkspaceMove(root, "docs/plans", "docs/Plans");
+      await expect(movePath(root, "docs/plans", "docs/Plans")).resolves.toBe("docs/Plans");
+      expect(listingsBeforeRename).toBe(0);
+      expect(listing).toHaveBeenCalledTimes(2);
+      expect(await readFile(join(root, "docs", "Plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      renaming.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  for (const stage of ["prepare", "commit"] as const) {
+    it(`maps an unknown destination identity to the move refusal during ${stage}`, async (context) => {
+      await mkdir(join(root, "docs", "plans"), { recursive: true });
+      await writeFile(join(root, "docs", "plans", "a.md"), "body");
+      if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+      const original = fsPromises.realpath.bind(fsPromises);
+      const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+        const resolved = await original(path);
+        return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+      });
+      const listing = vi.spyOn(fsPromises, "readdir");
+      if (stage === "prepare") listing.mockResolvedValue([]);
+      else fsHooks.afterMkdir = async (path) => {
+        if (path === join(root, "docs")) listing.mockResolvedValue([]);
+      };
+      try {
+        const operation = stage === "prepare" ? prepareWorkspaceMove : movePath;
+        await expect(operation(root, "docs/plans", "docs/Plans")).rejects.toThrow(
+          "dohc did not move docs/plans to docs/Plans. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
+        );
+        expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
+      } finally {
+        listing.mockRestore();
+        lookup.mockRestore();
+      }
+    });
+  }
+
+  it("maps an unknown case-alias descendant identity to the move refusal", async (context) => {
+    await mkdir(join(root, "Team", "leads"), { recursive: true });
+    await writeFile(join(root, "Team", "leads", "a.md"), "body");
+    if (!(await lstat(join(root, "team")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    const listing = vi.spyOn(fsPromises, "readdir").mockResolvedValue([]);
+    try {
+      await expect(prepareWorkspaceMove(root, "Team", "team/leads/sub")).rejects.toThrow(
+        "dohc did not move Team to team/leads/sub. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
+      );
+      expect(await readFile(join(root, "Team", "leads", "a.md"), "utf8")).toBe("body");
+    } finally {
+      listing.mockRestore();
+      lookup.mockRestore();
+    }
+  });
+
+  it("renames a case-only folder when realpath keeps lookup case", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    try {
+      await expect(movePath(root, "docs/plans", "docs/Plans")).resolves.toBe("docs/Plans");
+      expect(await readdir(join(root, "docs"))).toEqual(["Plans"]);
+      expect(await readFile(join(root, "docs", "Plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it("refuses a case-alias descendant when realpath keeps lookup case", async (context) => {
+    await mkdir(join(root, "Team", "leads"), { recursive: true });
+    await writeFile(join(root, "Team", "leads", "a.md"), "body");
+    if (!(await lstat(join(root, "team")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    try {
+      await expect(movePath(root, "Team", "team/leads/sub")).rejects.toThrow("Cannot move a path into itself");
+      expect(await readFile(join(root, "Team", "leads", "a.md"), "utf8")).toBe("body");
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   it("renames a file in place (one engine for rename and move)", async () => {
     await writeFile(join(root, "draft.md"), "body");
     const path = await movePath(root, "draft.md", "final.md");
@@ -517,6 +880,33 @@ describe("movePath", () => {
     expect(await readFile(join(root, "final.md"), "utf8")).toBe("body");
     expect(existsSync(join(root, "draft.md"))).toBe(false);
   });
+
+  for (const folder of [false, true]) {
+    for (const sameName of [false, true]) {
+      it(`keeps a symlink destination in its own folder for a ${folder ? "folder" : "file"} ${sameName ? "drag" : "rename"}`, async () => {
+        const from = folder ? "a/notes" : "a/notes.md";
+        const to = `b/${sameName ? "notes" : "link"}${folder ? "" : ".md"}`;
+        await mkdir(join(root, "a"));
+        await mkdir(join(root, "b"));
+        if (folder) await mkdir(join(root, from));
+        await writeFile(join(root, folder ? `${from}/content.md` : from), "body");
+        await symlink(join(root, from), join(root, to), folder ? "dir" : "file");
+        expect((await prepareWorkspaceMove(root, from, to)).physicalToPath).toBe(to);
+        if (folder) {
+          await expect(movePath(root, from, to)).rejects.toMatchObject({ code: process.platform === "win32" ? "EPERM" : "ENOTDIR" });
+          expect(await readdir(join(root, "a"))).toEqual(["notes"]);
+          expect((await lstat(join(root, to))).isSymbolicLink()).toBe(true);
+          expect(await readFile(join(root, from, "content.md"), "utf8")).toBe("body");
+        } else {
+          await expect(movePath(root, from, to)).resolves.toBe(to);
+          expect(await readdir(join(root, "a"))).toEqual([]);
+          expect((await lstat(join(root, to))).isSymbolicLink()).toBe(false);
+          expect(await readFile(join(root, to), "utf8")).toBe("body");
+        }
+        expect(await readdir(join(root, "b"))).toEqual([sameName ? (folder ? "notes" : "notes.md") : (folder ? "link" : "link.md")]);
+      });
+    }
+  }
 
   it("moves a file into a folder, creating the destination parent", async () => {
     await writeFile(join(root, "loose.md"), "x");
@@ -540,7 +930,7 @@ describe("movePath", () => {
     await expect(movePath(root, "a.md", "..%252fb.md")).rejects.toThrow(/traversal/);
     await expect(movePath(root, "/etc/passwd", "b.md")).rejects.toThrow(/absolute/);
     await expect(movePath(root, "a.md", "C:\\evil.md")).rejects.toThrow(/absolute/);
-    await expect(movePath(root, ".dohc/ui-state.json", "b.md")).rejects.toThrow(/reserved/);
+    await expect(movePath(root, ".dohc/local/ui-state.json", "b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", ".dohc/b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", "notes/.dohc/b.md")).rejects.toThrow(/reserved/);
     await expect(movePath(root, "a.md", ".DOHC./b.md")).rejects.toThrow(/reserved/);
@@ -647,10 +1037,15 @@ describe("prepareWorkspaceDelete", () => {
 });
 
 describe("deletePath", () => {
+  // The engine's open of the workspace prepared `.dohc/local`, where the
+  // workspace trash is.
+  const workspace = () => ({ workspaceId: "delete-path", rootPath: root });
+  beforeEach(() => openedLocalState(workspace()));
+
   it("hands the resolved real path to the OS trash", async () => {
     await writeFile(join(root, "junk.md"), "x");
     const trashed: string[] = [];
-    const result = await deletePath(root, "junk.md", async (p) => {
+    const result = await deletePath(workspace(), "junk.md", async (p) => {
       trashed.push(p);
     });
     expect(result).toEqual({ trashed: true });
@@ -658,30 +1053,32 @@ describe("deletePath", () => {
     expect(trashed[0]!.endsWith("junk.md")).toBe(true);
   });
 
-  it("falls back to .dohc/trash when the OS trash rejects (cross-filesystem)", async () => {
+  it("falls back to .dohc/local/trash when the OS trash rejects (cross-filesystem), never .dohc/trash", async () => {
     await mkdir(join(root, "notes"), { recursive: true });
     await writeFile(join(root, "notes", "junk.md"), "recover me");
-    const result = await deletePath(root, "notes/junk.md", rejectingTrash);
+    await mkdir(join(root, ".dohc", "trash"));
+    const result = await deletePath(workspace(), "notes/junk.md", rejectingTrash);
     expect(result).toEqual({ trashed: false });
+    expect(await readdir(join(root, ".dohc", "trash"))).toEqual([]);
     expect(existsSync(join(root, "notes", "junk.md"))).toBe(false);
-    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashNames).toHaveLength(1);
     expect(trashNames[0]).toMatch(/^\d+-[0-9a-f-]+-junk\.md$/);
     // Recoverable: the bytes survive, never a hard delete.
     expect(
-      await readFile(join(root, ".dohc", "trash", trashNames[0]!), "utf8"),
+      await readFile(join(root, ".dohc", "local", "trash", trashNames[0]!), "utf8"),
     ).toBe("recover me");
   });
 
   it("trashes folders (recursively recoverable)", async () => {
     await mkdir(join(root, "team"), { recursive: true });
     await writeFile(join(root, "team", "anna.md"), "a");
-    const result = await deletePath(root, "team", rejectingTrash);
+    const result = await deletePath(workspace(), "team", rejectingTrash);
     expect(result).toEqual({ trashed: false });
-    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashNames[0]).toMatch(/^\d+-[0-9a-f-]+-team$/);
     expect(
-      await readFile(join(root, ".dohc", "trash", trashNames[0]!, "anna.md"), "utf8"),
+      await readFile(join(root, ".dohc", "local", "trash", trashNames[0]!, "anna.md"), "utf8"),
     ).toBe("a");
   });
 
@@ -693,9 +1090,9 @@ describe("deletePath", () => {
     await mkdir(join(root, "b"), { recursive: true });
     await writeFile(join(root, "a", "readme.md"), "first bytes");
     await writeFile(join(root, "b", "readme.md"), "second bytes");
-    await deletePath(root, "a/readme.md", rejectingTrash);
-    await deletePath(root, "b/readme.md", rejectingTrash);
-    const trashDir = join(root, ".dohc", "trash");
+    await deletePath(workspace(), "a/readme.md", rejectingTrash);
+    await deletePath(workspace(), "b/readme.md", rejectingTrash);
+    const trashDir = join(root, ".dohc", "local", "trash");
     const names = await readdir(trashDir);
     expect(names).toHaveLength(2);
     const bodies = await Promise.all(
@@ -704,51 +1101,184 @@ describe("deletePath", () => {
     expect(bodies.sort()).toEqual(["first bytes", "second bytes"]);
   });
 
-  it("refuses a symlinked .dohc/trash — fallback never relocates outside the workspace", async () => {
-    // The resolveWorkspaceMetadataDir threat one level deeper: a real.dohc
-    // carrying `trash -> <outside>`. mkdir{recursive} no-ops on the existing
+  it("refuses a symlinked .dohc/local/trash — fallback never relocates outside the workspace", async () => {
+    // The resolveWorkspaceMetadataDir threat two levels deeper: a real
+    // .dohc/local carrying `trash -> <outside>`. mkdir no-ops on the existing
     // symlink-to-dir, so only the post-mkdir lstat check can catch it.
     const outside = await createTestScratch("dohc-attacker-");
-    await mkdir(join(root, ".dohc"), { recursive: true });
-    await symlink(outside, join(root, ".dohc", "trash"), "dir");
+    await symlink(outside, join(root, ".dohc", "local", "trash"), "dir");
     await writeFile(join(root, "secret-notes.md"), "private");
-    await expect(deletePath(root, "secret-notes.md", rejectingTrash)).rejects.toThrow(
-      /A link is at \.dohc\/trash, which must be a real folder/,
+    await expect(deletePath(workspace(), "secret-notes.md", rejectingTrash)).rejects.toThrow(
+      /A link is at \.dohc\/local\/trash, which must be a real folder/,
     );
     // The file stayed put; nothing landed in the attacker directory.
     expect(await readFile(join(root, "secret-notes.md"), "utf8")).toBe("private");
     expect(await readdir(outside)).toEqual([]);
   });
 
-  it("names the squatter when a FILE sits at .dohc/trash — never a raw errno", async () => {
-    // A plain file at .dohc/trash made mkdir{recursive} throw raw
+  it("names the squatter when a FILE sits at .dohc/local/trash — never a raw errno", async () => {
+    // A plain file at the trash made mkdir{recursive} throw raw
     // "EEXIST: file already exists, mkdir …": no constraint, no next
     // step, on the very path dohc advertises as the recovery location. The
-    // refusal must name .dohc/trash, what squats it, and the way out.
+    // refusal must name .dohc/local/trash, what squats it, and the way out.
     await mkdir(join(root, ".dohc"), { recursive: true });
-    await writeFile(join(root, ".dohc", "trash"), "squatting");
+    await writeFile(join(root, ".dohc", "local", "trash"), "squatting");
     await writeFile(join(root, "junk.md"), "keep me");
-    await expect(deletePath(root, "junk.md", rejectingTrash)).rejects.toThrow(
-      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
+    await expect(deletePath(workspace(), "junk.md", rejectingTrash)).rejects.toThrow(
+      "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
     // The target stayed put and the squatter was not touched.
     expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
-    expect(await readFile(join(root, ".dohc", "trash"), "utf8")).toBe("squatting");
+    expect(await readFile(join(root, ".dohc", "local", "trash"), "utf8")).toBe("squatting");
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a trash folder another user can change", async () => {
+    await mkdir(join(root, ".dohc", "local", "trash"));
+    await chmod(join(root, ".dohc", "local", "trash"), 0o777);
+    await writeFile(join(root, "junk.md"), "keep me");
+    await expect(deletePath(workspace(), "junk.md", rejectingTrash)).rejects.toThrow(
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash. Make it a folder only you can change. Then retry.",
+    );
+    expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
+    expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+  });
+
+  it.each([
+    ["not-opened", null, "because the workspace has not finished opening. Try again when it opens."],
+    ["not-excluded", false, "because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again."],
+  ] as const)("moves nothing when the OS trash rejects before the open prepares .dohc/local (%s)", async (_refusal, ready, because) => {
+    readLocalStateFrom(ready === null ? null : { currentBinding: () => ({ localStateReady: ready }), localStateOpenAt: async () => ({ current: () => true }) });
+    await writeFile(join(root, "junk.md"), "keep me");
+    await expect(deletePath(workspace(), "junk.md", rejectingTrash)).rejects.toThrow(
+      `dohc did not move junk.md to the workspace trash ${because}`,
+    );
+    expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
+    expect(existsSync(join(root, ".dohc", "local", "trash"))).toBe(false);
+    // The OS trash needs nothing from `.dohc/local`.
+    expect(await deletePath(workspace(), "junk.md", async () => undefined)).toEqual({ trashed: true });
+  });
+
+  // A local sparse file has a size and no blocks, as a file only in iCloud
+  // Drive does. Its dataless flag is clear, so it moves like any other.
+  it.runIf(process.platform === "darwin")("moves a local sparse file and a folder holding one into the workspace trash", async () => {
+    await writeFile(join(root, "sparse.bin"), "");
+    await truncate(join(root, "sparse.bin"), 4096);
+    await mkdir(join(root, "folder"));
+    await writeFile(join(root, "folder", "sparse.bin"), "");
+    await truncate(join(root, "folder", "sparse.bin"), 4096);
+    expect((await stat(join(root, "sparse.bin"))).blocks).toBe(0);
+    expect(await deletePath(workspace(), "sparse.bin", rejectingTrash)).toEqual({ trashed: false });
+    expect(await deletePath(workspace(), "folder", rejectingTrash)).toEqual({ trashed: false });
+    expect(existsSync(join(root, "sparse.bin"))).toBe(false);
+    expect(await readdir(join(root, ".dohc", "local", "trash"))).toHaveLength(2);
+  });
+
+  // With Optimize Mac Storage, iCloud Drive can leave a file's bytes only in
+  // iCloud. Moved into .dohc/local, which iCloud Drive skips, they could be
+  // lost. A sparse file is the candidate, and the flags it reports decide.
+  describe("a file only in iCloud Drive", () => {
+    const sparse = async (path: string) => { await writeFile(join(root, path), ""); await truncate(join(root, path), 4096); };
+    const evicted = async () => {
+      await sparse("evicted.md");
+      await mkdir(join(root, "folder", "inner"), { recursive: true });
+      await writeFile(join(root, "folder", "kept.md"), "here");
+      await sparse("folder/inner/evicted.md");
+    };
+    const untouched = async () => {
+      expect((await stat(join(root, "evicted.md"))).size).toBe(4096);
+      expect(await readFile(join(root, "folder", "kept.md"), "utf8")).toBe("here");
+      expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+    };
+
+    it.skipIf(process.platform === "win32")("moves nothing into the workspace trash when its dataless flag is set", async () => {
+      await evicted();
+      await withICloudCheck(datalessCandidates, async () => {
+        await expect(deletePath(workspace(), "evicted.md", rejectingTrash)).rejects.toThrow(
+          "dohc did not move evicted.md to the workspace trash because it is only in iCloud Drive. Download it, then try again.",
+        );
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
+          "dohc did not move folder to the workspace trash because some of it is only in iCloud Drive. Download it, then try again.",
+        );
+        await untouched();
+        // An empty file has no bytes to lose, and the system trash takes the rest.
+        await writeFile(join(root, "empty.md"), "");
+        expect(await deletePath(workspace(), "empty.md", rejectingTrash)).toEqual({ trashed: false });
+        const system: string[] = [];
+        expect(await deletePath(workspace(), "folder", async (path) => { system.push(path); })).toEqual({ trashed: true });
+        expect(system).toEqual([join(await realpath(root), "folder")]);
+      });
+    });
+
+    it.skipIf(process.platform === "win32")("moves nothing when it can't read the flags", async () => {
+      await evicted();
+      await withICloudCheck({ applies: true, readFlags: async () => { throw new Error("stat: evicted.md: No such file or directory"); } }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(
+          "dohc did not move folder to the workspace trash because dohc could not check for files only in iCloud Drive. Try again.",
+        );
+      });
+      await untouched();
+    });
+
+    // An empty folder lists no entry, so the bound is checked before each
+    // folder the walk opens, and once more before it answers. A bound
+    // already past stands in for one that runs out among empty folders. Past
+    // it, the walk opens nothing more: a folder it can't open would fail.
+    it.skipIf(process.platform === "win32")("checks its time bound before each folder it opens and before it answers", async () => {
+      await mkdir(join(root, "empty"));
+      await mkdir(join(root, "locked"));
+      await chmod(join(root, "locked"), 0o000);
+      await writeFile(join(root, "local.md"), "here");
+      try {
+        await withICloudCheck({ applies: true, maxMs: -1 }, async () => {
+          for (const folder of ["empty", "locked"]) {
+            await expect(deletePath(workspace(), folder, rejectingTrash)).rejects.toThrow(
+              `dohc did not move ${folder} to the workspace trash because it holds too many files to check. Delete it in smaller parts.`,
+            );
+          }
+          await expect(deletePath(workspace(), "local.md", rejectingTrash)).rejects.toThrow(
+            "dohc did not move local.md to the workspace trash because dohc could not check for files only in iCloud Drive. Try again.",
+          );
+        });
+      } finally {
+        await chmod(join(root, "locked"), 0o755);
+      }
+      expect(existsSync(join(root, "empty"))).toBe(true);
+      expect(existsSync(join(root, "locked"))).toBe(true);
+      expect(await readFile(join(root, "local.md"), "utf8")).toBe("here");
+      expect(await readdir(join(root, ".dohc", "local", "trash"))).toEqual([]);
+    });
+
+    it.skipIf(process.platform === "win32")("moves nothing from a folder too large to check in its bounds", async () => {
+      await evicted();
+      for (const n of [1, 2, 3]) await writeFile(join(root, "folder", `${n}.md`), String(n));
+      const words = "dohc did not move folder to the workspace trash because it holds too many files to check. Delete it in smaller parts.";
+      await withICloudCheck({ applies: true, maxEntries: 3 }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(words);
+      });
+      await withICloudCheck({ applies: true, maxMs: 0 }, async () => {
+        await expect(deletePath(workspace(), "folder", rejectingTrash)).rejects.toThrow(words);
+      });
+      await untouched();
+      // Within its bounds the same folder moves.
+      await withICloudCheck({ applies: true, maxEntries: 7, readFlags: async (paths) => paths.map(() => 0) }, async () => {
+        expect(await deletePath(workspace(), "folder", rejectingTrash)).toEqual({ trashed: false });
+      });
+    });
   });
 
   it("rejects traversal, reserved paths, the root, and symlinked-ancestor escapes", async () => {
-    await expect(deletePath(root, "../x", rejectingTrash)).rejects.toThrow(/traversal/);
-    await expect(deletePath(root, ".dohc/trash", rejectingTrash)).rejects.toThrow(
+    await expect(deletePath(workspace(), "../x", rejectingTrash)).rejects.toThrow(/traversal/);
+    await expect(deletePath(workspace(), ".dohc/local/trash", rejectingTrash)).rejects.toThrow(
       /reserved/,
     );
-    await expect(deletePath(root, ".", rejectingTrash)).rejects.toThrow(/invalid/);
+    await expect(deletePath(workspace(), ".", rejectingTrash)).rejects.toThrow(/invalid/);
     // A regular file reached through a symlinked ancestor still escapes: lstat
     // follows the ancestor link, realpath of the leaf resolves outside the
     // root, and containment refuses it.
     const outside = await createTestScratch("dohc-outside-");
     await writeFile(join(outside, "victim.md"), "keep");
     await symlink(outside, join(root, "linkdir"), "dir");
-    await expect(deletePath(root, "linkdir/victim.md", rejectingTrash)).rejects.toThrow(
+    await expect(deletePath(workspace(), "linkdir/victim.md", rejectingTrash)).rejects.toThrow(
       /escapes the workspace/,
     );
     expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
@@ -762,13 +1292,13 @@ describe("deletePath", () => {
     const outside = await createTestScratch("dohc-outside-");
     await writeFile(join(outside, "victim.md"), "keep");
     await symlink(join(outside, "victim.md"), join(root, "link.md"), "file");
-    const result = await deletePath(root, "link.md", rejectingTrash);
+    const result = await deletePath(workspace(), "link.md", rejectingTrash);
     expect(result).toEqual({ trashed: false });
     // The LINK left the tree, the target is untouched, and the trash holds the
     // link (never the target's bytes).
     expect(existsSync(join(root, "link.md"))).toBe(false);
     expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
-    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashNames).toHaveLength(1);
     expect(trashNames[0]).toMatch(/link\.md$/);
   });
@@ -779,13 +1309,13 @@ describe("deletePath", () => {
     // to fit; the uuid keeps the entry unique and the bytes recoverable.
     const longBase = `${"x".repeat(246)}.md`; // 249 chars — legal to create
     await writeFile(join(root, longBase), "recover me");
-    const result = await deletePath(root, longBase, rejectingTrash);
+    const result = await deletePath(workspace(), longBase, rejectingTrash);
     expect(result).toEqual({ trashed: false });
-    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    const trashNames = await readdir(join(root, ".dohc", "local", "trash"));
     expect(trashNames).toHaveLength(1);
     expect(Buffer.byteLength(trashNames[0]!, "utf8")).toBeLessThanOrEqual(255);
     expect(
-      await readFile(join(root, ".dohc", "trash", trashNames[0]!), "utf8"),
+      await readFile(join(root, ".dohc", "local", "trash", trashNames[0]!), "utf8"),
     ).toBe("recover me");
   });
 });
@@ -1092,9 +1622,15 @@ describe("importDroppedPaths", () => {
       [root],
     );
     // The symlink (refused before it follows to target.md) and the relative
-    // path are skipped, and the skip count says so instead of the batch
-    // silently shrinking. The empty folder lands, and the outcome counts it.
-    expect(outcome).toEqual({ imported: ["doc.md"], skipped: 2, folders: 1 });
+    // path are skipped, and the outcome says which and why instead of the
+    // batch silently shrinking. The empty folder lands, and the outcome
+    // names it.
+    expect(outcome).toEqual({
+      imported: ["doc.md"],
+      skipped: 2,
+      skippedSources: [{ path: "alias.md", reason: "link" }, { path: "relative.md", reason: "unreadable" }],
+      folders: ["folder"],
+    });
     expect((await stat(join(root, "folder"))).isDirectory()).toBe(true);
     expect(existsSync(join(root, "target.md"))).toBe(false);
   });
@@ -1120,14 +1656,65 @@ describe("importDroppedPaths", () => {
     const outcome = await importDroppedPaths(root, [trip], [root]);
     // Two links skipped; .DS_Store and .git are not workspace files at all.
     // The walk reads each folder in the order the disk lists it.
-    expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+    const byPath = (a: { path: string }, b: { path: string }) => a.path.localeCompare(b.path);
+    expect({
+      ...outcome,
+      imported: outcome.imported.sort(),
+      skippedSources: outcome.skippedSources?.sort(byPath),
+    }).toEqual({
       imported: ["Trip/Report.rtfd/TXT.rtf", "Trip/photos/beach.jpg", "Trip/plan.md"],
       skipped: 2,
-      folders: 4,
+      skippedSources: [{ path: "Trip/key.txt", reason: "link" }, { path: "Trip/linked", reason: "link" }],
+      folders: ["Trip"],
     });
     expect(await readFile(join(root, "Trip", "photos", "beach.jpg"), "utf8")).toBe("jpg-bytes");
     expect((await readdir(join(root, "Trip"))).sort()).toEqual(["Report.rtfd", "empty", "photos", "plan.md"]);
     expect(await readdir(join(root, "Trip", "photos"))).toEqual(["beach.jpg"]);
+  });
+
+  // Inside a folder these are left behind without a word. Dropped on their
+  // own, the person handed them over, so each is named with its reason.
+  it("names each item a drop leaves out on its own, and why", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    await writeFile(join(outside, "ok.md"), "ok");
+    await writeFile(join(outside, ".DS_Store"), "finder");
+    await mkdir(join(outside, "node_modules"));
+    await mkdir(join(outside, ".dohc"));
+
+    const dropped = ["ok.md", ".DS_Store", "node_modules", ".dohc"].map((name) => join(outside, name));
+    expect(await importDroppedPaths(root, dropped, [root])).toEqual({
+      imported: ["ok.md"],
+      skipped: 3,
+      skippedSources: [
+        { path: ".DS_Store", reason: "system-file" },
+        { path: "node_modules", reason: "left-out" },
+        { path: ".dohc", reason: "dohc-name" },
+      ],
+    });
+  });
+
+  // The validator reads these as .git, .dohc and .DS_Store, but the file is
+  // named with the encoded spelling, so renaming it is the fix.
+  it("says an encoded spelling of a reserved name can't be saved", () => {
+    expect(nameSkip("cfg%2f.git")).toBe("name");
+    expect(nameSkip("%2edohc")).toBe("name");
+    expect(nameSkip("Trip/%2eDS_Store")).toBe("name");
+    expect(nameSkip("Trip/.git")).toBe("left-out");
+  });
+
+  it.runIf(process.platform === "win32")("says which names Windows can't use", () => {
+    expect(nameSkip("Trip/CON.md")).toBe("windows-name");
+    expect(nameSkip("Trip/a:b.md")).toBe("windows-name");
+    expect(nameSkip("Trip/plan.md")).toBeNull();
+  });
+
+  it("lists the first 100 skips and counts them all", () => {
+    const skips = new ImportSkips();
+    for (let i = 0; i < 101; i += 1) skips.add(`f-${i}.md`, "link");
+    const outcome = skips.outcome();
+    expect(outcome.skipped).toBe(101);
+    expect(outcome.skippedSources).toHaveLength(100);
+    expect(outcome.skippedSources?.at(-1)).toEqual({ path: "f-99.md", reason: "link" });
   });
 
   it("lands a dropped folder beside one with its name, as a file would", async () => {
@@ -1149,7 +1736,7 @@ describe("importDroppedPaths", () => {
     expect(outcome).toEqual({
       imported: ["inbox/Trip (2)/plan.md", "inbox/Report (2).rtfd/TXT.rtf"],
       skipped: 0,
-      folders: 2,
+      folders: ["inbox/Trip (2)", "inbox/Report (2).rtfd"],
     });
     expect(await readFile(join(root, "inbox", "Trip", "plan.md"), "utf8")).toBe("existing");
     expect(await readFile(join(root, "inbox", "Trip (2)", "plan.md"), "utf8")).toBe("incoming");
@@ -1164,7 +1751,7 @@ describe("importDroppedPaths", () => {
     // The two folders and 998 files make 1,000.
     await Promise.all(Array.from({ length: 998 }, (_, i) => writeFile(join(fits, "inner", `f-${i}.md`), "x")));
     const landed = await importDroppedPaths(root, [fits], [root]);
-    expect([landed.imported.length, landed.folders]).toEqual([998, 2]);
+    expect([landed.imported.length, landed.folders]).toEqual([998, ["fits"]]);
 
     const over = join(outside, "over");
     await mkdir(over, { recursive: true });
@@ -1186,7 +1773,7 @@ describe("importDroppedPaths", () => {
     const stage = await createTestScratch("dohc-stage-");
     await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
     const outcome = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({ imported: [], skipped: 1, skippedSources: [{ path: "innocent.txt", reason: "link" }] });
     expect(existsSync(join(root, "innocent.txt"))).toBe(false);
     // Nothing landed in the workspace — the secret never left its directory.
     expect(await readdir(root)).toEqual([]);
@@ -1229,10 +1816,20 @@ describe("importDroppedPaths", () => {
     }
 
     const outcome = await importDroppedPaths(root, dropped, [root]);
-    expect(outcome).toEqual({ imported: ["Trip/ok.md"], skipped: dropped.length, folders: 1 });
+    expect(outcome).toEqual({
+      imported: ["Trip/ok.md"],
+      skipped: dropped.length,
+      skippedSources: expect.arrayContaining([
+        { path: "cfg%2fevil", reason: "name" },
+        { path: "cfg%2Fdeep", reason: "name" },
+        { path: "Trip/x%2fy.md", reason: "name" },
+      ]),
+      folders: ["Trip"],
+    });
     expect(await readdir(elsewhere)).toEqual([]);
     // The file dialog's path takes the same check.
-    expect(await copyIntoWorkspace(root, [encodedFile])).toEqual({ imported: [], skipped: 1 });
+    expect(await copyIntoWorkspace(root, [encodedFile]))
+      .toEqual({ imported: [], skipped: 1, skippedSources: [{ path: "cfg%2fevil", reason: "name" }] });
     expect(await readdir(elsewhere)).toEqual([]);
   });
 
@@ -1247,9 +1844,14 @@ describe("importDroppedPaths", () => {
     await mkdir(join(root, "docs"));
 
     expect(await importDroppedPaths(root, [join(outside, "Trip"), join(outside, SHARED_WITH_ME_FOLDER)], [root]))
-      .toEqual({ imported: [`Trip/${SHARED_WITH_ME_FOLDER}/notes.md`], skipped: 1, folders: 2 });
+      .toEqual({
+        imported: [`Trip/${SHARED_WITH_ME_FOLDER}/notes.md`],
+        skipped: 1,
+        skippedSources: [{ path: SHARED_WITH_ME_FOLDER, reason: "dohc-name" }],
+        folders: ["Trip"],
+      });
     expect(await importDroppedPaths(root, [join(outside, SHARED_WITH_ME_FOLDER)], [root], "docs"))
-      .toEqual({ imported: [`docs/${SHARED_WITH_ME_FOLDER}/plan.md`], skipped: 0, folders: 1 });
+      .toEqual({ imported: [`docs/${SHARED_WITH_ME_FOLDER}/plan.md`], skipped: 0, folders: [`docs/${SHARED_WITH_ME_FOLDER}`] });
   });
 
   // Another process that can write the dropped folder, but not read the
@@ -1303,13 +1905,14 @@ describe("importDroppedPaths", () => {
     await mkdir(join(trip, "sub"), { recursive: true });
     await writeFile(join(trip, "sub", "a.md"), "a");
     const screened = await screenDroppedPaths([trip], [root], "");
-    await rm(join(trip, "sub", "a.md"));
-    await writeFile(join(trip, "sub", "a.md"), "replaced");
+    // Written beside it first, so the replacement can't reuse a.md's inode.
+    await writeFile(join(trip, "sub", "a.md.new"), "replaced");
+    await rename(join(trip, "sub", "a.md.new"), join(trip, "sub", "a.md"));
 
     expect(await copyIntoWorkspace(root, screened.usable)).toMatchObject({
       imported: [],
       interrupted: true,
-      folders: 2,
+      folders: ["Trip"],
       stop: { file: "Trip/sub/a.md", refusal: "changed" },
     });
   });
@@ -1473,7 +2076,7 @@ describe("importDroppedPaths", () => {
       expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
         imported: ["Caf\u00e9/Cr\u00e8me/b.md", "Caf\u00e9/a.md"],
         skipped: 0,
-        folders: 2,
+        folders: ["Caf\u00e9"],
       });
       expect(await readFile(join(workspace, "Caf\u00e9", "Cr\u00e8me", "b.md"), "utf8")).toBe("b");
     } finally {
@@ -1490,7 +2093,11 @@ describe("importDroppedPaths", () => {
       [join(otherRoot, ".dohc", "credentials.json")],
       [root, otherRoot],
     );
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({
+      imported: [],
+      skipped: 1,
+      skippedSources: [{ path: "credentials.json", reason: "workspace-data" }],
+    });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
   });
 
@@ -1509,7 +2116,11 @@ describe("importDroppedPaths", () => {
       [join(stage, "alias", "credentials.json")],
       [root, otherRoot],
     );
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({
+      imported: [],
+      skipped: 1,
+      skippedSources: [{ path: "credentials.json", reason: "workspace-data" }],
+    });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
   });
 

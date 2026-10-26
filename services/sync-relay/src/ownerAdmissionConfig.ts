@@ -3,6 +3,7 @@ import {isAbsolute} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 // The relay builder bundles this declared dependency without publishing its private validator.
 import {liveValidation} from "./liveValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
@@ -41,7 +42,8 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
     maxIndexOperations: positive(validation.maxIndexOperations),
   };
   const validate = liveValidation.validator(policy);
-  const admission: OwnerOutboxAdmission = {trustedAccount,shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),validate};
+  const admission: OwnerOutboxAdmission = {trustedAccount,shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),
+    refusals: new OwnerKnownRefusals(),validate};
   return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
 }
 

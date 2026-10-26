@@ -3040,6 +3040,10 @@ fn left_folder<E>(
 }
 
 #[cfg(test)]
+#[path = "scene_unload_tests.rs"]
+mod scene_unload_tests;
+
+#[cfg(test)]
 mod left_folder_tests {
     use super::{LeftFolder, left_folder};
     use std::io::{Error, ErrorKind, Result};
@@ -3814,6 +3818,7 @@ mod hosted_refusal_tests {
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             3_000,
             &NoFaults,

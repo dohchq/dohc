@@ -65,7 +65,7 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
         } });
       const workspace = { workspaceId: "local", shareView };
       const adapter = sourceCaptureAdapter(new Map([["app/dataset.json", JSON.stringify(definition)]]), { workspaceId: "local" });
-      const ipc = createDatasetHandler({ flushSourceCapture: async () => [],
+      const ipc = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
         async withWorkspaceOperation(_caller: string, workspaceId, work) { if (workspaceId !== "local") throw Error("Wrong workspace"); return work({ workspace, signal: new AbortController().signal, assertCurrent() {} }); },
         namedDataForWorkspace: async () => data(), hostForWorkspace: vi.fn(), withAdapter: async (_workspace, work) => work(adapter), createSources: vi.fn(),
       });

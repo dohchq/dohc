@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   RelayUnauthorizedError,
@@ -15,6 +17,8 @@ import {
 } from "./shareViewFiles";
 import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import type { ShareMountRecord } from "./registryStore";
+import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareMountCommands,
   type ShareMountCommandDependencies,
@@ -160,6 +164,7 @@ function harness() {
 
   const files: ShareViewFiles = {
     lookup: vi.fn(async () => ({ files: [], folders: [] })),
+    linksEdges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})),
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     narrow: vi.fn(async () => undefined),
@@ -1145,8 +1150,13 @@ it("reconciles a revoked mount even when missing-pin detail lookup returns 404",
   h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientUserId: "recipient", grantedSelector: SELECTOR }];
   h.dependencies.fetchInfo = vi.fn(async () => { throw new ShareUnavailableError(); });
   const markEnded = vi.fn(async () => h.dependencies.updateMounts(WORKSPACE.workspaceId, rows => rows.map(row => ({ ...row, ended: true }))));
+  // The engine has opened the mount's store, so its refresh can say a pull is in flight.
+  const mountRoot = await createTestScratch("share-mount-commands-");
+  await mkdir(join(mountRoot, ".dohc", "local"), { recursive: true });
+  const opened = { localStateReady: true };
+  readLocalStateFrom({ currentBinding: () => opened, localStateOpenAt: async () => ({ current: () => true }) });
   const files = createShareViewFiles({
-    resolveTarget: () => preparedTarget(),
+    resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
     openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),
     resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
     pull: async () => { throw new ShareUnavailableError(); },

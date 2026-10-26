@@ -1,3 +1,4 @@
+import { installGraphFixture } from "../testing/graphPage.fixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
@@ -1251,6 +1252,52 @@ describe("editor groups", () => {
     expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
   });
 
+  it("closes an imported database in every group before its Undo reaches main", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["data.csv"], "data.csv")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "data.csv", kind: "file" as const }],
+      folders: [] as string[],
+    }));
+    // Past the preview's 500 rows, so the bound offers Import to SQLite.
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "name\n" + Array.from({ length: 501 }, (_, row) => `row ${row}`).join("\n"),
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    const undone = deferred<{ trashed: boolean }>();
+    // The database tabs still showing when Undo reaches main.
+    const shownAtUndo: number[] = [];
+    const undoDatabaseImport = vi.fn(() => {
+      shownAtUndo.push(screen.queryAllByTestId("tab-data.sqlite").length);
+      return undone.promise;
+    });
+    Object.assign(bridge, {
+      importToDatabase: vi.fn(async () => ({ operationId: "dohc-operation:import-1", path: "data.sqlite", tableName: "data", rowCount: 501 })),
+      undoDatabaseImport,
+      // The database views stay loading; this test is about their tabs.
+      readWorkspaceDatabase: vi.fn(() => new Promise(() => {})),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("csv-bound-import"));
+    await screen.findByTestId("tab-data.sqlite");
+    await user.click(screen.getByTestId("create-editor-group-right"));
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(within(right).getByTestId("tab-data.sqlite")).toBeTruthy());
+    expect(within(left).getByTestId("tab-data.sqlite")).toBeTruthy();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
+
+    // Both tabs are gone before Undo reaches main, so no view holds the file.
+    await waitFor(() => expect(undoDatabaseImport).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId, operationId: "dohc-operation:import-1" }));
+    expect(shownAtUndo).toEqual([0]);
+    expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
+    await act(async () => undone.resolve({ trashed: true }));
+  });
+
   it("does not keep save-first state after a dirty editor unmounts", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
@@ -1517,6 +1564,11 @@ describe("ui-state merge-on-load", () => {
             path: "docs/local.md",
             reason: "local-collision" as const,
           },
+          {
+            path: "docs/Notes.md",
+            reason: "spelling-collision" as const,
+            owner: "docs/notes.md",
+          },
           { path: "docs/locked.md", reason: "unreadable" as const },
         ],
         refusedOps: 0,
@@ -1576,6 +1628,10 @@ describe("ui-state merge-on-load", () => {
     );
     expect(notice.textContent).toContain(
       "Move or remove the file, then refresh.",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not receive docs/Notes.md. This machine treats docs/Notes.md and docs/notes.md as the same name. " +
+        "Ask the person who shared the files to rename one of them.",
     );
     expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
     expect(notice.textContent).toContain(
@@ -2601,20 +2657,21 @@ describe("ui-state merge-on-load", () => {
     );
     // The listing is held so the close cannot happen before the navigation.
     bridge.listWorkspaceFiles = vi.fn(() => listing.promise);
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [dmNode],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2649,20 +2706,21 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2699,20 +2757,21 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, fileThreadNode],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2754,14 +2813,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, first, second],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2769,6 +2828,7 @@ describe("ui-state merge-on-load", () => {
     // the sidebar. Every navigation from here leaves the active tab alone.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === first.path)!);
     const chatsTab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(first.channelId)}`);
@@ -2814,19 +2874,20 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2851,19 +2912,20 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2894,14 +2956,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2934,6 +2996,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2975,14 +3038,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, channel],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2990,6 +3053,7 @@ describe("ui-state merge-on-load", () => {
     // the sidebar.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === channel.path)!);
     expect((await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(channel.channelId)}`)).dataset.active).toBe("true");
@@ -3141,14 +3205,14 @@ describe("ui-state merge-on-load", () => {
       ],
       fileThreads: [],
     }));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     return Object.assign(bridge, {
       syncAnswers,
       listPersonalChatFeed: vi.fn(async () => ({
@@ -3248,6 +3312,7 @@ describe("ui-state merge-on-load", () => {
     await screen.findByTestId("chats-personal-feed");
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const callsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3280,6 +3345,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3329,6 +3395,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3369,6 +3436,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3417,6 +3485,7 @@ describe("ui-state merge-on-load", () => {
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3488,6 +3557,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3519,7 +3589,7 @@ describe("ui-state merge-on-load", () => {
   // `if (target)` branch cancels the pending DM.
   it("discards an in-flight DM navigation when a heading jump lands in the active file", async () => {
     const heading = {
-      path: "a.md#plan",
+      path: 'heading:["a.md","plan",0]',
       kind: "heading" as const,
       filePath: "a.md",
       headingAnchor: "plan",
@@ -3535,20 +3605,21 @@ describe("ui-state merge-on-load", () => {
         aboutVisible: false,
       }),
     );
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, heading],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());

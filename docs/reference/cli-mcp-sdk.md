@@ -74,11 +74,11 @@ Returns `{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`.
 
 ### `dohc_workspace_status`
 
-Report whether this workspace is local-only or cloud-synced.
+Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -89,6 +89,32 @@ Changes the workspace, so a shared view does not offer it.
 No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
+
+### `dohc_chat_links`
+
+Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.
+
+- `channelWireId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] } | null`.
+
+### `dohc_chat_file_mentions`
+
+Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.
+
+- `subject`: `{ path: string } | { objectId: string }`
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment, message, thread, channelId?, channelWireId?, channelName?, channelSlug?, channelKind? }[], unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor } | null`.
+
+### `dohc_links_edges`
+
+Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
+
+- `cursor`: `string`
+
+Returns `{ versionId, files: { objectId, path, title }[], entries: { kind, source, target, ordinal }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }`.
 
 ### `dohc_links_in`
 
@@ -107,6 +133,16 @@ Resolve wikilink or Markdown literals from one source document using the engine'
 - `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
 
 Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
+### `dohc_duplicate_file`
+
+Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, operationId, undo: { available: true } | { available: false, reason, paths }, path, materialized } | { ok: false, reason }`.
 
 ### `dohc_read_operation`
 
@@ -159,6 +195,60 @@ Changes the workspace, so a shared view does not offer it.
 - `id`: `integer`. Required.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
+
+### `dohc_save_recovery_copy`
+
+Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer, or on the server for a document it hosts (`storedOn`); dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. For edits the server keeps, dohc then tells the server the copy is saved, and the `recovery` becomes `copied`. `keptEdits` is `kept` when the edits stay where `storedOn` says, `copied` when the server may now release them, and `ended` for edits a Stop could not write: dohc no longer keeps those, and the copy holds them. Accepts every `recovery`. Pass the `incident` from `keptEdits` to save exactly those kept edits; without it, dohc saves edits a Stop could not write first. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`
+
+Returns `{ ok: true, copyPath, packagePath, folder, storedOn, keptEdits } | { ok: false, reason }`.
+
+### `dohc_retry_kept_edits`
+
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`. Required.
+
+Returns `{ ok: true, path } | { ok: false, reason }`.
+
+### `dohc_stop_again`
+
+Stop live editing again for a document whose Stop kept its edits, as Try again does on its row in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `not-written`, where dohc writes the kept edits into the file, or `stopping`, where it asks the server again to stop live editing. `keptEdits` is `recovered` once the file holds the edits, `kept` while dohc still keeps them, and `none` when it kept none. dohc refuses while the document is open in an editor. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`. Required.
+
+Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
+
+### `dohc_list_retained_copies`
+
+List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.
+
+A shared view keeps no old file copies, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, copies: { id, revision }[], more, total: { count, bytes } } | { ok: false, reason }`.
+
+### `dohc_delete_retained_copies`
+
+Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `copies`: `({ id: integer, revision: integer })[]`. Required.
+- `acceptLateWriteRisk`: `true`. Required.
+
+Returns `{ ok: true, deleted, skipped, failed, remaining: { count, bytes } } | { ok: false, reason }`.
 
 ### `dohc_read_change`
 
@@ -261,7 +351,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -270,11 +360,11 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
+Returns `{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/local/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
+Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -355,7 +445,7 @@ List the workspace's Chats groups (including the default #general) with each gro
 
 No arguments.
 
-Returns `{ ok: true, groups: { kind, id, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
+Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
 
 ### `dohc_start_group_chat`
 
@@ -456,27 +546,29 @@ Returns `{ ok: true, recordId, recordPath, kept? } | { ok: false, reason, partia
 
 ### `dohc_list_automation_runs`
 
-List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.
+List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `page`: `string`
+- `server`: `boolean`
 
-Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next } | { ok: false, reason }`.
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next } | { ok: false, reason }`.
 
 ### `dohc_read_automation_run`
 
-Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `run`: `string`. Required.
+- `server`: `boolean`
 
-Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } } | { ok: false, reason }`.
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } } | { ok: false, reason }`.
 
 ### `dohc_retry_automation_run`
 
@@ -545,11 +637,25 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+On Windows, dohc starts a chat agent with `NoDefaultCurrentDirectoryInExePath=1`, so in cmd the agent must run a program in the workspace folder as `.\name`, not by its bare name.
+
 ### `dohc links`
 
 Read and resolve document links.
 
 `indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields.
+
+#### `dohc links edges`
+
+```sh
+dohc links edges [options]
+```
+
+Read a bounded page of file links.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, files: { objectId, path, title }[], entries: { kind, source, target, ordinal }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }`.
 
 #### `dohc links in`
 
@@ -595,19 +701,31 @@ With `--json`, prints `{ schemaVersion, ok: true, workspaceId, workspaceSynced: 
 
 ### `dohc access`
 
-Read observed object grants and Sharing inventories.
+Read observed grants and request fresh Sharing inventories.
 
 Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage. Paths resolve from your current folder. Received selectors use their source workspace's coordinates.
 
-Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
+The object and sharing verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
 
-Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
+Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `joined`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read `dohc access sharing` afterward to inspect observations. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
 `unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
 
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 
 Collection answers report current access and capabilities, not share grants.
+
+#### `dohc access refresh`
+
+```sh
+dohc access refresh [options]
+```
+
+Request fresh Sharing observations with the same pacing as opening Sharing.
+
+Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations.
+
+With `--json`, prints `{ schemaVersion, status }` or `{ schemaVersion, status: "unavailable", reason }`. Uses socket verb `accessRefresh`.
 
 #### `dohc access object`
 
@@ -651,7 +769,7 @@ With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvi
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -729,6 +847,54 @@ Use - as the body to read it from stdin. The first message allows at most 64 KiB
 
 With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
 
+#### `dohc document kept-edits`
+
+```sh
+dohc document kept-edits [options]
+```
+
+List live documents whose edits the server refused, and where dohc keeps those edits.
+
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true }[] }`.
+
+#### `dohc document save-recovery-copy`
+
+```sh
+dohc document save-recovery-copy <path> [<incident>] [options]
+```
+
+Save a document's kept edits next to it.
+
+Accepts every recovery but unreadable. With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first. dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document. For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied. keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them. It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them. dohc writes these files itself, not as the agent that asked.
+
+With `--json`, prints `{ schemaVersion, ok: true, copyPath, packagePath, folder, storedOn, keptEdits }`.
+
+#### `dohc document retry-kept-edits`
+
+```sh
+dohc document retry-kept-edits <path> <incident> [options]
+```
+
+Send a document's kept edits to the server once more.
+
+Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps. For unreadable, dohc reads the kept edits again. It fails with the reason while it still cannot read them. A not-written or stopping document needs stop-again instead. Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document stop-again`
+
+```sh
+dohc document stop-again <path> <incident> [options]
+```
+
+Stop live editing again for a document whose Stop kept its edits.
+
+Take the incident from kept-edits. Accepts a recovery of not-written or stopping. For not-written, dohc writes the kept edits into the file. For stopping, it asks the server again to stop live editing. keptEdits is recovered once the file holds the edits, kept while dohc still keeps them, and none when it kept none. dohc refuses while the document is open in an editor. Run kept-edits again to follow it.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, keptEdits }`.
+
 ### `dohc chat`
 
 Read and post in Groups and threads.
@@ -743,7 +909,7 @@ dohc chat groups [options]
 
 List the Groups in this workspace.
 
-With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose? }[] }`.
+With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
 
 #### `dohc chat threads`
 
@@ -862,6 +1028,31 @@ Use at most one of --all, --group, or --thread.
 
 With `--json`, prints `{ schemaVersion, files: { threadId, path }[] }`.
 
+#### `dohc chat links`
+
+```sh
+dohc chat links <group> [options]
+```
+
+Read one page of files mentioned in a chat.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { channelWireId }, unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor, entries: { threadId, messageId, mentionedAtMs, file, author }[] }` or `null`.
+
+#### `dohc chat file-mentions`
+
+```sh
+dohc chat file-mentions [options]
+```
+
+Read one bounded page of file mentions.
+
+- `--subject <subject>`: A file path or objectId as JSON.
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { objectId, path } | null, entries: { attachment, message, thread, channelId?, channelWireId?, channelName?, channelSlug?, channelKind? }[], unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor }` or `null`.
+
 ### `dohc dataset`
 
 ```sh
@@ -876,12 +1067,14 @@ Each verb takes one JSON object that names workspaceId. Find workspaceId in .doh
 
 List Collections.
 
+On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others.
+
 - `workspaceId`: `string`. Required.
 - `after`: `UUID`
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
 
 #### `dohc dataset describe`
 
@@ -1478,6 +1671,22 @@ operationId names this removal. Retry failed items with the same operationId.
 
 Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCursor }`.
 
+### `dohc file`
+
+Change workspace files.
+
+Undo removes the copy while it is unchanged.
+
+#### `dohc file duplicate`
+
+```sh
+dohc file duplicate <path> [options]
+```
+
+Duplicate one file beside its source.
+
+With `--json`, prints `{ schemaVersion, ok: true, operationId, undo: { available: true } | { available: false, reason, paths }, path, materialized }`.
+
 ### `dohc history`
 
 Read History changes and undo deletes, moves, and renames.
@@ -1587,8 +1796,9 @@ List an automation's runs on this computer, newest first.
 Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID. When older runs remain, the last line gives the --page value that lists them.
 
 - `--page <page>`: List the older runs the last line of an earlier listing names.
+- `--server`: List the runs of the workspace's self-hosted server instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next }`.
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next }`.
 
 #### `dohc automation run`
 
@@ -1600,7 +1810,9 @@ Show one run: what started it, what each step changed, and why it failed.
 
 Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
 
-With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } }`.
+- `--server`: Show a run of the workspace's self-hosted server. It lists what the run changed, without steps.
+
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } }`.
 
 #### `dohc automation retry`
 

@@ -1,10 +1,12 @@
 import {createHash} from "node:crypto";
 import * as Y from "yjs";
 import {yDocToMarkdown} from "./import-export.js";
-import {createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
 
+import {restoreValidators, type RestoreArtifact} from "./liveRestoreValidation.js";
+
 type RestorePointInput = {
+  artifact?: RestoreArtifact;
   target: "selected";
   binding: {workspaceId: string; mainVersionId: string; objectId: string; lineageClaimId: string; currentPath: string};
   checkpoint: {bytes: Uint8Array};
@@ -23,11 +25,12 @@ export function resolveLiveRestorePoint(capture: RestorePointInput, policy: Orde
   if (capture.target !== "selected") throw new Error("Restore point requires the selected history capture.");
   const {workspaceId, mainVersionId, objectId, lineageClaimId, currentPath} = capture.binding;
   const document = {workspaceId, mainVersionId, objectId, lineageClaimId};
+  const {registration, journal} = restoreValidators(policy, capture.artifact);
   const last = capture.events.at(-1);
   const result = last
-    ? createLiveMarkdownJournalValidator(policy)({document, currentPath, checkpoint: capture.checkpoint.bytes,
+    ? journal({document, currentPath, checkpoint: capture.checkpoint.bytes,
       suffix: capture.events.slice(0, -1).map(event => event.updateBytes), candidate: last.updateBytes})
-    : createLiveMarkdownRegistrationValidator(policy)({document, currentPath, checkpoint: capture.checkpoint.bytes});
+    : registration({document, currentPath, checkpoint: capture.checkpoint.bytes});
   if (result.kind !== "accepted") throw new Error(`Restore point validation refused: ${result.reason}.`);
   const scratch = new Y.Doc({gc: false});
   try {

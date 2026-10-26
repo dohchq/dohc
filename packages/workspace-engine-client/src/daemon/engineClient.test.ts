@@ -65,7 +65,7 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
       admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"b".repeat(64),journalCursor:9,authority:null,
       restore:{operationId:"restore",checkpointDigest:"c".repeat(64),checkpointBytes:checkpoint,proof:{
         proposalDigest:"d".repeat(64),candidateDigest:metadata.accepted.receipt.updateDigest,
-        preparation:{fence:{operation:{operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
+        preparation:{fence:{operation:{point:{journalCursor:0,receiptDigest:"e".repeat(64)},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
           hostId:"host",newFence:1,origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
           point:{journalCursor:0,receiptDigest:"e".repeat(64),markdownDigest:"f".repeat(64),projectionDigest:"a".repeat(64)}},
         nativeSourceManifestDigest:"b".repeat(64),admitted:metadata,checkpointDigest:"c".repeat(64),sourceRanges:[],recordedAtMs:10}}}]);
@@ -85,42 +85,65 @@ describe("private owner delivery transport", () => {
   it.each([-1,0.5,Number.MAX_SAFE_INTEGER+1,NaN,Infinity])("rejects an invalid retirement cursor before sending: %s",async cursor => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
     const sent=vi.fn();peer.onEnvelope=sent;
-    try {await expect(transport.ownerYDocRelease(request,target.binding,cursor)).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
+    try {await expect(transport.ownerYDocRelease(request,target.binding,{acceptedCursor:cursor})).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
     finally {transport.close();}
+  });
+  // A Try again names the kept edits its record holds, and the Stop says which edits its release took.
+  it("sends a Try again with only its kept edits, and reads the kept edits a Stop names", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    let answered="2".repeat(64);
+    peer.onEnvelope=e=>{
+      if (e.type!=="request") return;
+      expect(e.params).toEqual({binding:target.binding,keptSnapshot:"1".repeat(64)});
+      peer.send({type:"response",id:e.id,result:{stops:[{...stopTarget,state:"released",retirementOwed:false,keptSnapshot:answered,materialized:true}]}});
+    };
+    try {
+      await expect(transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"X"})).rejects.toThrow("Invalid kept edits snapshot.");
+      expect(await transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"1".repeat(64)})).toMatchObject({keptSnapshot:"2".repeat(64),materialized:true});
+      answered="NOT-HEX".padEnd(64,"0");
+      await expect(transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"1".repeat(64)})).rejects.toThrow("Invalid Stop kept edits.");
+    } finally {transport.close();}
   });
   it.each(["valid", "negative", "extra", "unretired", "requested", "unbound"])("checks the deferred Stop contract: %s", async scenario => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
-    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",
+    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",materialized:false,
       ...(scenario==="unbound" ? {binding:null,relayDatabaseNamespace:""} : {}),
       deferred:{unsentEdits:scenario==="negative" ? -1 : 65,editable:false,...(scenario==="extra" ? {secret:"no"} : {})}};
     peer.onEnvelope=e=>{if (e.type==="request") peer.send({type:"response",id:e.id,result:{stops:[row]}});};
-    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, 0)).toEqual(row);
-      else await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);
+    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).toEqual(row);
+      else await expect(transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).rejects.toThrow(TypeError);
     } finally {transport.close();}
   });
   it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
+    // The first cancellation clears a finished Stop, which no list shows; the second finds none.
+    const finished = {...stopTarget, state: "released", retirementOwed: false};
+    let cleared = 0;
     peer.onEnvelope = e => {
       if (e.type !== "request") return;
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
-      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
-      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, state: action === "release" ? "released" : "requested"}]}});
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : action === "clear" ? {document: stopTarget.document} : {path: "a.md"});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? cleared++ === 0 ? [finished] : cleared === 2 ? [] : [finished, finished]
+        : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
-      expect((await transport.ownerYDocRelease(request, target.binding, 0)).state).toBe("released");
+      expect(await transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).toMatchObject({state: "released", materialized: true});
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
-      await transport.ownerYDocStopClear(request, "a.md");
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toEqual(finished);
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toBeUndefined();
+      await expect(transport.ownerYDocStopClear(request, stopTarget.document)).rejects.toThrow("Invalid Stop cancellation response.");
     } finally {transport.close();}
   });
-  it.each(["binding", "state", "extra", "namespace"])("rejects an invalid Stop release response: %s", async scenario => {
+  it.each(["binding", "state", "extra", "namespace", "unmaterialized", "materialized text"])("rejects an invalid Stop release response: %s", async scenario => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
-    const row = {...stopTarget, state: "released", ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
+    const row = {...stopTarget, state: "released", materialized: true, ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true}
+      : scenario === "unmaterialized" ? {materialized: undefined} : scenario === "materialized text" ? {materialized: "yes"} : {relayDatabaseNamespace: ""})};
     peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
-    try {await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);}
+    try {await expect(transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).rejects.toThrow(TypeError);}
     finally {transport.close();}
   });
   it("requests a Stop by its saved key and acknowledges an unenrolled retirement",async () => {

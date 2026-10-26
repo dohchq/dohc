@@ -23,6 +23,7 @@ mod rpc;
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 pub use events::AUTOMATION_CLAIMED_EVENT;
+pub use events::CAPTURE_IMPORT_PROGRESS_EVENT;
 pub use events::CAPTURE_INITIAL_SETTLED_EVENT;
 pub use events::CAPTURE_MOMENT_RECORDED_EVENT;
 pub use events::CAPTURE_NO_ATOMIC_PLACEMENT_EVENT;
@@ -67,7 +68,8 @@ use std::sync::MutexGuard;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
     replica_mode: Option<replica_mode::ReplicaMode>,
-    reader: std::sync::OnceLock<dohc_engine_reader::Reader>,
+    reader: std::sync::OnceLock<Arc<dohc_engine_reader::Reader>>,
+    reader_resolver: std::sync::OnceLock<Arc<dohc_engine_collab::reader_resolver::ReaderResolver>>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Arc<Mutex<rpc::live_application::Registry>>,
@@ -88,6 +90,12 @@ pub struct EngineService {
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+    /// One permit: rebuilds of recovery checkpoints, in any workspace, run one
+    /// at a time.
+    reconstructions: Arc<tokio::sync::Semaphore>,
+    /// Told when a rebuild starts waiting for the permit.
+    #[cfg(test)]
+    reconstruction_waits: tokio::sync::Notify,
     #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
@@ -162,7 +170,12 @@ impl EngineService {
     pub fn configure_reader(&self, config: dohc_engine_reader::Config) {
         let _ = self
             .reader
-            .set(dohc_engine_reader::Reader::new(Some(config)));
+            .set(Arc::new(dohc_engine_reader::Reader::new(Some(config))));
+        let _ = self.reader_resolver.set(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(
+                self.reader.get().unwrap().clone(),
+            ),
+        ));
     }
 
     pub fn new() -> Self {
@@ -182,6 +195,7 @@ impl EngineService {
         EngineService {
             replica_mode: None,
             reader: std::sync::OnceLock::new(),
+            reader_resolver: std::sync::OnceLock::new(),
             supervisor,
             handles: Mutex::new(HashMap::new()),
             live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),
@@ -225,6 +239,9 @@ impl EngineService {
             },
             events: EngineEvents::default(),
             capture_apply_probe: None,
+            reconstructions: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            reconstruction_waits: tokio::sync::Notify::new(),
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]

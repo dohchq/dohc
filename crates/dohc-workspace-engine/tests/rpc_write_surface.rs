@@ -146,13 +146,13 @@ async fn aggregate_history_reads_no_capture_mounts_and_their_read_only_handles()
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace_id = "no-capture-imported-history";
     let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"captureMode":"none"});
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(1, "workspace.open", None, params.clone()),
-        )
-        .await
-        .unwrap();
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(1, "workspace.open", None, params.clone()),
+    )
+    .await
+    .unwrap();
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     call(
@@ -196,7 +196,7 @@ async fn aggregate_history_reads_no_capture_mounts_and_their_read_only_handles()
         )
         .await,
     );
-    let attached = transport.call(RequestContext::unbounded(), request(5, "workspace.open", None, json!({
+    let attached = call_with_busy_retry(&transport,RequestContext::unbounded(), request(5, "workspace.open", None, json!({
         "rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"skipStartupMaintenance":true,
     }))).await.unwrap();
     let attached_handle: WorkspaceHandle =
@@ -235,7 +235,7 @@ async fn aggregate_history_reads_no_capture_mounts_and_their_read_only_handles()
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
 
     // A standalone maintenance-free read intentionally creates no capture driver either.
-    let read_only = transport.call(RequestContext::unbounded(), request(10, "workspace.open", None, json!({
+    let read_only = call_with_busy_retry(&transport,RequestContext::unbounded(), request(10, "workspace.open", None, json!({
         "rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"skipStartupMaintenance":true,
     }))).await.unwrap();
     let read_only_handle: WorkspaceHandle =
@@ -1289,21 +1289,21 @@ async fn secret_open_replay_writes_decrypted_plaintext_and_completes_once() {
     .await;
     assert!(!scratch.path().join("config/.env").exists());
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("open replay succeeds");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open replay succeeds");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -1365,21 +1365,21 @@ async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
 
-    let materialized = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("write replay materializes plaintext");
+    let materialized = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("write replay materializes plaintext");
     let materialized_handle: WorkspaceHandle =
         serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -1414,21 +1414,21 @@ async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
     )
     .await;
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("delete replay succeeds");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("delete replay succeeds");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(!scratch.path().join(".env").exists());
@@ -1476,21 +1476,21 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
 
-    let materialized = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("write replay materializes plaintext");
+    let materialized = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("write replay materializes plaintext");
     let materialized_handle: WorkspaceHandle =
         serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
     let target = scratch.path().join(".env");
@@ -1529,21 +1529,21 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
     )
     .await;
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("restore delete replay succeeds");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("restore delete replay succeeds");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -1600,21 +1600,21 @@ async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() 
     )
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
-    let materialized = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("write replay");
+    let materialized = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("write replay");
     let materialized_handle: WorkspaceHandle =
         serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
     std::fs::write(scratch.path().join(".env"), "TOKEN=externally-modified\n")
@@ -1642,21 +1642,21 @@ async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() 
     )
     .await;
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("adopt-current delete replay");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("adopt-current delete replay");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(!scratch.path().join(".env").exists());
@@ -1746,21 +1746,21 @@ async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
     )
     .await;
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("open replay");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open replay");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -1857,21 +1857,21 @@ async fn non_active_secret_write_survives_until_activation_and_reopen() {
     )
     .await;
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("open replay");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open replay");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -1912,21 +1912,21 @@ async fn non_active_secret_write_survives_until_activation_and_reopen() {
         json!({}),
     )
     .await;
-    let activated = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                10,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("active version replays its pending secret");
+    let activated = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            10,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("active version replays its pending secret");
     let activated_handle: WorkspaceHandle =
         serde_json::from_value(activated.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -2019,21 +2019,21 @@ async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
     assert_eq!(orphan_status, "pending");
     drop(connection);
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                5,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("orphan secret job is skipped");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            5,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("orphan secret job is skipped");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -2104,21 +2104,21 @@ async fn active_secret_write_then_delete_reopens_without_materializing_stale_pla
     )
     .await;
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                5,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("superseded write does not brick open");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            5,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("superseded write does not brick open");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(!scratch.path().join(".env").exists());
@@ -2226,21 +2226,21 @@ async fn replicated_apply_pending_secret_delete_reopens_without_bricking() {
         .expect("replicated delete job");
     assert_eq!(status, "pending", "apply exercises the pending-delete path");
     drop(connection);
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                8,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("replicated pending delete replays");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            8,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("replicated pending delete replays");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(!scratch.path().join(".env").exists());
@@ -2366,21 +2366,21 @@ async fn newer_non_active_marker_does_not_suppress_active_secret_delete() {
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
     std::fs::write(scratch.path().join(".env"), "ACTIVE=delete-me\n").expect("seed active disk");
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                10,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("active delete replay");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            10,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("active delete replay");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(!scratch.path().join(".env").exists());
@@ -2448,21 +2448,21 @@ async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() 
         )
         .expect("tamper auth tag");
     drop(connection);
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                5,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("a superseded tampered secret must not brick open");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            5,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("a superseded tampered secret must not brick open");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -2529,21 +2529,21 @@ async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
         )
         .expect("tamper auth tag");
     drop(connection);
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("tampered replay is skipped without bricking open");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("tampered replay is skipped without bricking open");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -2606,21 +2606,21 @@ async fn secret_disk_symlink_at_path_does_not_brick_open() {
     std::fs::write(&outside, "outside stays intact\n").expect("outside file");
     std::os::unix::fs::symlink(&outside, scratch.path().join(".env")).expect("secret symlink");
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("secret symlink only skips its replay job");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("secret symlink only skips its replay job");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -2690,21 +2690,21 @@ async fn secret_symlinked_parent_never_writes_outside_workspace() {
     let outside = ScratchDir::new().expect("external directory");
     std::os::unix::fs::symlink(outside.path(), scratch.path().join("config"))
         .expect("secret parent symlink");
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("ancestor refusal only skips the secret replay job");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("ancestor refusal only skips the secret replay job");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -2777,21 +2777,21 @@ async fn planted_secret_temp_symlink_is_never_followed() {
         .path()
         .join(".dohc-write-secret-mat-temp-symlink-secret-write.tmp");
     std::os::unix::fs::symlink(&outside_file, &temp).expect("planted temp symlink");
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("temp refusal only skips the secret replay job");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("temp refusal only skips the secret replay job");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -2864,21 +2864,21 @@ async fn planted_secret_temp_regular_file_is_unlinked_for_recovery() {
         .path()
         .join(".dohc-write-secret-mat-temp-regular-secret-write.tmp");
     std::fs::write(&temp, "PLANTED\n").expect("plant a regular file at the predictable temp path");
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("regular temp collision is recovered");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("regular temp collision is recovered");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -2946,21 +2946,21 @@ async fn crashed_secret_write_recovers_after_reopen() {
     std::fs::write(&temp, "TOKEN=recovered-after-crash\n")
         .expect("model durable temp left after flush-before-rename crash");
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen recovers the durable crashed temp");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen recovers the durable crashed temp");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -3017,21 +3017,21 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace = "ws-rpcd-secret-symlinked-root";
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": aliased_root.to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("open through workspace root alias");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": aliased_root.to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open through workspace root alias");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     call(
@@ -3059,21 +3059,21 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": aliased_root.to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen through workspace root alias");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": aliased_root.to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen through workspace root alias");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert_eq!(
@@ -3149,21 +3149,21 @@ async fn secret_junctioned_parent_never_writes_outside_workspace() {
         status.success(),
         "junction creation must succeed without elevation"
     );
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("ancestor reparse refusal only skips the secret replay job");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("ancestor reparse refusal only skips the secret replay job");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -3224,21 +3224,21 @@ async fn active_secret_write_blocked_by_directory_stays_pending() {
     let target = scratch.path().join(".env");
     std::fs::create_dir(&target).expect("directory at active secret write path");
     std::fs::write(target.join("keep.txt"), "do not replace\n").expect("sentinel");
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("blocked active secret write does not brick open");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("blocked active secret write does not brick open");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(target.is_dir());
@@ -3305,21 +3305,21 @@ async fn secret_directory_at_path_does_not_brick_open() {
     )
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
-    let materialized = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("materialize secret before scheduling delete");
+    let materialized = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("materialize secret before scheduling delete");
     let materialized_handle: WorkspaceHandle =
         serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
     call(
@@ -3350,21 +3350,21 @@ async fn secret_directory_at_path_does_not_brick_open() {
     std::fs::create_dir(&target).expect("directory at secret path");
     std::fs::write(target.join("keep.txt"), "do not recurse\n").expect("directory sentinel");
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("secret directory only skips its replay job");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("secret directory only skips its replay job");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -3426,21 +3426,21 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
     )
     .await;
     call(&transport, &handle, 3, "workspace.close", json!({})).await;
-    let materialized = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("materialize secret before scheduling delete");
+    let materialized = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            4,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("materialize secret before scheduling delete");
     let materialized_handle: WorkspaceHandle =
         serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
     call(
@@ -3476,21 +3476,21 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
         std::fs::write(target.join("keep.txt"), "do not remove\n").expect("directory sentinel");
     }
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("blocked special target does not brick open");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("blocked special target does not brick open");
     let reopened_handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     assert!(
@@ -3539,7 +3539,8 @@ async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
     });
     for (id, key_present) in [(2, false), (3, true)] {
         if key_present {
-            dohc_engine_crypto::create_key_file(scratch.path()).expect("create key file");
+            dohc_engine_crypto::create_key_file(&scratch.path().join(".dohc/engine"))
+                .expect("create key file");
         }
         let error = transport
             .call(
@@ -4492,21 +4493,21 @@ async fn rollback_rejects_sync_record_only_moment() {
     drop(connection);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-sync-only",
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-sync-only",
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let error = transport
         .call(
@@ -5228,7 +5229,18 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge" }))).await.expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge" }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let compared = call(
         &transport,
@@ -5258,21 +5270,21 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-merge-conflict-id"
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-merge-conflict-id"
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     call_keyed(
         &transport,
@@ -5339,21 +5351,21 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-binary-merge-wire"
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-binary-merge-wire"
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
 
@@ -5469,7 +5481,7 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-request-id");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge-request-id" }))).await.expect("open");
+    let opened = call_with_busy_retry(&transport,RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge-request-id" }))).await.expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let before = moments(&transport, &handle, 2).await.len();
     let params = json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api" });
@@ -5523,21 +5535,21 @@ async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-cross-kind");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-merge-cross-kind",
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-merge-cross-kind",
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     write(
         &transport,
@@ -5575,21 +5587,21 @@ async fn merge_on_a_leased_target_is_refused() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-lease");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-merge-lease",
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-merge-lease",
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let opened = call(
         &transport,
@@ -5634,7 +5646,7 @@ async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-compare");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-compare" }))).await.expect("open");
+    let opened = call_with_busy_retry(&transport,RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-compare" }))).await.expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let page = call(
         &transport,
@@ -5797,21 +5809,21 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
     };
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-keyset-compare",
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "ws-rpcd-keyset-compare",
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let mut actual = BTreeMap::new();
     let mut cursor: Option<String> = None;
@@ -6035,21 +6047,21 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let capped = call(
@@ -6519,21 +6531,21 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     );
     drop(connection);
 
-    let reopened_a = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                7,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_a,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen workspace A");
+    let reopened_a = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            7,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_a,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen workspace A");
     let handle_a: WorkspaceHandle = serde_json::from_value(reopened_a.result["workspace"].clone())
         .expect("reopened workspace A handle");
     let conflict_happy = call(
@@ -6556,13 +6568,13 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         "rootDir": scratch_b.path().to_string_lossy(),
         "workspaceId": "ws-rpcd-blob-scope-b",
     });
-    let created_b = transport
-        .call(
-            RequestContext::unbounded(),
-            request(10, "workspace.open", None, open_b.clone()),
-        )
-        .await
-        .expect("create workspace B");
+    let created_b = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(10, "workspace.open", None, open_b.clone()),
+    )
+    .await
+    .expect("create workspace B");
     let created_b: WorkspaceHandle =
         serde_json::from_value(created_b.result["workspace"].clone()).expect("workspace B handle");
     call(&transport, &created_b, 11, "workspace.close", json!({})).await;
@@ -6575,13 +6587,13 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(conflict_payload, conflict_sha);
     drop(connection);
 
-    let opened_b = transport
-        .call(
-            RequestContext::unbounded(),
-            request(12, "workspace.open", None, open_b),
-        )
-        .await
-        .expect("open workspace B");
+    let opened_b = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(12, "workspace.open", None, open_b),
+    )
+    .await
+    .expect("open workspace B");
     let handle_b: WorkspaceHandle =
         serde_json::from_value(opened_b.result["workspace"].clone()).expect("workspace B handle");
     let refused = transport
@@ -6718,21 +6730,21 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
     }
     drop(connection);
 
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                5,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            5,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen");
     let handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
     let corrupt = transport
@@ -6899,21 +6911,21 @@ async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
     let workspace_id = "ws-rpcd-binary-removal";
     seed_binary_before_fork(scratch.path(), workspace_id);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
 

@@ -5,7 +5,7 @@ import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
-import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
+import { Fragment, type Node as ProseMirrorNode, type ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   ChevronDown,
@@ -214,13 +214,17 @@ function buildBlockControlDecorations(
     );
   });
 
-  return DecorationSet.create(doc, decorations);
+  // Each widget sits on the boundary before its block, inside no block.
+  // Built against the full document, ProseMirror checks every widget against
+  // every block, so each Enter cost time quadratic in the document's length.
+  // The document without its blocks gives the same set.
+  return DecorationSet.create(doc.copy(Fragment.empty), decorations);
 }
 
 /**
  * A text-only replacement cannot change the set or kind of top-level blocks.
  * Keeping the persistent decoration tree and mapping its positions avoids
- * rebuilding two decorations for every block while typing. Structural edits,
+ * rebuilding a widget for every block while typing. Structural edits,
  * node replacements, and multi-step transactions still take the
  * full rebuild path below.
  */

@@ -5,10 +5,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createWorkspaceFilesIpc } from "./workspaceFilesIpc";
+import { registerWorkspaceHeadingsIpcHandlers, createWorkspaceFilesIpc } from "./workspaceFilesIpc";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { registerOperations } from "./operationTable";
-import { registerWorkspaceGraphIpcHandlers } from "./workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
 import { createExplorerMenuIpc } from "./explorerMenuIpc";
 import { explorerMenuOperations } from "./explorerMenuOperations";
@@ -18,7 +17,6 @@ import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, ExplorerMenuEntri
 import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
-import { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
 import { WorkspaceFileListingCache } from "../workspaces/workspaceFileListingCache";
 import { createWorkspaceFileMutationOwner } from "../workspaces/workspaceFileMutationOwner";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
@@ -28,6 +26,7 @@ import { listFiles } from "../workspaces/workspaceFiles";
 import { shareViewWriteScopeOf, workspaceWriteRefusal, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 type Sender = { id: number };
 type Event = { sender: Sender; trusted: boolean };
@@ -44,7 +43,7 @@ async function harness() {
   let generation = 1;
   let physicalCurrent = true;
   let rendererCurrent = true;
-  const state = { workspaceGraph: new WorkspaceGraphIndex() };
+  const state = {};
   const withOperation = createRendererWorkspaceOperationRunner({
     currentSession: (_sender: Sender) => {
       const captured = generation;
@@ -79,7 +78,7 @@ async function harness() {
     read: async () => { throw new Error("unexpected shared read"); },
   };
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
-    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: trusted,
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
       assertCurrent: () => operation.assertCurrent(),
@@ -126,20 +125,8 @@ async function harness() {
     withActiveWorkspace: (event: Event, id, message, work) => withOperation(event.sender, id, message, work),
   }, workspaceFileOperations, fileOwner);
 
-  type GraphDependencies = Parameters<typeof registerWorkspaceGraphIpcHandlers<Sender, Event, Workspace, Operation>>[0];
-  const capture = vi.fn(async () => ({ workspace }));
-  const syncChannels = vi.fn(async () => 0);
-  const store: ReturnType<GraphDependencies["linkedChatStoreFor"]> = {
-    listThreads: vi.fn(async () => []), listChannels: vi.fn(async () => []),
-    getChannelWireId: vi.fn(async () => null), listThreadAttachments: vi.fn(async () => []),
-  };
-  const resolveFiles = vi.fn<GraphDependencies["resolveEngineFiles"]>(async (_workspace, targets) => targets.map(() => ({ status: "absent" })));
-  registerWorkspaceGraphIpcHandlers<Sender, Event, Workspace, Operation>({
-    registerHandler, assertTrustedSender: trusted, withRendererWorkspaceOperation: withOperation,
-    workspaceFileListings: listings, listOwnedWorkspaceFilesFor: listing,
-    readOwnedWorkspaceTextFor: readText, requireEngineCapture: capture,
-    syncWorkspaceSharedChannels: syncChannels, linkedChatStoreFor: () => store,
-    resolveEngineFiles: resolveFiles,
+  registerWorkspaceHeadingsIpcHandlers<Sender, Event, Workspace, Operation>({
+    registerHandler, assertTrustedSender: trusted, withRendererWorkspaceOperation: withOperation, readOwnedWorkspaceTextFor: readText,
   });
 
   type MenuDependencies = Parameters<typeof registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>>[0];
@@ -167,7 +154,7 @@ async function harness() {
   };
   return {
     workspace, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
-    openPath, reveal, renderPdf, notify, capture, syncChannels, store, resolveFiles, buildMenu,
+    openPath, reveal, renderPdf, notify, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     reenterWorkspace: () => { generation += 1; },
@@ -210,6 +197,8 @@ describe("registered workspace file handlers", () => {
 
   it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     const root = h.workspace.rootPath;
     const foreignPath = collision === "root" ? "app/notes.txt"
       : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
@@ -251,6 +240,8 @@ describe("registered workspace file handlers", () => {
 
   it("keeps foreign descendants added to a created folder before rollback", async () => {
     const h = await harness();
+    // Rollback deletes what it made, through the workspace trash.
+    await openedLocalState(h.workspace);
     await expect(createFirstAppFiles({
       workspaceId: "workspace", files: [], folders: [],
       mutations: {
@@ -271,14 +262,14 @@ describe("registered workspace file handlers", () => {
     expect(await readdir(join(h.workspace.rootPath, "app"))).toEqual(["scripts"]);
   });
 
-  it("registers all file, graph, and menu channels with their trust and parser order", async () => {
+  it("registers all file, heading, and menu channels with their trust and parser order", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       workspaceFileOperations.listWorkspaceFiles.channel, workspaceFileOperations.createWorkspaceFile.channel, workspaceFileOperations.createWorkspaceFolder.channel,
-      workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
+      workspaceFileOperations.duplicateWorkspaceFile.channel, workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
-      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph,
+      workspaceFileOperations.openFileExternally.channel,
       CHANNELS.listWorkspaceHeadings, CHANNELS.showWorkbenchMenu,
       explorerMenuOperations.readExplorerMenu.channel, explorerMenuOperations.revealExplorerPath.channel,
     ]);
@@ -467,75 +458,17 @@ describe("registered workspace file handlers", () => {
   });
 });
 
-describe("registered graph and heading handlers", () => {
-  it("reads real links, backlinks, and repeated headings through the existing graph owner", async () => {
+describe("registered heading handler", () => {
+  it("reads repeated headings through the file owner", async () => {
     const h = await harness();
-    // Go to and backlinks use files while the engine's deferred index is not ready.
-    h.capture.mockRejectedValue(new Error("link index not ready"));
-    h.resolveFiles.mockRejectedValue(new Error("link index not ready"));
     await writeFile(join(h.workspace.rootPath, "alpha.md"), "# Alpha\n[[beta]]\n");
     await writeFile(join(h.workspace.rootPath, "beta.md"), "# Same\n\n# Same\n");
-    await expect(h.invoke(CHANNELS.readWorkspaceGraph)).resolves.toMatchObject({
-      nodes: expect.arrayContaining([expect.objectContaining({ path: "alpha.md" }), expect.objectContaining({ path: "beta.md" })]),
-      edges: [{ source: "alpha.md", target: "beta.md", kind: "wikilink" }],
-    });
+
     await expect(h.invoke(workspaceFileOperations.listWorkspaceFiles.channel)).resolves.toMatchObject({
       files: expect.arrayContaining([expect.objectContaining({ path: "alpha.md" }), expect.objectContaining({ path: "beta.md" })]),
     });
-    expect(h.capture).not.toHaveBeenCalled();
-    expect(h.resolveFiles).not.toHaveBeenCalled();
     const headings = await h.invoke(CHANNELS.listWorkspaceHeadings, { workspaceId: "workspace", path: "beta.md" }) as { headings: { occurrence: number }[] };
     expect(headings.headings.map((heading) => heading.occurrence)).toEqual([0, 1]);
-  });
-
-  it("uses canonical object paths for chat mentions and omits removed objects", async () => {
-    const h = await harness();
-    await writeFile(join(h.workspace.rootPath, "current.md"), "# Current\n");
-    type Thread = Awaited<ReturnType<typeof h.store.listThreads>>[number];
-    type Attachment = Awaited<ReturnType<typeof h.store.listThreadAttachments>>[number];
-    vi.mocked(h.store.listThreads).mockResolvedValue([{ id: "thread", workspaceId: h.workspace.workspaceId, title: "Discussion", createdAtMs: 1, updatedAtMs: 1 } satisfies Thread]);
-    vi.mocked(h.store.listThreadAttachments).mockResolvedValue([
-      { messageId: "message", objectId: "present", pathHint: "old.md" } as Attachment,
-      { messageId: "removed-message", objectId: "removed", pathHint: "current.md" } as Attachment,
-      { messageId: "invalid-hint", pathHint: "../outside.md" } as Attachment,
-      { messageId: "mounted-legacy-hint", pathHint: "shared-with-me/Shared/a.md" } as Attachment,
-      { messageId: "duplicate", objectId: "present", pathHint: "another-old-hint.md" } as Attachment,
-    ]);
-    h.resolveFiles.mockResolvedValue([
-      { status: "found", objectId: "present", path: "current.md" }, { status: "absent" }, { status: "invalid" }, { status: "absent" },
-    ]);
-    h.syncChannels.mockResolvedValue(2);
-    const graph = await h.invoke(CHANNELS.readWorkspaceGraph, { workspaceId: "workspace", includeChatMentions: true }) as {
-      nodes: { path: string }[]; edges: { target: string }[]; sharedChannelRowsUncovered: number;
-    };
-    expect(graph.sharedChannelRowsUncovered).toBe(2);
-    expect(graph.nodes.some((node) => node.path === "current.md")).toBe(true);
-    expect(graph.nodes.some((node) => node.path === "old.md")).toBe(false);
-    expect(graph.edges).toHaveLength(1);
-    expect(h.capture).toHaveBeenCalledWith("workspace", "Chat mentions");
-    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [workspaceFileRef("workspace", "present"), workspaceFileRef("workspace", "removed"), { path: "../outside.md" }, { path: "shared-with-me/Shared/a.md" }]);
-  });
-
-  it("received graph mentions follow token identity after rename and omit deleted tokens", async () => {
-    const h = await harness();
-    const objectId = "share-object:v1:" + "a".repeat(64), receivedSource = "share-source:v1:" + "b".repeat(64);
-    h.workspace.shareView = { shareId: "share", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["current.md"], versionId: null, access: "view" }, receivedIdentity: { receivedSource, grantId: "grant", generation: 1 } };
-    await writeFile(join(h.workspace.rootPath, "current.md"), "# Current\n");
-    vi.mocked(h.store.listThreads).mockResolvedValue([{ id: "thread", workspaceId: "workspace", title: "Chat", createdAtMs: 1, updatedAtMs: 1 }]);
-    vi.mocked(h.store.listThreadAttachments).mockResolvedValue([{ messageId: "message", objectId, pathHint: "old.md" } as Awaited<ReturnType<typeof h.store.listThreadAttachments>>[number]]);
-    const engine = new VersionedLoopbackEngine();
-    engine.seedTextFile({ workspace: "workspace", path: "current.md", text: "# Current", objectId });
-    const adapter = new VersionedLiveAdapter({ close() {}, sendRequest: request => engine.sendRequest(request) }, "workspace", { workspaceId: "workspace" });
-    h.resolveFiles.mockImplementation(createEngineFileResolver(async (_workspace: { workspaceId: string; shareView?: unknown }, work) => work(adapter), async () => [{
-      workspace: h.workspace, pin: h.workspace.shareView!.receivedIdentity!,
-      selector: { paths: ["current.md"], versionId: null, access: "view" as const }, assertCurrent() {},
-    }]));
-    const input = { workspaceId: "workspace", includeChatMentions: true };
-    await expect(h.invoke(CHANNELS.readWorkspaceGraph, input)).resolves.toMatchObject({ edges: [expect.objectContaining({ target: "current.md" })] });
-    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [{ source: { receivedSource }, target: { kind: "file", objectId }, labels: { name: "", displayKind: "binary" } }]);
-    expect(h.capture).not.toHaveBeenCalled();
-    h.resolveFiles.mockResolvedValue([{ status: "absent" }]);
-    await expect(h.invoke(CHANNELS.readWorkspaceGraph, input)).resolves.toMatchObject({ edges: [] });
   });
 
   it("rejects a heading response after renderer retirement", async () => {
@@ -568,7 +501,6 @@ describe("registered native menu handlers", () => {
 
   it("derives sharing and update controls from main-owned state", async () => {
     const h = await harness();
-    h.workspace.remote = { serverUrl: "https://account.example", ownerUserId: "owner" };
     const file = { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false };
     expect(await h.invoke(explorerMenuOperations.readExplorerMenu.channel, file)).toContainEqual({ kind: "item", label: "Share…", id: "share" });
     h.setSharedScope({ access: "view", ended: false });
@@ -579,6 +511,24 @@ describe("registered native menu handlers", () => {
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: "Update and Restart", enabled: true }),
     ]));
+  });
+
+  // A workspace that does not sync still offers Share…, as the toolbar does:
+  // the dialog says sharing needs sync and leads to setting it up.
+  it("offers Share… on a workspace without sync, but not on the root, a mount path or a shared view", async () => {
+    const h = await harness();
+    expect(h.workspace.remote).toBeUndefined();
+    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") =>
+      ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, { workspaceId: "workspace", path, kind, pinned: false }),
+      ).some((entry) => entry.kind === "item" && entry.label === "Share…");
+    expect(await offersShare("notes.md", "file")).toBe(true);
+    expect(await offersShare("notes", "folder")).toBe(true);
+    expect(await offersShare(undefined, "root")).toBe(false);
+    expect(await offersShare("shared-with-me/sam/notes.md", "file")).toBe(false);
+    expect(await offersShare("shared-with-me/sam", "folder")).toBe(false);
+    h.setSharedScope({ access: "edit", ended: false });
+    expect(await offersShare("notes.md", "file")).toBe(false);
   });
 
   // main's own reading of the registry marker, through the entries it

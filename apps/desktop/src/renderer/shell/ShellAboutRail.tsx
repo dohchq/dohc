@@ -6,6 +6,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AboutRail } from "../workbench/AboutRail";
+import { isHistoryPaused } from "../workbench/EngineHistory";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 import { parseTab, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
 import { useAboutConversation } from "../workbench/aboutConversation";
@@ -23,7 +24,16 @@ const LazyAboutConversationPanel = lazy(() =>
   })),
 );
 
+const LazyAboutFileChatsOff = lazy(() =>
+  import("../workbench/About").then((mod) => ({
+    default: mod.AboutFileChatsOff,
+  })),
+);
+
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
+
+// A conversation's Links read as About shows it; Access waits to be opened.
+const CONVERSATION_SECTIONS_OPEN = { links: true, access: false };
 
 // A file's chat opened from search, a mention or the graph. The shell mints
 // one per hit and names the tab it belongs to, so the hit lives with the
@@ -54,11 +64,17 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   searchChatTarget: AboutSearchHit | null;
   onSearchHitRead: () => void;
   onSearchHitClosed: () => void;
-  openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
+  openPathWithHeading: NonNullable<LinkedChatsPanelProps["onOpenPath"]>;
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
+  onAgentWaitsForTrust?: LinkedChatsPanelProps["onAgentWaitsForTrust"];
   historyRevision: number;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
+  // Changes whenever the open file re-reads: history growth, a version
+  // switch, or a share mount's pull.
+  linksRevision: number;
+  openPathAtLine: LinkedChatsPanelProps["links"]["onOpenLink"];
+  openChatMention: NonNullable<LinkedChatsPanelProps["links"]["onOpenChat"]>;
   aboutNotices: LinkedChatsPanelProps["notices"];
   accessContext: LinkedChatsPanelProps["accessContext"];
 }) {
@@ -79,8 +95,12 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     openPathWithHeading,
     onChatsThreadRead,
     reportFailureMessage,
+    onAgentWaitsForTrust,
     historyRevision,
     openMoment,
+    linksRevision,
+    openPathAtLine,
+    openChatMention,
     aboutNotices,
     accessContext,
   } = props;
@@ -97,7 +117,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   // Null for a tab that is not a conversation's.
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
-  const [conversationAccessOpen, setConversationAccessOpen] = useState(false);
+  const [conversationSections, setConversationSections] = useState(CONVERSATION_SECTIONS_OPEN);
   const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
   return (
     <AboutRail
@@ -119,8 +139,22 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
           //
           // A shared view needs no capture and waits for no decision: main
           // answers its per-file chat from the share scope.
+          //
+          // A file's links come from the engine's own index, not from
+          // capture, so they stay above the fact.
           !captureDecided ? (
             loading
+          ) : activeDocumentPath ? (
+            <Suspense fallback={loading}>
+              <LazyAboutFileChatsOff
+                workspaceId={workspaceId}
+                path={activeDocumentPath}
+                revision={linksRevision}
+                onOpenLink={openPathAtLine}
+                notices={aboutNotices}
+                words={chatsOffCopy(syncStatus)}
+              />
+            </Suspense>
           ) : (
             <div
               data-testid="about-rail-off"
@@ -136,8 +170,9 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             <LazyAboutConversationPanel
               workspaceId={workspaceId}
               conversation={conversation}
-              accessOpen={conversationAccessOpen}
-              onToggleAccess={() => setConversationAccessOpen((open) => !open)}
+              sectionsOpen={conversationSections}
+              onToggleSection={(id) => setConversationSections((open) => ({ ...open, [id]: !open[id] }))}
+              onOpenFile={openPathWithHeading}
               notices={aboutNotices}
               accessContext={accessContext}
             />
@@ -151,7 +186,13 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               aboutTabOpen={aboutTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
-                : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
+                : { history: { revision: historyRevision, paused: isHistoryPaused(syncStatus), onOpenMoment: openMoment } })}
+              // Chats that link here are a Chats call, refused without capture.
+              links={{
+                revision: linksRevision,
+                onOpenLink: openPathAtLine,
+                ...(captureAvailable ? { onOpenChat: openChatMention } : {}),
+              }}
               initialThread={pendingHit?.thread ?? null}
               initialFocusMessageId={pendingHit?.focusMessageId}
               onInitialThreadConsumed={onSearchHitRead}
@@ -159,6 +200,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}
+              onAgentWaitsForTrust={onAgentWaitsForTrust}
               notices={aboutNotices}
               accessContext={accessContext}
             />

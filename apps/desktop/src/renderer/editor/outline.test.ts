@@ -42,6 +42,12 @@ describe("extractOutline", () => {
     ]);
   });
 
+  it("finds a heading nested in a container block", () => {
+    // blockquote at 0 opens; its heading starts at 1.
+    const d = doc(schema.node("blockquote", null, [heading(2, "Quoted")]));
+    expect(extractOutline(d)).toEqual([{ level: 2, text: "Quoted", pos: 1 }]);
+  });
+
   it("ignores non-heading nodes entirely", () => {
     const d = doc(paragraph("not a heading"), codeBlock("# not markdown here"));
     expect(extractOutline(d)).toEqual([]);
@@ -66,39 +72,27 @@ describe("extractOutline", () => {
 });
 
 describe("resolveActiveHeadingIndex", () => {
-  const tops = [0, 200, 500, 900];
+  const headings = [0, 200, 500, 900].map((pos) => ({ pos }));
 
   it("returns -1 for an empty heading list", () => {
     expect(resolveActiveHeadingIndex([], 500)).toBe(-1);
   });
 
-  it("returns 0 before scrolling past the first heading", () => {
-    expect(resolveActiveHeadingIndex(tops, 0)).toBe(0);
+  it("returns 0 before the reading position reaches the first heading", () => {
+    expect(resolveActiveHeadingIndex([{ pos: 100 }], 50)).toBe(0);
   });
 
-  it("picks the last heading whose top has scrolled past scrollTop", () => {
-    expect(resolveActiveHeadingIndex(tops, 250)).toBe(1);
-    expect(resolveActiveHeadingIndex(tops, 899)).toBe(2);
-    expect(resolveActiveHeadingIndex(tops, 900)).toBe(3);
-    expect(resolveActiveHeadingIndex(tops, 5000)).toBe(3);
+  it("picks the last heading at or before the reading position", () => {
+    expect(resolveActiveHeadingIndex(headings, 250)).toBe(1);
+    expect(resolveActiveHeadingIndex(headings, 899)).toBe(2);
+    expect(resolveActiveHeadingIndex(headings, 900)).toBe(3);
+    expect(resolveActiveHeadingIndex(headings, 5000)).toBe(3);
   });
 
-  it("applies a readingOffset to nudge the threshold down from the viewport top", () => {
-    // Without an offset, scrollTop=150 hasn't reached heading 1 (top 200) yet.
-    expect(resolveActiveHeadingIndex(tops, 150)).toBe(0);
-    // With a 60px reading offset, the effective threshold is 210 — past it.
-    expect(resolveActiveHeadingIndex(tops, 150, 60)).toBe(1);
-  });
-
-  it("is exact at the boundary (top === scrollTop + offset counts as reached)", () => {
-    expect(resolveActiveHeadingIndex([100], 100)).toBe(0);
-    expect(resolveActiveHeadingIndex([100], 99)).toBe(0); // still index 0, nothing before it
-  });
-
-  it("searches a long cached outline without scanning every heading", () => {
+  it("searches a long outline without reading every heading", () => {
     let reads = 0;
-    const cachedTops = new Proxy(
-      Array.from({ length: 1_024 }, (_, index) => index * 20),
+    const long = new Proxy(
+      Array.from({ length: 1_024 }, (_, index) => ({ pos: index * 20 })),
       {
         get(target, property, receiver) {
           if (typeof property === "string" && /^\d+$/.test(property)) reads += 1;
@@ -107,7 +101,7 @@ describe("resolveActiveHeadingIndex", () => {
       },
     );
 
-    expect(resolveActiveHeadingIndex(cachedTops, 15_000, 72)).toBe(753);
+    expect(resolveActiveHeadingIndex(long, 15_072)).toBe(753);
     expect(reads).toBeLessThanOrEqual(11);
   });
 });

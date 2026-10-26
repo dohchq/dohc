@@ -73,6 +73,9 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 }
 
 pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageError> {
+    // Keep replica change keys within the child's address-space limit, without temporary disk files.
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(StorageError::persist)?;
     conn.execute_batch(
         "CREATE TEMP TRIGGER IF NOT EXISTS passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
          BEGIN SELECT RAISE(IGNORE); END;
@@ -87,6 +90,16 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 }
 
 impl EngineStore {
+    /// A bounded wait for the next checkpoint cycle, run off the writer.
+    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+        let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
+        move || {
+            if let Some(wait) = &wait {
+                wait();
+            }
+        }
+    }
+
     /// Open a passive store; existing owner stores are refused.
     pub fn open_passive(
         path: &Path,
@@ -209,11 +222,16 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work)?;
+        let opened = open_engine_db_read_only(path, work, None)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
-        let flushes = crate::flush::Flushes::read_only();
-        Ok(EngineStore {
-            conn: opened.conn,
+        Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// A store for queries only over `conn`, a checked connection to a current
+    /// store at `path` that this open neither migrates nor writes.
+    pub(crate) fn from_read_only(conn: Connection, path: &Path, passive: bool) -> Self {
+        EngineStore {
+            conn,
             checkpoints: None,
             checkpoint_changes: 0,
             freshly_created: false,
@@ -222,8 +240,8 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
-            flushes,
-        })
+            flushes: crate::flush::Flushes::read_only(),
+        }
     }
 
     /// Count this connection's SQLite work into `work` for as long as someone
@@ -254,6 +272,9 @@ impl EngineStore {
 
     /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
+        self.request_checkpoint_mode(false);
+    }
+    fn request_checkpoint_mode(&mut self, background: bool) {
         #[cfg(feature = "fault-injection")]
         let _checkpoint = crate::capture_phase::Measure::new("writer_checkpoint_and_request");
         let changes = self.conn.total_changes();
@@ -262,10 +283,12 @@ impl EngineStore {
         }
         self.checkpoint_changes = changes;
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
-        }
-        if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.request();
+            if background {
+                checkpoints.request_full();
+            } else {
+                checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+                checkpoints.request();
+            }
         }
     }
 
@@ -287,6 +310,13 @@ impl EngineStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn startup_checkpoint_work_for_test(&self) -> (u64, i64) {
+        self.checkpoints
+            .as_ref()
+            .map_or((0, 0), |c| c.startup_work_for_test())
+    }
+
+    #[cfg(test)]
     pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
         self.checkpoints.as_ref().unwrap().completed_for_test()
     }
@@ -299,7 +329,7 @@ impl EngineStore {
             .wait_for_completion_for_test(before);
     }
 
-    fn prepare_write(&mut self) -> Result<(), StorageError> {
+    fn prepare_write(&mut self, background: bool) -> Result<(), StorageError> {
         #[cfg(feature = "fault-injection")]
         let _admission = crate::capture_phase::Measure::new("prepare_write");
         if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
@@ -308,7 +338,7 @@ impl EngineStore {
             self.checkpoints.replace(replacement);
         }
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.prepare_for_write(&self.conn)?;
+            checkpoints.prepare_for_write(&self.conn, background)?;
         }
 
         Ok(())
@@ -322,7 +352,7 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let result = f(&self.conn);
         self.request_checkpoint();
         result
@@ -463,9 +493,9 @@ impl EngineStore {
         let changes = self.conn.total_changes();
         #[cfg(feature = "fault-injection")]
         crate::capture_phase::wal(&self.conn, &mut phase, true);
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = Self::write_on_connection(&self.conn, faults, f)?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         #[cfg(feature = "fault-injection")]
         {
             crate::capture_phase::wal(&self.conn, &mut phase, false);
@@ -482,6 +512,22 @@ impl EngineStore {
         Ok(outcome)
     }
 
+    /// Commit atomically, with WAL backfill on the checkpoint worker. A full
+    /// WAL refuses before BEGIN; an async caller can retry between actor turns.
+    pub fn write_background_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write(true).map_err(E::from)?;
+        let outcome = Self::write_on_connection(&self.conn, faults, f)?;
+        self.record_write_outcome(&outcome, true);
+        Ok(outcome)
+    }
+
     /// One FULL commit syncs this transaction and every earlier WAL commit.
     pub fn write_durable_with<T, E>(
         &mut self,
@@ -491,20 +537,20 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = crate::durability::with_full_synchronous(&self.conn, |conn| {
             Self::write_on_connection(conn, faults, f)
         })?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         Ok(outcome)
     }
 
-    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>) {
+    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>, background: bool) {
         if matches!(
             outcome,
             TxnOutcome::Committed(_) | TxnOutcome::Crashed { committed: true }
         ) {
-            self.request_checkpoint();
+            self.request_checkpoint_mode(background);
             #[cfg(feature = "fault-injection")]
             {
                 self.harness_commits += 1;
@@ -651,6 +697,16 @@ impl EngineStore {
         path: &str,
     ) -> Result<bool, StorageError> {
         materialize::has_pending_job_for_path(&self.conn, workspace_id, path)
+    }
+
+    /// Pending merge deletes in a workspace that expect these bytes at their
+    /// path, oldest first.
+    pub fn pending_merge_deletes_expecting(
+        &self,
+        workspace_id: &str,
+        preimage_sha256: &str,
+    ) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::pending_merge_deletes_expecting(&self.conn, workspace_id, preimage_sha256)
     }
 
     /// Load a single materialization job by id.
@@ -891,9 +947,11 @@ impl EngineStore {
     /// (`VACUUM INTO`). `dest` must not already exist. Used by the backup
     /// pipeline; not a general-purpose export.
     pub(crate) fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
-        let dest_str = dest.to_str().ok_or(StorageError::InvalidInput {
-            reason: "backup destination path is not valid UTF-8",
-        })?;
+        let dest_str = crate::sqlite_path(dest)
+            .to_str()
+            .ok_or(StorageError::InvalidInput {
+                reason: "backup destination path is not valid UTF-8",
+            })?;
         self.conn
             .execute("VACUUM INTO ?1", [dest_str])
             .map_err(StorageError::backup)?;
@@ -971,6 +1029,48 @@ impl EngineStore {
     ) -> Result<(), StorageError> {
         self.require_materialization_owner()?;
         materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
+    }
+    /// The retained row with `id`, if it is still retained.
+    pub fn retained_displacement(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::RetainedDisplacement>, StorageError> {
+        materialize::retained_row_by_id(&self.conn, id)
+    }
+    /// How many of the workspace's retained originals the sweep can never
+    /// release, and their logical size.
+    pub fn retained_summary(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::RetainedSummary, StorageError> {
+        materialize::retained_summary(&self.conn, workspace_id)
+    }
+    /// At most `limit` of the workspace's retained originals the sweep can
+    /// never release, after `after`, quiet since `quiet_before_ms`.
+    pub fn blocked_retained_displacements(
+        &self,
+        workspace_id: &str,
+        quiet_before_ms: i64,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::RetainedDisplacement>, StorageError> {
+        materialize::blocked_retained_rows(&self.conn, workspace_id, quiet_before_ms, after, limit)
+    }
+    /// Whether recovery may still need `row`'s original.
+    pub fn retained_original_needed(
+        &self,
+        row: &crate::RetainedDisplacement,
+    ) -> Result<bool, StorageError> {
+        materialize::retained_original_needed(&self.conn, row)
+    }
+    /// Record whether `row`'s volume can refuse to unlink an open file.
+    pub fn record_retained_busy_check(
+        &self,
+        row: &crate::RetainedDisplacement,
+        unsupported: bool,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::record_retained_busy_check(&self.conn, row, unsupported)
     }
     pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
         self.require_materialization_owner()?;
@@ -1090,3 +1190,7 @@ impl Drop for EngineStore {
         self.checkpoints.take();
     }
 }
+
+#[cfg(test)]
+#[path = "store/background_checkpoint_tests.rs"]
+mod background_checkpoint_tests;

@@ -63,14 +63,11 @@ it("keeps the form open while saving and checking", async () => {
   render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));
-  const backdrop = screen.getByTestId("chats-add-agent").closest('[data-dohc-modal="true"]')!;
   fireEvent.keyDown(document, { key: "Escape" });
-  fireEvent.click(backdrop);
   expect(f.props.onCancel).not.toHaveBeenCalled();
   await act(async () => { save.resolve(); });
   await waitFor(() => expect(f.selfTest).toHaveBeenCalled());
   fireEvent.keyDown(document, { key: "Escape" });
-  fireEvent.click(backdrop);
   expect(f.props.onCancel).not.toHaveBeenCalled();
   await act(async () => { check.resolve({ ok: true, detail: "Ready" }); });
   fireEvent.keyDown(document, { key: "Escape" });
@@ -89,7 +86,7 @@ it.each(["Claude Code", "Codex"])("saves %s as a profile and checks through the 
   render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name }));
   expect(screen.getByText("Conversation through stdin")).toBeTruthy();
-  expect(screen.getByText("Tool configuration only. dohc adds no servers.")).toBeTruthy();
+  expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "OpenCode" }).hasAttribute("disabled")).toBe(true);
   expect(screen.queryByTestId("chats-add-agent-check-result")).toBeNull();
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));

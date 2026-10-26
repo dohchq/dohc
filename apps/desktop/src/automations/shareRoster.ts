@@ -1,3 +1,4 @@
+import type { AccessRefreshResult } from "@dohc/workspace-contracts/access";
 import type { RegistryEntry, ShareViewIdentity } from "../workspaces/registryStore";
 import type { SyncHistory } from "../workspaces/syncHistory";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
@@ -96,7 +97,7 @@ interface RosterState {
   noAnswer: { next: string; partial: boolean } | null;
   // A listing the registry has not saved yet.
   unsaved: { listing: RosterListing; pulledAfter: boolean; listedAtMs: number; context: unknown } | null;
-  running: Promise<void> | null;
+  running: Promise<"requested" | "unavailable"> | null;
   again: boolean;
   retry: ReturnType<typeof setTimeout> | null;
   changeGeneration: number;
@@ -202,10 +203,10 @@ export function createShareRosters(dependencies: {
     return state.noAnswer.partial || pulledSinceListing(workspaceId, state);
   }
 
-  async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
+  async function listOnce(workspaceId: string, state: RosterState): Promise<"requested" | "unavailable"> {
     const workspace = dependencies.findWorkspace(workspaceId);
     const remote = workspace?.remote ?? workspace?.pausedRemote;
-    if (!workspace || !remote || workspace.shareView) return;
+    if (!workspace || !remote || workspace.shareView) return "unavailable";
     state.lastAttemptMs = nowMs();
     const listedAtMs = wallNowMs();
     const capturedContext = context(workspaceId);
@@ -225,11 +226,11 @@ export function createShareRosters(dependencies: {
     const currentRemote = current?.remote ?? current?.pausedRemote;
     if (state.retired || context(workspaceId) !== capturedContext || !current ||
         current.rootPath !== workspace.rootPath || currentRemote?.ownerUserId !== remote.ownerUserId ||
-        currentRemote?.serverUrl !== remote.serverUrl) return;
+        currentRemote?.serverUrl !== remote.serverUrl) return "unavailable";
     if (answer.kind === "unanswered") {
       state.invalidated = true;
       state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
-      return;
+      return "unavailable";
     }
     state.noAnswer = null;
     state.checkedAtMs = listedAtMs;
@@ -238,13 +239,14 @@ export function createShareRosters(dependencies: {
     state.unsaved = { listing: answer.listing, listedAtMs, context: capturedContext, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
     dependencies.onListed?.(workspaceId);
+    return "requested";
   }
 
   // Pace Access requests independently of immediate share-change and pull
   // relisting for automation reach.
-  function pacedRefresh(workspaceId: string): Promise<void> {
+  function pacedRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
     const state = stateFor(workspaceId);
-    if (state.running) return state.running;
+    if (state.running) return state.running.then(status => status === "requested" ? "joined" : status);
     if (due(state)) return refresh(workspaceId);
     if (!state.retry) {
       state.retry = setTimeout(() => {
@@ -253,18 +255,20 @@ export function createShareRosters(dependencies: {
       }, Math.max(0, SHARE_ROSTER_FRESH_MS - (nowMs() - state.lastAttemptMs!)));
       state.retry.unref?.();
     }
-    return Promise.resolve();
+    return Promise.resolve("paced");
   }
 
-  function refresh(workspaceId: string): Promise<void> {
+  function refresh(workspaceId: string): Promise<"requested" | "unavailable"> {
     const state = stateFor(workspaceId);
     if (state.running) { state.again = true; return state.running; }
     if (state.retry) { clearTimeout(state.retry); state.retry = null; }
     const running = (async () => {
+      let status: "requested" | "unavailable";
       do {
         state.again = false;
-        await listOnce(workspaceId, state);
+        status = await listOnce(workspaceId, state);
       } while (state.again && !state.retired);
+      return status;
     })().finally(() => { state.running = null; });
     state.running = running;
     return running;
@@ -357,7 +361,7 @@ export function createShareRosters(dependencies: {
      */
     pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
-      return (recovered || state.noAnswer !== null) && due(state) ? pacedRefresh(workspaceId) : Promise.resolve();
+      return (recovered || state.noAnswer !== null) && due(state) ? pacedRefresh(workspaceId).then(() => undefined) : Promise.resolve();
     },
 
     /**
@@ -387,8 +391,8 @@ export function createShareRosters(dependencies: {
       };
     },
 
-    /** Called only when Sharing opens or Access expands. The query caller arrives in PR 3. */
-    requestRefresh(workspaceId: string): Promise<void> { return pacedRefresh(workspaceId); },
+    /** Sharing, Access, and the CLI use this same pacing decision. */
+    requestRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> { return pacedRefresh(workspaceId); },
 
     observation(workspaceId: string): RosterObservation {
       const state = stateFor(workspaceId);

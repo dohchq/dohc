@@ -6,6 +6,7 @@ import type { ShellErrorKind, useShellError } from "./useShellError";
 const kinds = {
   "no-runner": "chat-no-runner",
   "budget-paused": "chat-budget-paused",
+  restricted: "chat-restricted",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 
 export function useChatDispatchNotices(
@@ -13,9 +14,13 @@ export function useChatDispatchNotices(
   ready: boolean,
   report: ReturnType<typeof useShellError>["reportShellFailure"],
   clear: ReturnType<typeof useShellError>["clearKind"],
+  // Opens main's trust dialog, for a request Restricted Mode holds.
+  trustWorkspace: () => void,
 ) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
+  const trustRef = useRef(trustWorkspace);
+  trustRef.current = trustWorkspace;
   useEffect(() => {
     if (!ready) return;
     let active = true;
@@ -32,6 +37,11 @@ export function useChatDispatchNotices(
         shown.set(reason, notice.id);
         report({
           message: notice.message, kind: kinds[reason],
+          // Nothing failed: the request waits for the person.
+          ...(reason === "restricted" ? {
+            tone: "warning" as const,
+            action: { label: "Trust workspace", run: () => { if (isCurrent()) trustRef.current(); } },
+          } : {}),
           details: [
             ["Thread", notice.threadId],
             ...(notice.runId ? [["Run", notice.runId] as const] : []),

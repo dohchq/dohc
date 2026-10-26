@@ -47,18 +47,18 @@ async fn received_ydoc_method(method: &str) {
     let received_handle = open(&transport, &received, true).await;
     let open_params = json!({ "versionId": "main", "path": "note.md", "contentKind": "richdoc" });
     let context = || RequestContext::unbounded().with_capability("blobs");
-    let session = transport
-        .call(
-            context(),
-            request(
-                2,
-                "ydoc.open",
-                Some(workspace_handle.clone()),
-                open_params.clone(),
-            ),
-        )
-        .await
-        .expect("workspace live session");
+    let session = call_with_busy_retry(
+        &transport,
+        context(),
+        request(
+            2,
+            "ydoc.open",
+            Some(workspace_handle.clone()),
+            open_params.clone(),
+        ),
+    )
+    .await
+    .expect("workspace live session");
     let session_id = session.result["sessionId"].clone();
     call(
         &transport,
@@ -96,13 +96,13 @@ async fn received_ydoc_method(method: &str) {
     } else {
         params
     };
-    transport
-        .call(
-            context(),
-            request(4, method, Some(workspace_handle.clone()), workspace_params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} must still work on a workspace: {error:?}"));
+    call_with_busy_retry(
+        &transport,
+        context(),
+        request(4, method, Some(workspace_handle.clone()), workspace_params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} must still work on a workspace: {error:?}"));
     call(
         &transport,
         &workspace_handle,
@@ -220,18 +220,18 @@ async fn received_live_application_provision(trusted: bool) {
         } else {
             let mut context = RequestContext::unbounded();
             context.connection = Some(owner.handle());
-            transport
-                .call(
-                    context,
-                    request(
-                        2,
-                        "liveApplication.provisionOwner",
-                        Some(handle),
-                        json!({"relayNamespace": "relay-history", "host": host}),
-                    ),
-                )
-                .await
-                .map(|response| assert_eq!(response.result["provisioned"], true))
+            call_with_busy_retry(
+                &transport,
+                context,
+                request(
+                    2,
+                    "liveApplication.provisionOwner",
+                    Some(handle),
+                    json!({"relayNamespace": "relay-history", "host": host}),
+                ),
+            )
+            .await
+            .map(|response| assert_eq!(response.result["provisioned"], true))
         }
     };
     let received_result = provision(received_handle.clone()).await;

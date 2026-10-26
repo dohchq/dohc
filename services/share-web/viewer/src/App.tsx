@@ -18,6 +18,7 @@ import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
+import { LinkChannelPanel } from "./LinkChannelPanel";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
 import { LinkEntry } from "./LinkEntry";
@@ -71,6 +72,7 @@ export const TEXT_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 type ViewerState =
   | { status: "loading" }
   | { status: "refused" }
+  | { status: "load-failed" }
   | { status: "version-mismatch"; message: string }
   | {
       status: "ready";
@@ -97,6 +99,13 @@ interface LoadedCurrentState extends LoadedLog {
 class ViewResponseError extends Error {
   constructor(readonly status: number) {
     super("refused");
+  }
+}
+
+// The server stayed busy or unreachable for the whole retry budget; the link may still open.
+class RetryExhaustedError extends Error {
+  constructor() {
+    super("retry budget exhausted");
   }
 }
 
@@ -225,7 +234,7 @@ async function withBoundedRetry(
       if (!retryThrownFailures || signal?.aborted) throw error;
     }
     if (retryWaitedMs + retryDelayMs > RETRY_BUDGET_MS) {
-      throw new Error("refused");
+      throw new RetryExhaustedError();
     }
     await waitForRetry(retryDelayMs, signal);
     retryWaitedMs += retryDelayMs;
@@ -299,6 +308,7 @@ export async function loadLog(
   signal?: AbortSignal,
   expectedEpochLogFloor?: number,
   holdMs?: number,
+  currentOnly = false,
 ): Promise<LoadedLog> {
   let cursor = initialCursor;
   let pageNumber = 0;
@@ -307,7 +317,7 @@ export async function loadLog(
     pageNumber += 1;
     const response = await apiWithThrottleRetry(
       session,
-      `/api/view/log?since=${cursor}&limit=500${
+      `/api/view/log?since=${cursor}&limit=500${currentOnly ? "&current=true" : ""}${
         pageNumber === 1 && holdMs !== undefined ? `&hold=${String(holdMs)}` : ""
       }`,
       signal,
@@ -321,7 +331,7 @@ export async function loadLog(
     };
     if (
       !Array.isArray(page.ops) ||
-      page.ops.some((op) => !relayOp(op)) ||
+      page.ops.some((op) => !relayOp(op, currentOnly)) ||
       typeof page.nextCursor !== "number" ||
       typeof page.hasMore !== "boolean" ||
       typeof page.epochLogFloor !== "number" ||
@@ -355,6 +365,7 @@ export async function loadLog(
     } else if (page.epochLogFloor !== foldEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
+    if ((page.ops as RelayOp[]).some(op => op.opKind === "files.reset")) throw new EpochFloorChangedError();
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
       return {
@@ -368,9 +379,18 @@ export async function loadLog(
   throw new Error("refused");
 }
 
-function relayOp(value: unknown): value is RelayOp {
+function relayOp(value: unknown, currentOnly = false): value is RelayOp {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
+  if (currentOnly) {
+    if (!Number.isSafeInteger(record.relaySeq) || Number(record.relaySeq) < 0) return false;
+    if (record.opKind === "files.reset") return true;
+    const payload = record.payload as {objectId?: unknown; file?: unknown} | null;
+    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string") return false;
+    if (payload.file === null) return true;
+    const files = accumulatorFromCurrentFiles([payload.file]);
+    return files !== null && [...files.values()][0]?.objectId === payload.objectId;
+  }
   return (
     typeof record.relaySeq === "number" &&
     Number.isSafeInteger(record.relaySeq) &&
@@ -403,7 +423,10 @@ function viewMeta(value: unknown): ViewMeta | null {
   ) {
     return null;
   }
+  const channel = record.channel as Record<string, unknown> | null | undefined;
+  if (channel !== undefined && (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")) return null;
   return {
+    ...(channel ? { channel: { channelWireId: channel.channelWireId as string } } : {}),
     access,
     subjectName: normalizeShareLabel(record.subjectName),
     effectiveSelector: {
@@ -453,6 +476,7 @@ export async function loadCurrentState(
 ): Promise<LoadedCurrentState> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const projection = await loadCurrentProjection(session, signal);
+    if (projection.meta.access !== "edit") return projection;
     try {
       const caughtUp = await loadLog(
         session,
@@ -464,6 +488,10 @@ export async function loadCurrentState(
       );
       return { ...caughtUp, meta: projection.meta };
     } catch (error: unknown) {
+      if (error instanceof ViewResponseError && error.status === 404) {
+        const meta = await loadMeta(session, signal);
+        if (meta.access !== "edit") continue;
+      }
       if (!(error instanceof EpochFloorChangedError)) throw error;
     }
   }
@@ -501,9 +529,13 @@ function scrubFragment(): void {
   history.replaceState(history.state, "", `${location.pathname}${location.search}`);
 }
 
-async function establishSession(signal?: AbortSignal): Promise<string> {
-  const secret = location.hash.slice(1);
-  if (/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
+// The link's secret leaves the address bar at once, but stays in `pending`
+// until its exchange succeeds or is refused, so Try again can repeat the exchange.
+async function establishSession(pending: { secret: string | null }, signal?: AbortSignal): Promise<string> {
+  const fragment = location.hash.slice(1);
+  if (/^[A-Za-z0-9_-]{43}$/u.test(fragment)) pending.secret = fragment;
+  const secret = pending.secret;
+  if (secret !== null) {
     const exchange = withBoundedRetry(
       () => fetchShareWeb("/api/exchange", {
         method: "POST",
@@ -518,13 +550,18 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
       true,
       signal,
     );
-    scrubFragment();
+    if (location.hash) scrubFragment();
     const response = await exchange;
-    if (!response.ok) throw (await versionMismatch(response)) ?? new Error("refused");
+    if (!response.ok) {
+      // A 429 is retried above, so any 4xx here is a refusal.
+      if (response.status >= 400 && response.status < 500) pending.secret = null;
+      throw (await versionMismatch(response)) ?? new Error("refused");
+    }
     const body = (await response.json()) as { session?: unknown };
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
     }
+    pending.secret = null;
     history.replaceState(null, "", `/s/${body.session}${location.search}`);
     return body.session;
   }
@@ -664,6 +701,7 @@ function FileView(props: {
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
+  const [readAttempt, setReadAttempt] = useState(0);
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const rendersExcalidraw =
     props.file.contentKind === "text" && isExcalidraw(props.file.path);
@@ -724,16 +762,25 @@ function FileView(props: {
     props.file.path,
     props.onStaleBlob,
     props.session,
+    readAttempt,
     rendersTextPreview,
   ]);
 
-  if (fileStatus !== "ready") {
+  if (fileStatus === "refreshing") {
+    return <p className="file-status muted">This file changed. Refreshing.</p>;
+  }
+  if (fileStatus === "unavailable") {
     return (
-      <p className="file-status muted">
-        {fileStatus === "refreshing"
-          ? "This file changed. Refreshing."
-          : "This file isn't available right now."}
-      </p>
+      <div role="alert">
+        <p className="file-status muted">This file isn't available right now.</p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          onClick={() => setReadAttempt((attempt) => attempt + 1)}
+        >
+          Try again
+        </button>
+      </div>
     );
   }
   if (rendersMarkdown) {
@@ -1054,6 +1101,8 @@ function OpenInDohc(props: { session: string }) {
 
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const pendingExchange = useRef<{ secret: string | null }>({ secret: null });
   const [selectedPath, setSelectedPath] = useState("");
   const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
@@ -1090,7 +1139,7 @@ export function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const session = await establishSession(controller.signal);
+        const session = await establishSession(pendingExchange.current, controller.signal);
         const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
@@ -1109,7 +1158,11 @@ export function App() {
         if (current) {
           setState(error instanceof VersionMismatchError
             ? { status: "version-mismatch", message: error.message }
-            : { status: "refused" });
+            // A lost answer, a lost connection or a server that stayed busy says nothing about the link.
+            : (error instanceof ViewResponseError && error.status >= 500) ||
+                error instanceof TypeError || error instanceof RetryExhaustedError
+              ? { status: "load-failed" }
+              : { status: "refused" });
         }
       }
     })();
@@ -1117,7 +1170,7 @@ export function App() {
       current = false;
       controller.abort();
     };
-  }, []);
+  }, [loadAttempt]);
 
   const readySession = state.status === "ready" ? state.session : null;
   const readyFiles = state.status === "ready" ? state.files : null;
@@ -1223,6 +1276,7 @@ export function App() {
         const requestController = new AbortController();
         followerController = requestController;
         const requestStartedAtMs = Date.now();
+        let readingLog = true;
         try {
           const log = await loadLog(
             readySession,
@@ -1232,7 +1286,9 @@ export function App() {
             requestController.signal,
             previous.epochLogFloor,
             VIEW_LOG_HOLD_MS,
+            previous.meta.access !== "edit",
           );
+          readingLog = false;
           const meta = await loadMeta(readySession, requestController.signal);
           if (commit(previous, { ...log, meta }, expectedVersion) === null) {
             continue;
@@ -1250,6 +1306,12 @@ export function App() {
           }
         } catch (error: unknown) {
           if (!current || operationVersion !== expectedVersion) continue;
+          if (error instanceof ViewResponseError && error.status === 404 && readingLog && previous.meta.access === "edit") {
+            try {
+              const meta = await loadMeta(readySession, sessionController.signal);
+              if (meta.access !== "edit" && await refresh()) continue;
+            } catch { /* The terminal response below handles removed access. */ }
+          }
           if (error instanceof EpochFloorChangedError) {
             const reloaded = await refresh();
             if (reloaded) {
@@ -1301,6 +1363,25 @@ export function App() {
         available={available} onClose={() => setEditing(null)} />;
   }
   if (state.status === "refused") return <Unavailable />;
+  if (state.status === "load-failed") {
+    return (
+      <main className="state">
+        <div className="handoff-panel" role="alert">
+          <p>dohc couldn't open the shared files. Check your connection, then choose Try again.</p>
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => {
+              setState({ status: "loading" });
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      </main>
+    );
+  }
   if (state.status === "version-mismatch") return <main className="state"><p>{state.message}</p></main>;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
@@ -1370,10 +1451,15 @@ export function App() {
             <p>No files in this share yet.</p>
           )}
         </main>
-        <CommentsPanel
-          access={state.meta.access}
+        {/* A Group share's conversation is its channel; any other share's is its discussion. */}
+        <LinkChannelPanel
           session={state.session}
-          onAccessChange={applyDiscussionAccess}
+          channelWireId={state.meta.channel?.channelWireId ?? null}
+          fallback={<CommentsPanel
+            access={state.meta.access}
+            session={state.session}
+            onAccessChange={applyDiscussionAccess}
+          />}
         />
       </div>
     </div>

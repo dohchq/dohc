@@ -8,6 +8,8 @@ pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
     let generation = Arc::new(AtomicI64::new(0));
     let dirty = Arc::new(AtomicBool::new(false));
     let writes = Arc::clone(&dirty);
+    let hold_generation = Arc::new(AtomicI64::new(0));
+    let hold_writes = Arc::clone(&hold_generation);
     conn.update_hook(Some(move |_, database: &str, table: &str, _| {
         #[cfg(feature = "fault-injection")]
         {
@@ -20,6 +22,9 @@ pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
                 }
                 _ => {}
             }
+        }
+        if database == "main" && table == "capture_file_holds" {
+            hold_writes.fetch_add(1, Ordering::Relaxed);
         }
         if database == "main"
             && matches!(
@@ -35,6 +40,12 @@ pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
             writes.store(true, Ordering::Relaxed);
         }
     }))?;
+    conn.create_scalar_function(
+        "dohc_placement_hold_generation",
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY,
+        move |_| Ok(hold_generation.load(Ordering::Relaxed)),
+    )?;
     conn.create_scalar_function(
         "dohc_search_generation",
         0,
@@ -64,11 +75,12 @@ mod tests {
     fn row_writes_coalesce_until_the_search_revision_is_read() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE snapshots(value INTEGER); CREATE TABLE link_pending(value INTEGER);",
+            "CREATE TABLE snapshots(value INTEGER); CREATE TABLE link_pending(value INTEGER); CREATE TABLE capture_file_holds(value INTEGER);",
         )
         .unwrap();
         install(&conn).unwrap();
         assert_eq!(search_generation(&conn).unwrap(), 0);
+        assert_eq!(crate::capture_file_holds::generation_in(&conn).unwrap(), 0);
         conn.execute_batch(
             "INSERT INTO snapshots VALUES (1),(2),(3); INSERT INTO link_pending VALUES(1);",
         )
@@ -79,5 +91,13 @@ mod tests {
         assert_eq!(search_generation(&conn).unwrap(), 1);
         conn.execute("UPDATE snapshots SET value=4", []).unwrap();
         assert_eq!(search_generation(&conn).unwrap(), 2);
+        assert_eq!(crate::capture_file_holds::generation_in(&conn).unwrap(), 0);
+        conn.execute_batch("INSERT INTO capture_file_holds VALUES(1);")
+            .unwrap();
+        assert_eq!(crate::capture_file_holds::generation_in(&conn).unwrap(), 1);
+        assert_eq!(search_generation(&conn).unwrap(), 2);
+        conn.execute_batch("BEGIN; DELETE FROM capture_file_holds WHERE value=1; ROLLBACK;")
+            .unwrap();
+        assert_eq!(crate::capture_file_holds::generation_in(&conn).unwrap(), 2);
     }
 }

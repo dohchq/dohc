@@ -73,7 +73,7 @@ it("closes a busy child at its maximum lifetime", async () => {
   } finally {stopped.resolve(); await supervisor.close();}
 });
 
-const emptyCurrentView=(input: ReplicaChildInput)=>async()=>({workspaceId:input.lease.workspaceId,revision:0,logCursor:0,journalCursor:0,files:[],texts:[],moved:false,nextCursor:null,refusedFiles:[]});
+const emptyCurrentView=(input: ReplicaChildInput)=>async()=>({workspaceId:input.lease.workspaceId,revision:0,logCursor:0,journalCursor:0,files:[],texts:[],delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]});
 
 it("collects after each full drain even when a later owner write is queued",async()=>{
   const {storage}=await fixture(),events:string[]=[];let pulls=0;

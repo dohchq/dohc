@@ -170,12 +170,13 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   // remote update still applies to a deleted-while-editing doc (only LOCAL
   // writes are refused), so a deletion's captured text must be frozen
   // against exactly this.
-  function emitRemoteEdit(suffix: string): void {
+  function emitRemoteEdit(suffix: string, lineageGeneration?: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const before = Y.encodeStateVector(doc);
     doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
     const update = Y.encodeStateAsUpdate(doc, before);
-    const event = { sessionId: openedSessionId, update };
+    // Main stamps a remote update with its lineage; without one the editor drops it.
+    const event = { sessionId: openedSessionId, update, ...(lineageGeneration === undefined ? {} : { lineageGeneration }) };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });
@@ -267,6 +268,18 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     }
   }
 
+  // Main says the file changed outside dohc, and whether it counted unsaved edits.
+  function emitChangedOutside(unsaved: boolean, seq: number): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const event = {
+      sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md",
+      ...engineSaveState(unsaved ? "changed-on-disk" : "saved"), changedOutside: { unsaved }, seq,
+    };
+    act(() => {
+      for (const listener of [...saveStateListeners]) listener(event);
+    });
+  }
+
   // Main refused an edit and is about to restore the admitted document.
   function emitEditRefusal(message: string, seq: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
@@ -285,6 +298,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     emit,
     emitNow,
     emitEditRefusal,
+    emitChangedOutside,
     emitRemoteEdit,
     emitLineageReplacement,
     applied,

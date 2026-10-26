@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
+import { ownedFileRefusal, readOwnedFile } from "@dohc/workspace-core/owned-file";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
 import type { PlannedEffect, StepOutput } from "./automationPlan";
 import { StoredReachVerdictSchema, type StoredReachVerdict } from "./reachVerdicts";
@@ -13,8 +15,8 @@ export { sharedFileUpdateKey } from "./sharedFileSettlement";
 export type { UndoWrite } from "@dohc/workspace-contracts/shared-file-settlement";
 
 // This computer's record of each Collection automation run, under
-// <workspace>/.dohc/automations. Claims are local to the computer that ran
-// them, so their runs are too. Each step is appended to a run's progress once
+// <workspace>/.dohc/local/automations. Claims are local to the computer that
+// ran them, so their runs are too. Each step is appended to a run's progress once
 // it is planned, before its first effect, and each effect as it lands, before
 // the next one starts. A run that stops part way, from a crash or a failed
 // write, resumes from here: it evaluates no saved step again, so no effect
@@ -23,6 +25,11 @@ export type { UndoWrite } from "@dohc/workspace-contracts/shared-file-settlement
 // A whole file is written to a temporary name, flushed to disk, and renamed
 // over the old one, so a crash leaves the old record or the new one. An
 // appended line is flushed before the next effect starts.
+//
+// What is saved here decides what automations may do: which steps a person
+// allowed, which runs can resume, what an Undo reverses. So the store reads
+// only files this user owns and alone can change, and a file it does not
+// trust reads as one it cannot read, which never allows more.
 
 /** A kept field's identity and display name, at its document or dataset Collection path. */
 export type UndoKeptField = { recordId: string; field: string; path: string | null; fieldName: string; datasetRecordId: string | number | null };
@@ -633,28 +640,39 @@ async function syncFolder(folder: string): Promise<void> {
   }
 }
 
-// A folder under the metadata folder: made when missing, never a symlink,
-// so a planted link cannot send run records outside the workspace.
+// Something other than a real folder only this user can change: a planted
+// link could send run records outside the workspace, and another user who
+// can write the folder can delete or replace a file in it. No check on the
+// file sees a deletion, and a deleted run starts its claim over, repeating
+// its effects. Windows reports no owner or mode.
+function unusableFolder(stats: Stats): boolean {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return true;
+  const uid = process.getuid?.();
+  return uid !== undefined && (stats.uid !== uid || (stats.mode & 0o022) !== 0);
+}
+
+// A folder inside the store's folder, made when missing.
 async function realFolder(path: string): Promise<string> {
   let stats = await lstat(path).catch(() => null);
   if (stats === null) {
-    // Two readers can both find it missing; the second finds the first's folder.
-    await mkdir(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    // Two writers can both find it missing; the second finds the first's
+    // folder. 0700 whatever the umask, as each file in it is 0600.
+    await mkdir(path, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     await syncFolder(dirname(path));
     stats = await lstat(path);
   }
-  if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    throw new Error(`${path} must be a folder inside this workspace.`);
-  }
+  if (unusableFolder(stats)) throw new Error(`${path} must be a folder in this workspace that only you can change.`);
   return path;
 }
 
-// A folder that must already exist, for reads that change nothing: null when
-// it does not, and "unusable" when something other than a real folder is there.
+// A folder that must already exist, for reads that change nothing: null only
+// when it is not there, and "unusable" when something other than a real
+// folder is there or dohc can't look at it, since it may hold saved steps and
+// Undo.
 async function existingFolder(path: string): Promise<string | null | "unusable"> {
-  const stats = await lstat(path).catch(() => null);
-  if (stats === null) return null;
-  return stats.isSymbolicLink() || !stats.isDirectory() ? "unusable" : path;
+  const stats = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? null : "unusable" as const));
+  if (stats === null || stats === "unusable") return stats;
+  return unusableFolder(stats) ? "unusable" : path;
 }
 
 // Share ordering across store instances on every platform. A run rewrite
@@ -687,7 +705,8 @@ async function retryFileAccess<T>(work: () => Promise<T>): Promise<T> {
 async function writeDurablyUnlocked(path: string, text: string, assertCurrent: () => void = () => {}): Promise<void> {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    const file = await open(temp, "w");
+    // 0600 whatever the umask: a reader refuses a file others can write.
+    const file = await open(temp, "w", 0o600);
     try {
       await file.writeFile(text);
       await file.sync();
@@ -704,20 +723,15 @@ async function writeDurablyUnlocked(path: string, text: string, assertCurrent: (
 }
 
 // A file's text, undefined when it does not exist, or null when it is not a
-// plain file within the size bound.
+// file of this user's within the size bound.
 function readBounded(path: string): Promise<string | undefined | null> {
   return withFile(path, () => readBoundedUnlocked(path));
 }
 
 async function readBoundedUnlocked(path: string): Promise<string | undefined | null> {
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) return undefined;
-  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    return null;
-  }
+  const read = await readOwnedFile(path, MAX_RUN_FILE_BYTES).catch(() => null);
+  if (read?.status === "missing") return undefined;
+  return read?.status === "read" ? read.content : null;
 }
 
 const firstLine = (text: string | null | undefined): string | null | undefined => {
@@ -746,7 +760,10 @@ async function readHeaderLineUnlocked(path: string): Promise<string | null | und
 // A file's JSON, undefined when it does not exist, or null when it cannot be
 // read as JSON within the size bound.
 async function readJson(path: string): Promise<unknown> {
-  const text = await readBounded(path);
+  return parseJson(await readBounded(path));
+}
+
+function parseJson(text: string | undefined | null): unknown {
   if (text === undefined || text === null) return text;
   try {
     return JSON.parse(text);
@@ -883,24 +900,47 @@ function progressText(run: StoredRun): string {
 }
 
 /**
- * Where a host keeps a workspace's metadata, the desktop's `<root>/.dohc`:
- * made if missing, and refused when it is not a real folder the host allows.
- * With `create: false` it makes nothing and answers null when the folder does
- * not exist, for reads that change nothing.
+ * The folder a host keeps this computer's automation state in, such as the
+ * desktop's `<workspace>/.dohc/local`. The store keeps everything under
+ * `automations` in it, and never makes the folder itself.
  */
-export interface MetadataDirResolver {
-  (rootPath: string): Promise<string>;
-  (rootPath: string, options: { create: false }): Promise<string | null>;
+export interface AutomationStoreFolder {
+  /**
+   * The folder, for a write. Refuses with words a person can read until the
+   * host has prepared it, and makes nothing.
+   */
+  forWrite(): Promise<string>;
+  /**
+   * Runs `work` on the folder, for a read, or on null when it does not
+   * exist, and returns what `work` returned. Refuses when the host does not
+   * trust the folder, before `work` runs or after it, so nothing read in it is
+   * used. A host that has not opened the workspace refuses with
+   * AutomationStoreNotOpenedError. Makes nothing.
+   */
+  read<T>(work: (dir: string | null) => Promise<T>): Promise<T>;
+}
+
+// A store read the host refused.
+const REFUSED = Symbol("refused");
+
+/**
+ * The host has not opened the workspace, so nothing in its store folder can
+ * be read yet. The read of the steps a person allowed passes this on, so they
+ * don't read as unreadable because of it. Other reads take it as any refusal.
+ */
+export class AutomationStoreNotOpenedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AutomationStoreNotOpenedError";
+  }
 }
 
 /**
- * The run store of the workspace at `rootPath`, under `automations` in the
- * folder `resolveMetadataDir` answers. Reads that change nothing make no
- * folders. Tests lower `expireBatchRuns` to cross batches with a few runs.
+ * The run store under `automations` in `home`. Reads make no folders.
+ * Tests lower `expireBatchRuns` to cross batches with a few runs.
  */
 export function createAutomationRunStore(
-  rootPath: string,
-  resolveMetadataDir: MetadataDirResolver,
+  home: AutomationStoreFolder,
   assertCurrent: () => void = () => {},
   { expireBatchRuns = EXPIRE_BATCH_RUNS }: { expireBatchRuns?: number } = {},
 ): AutomationRunStore {
@@ -918,7 +958,47 @@ export function createAutomationRunStore(
     queue = next.catch(() => undefined);
     return next;
   };
-  const base = async () => realFolder(join(await resolveMetadataDir(rootPath), "automations"));
+  // The store's folder for a write, made inside the host's folder when missing.
+  const base = async () => realFolder(join(await home.forWrite(), "automations"));
+  // Runs `work` on the store's folder at `segments` for a read: null when it
+  // does not exist, and "unusable" when something other than a folder only
+  // this user can change is there. Returns REFUSED when the host refuses its
+  // folder, before `work` or after it, or throws when the host has not opened
+  // the workspace and `notOpened` says so. Makes nothing.
+  const readStoreFolder = async <T>(
+    segments: string[], work: (found: string | null | "unusable") => Promise<T>, notOpened: "refused" | "throws" = "refused",
+  ): Promise<T | typeof REFUSED> => {
+    // What `work` threw, which is not the host's refusal.
+    const failed: { error?: unknown } = {};
+    try {
+      return await home.read(async (dir) => {
+        let found: string | null | "unusable" = dir;
+        for (const segment of ["automations", ...segments]) {
+          if (found === null || found === "unusable") break;
+          found = await existingFolder(join(found, segment));
+        }
+        try {
+          return await work(found);
+        } catch (error) {
+          failed.error = error;
+          throw error;
+        }
+      });
+    } catch (error) {
+      if ("error" in failed) throw failed.error;
+      if (notOpened === "throws" && error instanceof AutomationStoreNotOpenedError) throw error;
+      return REFUSED;
+    }
+  };
+  // One of the store's own files, for a read: undefined when it does not
+  // exist, and null when it cannot be read or is not trusted.
+  const readStored = async (name: string, notOpened: "refused" | "throws" = "refused"): Promise<string | undefined | null> => {
+    const read = await readStoreFolder([], async (found) =>
+      found === null ? undefined : found === "unusable" ? null : readBounded(join(found, name)), notOpened);
+    return read === REFUSED ? null : read;
+  };
+  const readStoredJson = async (name: string, notOpened: "refused" | "throws" = "refused"): Promise<unknown> =>
+    parseJson(await readStored(name, notOpened));
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
@@ -958,7 +1038,7 @@ export function createAutomationRunStore(
     return restores!;
   };
   const readRestores = async (refresh = false): Promise<Map<string, PendingRestore> | null> =>
-    !refresh && restores !== undefined ? restores : parseRestores(await readBounded(await restoresFile()));
+    !refresh && restores !== undefined ? restores : parseRestores(await readStored("restoring.json"));
   const changeRestore = (id: string, entry?: PendingRestoreUpdate, whilePending?: string) => serial(async () => {
     const path = await restoresFile();
     return withFile(path, async () => {
@@ -981,7 +1061,7 @@ export function createAutomationRunStore(
   });
   const readUndos = async () => {
     if (undos !== undefined) return undos;
-    const read = await readJson(await undosFile());
+    const read = await readStoredJson("undoing.json");
     const parsed = read === undefined ? { success: true as const, data: { version: 1 as const, runs: [] } } : UnfinishedUndosSchema.safeParse(read);
     undos = parsed.success ? new Map(parsed.data.runs.map((entry) => [`${entry.automationId}\n${entry.run}`, entry])) : null;
     return undos;
@@ -1083,7 +1163,8 @@ export function createAutomationRunStore(
         await writeCurrentUnlocked(path, text);
         return;
       }
-      if (existing === null || existing.isSymbolicLink() || !existing.isFile()) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+      // A file dohc does not trust is not one to add to.
+      if (existing === null || ownedFileRefusal(existing) !== null) throw new Error("dohc could not read this run's saved changes in .dohc/local/automations.");
       // Count the header too, so an append needs no separate header read.
       if (existing.size + Buffer.byteLength(text) > limit) throw tooLarge();
       const repair = await open(path, "r+");
@@ -1217,29 +1298,21 @@ export function createAutomationRunStore(
 
   return {
     async runsOf(automationId, claimId) {
-      let folder: string | null;
-      try {
-        folder = await resolveMetadataDir(rootPath, { create: false });
-      } catch {
-        return { runs: [], unreadable: true };
-      }
-      if (folder === null) return { runs: [], unreadable: false };
-      for (const segment of ["automations", "runs", hashName(automationId)]) {
-        const found = await existingFolder(join(folder, segment));
-        if (found === null) return { runs: [], unreadable: false };
-        if (found === "unusable") return { runs: [], unreadable: true };
-        folder = found;
-      }
-      const prefix = `${hashName(claimId)}-`;
-      const found: StoredRun[] = [];
-      let unreadable = false;
-      for (const file of await readdir(folder)) {
-        if (!file.startsWith(prefix) || !file.endsWith(RUN_SUFFIX)) continue;
-        const run = await readRun(folder, file.slice(0, -RUN_SUFFIX.length), automationId);
-        if (run?.claimId === claimId) found.push(run);
-        else unreadable = true;
-      }
-      return { runs: found, unreadable };
+      const read = await readStoreFolder(["runs", hashName(automationId)], async (runs) => {
+        if (runs === null) return { runs: [], unreadable: false };
+        if (runs === "unusable") return { runs: [], unreadable: true };
+        const prefix = `${hashName(claimId)}-`;
+        const found: StoredRun[] = [];
+        let unreadable = false;
+        for (const file of await readdir(runs)) {
+          if (!file.startsWith(prefix) || !file.endsWith(RUN_SUFFIX)) continue;
+          const run = await readRun(runs, file.slice(0, -RUN_SUFFIX.length), automationId);
+          if (run?.claimId === claimId) found.push(run);
+          else unreadable = true;
+        }
+        return { runs: found, unreadable };
+      });
+      return read === REFUSED ? { runs: [], unreadable: true } : read;
     },
     save(run) {
       return serial(async () => {
@@ -1323,7 +1396,7 @@ export function createAutomationRunStore(
         const path = join(folder, `${name}${RUN_SUFFIX}`);
         return withFile(path, async () => {
           const saved = parseRun(await readBoundedUnlocked(path), name, run.automationId);
-          if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
+          if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/local/automations.");
           const next = { ...saved, ...state };
           if (state.sharedSettlements) next.sharedSettlements = [...new Map([
             ...state.sharedSettlements, ...(saved.sharedSettlements ?? []),
@@ -1372,14 +1445,17 @@ export function createAutomationRunStore(
     },
     async expire(now, standing, from) {
       const runs = await serial(async () => {
+        // Expiry removes and rewrites, so the host refuses it as it refuses
+        // any write until its folder is ready. A refused pass ends here, and
+        // the next pass tries again. It makes nothing.
         let found: string | null;
         try {
-          found = await resolveMetadataDir(rootPath, { create: false });
+          found = await home.forWrite();
         } catch {
           return null;
         }
         for (const segment of ["automations", "runs"]) {
-          const next = found === null ? null : await existingFolder(join(found, segment));
+          const next = await existingFolder(join(found, segment));
           if (next === null || next === "unusable") return null;
           found = next;
         }
@@ -1457,7 +1533,7 @@ export function createAutomationRunStore(
       return null;
     },
     async readSubscriptions() {
-      const parsed = SubscriptionsSchema.safeParse(await readJson(join(await base(), "subscriptions.json")));
+      const parsed = SubscriptionsSchema.safeParse(await readStoredJson("subscriptions.json"));
       return parsed.success ? parsed.data.subscriptions : [];
     },
     saveSubscriptions(subscriptions) {
@@ -1466,7 +1542,8 @@ export function createAutomationRunStore(
       });
     },
     async readReachVerdicts() {
-      const read = await readJson(join(await base(), "reach.json"));
+      // With no open, every automation waits for it, not for a reset of holds.
+      const read = await readStoredJson("reach.json", "throws");
       const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
       if (read === undefined) return { ...none, unreadable: false, missing: true };
       const parsed = ReachVerdictsSchema.safeParse(read);
@@ -1484,10 +1561,12 @@ export function createAutomationRunStore(
       });
     },
     async reachVerdictsPath() {
-      return join(await base(), "reach.json");
+      const found = await home.read(async (dir) => dir);
+      if (found === null) throw new Error("dohc has not saved which automation steps were allowed in this workspace.");
+      return join(found, "automations", "reach.json");
     },
     async readTimeouts() {
-      const parsed = TimeoutsSchema.safeParse(await readJson(join(await base(), "timeouts.json")));
+      const parsed = TimeoutsSchema.safeParse(await readStoredJson("timeouts.json"));
       return new Map(parsed.success ? parsed.data.timeouts.map((entry) => [entry.automationId, entry.count]) : []);
     },
     saveTimeouts(timeouts) {
@@ -1497,7 +1576,7 @@ export function createAutomationRunStore(
       });
     },
     async readCircuitBreakers() {
-      const parsed = CircuitBreakersSchema.safeParse(await readJson(join(await base(), "circuit-breakers.json")));
+      const parsed = CircuitBreakersSchema.safeParse(await readStoredJson("circuit-breakers.json"));
       return parsed.success ? parsed.data.breakers : [];
     },
     recordCircuitBreaker(breaker) {
@@ -1518,7 +1597,7 @@ export function createAutomationRunStore(
       });
     },
     async readReportedFailures() {
-      const parsed = ReportedFailuresSchema.safeParse(await readJson(join(await base(), "failures.json")));
+      const parsed = ReportedFailuresSchema.safeParse(await readStoredJson("failures.json"));
       return parsed.success ? parsed.data.failures : [];
     },
     saveReportedFailures(failures) {
@@ -1527,7 +1606,7 @@ export function createAutomationRunStore(
       });
     },
     async readEnabledAutomations() {
-      const read = await readJson(join(await base(), "enabled.json"));
+      const read = await readStoredJson("enabled.json");
       if (read === undefined) return null;
       const parsed = EnabledAutomationsSchema.safeParse(read);
       // A damaged file counts as none: nothing is reported until the next save.

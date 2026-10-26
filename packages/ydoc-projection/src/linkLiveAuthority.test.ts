@@ -40,7 +40,7 @@ function setup(options: {linkDiscussionPrincipalLimit?: number; workspaceQuotaBy
 
 it("enrolls a fresh authenticated editor without a comment and persists server-derived link attribution", async () => {
   const f = setup();
-  const resolver = createLinkLiveBrowserResolver({ storage: f.storage, linkKey: key });
+  const resolver = createLinkLiveBrowserResolver({publicEditRelease:{version:1}, storage: f.storage, linkKey: key });
   const request = new Request(`${audience}/private`, { method: "POST", headers: {
     authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile,
   }, body: JSON.stringify({ principalId: "forged", workspaceId: "other" }) });

@@ -22,29 +22,42 @@ let currentLook: LookSettings = DEFAULT_USER_SETTINGS;
 // Counts applied settings, so a late startup read cannot undo newer ones.
 let lookRevision = 0;
 
-// The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
-// every theme flip to main. Best-effort: a platform without an overlay (or a
-// test without the bridge) just ignores it.
-function applyTheme(theme: "light" | "dark"): void {
-  document.documentElement.dataset.theme = theme;
-  void window.dohcDesktop?.setTitlebarTheme?.({ theme }).catch(() => undefined);
-}
-
 function setProperty(name: string, value: string | null): void {
   const style = document.documentElement.style;
   if (value === null) style.removeProperty(name);
   else if (style.getPropertyValue(name) !== value) style.setProperty(name, value);
 }
 
+// Gives the whole window its new colors in one frame. A control that fades
+// its colors, such as the active tab, would otherwise fade from the old
+// colors while the rest of the window changes at once, so the transitions
+// this change starts end at once.
+function applyColors(theme: "light" | "dark", accent: string | null): void {
+  const root = document.documentElement;
+  if (root.dataset.theme !== theme || root.style.getPropertyValue("--dohc-accent") !== (accent ?? "")) {
+    const running = new Set(document.getAnimations());
+    root.dataset.theme = theme;
+    setProperty("--dohc-accent", accent);
+    // Reading the animations resolves the new styles, which starts the
+    // transitions; the frame would resolve them anyway.
+    for (const animation of document.getAnimations()) {
+      if (animation instanceof CSSTransition && !running.has(animation)) animation.finish();
+    }
+  }
+  // The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
+  // every theme flip to main. Best-effort: a platform without an overlay (or
+  // a test without the bridge) just ignores it.
+  void window.dohcDesktop?.setTitlebarTheme?.({ theme }).catch(() => undefined);
+}
+
 function applyLook(look: LookSettings): void {
   currentLook = look;
   const { appearance, editor } = look;
   const theme = effectiveThemeMode(appearance.themeMode, media?.matches ?? false);
-  applyTheme(theme);
-  // Inline, so it wins over both theme blocks in styles.css; a theme flip
-  // runs this again for the other theme's readable shade.
-  setProperty(
-    "--dohc-accent",
+  // The accent is inline, so it wins over both theme blocks in styles.css;
+  // a theme flip runs this again for the other theme's readable shade.
+  applyColors(
+    theme,
     appearance.accentColor === null ? null : readableAccent(appearance.accentColor, theme),
   );
   setProperty(

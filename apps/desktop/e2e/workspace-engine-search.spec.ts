@@ -13,6 +13,7 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
+  waitForFileObjectId,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -25,28 +26,6 @@ import {
 // raw FTS tables.
 
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
-
-async function waitForFileObjectId(
-  page: import("@playwright/test").Page,
-  workspaceId: string,
-  path: string,
-): Promise<void> {
-  await page.waitForFunction(
-    async ({ id, filePath }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-            fileObjectId: string | null;
-          }>;
-        };
-      }).dohcDesktop;
-      if (!api) return false;
-      const result = await api.listFileChats({ workspaceId: id, path: filePath });
-      return result.fileObjectId !== null;
-    },
-    { id: workspaceId, filePath: path },
-  );
-}
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {

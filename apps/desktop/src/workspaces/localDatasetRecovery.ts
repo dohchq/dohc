@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import { lstat, mkdir, open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { RecoveryImportReceipt } from "@dohc/app-backend-runtime/recovery-install";
@@ -14,7 +14,7 @@ export interface DatasetRecoveryPreparation {
 interface Prepared extends DatasetRecoveryPreparation { install(): Promise<RecoveryImportReceipt>; dispose(): Promise<void> }
 
 export function createLocalDatasetRecovery(options: {
-  workspaceId: string; directory: string; maxBytes: number; signal: AbortSignal; assertCurrent(): void;
+  workspaceId: string; maxBytes: number; signal: AbortSignal; assertCurrent(): void;
   prepare(input: { workspaceId: string; transferId: string; manifestSha256: string; stream: AsyncIterable<Uint8Array>; signal: AbortSignal }): Promise<Prepared>;
   claim(input: RecoveryImportReceipt & { workspaceId: string; datasetId: string; oldHostStopped: true; signal: AbortSignal }): RecoveryImportReceipt;
 }) {
@@ -39,7 +39,6 @@ export function createLocalDatasetRecovery(options: {
         const manifest = Buffer.alloc(length);
         if ((await file.read(manifest,0,length,13)).bytesRead !== length) throw new Error("This recovery file is incomplete.");
         const manifestSha256 = createHash("sha256").update(manifest).digest("hex");
-        await mkdir(options.directory,{ recursive:true });
         const source = file.createReadStream({start:0,autoClose:false,highWaterMark:1024*1024});
         const stream = (async function* () { for await (const chunk of source) { check(); input.signal?.throwIfAborted(); yield new Uint8Array(chunk); } })();
         let prepared: Prepared;

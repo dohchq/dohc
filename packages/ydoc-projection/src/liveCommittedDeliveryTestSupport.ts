@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import * as Y from "yjs";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import {restoreValidators, type RestoreArtifact} from "./liveRestoreValidation.js";
 import { markdownToYDoc } from "./import-export.js";
 import {
   createLiveMarkdownRegistrationValidator,
@@ -20,6 +21,7 @@ import {
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { liveJournalCheckpointDue } from "../../../services/sync-relay/src/storage/liveJournalCheckpoint.js";
+import { liveRestoreValidator, runLiveRestoreWork } from "../../../services/sync-relay/src/liveRestoreValidation.js";
 
 export const policy = {
   maxStructVisits: 1_000_000,
@@ -30,6 +32,8 @@ export const policy = {
   maxDeleteIntervalVisits: 1_000_000,
   maxIndexOperations: 10_000_000,
 };
+/** Restore validation in this process, through the relay's artifact protocol. */
+export const restore = liveRestoreValidator(async work => runLiveRestoreWork(work, policy));
 const validate = createLiveMarkdownRegistrationValidator(policy);
 const validateJournal = createLiveMarkdownJournalValidator(policy);
 export const { DatabaseSync } = createRequire(import.meta.url)(
@@ -66,6 +70,7 @@ function validated(
   bytes = checkpoint(),
   currentPath = "docs/a.md",
   objectId = "object",
+  artifact?: RestoreArtifact,
 ) {
   const captured = new Uint8Array(
     bytes.buffer,
@@ -78,7 +83,7 @@ function validated(
     objectId,
     lineageClaimId: hash(captured),
   };
-  const result = validate({ document, currentPath, checkpoint: captured });
+  const result = (artifact ? restoreValidators(policy,artifact).registration : validate)({ document, currentPath, checkpoint: captured });
   expect(result.kind).toBe("accepted");
   if (result.kind !== "accepted") throw new Error(JSON.stringify(result));
   const baselineBytes = Uint8Array.from(captured);
@@ -179,6 +184,7 @@ export function registered(
   options: {
     workspaceQuotaBytes?: number;
     baselineBytes?: Uint8Array;
+    readerArtifact?: RestoreArtifact;
     journalPolicy?: typeof policy;
     host?: LiveHostConnectionCoordinate;
     deployment?: boolean;
@@ -187,7 +193,7 @@ export function registered(
   } = {},
 ) {
   const f = fixture(options, options.host),
-    input = { ...validated(options.baselineBytes), host: { ...(options.host ?? host) } };
+    input = { ...validated(options.baselineBytes,undefined,undefined,options.readerArtifact), host: { ...(options.host ?? host) } };
   f.moment(input);
   expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe("registered");
   f.write(db => { db

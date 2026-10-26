@@ -61,6 +61,15 @@ vi.mock("./editor/artifactSource", () => ({
   },
 }));
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
+import { rememberLossyNoteVerdictForTests } from "./editor/lossyNote";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -253,6 +262,23 @@ describe("engine markdown source view", () => {
     return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
 
+  // The first read answers, so the note is checked and binds; later ones fail.
+  function failingAfterFirstRead(bridgeMock: ReturnType<typeof makeEngineBridge>["bridgeMock"]) {
+    let reads = 0;
+    return vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async (payload) => {
+      reads += 1;
+      if (reads === 1) return await bridgeMock.readWorkspaceText(payload);
+      throw new Error("read failed");
+    });
+  }
+
+  async function laterReadFailed(read: ReturnType<typeof failingAfterFirstRead>) {
+    await waitFor(() => expect(read.mock.settledResults[1]?.type).toBe("rejected"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
   it("source view returns the witnessed settled file bytes", async () => {
     const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
     const doc = markdownToYDoc(source);
@@ -297,6 +323,11 @@ describe("engine markdown source view", () => {
     doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const {bridgeMock} = makeEngineBridge(source);
+    // Most of these are lossy notes, which reach an engine session only when
+    // the person chooses to edit them anyway. The read returns the bytes the
+    // session holds, so the session needs no check of its own.
+    bridgeMock.readWorkspaceText.mockResolvedValue({ text: source, truncated: false, contentHash: sha(source) });
+    rememberLossyNoteVerdictForTests(sha(source), false);
     bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -594,7 +625,7 @@ describe("engine markdown source view", () => {
     expect(
       (await screen.findByTestId("deleted-while-editing-notice")).textContent,
     ).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(screen.queryByTestId("orphaned-draft-copy")).toBeNull();
@@ -605,7 +636,7 @@ describe("engine markdown source view", () => {
       ).toBe("false"),
     );
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
   });
 
@@ -783,7 +814,7 @@ describe("engine markdown source view", () => {
     expect(
       (await screen.findByTestId("deleted-while-editing-notice")).textContent,
     ).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
       "This document reopened before your last edit saved. Copy your text to keep it.",
@@ -1118,29 +1149,24 @@ describe("engine markdown source view", () => {
   // loading/error branch owned the surface. A successful retry clears
   // `engineMayHoldDocument` — and the user was left at "Couldn't read this file."
   // with no document and no retry, while main held a live session.
-  it("renders the document when the retry binds after a failed read", async () => {
+  // A note opens its session only once a read has checked it (CONTEXT.md, lossy
+  // note), so the read that fails under a bound document is a later one.
+  it("keeps the bound document on screen when a later read fails", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
-    let opens = 0;
+    const read = failingAfterFirstRead(bridgeMock);
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      readWorkspaceText: vi.fn(async () => {
-        throw new Error("read failed");
-      }),
-      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
-        opens += 1;
-        return opens === 1
-          ? { available: false, engineMayHoldDocument: true }
-          : await bridgeMock.openEngineYDocSession(payload);
-      }),
+      readWorkspaceText: read,
     });
 
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("engine-may-hold-document-notice");
-    fireEvent.click(screen.getByText("Try again"));
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    await screen.findByTestId("markdown-source-toggle");
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
+    await laterReadFailed(read);
 
-    await screen.findByTestId("view-markdown");
-    expect(screen.queryByText("Couldn't read this file."), "let the read-error branch win over a bound engine doc -> this never appears and the user keeps 'Couldn't read this file.'").toBeNull();
+    expect(screen.getByTestId("view-markdown")).toBeTruthy();
+    expect(screen.queryByText("Couldn't read this file."), "let the read-error branch win over a bound engine doc -> the document is replaced by 'Couldn't read this file.'").toBeNull();
   });
 
   // The other direction of the same guard. The
@@ -1189,39 +1215,29 @@ describe("engine markdown source view", () => {
     }
   });
 
-  // When the content read itself failed, the
-  // inspector returns from its loading/error branch before MarkdownView
-  // mounts — the one path where the engine session is the only way back to
-  // the content is exactly where the timeout had no notice and no retry.
-  it("offers the timeout retry even when the content read failed", async () => {
+  // When the content read itself failed, the inspector returns from its
+  // loading/error branch before MarkdownView mounts. That branch must offer a
+  // way back. A note no read has checked opens no session, so the way back is
+  // reading it again.
+  it("offers Try again when the content read failed, and opens no session for unchecked bytes", async () => {
     const user = userEvent.setup();
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
-    let opens = 0;
+    const read = vi.fn(async () => {
+      throw new Error("read failed");
+    });
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      readWorkspaceText: vi.fn(async () => {
-        throw new Error("read failed");
-      }),
-      openEngineYDocSession: vi.fn(async () => {
-        opens += 1;
-        return { available: false, engineMayHoldDocument: true };
-      }),
+      readWorkspaceText: read,
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const notice = await screen.findByTestId("engine-may-hold-document-notice");
-    expect(notice.textContent).toContain(
-      "dohc could not open this document for editing.",
-    );
-    // The read failure stays stated beside it — and the notice must not
-    // promise read access to content that is not on screen.
-    expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
-    expect(notice.textContent).not.toContain("read-only for now");
-
-    await user.click(screen.getByText("Try again"));
-    await waitFor(() => expect(opens).toBe(2));
+    await screen.findByText("Couldn't read this file.");
+    expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull();
+    await user.click(screen.getByTestId("file-read-retry"));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.openEngineYDocSession).not.toHaveBeenCalled();
   });
 
   // codex r15. The Y.Doc-only bypass renders the document when the read
@@ -1237,18 +1253,22 @@ describe("engine markdown source view", () => {
   it("retires the search jump when the document comes back through the Y.Doc", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
     const onScrollConsumed = vi.fn();
+    const read = failingAfterFirstRead(bridgeMock);
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      readWorkspaceText: vi.fn(async () => {
-        throw new Error("read failed");
-      }),
+      readWorkspaceText: read,
     });
 
-    render(
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    await screen.findByTestId("markdown-source-toggle");
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
+    await laterReadFailed(read);
+    view.rerender(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
+        refreshKey={1}
         scrollTarget={{ path: "a.md", line: 3, nonce: 1 }}
         onScrollConsumed={onScrollConsumed}
       />,
@@ -1865,7 +1885,7 @@ describe("engine markdown source view", () => {
       "",
       LARGE_READ_MODE_FILLER,
     ].join("\n");
-    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    expect(bigBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(bigBody);
     bridgeMock.openEngineYDocSession.mockResolvedValue({
       available: false,
@@ -1932,7 +1952,7 @@ describe("engine markdown source view", () => {
       "",
       filler,
     ].join("\n");
-    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    expect(firstBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(firstBody);
     let reads = 0;
     bridgeMock.readWorkspaceText.mockImplementation(async () => {
@@ -1991,8 +2011,9 @@ describe("engine markdown source view", () => {
 
   it("retires a read-mode heading observer when a newer switch arm replaces it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
+    // Past the WYSIWYG limit, so the first version opens as the read preview.
     const firstBody = Array.from(
-      { length: 201 },
+      { length: Math.max(201, Math.ceil(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 450)) },
       (_, index) =>
         `# First ${index + 1}\n\n${"first document padding ".repeat(20)}\n\n`,
     ).join("");
@@ -3111,10 +3132,10 @@ describe("engine markdown source view", () => {
   });
 
   it("resyncs an editable mode entered while the switch reread is pending", async () => {
-    const firstBody = `# Old version\n\n${"x".repeat(64 * 1024)}`;
+    const firstBody = `# Old version\n\n${"x".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES)}`;
     const secondBody = "# New version\n\nReplacement paragraph.\n";
     const typedBody = `${firstBody}\nTyped while the reread was pending.`;
-    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    expect(firstBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(firstBody);
     let releaseSecondRead!: () => void;
     let reads = 0;
@@ -3141,6 +3162,9 @@ describe("engine markdown source view", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
 
     view.rerender(
       <FileInspector
@@ -3356,18 +3380,22 @@ describe("engine markdown source view", () => {
 
   it("routes the recovery path's jump through the same seam", async () => {
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    const read = failingAfterFirstRead(bridgeMock);
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      readWorkspaceText: vi.fn(async () => {
-        throw new Error("read failed");
-      }),
+      readWorkspaceText: read,
     });
 
-    render(
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    await screen.findByTestId("markdown-source-toggle");
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={1} />);
+    await laterReadFailed(read);
+    view.rerender(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
+        refreshKey={1}
         scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
         onScrollConsumed={vi.fn()}
       />,
@@ -3617,6 +3645,7 @@ describe("engine markdown source view", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(opens).toBe(1));
 
     // The switch: both tokens move together, exactly as the shell bumps them.
     view.rerender(

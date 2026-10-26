@@ -437,11 +437,12 @@ export async function verify(args) {
         throw error;
       }
     }
-    // Rust in the host's WSL distro, beside the Windows job: clippy for a PR, the whole Rust job for a full run.
+    // Rust in the host's WSL distro, beside the Windows job: clippy and the compiler owner's tests for a PR,
+    // the whole Rust job for a full run.
     async function linuxJob() {
       if (!linux) return;
       const linuxOutput = join(output, "rust-linux");
-      const mode = full ? "gate" : "clippy";
+      const mode = full ? "gate" : "pr";
       let receipt;
       let scope;
       try {
@@ -618,7 +619,7 @@ export async function verify(args) {
       if (report.repositoryTests === "test:repo:tree") console.log("[verification] repository tests: tree set only (no tooling change). --full runs every repository test.");
       if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
-      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}`).join("\n")}`);
+      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}${row.error ? `\n    first try: ${row.error.split("\n")[0]}` : ""}`).join("\n")}`);
       const shared = report.shared ?? [];
       if (shared.length) console.log(`[verification] ${shared.length === 1 ? "1 failed test" : `${shared.length} failed tests`} also failed on other branches in the last day. A failure that other branches share often comes from main or a flaky test, not from this change. Check origin/main and the nightly before you change this branch to fix ${shared.length === 1 ? "it" : "them"}:\n${shared.map(row => `  ${row.step}: ${row.test} (also ${row.branches.join(", ")})`).join("\n")}`);
       if (rerun.length) console.log(`[verification] Rerun the failed tests locally before resubmitting. Set DOHC_REQUIRE_POSTGRES=1 and DOHC_REQUIRE_ENGINE_E2E=1, as the gate does, so a missing database or engine fails instead of skipping:\n${rerun.map(command => `  ${command}`).join("\n")}`);

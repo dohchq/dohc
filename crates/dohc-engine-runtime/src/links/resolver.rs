@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 /// The desktop graph's wikilink precedence, over the active version's aliases.
-pub(super) struct Resolver {
+pub(crate) struct Resolver {
     exact: HashSet<String>,
     folded: HashMap<String, Option<String>>,
     stems: HashMap<String, Option<String>>,
@@ -18,7 +18,7 @@ fn unique(map: &mut HashMap<String, Option<String>>, key: String, path: &str) {
         .or_insert_with(|| Some(path.to_owned()));
 }
 
-pub(super) fn without_extension(path: &str) -> &str {
+pub(crate) fn without_extension(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rfind('.') {
         Some(i) if i > 0 => &path[..path.len() - name.len() + i],
@@ -146,7 +146,7 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
 }
 
 impl Resolver {
-    pub(super) fn paths_for_version(
+    pub(crate) fn paths_for_version(
         conn: &rusqlite::Connection,
         ws: &str,
         version: &str,
@@ -162,7 +162,7 @@ impl Resolver {
         Ok(paths)
     }
 
-    pub(super) fn new(paths: impl IntoIterator<Item = String>) -> Self {
+    pub(crate) fn new(paths: impl IntoIterator<Item = String>) -> Self {
         let mut index = Self {
             exact: HashSet::new(),
             folded: HashMap::new(),

@@ -126,7 +126,7 @@ fn seed_counts_unreached_objects_once_and_never_double_counts_pending() {
     write_deferred(&mut s, "b", "b.md", "", 2);
     assert_eq!(lookup(&s, "target.md").unchecked, vec!["a.md", "b.md"]);
     assert!(lookup(&s, "target.md").sources.is_empty());
-    while seed_step(&mut s).unwrap() {}
+    while retry_file_locked("link drain seed_step", || seed_step(&mut s)) {}
     let pending = lookup(&s, "target.md");
     assert!(pending.unchecked.is_empty());
     assert_eq!(pending.sources.len(), 2);
@@ -322,7 +322,7 @@ fn fresh_seed_does_not_queue_current_sources_again() {
             n + 1,
         );
     }
-    while seed_step(&mut s).unwrap() {}
+    while retry_file_locked("link drain seed_step", || seed_step(&mut s)) {}
     publish_pending(&mut s);
     assert_eq!(count(&s, "link_sources"), 1000);
     assert!(
@@ -332,13 +332,19 @@ fn fresh_seed_does_not_queue_current_sources_again() {
         )
         .unwrap()
     );
-    assert!(!reseed_step(&mut s).unwrap());
+    assert!(!retry_file_locked(
+        "link drain reseed_step",
+        || reseed_step(&mut s)
+    ));
     assert_eq!(
         count(&s, "link_pending"),
         0,
         "the first seed already certified generation 2 keys"
     );
-    assert!(!reseed_step(&mut s).unwrap());
+    assert!(!retry_file_locked(
+        "link drain reseed_step",
+        || reseed_step(&mut s)
+    ));
 }
 
 fn resolver_for(s: &EngineStore, ws: &str, version: &str) -> Resolver {
@@ -378,7 +384,7 @@ fn write_scoped(
     VersionedTextStore::new(s)
         .ensure_main_version(ws, "main", 1, &NoFaults)
         .unwrap();
-    while seed_step(s).unwrap() {}
+    while retry_file_locked("link alias seeding", || seed_step(s)) {}
     VersionedTextStore::new(s)
         .write_text(
             &WriteText {
@@ -424,7 +430,9 @@ fn authoritative_resolver_is_complete_during_deferred_and_partial_seed() {
         resolver_for(&s, "ws", "main").resolve("source.md", "/z/report"),
         Some("z/report.md")
     );
-    assert!(seed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain seed_step", || seed_step(
+        &mut s
+    )));
     assert_eq!(count(&s, "link_aliases"), 32);
     assert_eq!(
         resolver_for(&s, "ws", "main").resolve("source.md", "report"),
@@ -521,7 +529,9 @@ fn publish_pending(s: &mut EngineStore) {
             .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
             .collect::<std::collections::VecDeque<_>>();
         while !staged.is_empty() {
-            stage_batch(&mut staged, s, &NoFaults).unwrap();
+            retry_file_locked("link batch staging", || {
+                stage_batch(&mut staged, s, &NoFaults)
+            });
         }
     }
 }
@@ -536,7 +546,9 @@ fn reseed_reopen_retains_cursor_and_queue_and_covers_mixed_generations() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n031".into()));
     assert_eq!(count(&s, "link_pending"), 32);
     let queue = s
@@ -587,7 +599,9 @@ fn reseed_reopen_retains_cursor_and_queue_and_covers_mixed_generations() {
         "stale sources remain candidates between batches"
     );
     assert_eq!(lookup(&s, "target.md").sources.len(), 70);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
     assert_eq!(count(&s, "link_pending"), 32);
     drain(&mut s);
@@ -602,10 +616,12 @@ fn fork_mid_reseed_copies_cursor_and_work_and_resumes_independently() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     // Publish one source, leaving both current and old generations plus work.
     let mut staged = parsed(&s);
-    while !staged.step(&mut s, &NoFaults).unwrap() {}
+    while !retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)) {}
     fork(&mut s);
     assert_eq!(reseed_state(&s, "fork"), (1, "n031".into()));
     let pending: i64 = s
@@ -649,7 +665,9 @@ fn reseed_skips_edited_sources_ahead_and_triggers_requeue_behind_cursor() {
     let scratch = ScratchDir::new().unwrap();
     let mut s = open(&engine_db_path(&scratch).unwrap());
     upgrade_fixture(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     publish_pending(&mut s);
     write(&mut s, "n040", "n040.md", "[[ahead]]", 100);
     publish_pending(&mut s);
@@ -670,7 +688,9 @@ fn reseed_skips_edited_sources_ahead_and_triggers_requeue_behind_cursor() {
     );
     assert_eq!(lookup(&s, "behind.md").sources[0].0, "n000");
     publish_pending(&mut s);
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
     let ahead_queued: bool = s
         .read_with(|c| {
@@ -719,11 +739,15 @@ fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
     })
     .unwrap();
     for cursor in ["n031", "n063"] {
-        assert!(reseed_step(&mut s).unwrap());
+        assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+            &mut s
+        )));
         assert_eq!(reseed_state(&s, "main"), (1, cursor.into()));
         assert_eq!(count(&s, "link_pending"), 0);
     }
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(count(&s, "link_pending"), 6);
     drain(&mut s);
     // One object with many aliases also consumes only one 32-row slice.
@@ -740,7 +764,9 @@ fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
         Ok::<_, StorageError>(())
     })
     .unwrap();
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain reseed_step", || reseed_step(
+        &mut s
+    )));
     assert_eq!(reseed_state(&s, "main"), (1, "n000".into()));
     assert_eq!(count(&s, "link_pending"), 0);
     drain(&mut s);
@@ -753,6 +779,7 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     // tests the read boundary with collisions that normal writes cannot create.
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch("CREATE TABLE path_aliases(workspace_id,version_id,object_id,path);
+        CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id,object_id);
         CREATE TABLE link_sources(workspace_id,version_id,object_id,index_key,status,parser_generation);
         CREATE TABLE link_pending(workspace_id,version_id,object_id);
         CREATE TABLE link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key);
@@ -838,4 +865,126 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     let other = incoming::candidates(&c, "other", "main", "target.md", &["wikilink"]).unwrap();
     assert!(other.sources.is_empty());
     assert_eq!(other.unchecked, vec!["source.md"]);
+}
+
+#[test]
+fn incoming_pending_candidates_do_not_rescan_the_workspace_per_source() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "target", "target.md", "", 1);
+    drain(&mut s);
+    const SOURCES: u64 = 1024;
+    s.write_with(&NoFaults, |tx| {
+        for n in 0..SOURCES {
+            let object = format!("pending-{n:04}");
+            tx.execute(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,1)",
+                [&object],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main',?1,?2)",
+                params![object, format!("pending-{n:04}.md")],
+            ).map_err(sql)?;
+        }
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(count(&s, "link_pending"), SOURCES as i64);
+    let work = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&work))).unwrap();
+    let result = lookup(&s, "target.md");
+    s.count_work(None).unwrap();
+    assert!(result.unchecked.is_empty());
+    let expected: Vec<_> = (0..SOURCES)
+        .map(|n| (format!("pending-{n:04}"), format!("pending-{n:04}.md")))
+        .collect();
+    assert_eq!(result.sources, expected);
+    let steps = work.load(Ordering::Relaxed) * 1000;
+    assert!(
+        steps < SOURCES * 256,
+        "incoming candidates used {steps} SQLite VM steps for {SOURCES} pending sources"
+    );
+}
+
+#[test]
+fn incoming_indexed_probes_do_not_scan_unrelated_occurrence_keys() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "match", "match.md", "[[target]] [[target#part]]", 1);
+    write(&mut s, "markdown", "markdown.md", "[target](target.md)", 2);
+    drain(&mut s);
+    const SOURCES: i64 = 1024;
+    const LINKS: i64 = 20;
+    // Populate only the derived read model after creating authoritative aliases.
+    s.write_with(&NoFaults, |tx| {
+        for n in 0..SOURCES {
+            let object = format!("indexed-{n:04}");
+            let path = format!("indexed-{n:04}.md");
+            tx.execute(
+                "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,1)",
+                [&object],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main',?1,?2)",
+                params![object, path],
+            ).map_err(sql)?;
+            tx.execute(
+                "INSERT INTO link_sources(workspace_id,version_id,object_id,source_hash,path,title,parser_generation,status,index_key)
+                 VALUES('ws','main',?1,'fixture',?2,'',?3,'indexed','fixture')",
+                params![object, path, PARSER_GENERATION],
+            ).map_err(sql)?;
+        }
+        tx.execute(
+            "WITH RECURSIVE ordinals(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM ordinals WHERE n+1<?1)
+             INSERT INTO links(workspace_id,version_id,object_id,index_key,ordinal,literal,kind,start_utf16,end_utf16,line,snippet)
+             SELECT workspace_id,version_id,object_id,index_key,n,'elsewhere','wikilink',n*14,n*14+13,n+1,'[[elsewhere]]'
+             FROM link_sources CROSS JOIN ordinals WHERE index_key='fixture'",
+            [LINKS],
+        ).map_err(sql)?;
+        for (kind, key) in occurrence_keys("indexed.md", "elsewhere", "wikilink") {
+            tx.execute(
+                "INSERT INTO link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key)
+                 SELECT workspace_id,version_id,object_id,index_key,ordinal,?1,?2 FROM links WHERE index_key='fixture'",
+                params![kind, key],
+            ).map_err(sql)?;
+        }
+        tx.execute("DELETE FROM link_pending WHERE object_id LIKE 'indexed-%'", []).map_err(sql)?;
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(count(&s, "link_pending"), 0);
+    assert_eq!(count(&s, "links"), SOURCES * LINKS + 3);
+    assert!(count(&s, "link_occurrence_keys") >= SOURCES * LINKS * 3);
+    let work = Arc::new(AtomicU64::new(0));
+    s.count_work(Some(Arc::downgrade(&work))).unwrap();
+    let result = lookup(&s, "target.md");
+    s.count_work(None).unwrap();
+    assert_eq!(
+        result,
+        incoming::Candidates {
+            sources: vec![("match".into(), "match.md".into())],
+            unchecked: vec![],
+        }
+    );
+    let steps = work.load(Ordering::Relaxed) * 1000;
+    assert!(
+        steps < SOURCES as u64 * 64,
+        "incoming candidates used {steps} SQLite VM steps for {SOURCES} indexed sources with {LINKS} unrelated links each"
+    );
+    s.read_with(|c| {
+        let keys = serde_json::to_string(&path_keys("target.md")).unwrap();
+        let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {}", incoming::CANDIDATES_SQL)).map_err(sql)?;
+        let plan = stmt.query_map(params!["ws", "main", keys, PARSER_GENERATION, "[\"wikilink\"]"], |r| r.get::<_, String>(3))
+            .map_err(sql)?.collect::<Result<Vec<_>, _>>().map_err(sql)?;
+        assert!(plan.iter().any(|row| row.contains("SEARCH k USING INDEX link_occurrence_probe (workspace_id=? AND version_id=? AND key_kind=? AND key=?)")), "{plan:#?}");
+        Ok::<_, StorageError>(())
+    }).unwrap();
 }

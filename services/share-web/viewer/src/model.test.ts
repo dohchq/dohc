@@ -748,3 +748,36 @@ describe("public discussion projection", () => {
     }
   });
 });
+
+it("folds current notifications across renames, path reuse, and deletion without removing a new occupant", () => {
+  const first = "share-object:v1:" + "a".repeat(64),
+    second = "share-object:v1:" + "b".repeat(64);
+  const file = (objectId: string, path: string): SharedFile => ({
+    objectId,
+    path,
+    blobSha256: ORIGINAL_SHA,
+    contentKind: "text",
+  });
+  const files = accumulatorFromCurrentFiles([
+    file(first, "old.md"),
+    file(second, "other.md"),
+  ])!;
+  foldLogOps(files, [
+    {
+      relaySeq: 1,
+      opKind: "file.current",
+      payload: { objectId: second, file: file(second, "old.md") },
+    },
+    {
+      relaySeq: 2,
+      opKind: "file.current",
+      payload: { objectId: first, file: file(first, "renamed.md") },
+    },
+    {
+      relaySeq: 3,
+      opKind: "file.current",
+      payload: { objectId: first, file: null },
+    },
+  ]);
+  expect(filesFromAccumulator(files)).toEqual([file(second, "old.md")]);
+});

@@ -34,6 +34,9 @@ const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
+// The relay's own bound on a link post: an 8,000-byte body, escaped, and its fields.
+const MAX_LINK_CHAT_POST_BYTES = 64 * 1024;
+const LINK_CHAT_POST_FIELDS = new Set(["channelWireId", "threadId", "body", "claimedName", "idempotencyKey"]);
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
@@ -108,6 +111,11 @@ interface RelayCall {
   buffered?: boolean;
   /** Refuses when the session changed before the call answered. */
   ifSessionChanged?: boolean;
+  /**
+   * Answers a lost or unreadable relay answer as 503 `link_unavailable`, not as
+   * a refusal: a write may have landed, and a read's failure says nothing about the link.
+   */
+  retryable?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
   ok?(relayResponse: Response, holdSlot: () => () => void, signal: AbortSignal): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
@@ -412,7 +420,7 @@ async function discussionInput(request: Request): Promise<string | null> {
 function logRelayPath(request: Request): string {
   const incoming = new URL(request.url).searchParams;
   const query = new URLSearchParams();
-  for (const key of ["since", "limit", "hold"]) {
+  for (const key of ["since", "limit", "hold", "current"]) {
     const value = incoming.get(key);
     if (value !== null) query.set(key, value);
   }
@@ -553,6 +561,67 @@ async function discussionRefusal(relayResponse: Response): Promise<Response | nu
     { ok: false, ...state },
     { status: state.state === "limit-reached" ? 413 : 403 },
   );
+}
+
+// A Group's channel read through its link: the channel, a page of messages
+// newest first with `before`, or new ones with `since` and an optional hold.
+function linkChatReadPath(request: Request, channels: boolean): { path: string; holdMs: number } | null {
+  const params = new URL(request.url).searchParams;
+  const allowed = channels ? ["session"] : ["session", "channelWireId", "before", "since", "hold", "limit"];
+  if ([...params.keys()].some((key) => !allowed.includes(key) || params.getAll(key).length !== 1)) return null;
+  if (channels) return { path: "/sync/link/chat/channels", holdMs: 0 };
+  const channelWireId = params.get("channelWireId");
+  const cursor = (key: string) => params.get(key) === null || /^(?:0|[1-9][0-9]{0,15})$/u.test(params.get(key)!);
+  const hold = params.get("hold") ?? "0";
+  if (!channelWireId || channelWireId.length > 256 || !cursor("before") || !cursor("since") ||
+      !DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
+      (params.has("limit") && (!DISCUSSION_LIMIT.test(params.get("limit")!) || Number(params.get("limit")) > 100))) return null;
+  const relaySearch = new URLSearchParams({ channelWireId });
+  for (const key of ["before", "since", "hold", "limit"]) {
+    const value = params.get(key);
+    if (value !== null) relaySearch.set(key, value);
+  }
+  return { path: `/sync/link/chat/messages?${relaySearch}`, holdMs: Number(hold) };
+}
+
+// Only what a post is: its channel, an optional thread, the body, a retry
+// key and the link holder's optional name.
+async function linkChatPostInput(request: Request): Promise<string | null> {
+  try {
+    const value = asRecord(await readBoundedJson(request, MAX_LINK_CHAT_POST_BYTES, request.signal));
+    if (
+      !value || Object.keys(value).some((key) => !LINK_CHAT_POST_FIELDS.has(key)) ||
+      typeof value.channelWireId !== "string" || typeof value.body !== "string" || typeof value.idempotencyKey !== "string" ||
+      (Object.hasOwn(value, "threadId") && typeof value.threadId !== "string") ||
+      (Object.hasOwn(value, "claimedName") && typeof value.claimedName !== "string")
+    ) {
+      return null;
+    }
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+// A link post's refusals that the viewer and agents act on, in this server's
+// words. Only the relay's code passes, never its own words.
+const LINK_CHAT_REFUSALS: Readonly<Record<string, { status: number; error: string }>> = {
+  bad_request: { status: 400, error: "dohc could not post this message. Check its thread and text, then try again." },
+  link_discussion_blocked: { status: 403, error: "The owner stopped this link holder from posting. Ask the owner to allow your posts again." },
+  link_discussion_paused: { status: 403, error: "The owner paused posts from share links. Try again later." },
+  conflict: { status: 409, error: "This message's key was already used for a different message. Send it as a new message." },
+  link_name_already_set: { status: 409, error: "This link holder already has a name. Post with that name, or with none." },
+  discussion_limit_reached: { status: 413, error: "This link has reached its message limit. Ask the owner if you need to post more." },
+  quota_exceeded: { status: 413, error: "The owner's workspace is full. Ask the owner to free space, then send this message again." },
+  payload_too_large: { status: 413, error: "This message is too long. Shorten it, then send it again." },
+};
+
+async function linkChatRefusal(relayResponse: Response): Promise<Response | null> {
+  const code = asRecord(await relayResponse.json().catch(() => null))?.code;
+  const refusal = typeof code === "string" && Object.hasOwn(LINK_CHAT_REFUSALS, code) ? LINK_CHAT_REFUSALS[code] : undefined;
+  return refusal?.status === relayResponse.status
+    ? jsonResponse({ ok: false, code, error: refusal.error }, { status: refusal.status })
+    : null;
 }
 
 // A Collection write's answers, as `parseCollectionWriteOutcome` reads them.
@@ -1147,12 +1216,21 @@ export function createShareWebApplication({
       }
       return result;
     };
-    const superseded = (): Response | null =>
-      call.ifSessionChanged && !current() ? refused() : null;
+    // A renewal replaces the capability without ending the grant, so a
+    // retryable call it superseded tries again instead of ending the link.
+    // A renewal can overtake any call, so a failed retryable one always checks.
+    const superseded = (failed = false): Response | null => {
+      if (!(call.ifSessionChanged || (failed && call.retryable)) || current()) return null;
+      const renewed = call.retryable &&
+        sessions.get(browser.discriminator, browser.token, nowMs())?.grantId === browser.session.grantId;
+      return renewed ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
+    };
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
-    if (!release) return answer(refused());
+    // A full limiter is busy, not a refusal: the link still opens.
+    if (!release) return answer(call.retryable
+      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;
@@ -1182,13 +1260,13 @@ export function createShareWebApplication({
         if (call.path === "/sync/link/share") {
           sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
         }
-        const stale = superseded();
+        const stale = superseded(true);
         await relayResponse.body?.cancel().catch(() => undefined);
         return stale ?? refused();
       }
       if (relayResponse.status >= 500) {
         await relayResponse.body?.cancel().catch(() => undefined);
-        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
+        return superseded(true) ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1200,16 +1278,22 @@ export function createShareWebApplication({
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot, bounded.request.signal));
       }
       if ([400, 403, 409, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
-        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
+        // An unreadable refusal says nothing about the link when the call is retryable.
+        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch((error: unknown) => {
+          if (call.retryable) throw error;
+          return null;
+        });
         const detail = parseLinkRefusal(value, relayResponse.status);
         if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
         const translated = await call.refusal?.(Response.json(value, {status: relayResponse.status}));
         if (translated) return answer(translated);
       }
       await relayResponse.body?.cancel().catch(() => undefined);
-      return answer(refused());
+      // A proxy's busy answer carries no refusal, so a retryable call tries again.
+      return answer(call.retryable && relayResponse.status === 429
+        ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } catch {
-      return superseded() ?? answer(call.path === "/sync/link/collection-writes"
+      return superseded(true) ?? answer(call.retryable
         ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } finally {
       bounded.dispose();
@@ -1495,6 +1579,7 @@ export function createShareWebApplication({
       const probe = await callRelay(request, authenticated, {
         path: "/sync/link/share",
         buffered: true,
+        retryable: true,
         ok: async (relayResponse) => {
           const meta = asRecord(await relayResponse.json().catch(() => null));
           writable = meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
@@ -1530,6 +1615,7 @@ export function createShareWebApplication({
           headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
           body,
           buffered: true,
+          retryable: true,
           timeoutMs: COLLECTION_WRITE_TIMEOUT_MS,
           ok: acceptedCollectionWrite,
           refusal: collectionWriteRefusal,
@@ -1537,6 +1623,52 @@ export function createShareWebApplication({
       } finally {
         release();
       }
+    }
+
+    if (pathname === "/api/view/chat/channels" || pathname === "/api/view/chat/messages") {
+      const authenticated = readSession(request);
+      if (!authenticated) return refused();
+      // An agent's session posts with its server-held profile only.
+      const cookieProfile = parseCookies(request.headers.get("cookie")).get(profileCookieName(authenticated.discriminator));
+      const agentProfile = authenticated.session.agentProfileSecret;
+      const profileSecret = cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) &&
+        (agentProfile === undefined || sameSecret(cookieProfile, agentProfile)) ? cookieProfile : null;
+      if (request.method === "GET") {
+        const channels = pathname === "/api/view/chat/channels";
+        const read = linkChatReadPath(request, channels);
+        if (!read) return refused();
+        return await callRelay(request, authenticated, {
+          path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true, retryable: true,
+          // The channel answer names this profile's name, once set.
+          ...(channels && profileSecret ? { headers: { "x-dohc-link-profile-secret": profileSecret } } : {}),
+          ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
+        });
+      }
+      // Only the viewer page, or this server's own MCP tools, which send the
+      // viewer's headers, as for Collection writes.
+      const fetchSite = request.headers.get("sec-fetch-site");
+      if (
+        request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
+        request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
+        !request.headers.has(LINK_SESSION_HEADER) || !profileSecret ||
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+      ) {
+        return refused();
+      }
+      const body = await linkChatPostInput(request);
+      if (body === null) return refused();
+      // Who posts comes from the capability and the profile alone; the relay
+      // checks the link's access again inside its write.
+      return await callRelay(request, authenticated, {
+        path: "/sync/link/chat/messages",
+        method: "POST",
+        headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
+        body,
+        buffered: true,
+        ifSessionChanged: true,
+        retryable: true,
+        refusal: linkChatRefusal,
+      });
     }
 
     if (
@@ -1594,6 +1726,7 @@ export function createShareWebApplication({
         ...(appendBody === null ? {} : { body: appendBody, exchangeKey: true }),
         holdMs,
         buffered: true,
+        retryable: true,
         ...(isActivity
           ? { limiter: activityHoldLimiter, ifSessionChanged: true }
           : { ifSessionChanged: true, refusal: discussionRefusal }),
@@ -1604,12 +1737,13 @@ export function createShareWebApplication({
       const authenticated = readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {
-        return await callRelay(request, authenticated, { path: "/sync/link/share" });
+        // The share's answer says whether the link has a channel, so a lost one is retryable.
+        return await callRelay(request, authenticated, { path: "/sync/link/share", retryable: true });
       }
       if (pathname === "/api/view/current") {
         const collectionPath = new URL(request.url).searchParams.get("collectionPath");
         const query = collectionPath === null ? "" : `?${new URLSearchParams({ collectionPath })}`;
-        return await callRelay(request, authenticated, { path: `/sync/link/current${query}` });
+        return await callRelay(request, authenticated, { path: `/sync/link/current${query}`, retryable: true });
       }
       if (pathname === "/api/view/log") {
         const hold = new URL(request.url).searchParams.get("hold") ?? "0";
@@ -1619,8 +1753,9 @@ export function createShareWebApplication({
         return await callRelay(request, authenticated, {
           path: logRelayPath(request),
           holdMs: Number(hold),
-          limiter: activityHoldLimiter,
           ifSessionChanged: true,
+          retryable: true,
+          ...(Number(hold) > 0 ? { limiter: activityHoldLimiter } : {}),
         });
       }
       const sha = pathname.slice("/api/view/blob/".length);
@@ -1630,6 +1765,7 @@ export function createShareWebApplication({
       return await callRelay(request, authenticated, {
         path: `/sync/link/blobs/${sha}`,
         limiter: blobProxyLimiter,
+        retryable: true,
         ok: (relayResponse, holdSlot) => streamingBlobResponse(relayResponse, holdSlot()),
       });
     }

@@ -1,27 +1,21 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { shortcutName } from "../shortcuts/shortcutNames";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
-import { isEditorMenuCommand, type EditorMenuCommand } from "../ipc/channels";
-import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
+import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
 
 // Each item's label is its palette row's label, so the menu and the palette
 // cannot disagree. The menu already groups by category, so "View: Chats" shows
-// as "Chats". The palette does not list itself, so it has no row. macOS's app
-// menu adds the ellipsis of Settings…, a command that opens a window.
-// macOS's Edit > Find has no rows: each of its items acts on the editor that
-// has focus, which the palette would take.
-const FIND_LABELS: Record<EditorMenuCommand, string> = {
-  "editor-find": "Find…",
-  "editor-replace": "Find and replace…",
-  "find-again-next": "Find next",
-  "find-again-previous": "Find previous",
-};
+// as "Chats". The palette does not list itself, and macOS's Edit > Find items
+// act on the editor that has focus, which the palette would take, so neither
+// has a row: they take their shortcut's name. macOS adds the ellipsis of a
+// command that asks for more: Settings… in the app menu, and Find… and Find
+// and replace…, which open the find bar.
 function menuLabel(id: MenuCommand | StaticCommandId): string {
-  if (id === "command-palette") return "Command palette";
-  if (isEditorMenuCommand(id)) return FIND_LABELS[id];
-  return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  if (isStaticCommandId(id)) return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  return id === "editor-find" || id === "editor-replace" ? `${shortcutName(id)}…` : shortcutName(id);
 }
 
 // Real application menu (File/Edit/View/Go/Help on Windows and Linux; the
@@ -101,7 +95,7 @@ export function buildMenuTemplate(options: {
       { role: "hideOthers" },
       { role: "unhide" },
       { type: "separator" },
-      { role: "quit", label: "Quit dohc" },
+      { role: "quit", label: "Quit dohc", accelerator: shortcutAccelerators("quit", options.platform)[0] },
     ],
   };
   const macEditItems: MenuItemConstructorOptions[] = [
@@ -176,6 +170,11 @@ export function buildMenuTemplate(options: {
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
         { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
+        // A schedule can keep dohc running with no window, and GNOME hides the
+        // tray icon that would quit it, so Linux quits from File.
+        ...(options.platform === "linux"
+          ? [{ type: "separator" }, { role: "quit", label: "Quit", accelerator: shortcutAccelerators("quit", options.platform)[0] }] as const
+          : []),
       ],
     },
     // The editor answers Undo and Redo. macOS adds the items of Electron's

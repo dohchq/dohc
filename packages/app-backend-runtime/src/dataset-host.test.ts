@@ -1,4 +1,5 @@
 import { readDatasetHistoryHeads } from "./dataset-history.js";
+import { privateFolder } from "./private-folder.test-helper";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "./protocol.js";
@@ -70,7 +71,7 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
     try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
   const journal = createDatasetJournal({ db, transaction });
-  const supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
+  const supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   const host = createDatasetHost<Context>({ db, transaction, journal, supervisor,
     resolveAuthority(context, request) {

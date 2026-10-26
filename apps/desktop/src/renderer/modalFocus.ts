@@ -1,3 +1,5 @@
+import { focusedElementIn } from "./ui/focusedElement";
+
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), details > summary:first-of-type, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])';
 
@@ -21,7 +23,7 @@ export function trapModalTabKey(
   dialog: HTMLElement | null,
 ): void {
   if (event.key !== "Tab" || !dialog) return;
-  const container = toastRegion(document.activeElement) ?? dialog;
+  const container = toastRegion(focusedElementIn(dialog)) ?? dialog;
   const focusable = modalFocusableElements(container);
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -31,7 +33,7 @@ export function trapModalTabKey(
     return;
   }
 
-  const active = document.activeElement;
+  const active = focusedElementIn(dialog);
   const boundary = event.shiftKey ? first : last;
   const direction = event.shiftKey
     ? Node.DOCUMENT_POSITION_PRECEDING
@@ -50,7 +52,7 @@ export function trapModalTabKey(
 // did. Escape in a toast goes back too, so it never closes the dialog.
 export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | null): boolean {
   if (!dialog || (event.key !== "F6" && event.key !== "Escape")) return false;
-  const active = document.activeElement;
+  const active = focusedElementIn(dialog);
   if (toastRegion(active)) {
     event.preventDefault();
     event.stopPropagation();
@@ -76,7 +78,7 @@ export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
     ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
   ].filter((element) => {
     if (
-      element.closest('[hidden], [aria-hidden="true"]') !== null ||
+      element.closest('[hidden], [aria-hidden="true"], [inert]') !== null ||
       element.matches(':disabled, input[type="hidden"]') ||
       (element.hasAttribute("tabindex") && element.tabIndex < 0)
     ) return false;

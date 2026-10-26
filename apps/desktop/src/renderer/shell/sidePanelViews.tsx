@@ -116,6 +116,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
           onOpenPath={context.openPathWithHeading}
           onOpenChatThread={context.openGraphChatThread}
           chatMentionsAvailable={context.captureAvailable}
+          onError={context.reportShellError}
           variant="panel"
         />
       </Suspense>

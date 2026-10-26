@@ -15,10 +15,14 @@ export type PublicUpdateState = {
   canInstall: boolean;
   version?: string;
   percent?: number;
+  // A Linux .deb that did not install: the command that installs it from a terminal.
+  installCommand?: string;
 };
 
 export type UpdateActionResult = {
   accepted: boolean;
+  // Why an install did not go ahead, when the updater said.
+  reason?: string;
   state: PublicUpdateState;
 };
 
@@ -66,7 +70,7 @@ type AutoUpdaterLike = {
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
   on(eventName: "update-not-available", listener: () => void): void;
   on(eventName: "download-progress", listener: (progress: { percent: number }) => void): void;
-  on(eventName: "update-downloaded", listener: (info: { version: string }) => void): void;
+  on(eventName: "update-downloaded", listener: (info: { version: string; downloadedFile?: string }) => void): void;
   on(eventName: "error", listener: (error: Error) => void): void;
 };
 
@@ -105,6 +109,27 @@ export function updatesEnabled(
 const OFFLINE_PATTERN =
   /ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|net::/i;
 const INSTALL_RESTART_FAILURE = "Could not restart into the update.";
+
+type InstallFailure = { message: string; installCommand?: string };
+
+/**
+ * Why a Linux .deb did not install, and what the person can do. electron-updater installs it as root
+ * through the first of gksudo, kdesudo, pkexec, and beesu it finds, or plain sudo, and reports a
+ * failure as "Command <program> exited with code <status>". pkexec exits 126 when the person closes
+ * its prompt, and 127 when it gets no authorization any other way: no agent to ask, a refusal, or
+ * an error. Plain sudo has no terminal to ask from, and its failure looks like dpkg's, so its cause
+ * stays unnamed.
+ */
+export function debInstallFailure(error: Error, installer: string): InstallFailure {
+  const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
+  if (program === "pkexec" && status === "126") {
+    return { message: "The update did not install without your password. Choose Restart to try again." };
+  }
+  const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
+  return program === "pkexec" && status === "127"
+    ? { message: "dohc did not get permission to install the update. Run this command in a terminal to install it.", installCommand }
+    : { message: "The update did not install. Run this command in a terminal to install it.", installCommand };
+}
 // electron-updater's code when the feed has no channel file for this
 // platform. GitHubProvider sets it on a 404 for <channel>-mac.yml in the
 // newest release; GenericProvider sets it for a custom feed.
@@ -194,7 +219,9 @@ export async function startAutoUpdates(options: {
   let state = initialUpdateState;
   let checkInFlight = false;
   let restartStaged = false;
-  let installErrorMessage: string | null = null;
+  let installFailure: InstallFailure | null = null;
+  // The downloaded .deb on Linux, which a failed install names in its command.
+  let debInstaller: string | null = null;
   let stopped = false;
   const publicState = () => {
     const base = publicUpdateState(state, {
@@ -203,8 +230,8 @@ export async function startAutoUpdates(options: {
       checkInFlight,
       restartStaged,
     });
-    return installErrorMessage && state.status === "ready"
-      ? { ...base, message: installErrorMessage }
+    return installFailure && state.status === "ready"
+      ? { ...base, ...installFailure }
       : base;
   };
   const waiters = new Set<() => void>();
@@ -237,7 +264,7 @@ export async function startAutoUpdates(options: {
   if (autoUpdater.isUpdaterActive?.() === false) return null;
 
   autoUpdater.on("checking-for-update", () => {
-    installErrorMessage = null;
+    installFailure = null;
     checkInFlight = true;
     dispatch({ type: "check" });
   });
@@ -253,7 +280,8 @@ export async function startAutoUpdates(options: {
     dispatch({ type: "progress", percent: boundedPercent(progress.percent) }),
   );
   autoUpdater.on("update-downloaded", (info) => {
-    installErrorMessage = null;
+    installFailure = null;
+    debInstaller = platform === "linux" && info.downloadedFile?.endsWith(".deb") ? info.downloadedFile : null;
     dispatch({ type: "downloaded", version: info.version });
     checkInFlight = false;
     emit();
@@ -261,7 +289,7 @@ export async function startAutoUpdates(options: {
   autoUpdater.on("error", (error) => {
     if (restartStaged && state.status === "ready") {
       restartStaged = false;
-      installErrorMessage = INSTALL_RESTART_FAILURE;
+      installFailure = debInstaller ? debInstallFailure(error, debInstaller) : { message: INSTALL_RESTART_FAILURE };
       emit();
       return;
     }
@@ -283,7 +311,7 @@ export async function startAutoUpdates(options: {
       return { checked: false, state: publicState() };
     }
     checkInFlight = true;
-    installErrorMessage = null;
+    installFailure = null;
     try {
       await autoUpdater.checkForUpdates();
       return { checked: true, state: publicState() };
@@ -320,19 +348,21 @@ export async function startAutoUpdates(options: {
       return { accepted: true, state: publicState() };
     }
     restartStaged = true;
-    installErrorMessage = null;
+    installFailure = null;
     emit();
     try {
       autoUpdater.quitAndInstall(false, true);
-      if (installErrorMessage) {
-        return { accepted: false, state: publicState() };
+      // The updater's error event sets it while quitAndInstall runs.
+      const failure = installFailure as InstallFailure | null;
+      if (failure) {
+        return { accepted: false, reason: failure.message, state: publicState() };
       }
       return { accepted: true, state: publicState() };
     } catch {
       restartStaged = false;
-      installErrorMessage = INSTALL_RESTART_FAILURE;
+      installFailure = { message: INSTALL_RESTART_FAILURE };
       emit();
-      return { accepted: false, state: publicState() };
+      return { accepted: false, reason: INSTALL_RESTART_FAILURE, state: publicState() };
     }
   };
 

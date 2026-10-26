@@ -5,6 +5,7 @@ import { isComposingKey, isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { useRequestSequence } from "../useRequestSequence";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
@@ -15,8 +16,10 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  Laptop,
   Pin,
   RefreshCw,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import {
@@ -65,6 +68,8 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
+import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -107,9 +112,10 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
-  // A path to select and focus once its row renders ("Show in Explorer").
-  // The shell expands its folders first; onRevealed clears the request.
-  revealPath?: string | null;
+  // Paths to select once their rows render ("Show in Explorer", or what an
+  // import added). The first in the tree takes focus. The shell expands their
+  // folders first; onRevealed clears the request.
+  revealPaths?: readonly string[] | null;
   onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   onActivateTab: (groupId: string, path: string) => void;
@@ -134,6 +140,15 @@ export interface ExplorerProps {
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
+  // Why this computer cannot list the workspace's Collections, in main's
+  // words, such as another computer keeping them. The section says so in
+  // place of the list.
+  collectionsRefusal?: CollectionsRefusalRead | null;
+  // Another computer keeps the workspace's Collections, and the list holds
+  // the ones on this computer's server. This names that computer.
+  collectionsElsewhere?: CollectionsElsewhere | null;
+  onKeepCollections?: () => void;
+  onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
   // A rejected begin (a flush failure, an unresolved collection write)
@@ -547,7 +562,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onOpenFile,
     onOpenCollection,
     onTogglePin,
-    revealPath,
+    revealPaths,
     onRevealed,
   } = props;
   const activeTab =
@@ -628,6 +643,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // twice (and the second rename would fail on the now-missing source).
   const editDone = useRef(false);
   const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const editErrorRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (editError) editErrorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [editError]);
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
@@ -886,6 +906,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }
       }
       setEditValue("");
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "create", kind, parentPath });
@@ -913,6 +934,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
       setEditValue(basenameOf(path));
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "rename", path, isFolder });
@@ -1219,20 +1241,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   useEffect(() => {
-    if (!revealPath) return;
+    if (!revealPaths) return;
     // A path the tree does not list never gets a row; drop the request so it
     // cannot take focus later when that path appears.
-    if (!fileByPath.has(revealPath) && !isFolderPath(revealPath)) {
+    if (!revealPaths.some((path) => fileByPath.has(path) || isFolderPath(path))) {
       onRevealed?.();
       return;
     }
-    if (!renderIndexByPath.has(revealPath)) return;
+    const shown = revealPaths.filter((path) => renderIndexByPath.has(path));
+    if (shown.length === 0) return;
+    const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
     setFilesExpanded(true);
-    setSelection(new Set([revealPath]));
-    setAnchorPath(revealPath);
-    focusRow(revealPath);
+    setSelection(new Set(shown));
+    setAnchorPath(first);
+    focusRow(first);
     onRevealed?.();
-  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPath]);
+  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPaths]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
@@ -1718,7 +1742,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
   const editRow = (depth: number): ReactNode => (
-    <li role="none" key="edit-row">
+    <li role="none" key="edit-row" className="relative">
       <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={depth} />
@@ -1763,8 +1787,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 : "New file name"
           }
           value={editValue}
+          aria-invalid={editError ? true : undefined}
+          aria-describedby={editError ? "tree-name-error" : undefined}
           readOnly={editPending}
-          onChange={(event) => setEditValue(event.target.value)}
+          onChange={(event) => { setEditValue(event.target.value); setEditError(null); }}
           onKeyDown={(event) => {
             event.stopPropagation();
             if (isComposingKey(event)) return;
@@ -1781,14 +1807,31 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
           // VS Code's rename input signals the same way with focusBorder).
-          className="min-w-0 flex-1 rounded-sm border border-ink/50 bg-bg px-1 py-0.5 text-[13px] text-ink outline-none"
+          className={`min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
         />
       </div>
+      {editError && (
+        <div ref={editErrorRef} id="tree-name-error" role="alert" className="absolute left-6 right-2 top-full z-20 rounded-md border border-danger bg-panel px-2 py-1.5 text-[12px] text-danger">
+          {editError}
+        </div>
+      )}
     </li>
   );
 
   function finishEdit(commit: boolean, returnFocus = false): void {
     if (editDone.current || !editing) return;
+    if (commit && editValue.trim()) {
+      const platform = window.dohcDesktop?.platform ?? "";
+      const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
+      const destination = editing.mode === "rename"
+        ? editing.isFolder ? typed : withRenameDefault(editing.path, typed)
+        : editing.kind === "folder" ? typed : withMarkdownDefault(typed);
+      const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
+      if (error) {
+        setEditError(error);
+        return;
+      }
+    }
     editDone.current = true;
     setEditPending(true);
     renameFocus.current = null;
@@ -1932,16 +1975,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
+          {props.collectionsElsewhere && <CollectionsElsewhereRow elsewhere={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          </>}
         </section>}
         <section
           data-testid="open-editors-section"
@@ -1964,7 +2010,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 aria-hidden
                 className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
-              <span className="min-w-0 flex-1 truncate">Open Editors</span>
+              <span className="min-w-0 flex-1 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
                   aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}
@@ -2329,3 +2375,65 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     </>
   );
 });
+
+// A Collections row's mark and words. Given a `detail`, the words take focus
+// and show it as a tooltip on hover or keyboard focus. The row that holds
+// this is the `@container` the tooltip's width keeps within, so the sidebar
+// never scrolls sideways to show it.
+function CollectionsNote({ icon: Icon, iconClassName, words, detail }: {
+  icon: typeof Laptop;
+  iconClassName: string;
+  words: string;
+  detail: string | null;
+}) {
+  const tooltip = useTooltip();
+  return (
+    <p {...tooltip.hoverProps} className="relative m-0 flex gap-1.5 text-[12px] text-muted">
+      <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${iconClassName}`} />
+      {detail === null ? <span className="wrap-anywhere">{words}</span> : <>
+        <span {...tooltip.focusProps} tabIndex={0} className="wrap-anywhere rounded">{words}</span>
+        {/* 18px: the tooltip's padding and border, around these words. */}
+        <Tooltip {...tooltip.tooltipProps}><span className="block max-w-[calc(100cqw-18px)]">{detail}</span></Tooltip>
+      </>}
+    </p>
+  );
+}
+
+// Below the Collections on this computer's server: the computer that keeps
+// the workspace's other Collections, where a move to a server starts. The
+// whole sentence is the row's tooltip, or the row itself when main named no
+// computer.
+export function CollectionsElsewhereRow({ elsewhere, onKeep }: { elsewhere: CollectionsElsewhere; onKeep?: () => void }) {
+  const { computer, others, words } = elsewhere;
+  return (
+    <div data-testid="collections-elsewhere" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
+      <CollectionsNote icon={Laptop} iconClassName="" words={computer === null ? words : `${others ? "Others on" : "On"} ${computer}`}
+        detail={computer === null ? null : words} />
+      {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
+    </div>
+  );
+}
+
+// The Collections section when this computer cannot use them: where they
+// are, or what went wrong, and the one step that helps. Where another
+// computer keeps them, the whole sentence is the row's tooltip, or the row
+// itself when main named no computer.
+export function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
+  refusal: CollectionsRefusalRead;
+  onKeep?: () => void;
+  onRetry?: () => void;
+}) {
+  const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
+  const named = refusal.kind === "elsewhere" && refusal.computer !== null ? refusal.computer : null;
+  const words = refusal.kind === "unclaimed" ? "Which computer keeps these Collections?" : named !== null ? `On ${named}` : refusal.words;
+  return (
+    <div role="status" data-testid="collections-refusal" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
+      <CollectionsNote icon={held ? Laptop : TriangleAlert} iconClassName={held ? "text-warning" : "text-danger"} words={words}
+        detail={named === null ? null : refusal.words} />
+      <div className="flex flex-wrap gap-1.5">
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>}
+      </div>
+    </div>
+  );
+}

@@ -23,13 +23,12 @@ export async function runUpdateInstall(reportError: ReportError): Promise<void> 
     // opens instead of the one-shot install.
     const result = await requestGuardedUpdateInstall();
     if (result === null) return;
+    // Main says why when it knows, such as a Linux password prompt that was closed.
     if (!result.accepted) {
       reportError(
         "Could not install the update.",
         new Error(
-          result.state.status === "error"
-            ? result.state.message
-            : "The restart request was not accepted.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "The restart request was not accepted."),
         ),
       );
     }

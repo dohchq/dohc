@@ -288,6 +288,7 @@ impl ApplicationOwner {
     pub fn apply_restore(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         cache: &mut WriterDocCache,
         input: NativeRestoreApplication,
         coordinate: ApplicationHostCoordinate,
@@ -303,7 +304,8 @@ impl ApplicationOwner {
         ) -> Result<(), ApplicationError>,
     ) -> Result<NativeRestoreApplicationReceipt, ApplicationError> {
         self.apply_restore_with_facts(
-            store, cache, input, coordinate, max_bytes, max_events, now_ms, faults, follow_up,
+            store, resolver, cache, input, coordinate, max_bytes, max_events, now_ms, faults,
+            follow_up,
         )
         .map(|(receipt, _)| receipt)
     }
@@ -313,6 +315,7 @@ impl ApplicationOwner {
     pub fn apply_restore_with_facts(
         &mut self,
         store: &mut EngineStore,
+        resolver: Option<&Arc<crate::reader_resolver::ReaderResolver>>,
         cache: &mut WriterDocCache,
         input: NativeRestoreApplication,
         coordinate: ApplicationHostCoordinate,
@@ -362,7 +365,7 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             let saved = read_saved(tx, &held, &operation.operation_id, &mut budget)?;
-            let proposal = prepare_in(tx, &held, &input.preparation, budget.remaining, max_events)?;
+            let proposal = prepare_in(tx, &held, &input.preparation, budget.remaining, max_events, resolver.map(Arc::as_ref))?;
             if proposal.receipt.candidate_digest != input.candidate_digest
                 || proposal.receipt.native_source_manifest_digest != input.native_source_manifest_digest
                 || proposal.receipt.replacement_ranges != input.admitted.first_seen

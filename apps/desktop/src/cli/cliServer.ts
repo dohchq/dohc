@@ -1,4 +1,7 @@
-import type { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
@@ -70,6 +73,8 @@ import {
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -92,6 +97,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  posix,
   relative,
   resolve,
   sep,
@@ -239,6 +245,26 @@ export interface CliKeptCopiesPort {
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
+// Live documents whose edits the server refused, which dohc keeps on this
+// computer or on the server, and the steps the desktop's Notices row offers
+// for them: Save recovery copy, Try again, and a Stop run again for a Stop
+// that kept them. Paths are workspace-relative.
+export interface CliKeptEditsPort {
+  list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
+  /** With an incident, saves exactly the kept edits it names. */
+  saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
+  retry(path: string, incident: string): Promise<void>;
+  stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
+}
+
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open, and the step that deletes listed ones. The desktop's
+// Notices row offers the same step after the same warning.
+export interface CliRetainedCopiesPort {
+  list(): Promise<RetainedCopiesListResult>;
+  delete(copies: readonly { id: number; revision: number }[]): Promise<RetainedCopiesDeleteResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -250,6 +276,9 @@ export interface CliAutomationsPort {
   /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
   runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
+  /** The same reads of the workspace's self-hosted server's runs. Null when this computer cannot ask it as the owner. */
+  serverRuns(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null>;
+  serverRun(automationId: string, claimId: string): Promise<CollectionAutomationRun | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
 
@@ -281,6 +310,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
+    refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
     sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
   };
@@ -315,10 +345,13 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
   historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
   historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
+  duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
+  retainedCopies?: CliRetainedCopiesPort;
+  keptEdits?: CliKeptEditsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -337,7 +370,10 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  chatLinks?(workspace:CliRegistryWorkspace,input:ChatLinksInput):Promise<ChatLinksPage>;
+  chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
   links?: {
+    edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
     incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
     resolve(workspace: CliRegistryWorkspace, input: LinksResolveInput): Promise<LinksResolveResult>;
   };
@@ -355,6 +391,7 @@ export interface CliServerOptions {
   agentRunDepth(workspaceId: string): number;
   // Whether a run dohc dispatched holds the workspace's run slot.
   dispatchedAgentRun(workspaceId: string): boolean;
+  agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -732,7 +769,22 @@ function keptCopiesUnavailable() {
   };
 }
 
+function retainedCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
+  };
+}
+
+function keptEditsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Kept edits are kept only in the original workspace. Open it to continue.",
+  };
+}
+
 const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
+const SERVER_RUNS_UNREADABLE = "Your server has no runs in this workspace that this computer can read.";
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -772,6 +824,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
+    ...(run.unsentChangesLost ? { unsentChangesLost: true as const } : {}),
   };
 }
 
@@ -1409,6 +1462,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
   return (
     verb === "groups" ||
     verb === "threads" ||
+    verb === "chatLinks" ||
     verb === "inbox" ||
     verb === "show" ||
     verb === "grep" ||
@@ -1434,6 +1488,8 @@ function chatReadTarget(
       return { threadId: request.args.target };
     case "threads":
       return { channelId: request.args.group };
+    case "chatLinks":
+      return "group" in request.args ? { channelId: request.args.group } : undefined;
     default:
       return undefined;
   }
@@ -2122,7 +2178,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       return path;
     },
     result(value: unknown, changeSnapshots = false): unknown {
-      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
+      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder"]);
       const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
@@ -2177,18 +2233,20 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
   }
   let paths: Awaited<ReturnType<typeof callerPaths>>;
   try { paths = await callerPaths(context, request.args.cwd); } catch (error) {
-    if (request.verb === "fileMove" || request.verb === "fileDelete") {
-      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : "delete"} the file.`);
+    if (request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate") {
+      return pathFreeFailure(error, `dohc could not ${request.verb === "fileMove" ? "move" : request.verb === "fileDuplicate" ? "duplicate" : "delete"} the file.`);
     }
     throw error;
   }
+  // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
+  if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2196,6 +2254,12 @@ async function dispatch(
       case "fileMove":
         rebased = { ...request, args: { ...request.args, fromPath: paths.rebase(request.args.fromPath, "materialize"), toPath: paths.rebase(request.args.toPath, "materialize") } };
         break;
+      case "fileDuplicate": {
+        const path = paths.rebase(request.args.path, "materialize");
+        if (classifyEngineFilePathForRead(path, process.platform).kind === "secret") throw new CliCommandError("History cannot record secret files. Choose another file.");
+        rebased = { ...request, args: { ...request.args, path } };
+        break;
+      }
       case "fileDelete":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "materialize") } };
         break;
@@ -2220,6 +2284,13 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
       case "documentEdit":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "saveRecoveryCopy":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "retryKeptEdits":
+      case "stopAgain":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentCreate":
@@ -2308,6 +2379,9 @@ async function dispatchWorkspace(
     case "shareCopy":
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
+    case "accessRefresh":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.refresh();
     case "accessObject":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.object(request.args);
@@ -2493,11 +2567,14 @@ async function dispatchWorkspace(
         if (fullChannels.length !== before.length) {
           await notifyWrite(options, context);
         }
+        const wireIds = await Promise.all(fullChannels.map(channel =>
+          context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }).catch(() => null)));
         const withThreads = [];
-        for (const channel of fullChannels) {
+        for (const [index, channel] of fullChannels.entries()) {
           const threads = await listCliChannelThreads(context, channel);
           withThreads.push({
             id: channel.id,
+            channelWireId: wireIds[index] ?? null,
             name: channel.name,
             slug: channel.slug,
             kind: cliGroupKind(channel.kind),
@@ -2737,13 +2814,21 @@ async function dispatchWorkspace(
         const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
         if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const page = await automations.runs(automationId, request.args.page);
+          const page = request.args.server ? await automations.serverRuns(automationId, request.args.page) : await automations.runs(automationId, request.args.page);
+          if (page === null) return { ok: false as const, reason: SERVER_RUNS_UNREADABLE };
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
             runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
             next: page.next,
           };
           return listed;
+        }
+        if (request.verb === "automationRun" && request.args.server) {
+          const run = await automations.serverRun(automationId, request.args.run);
+          if (run === null) return { ok: false as const, reason: `Your server has no run ${request.args.run} of this automation that this computer can read.` };
+          const { writes, ...fields } = run;
+          const read: CliResultByVerb["automationRun"] = { ok: true, run: { ...automationRunFields(fields), server: true, changes: writes } };
+          return read;
         }
         if (request.verb === "automationRun") {
           const run = await automations.run(automationId, request.args.run);
@@ -2802,6 +2887,17 @@ async function dispatchWorkspace(
       } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
     }
 
+    case "fileDuplicate": {
+      if (context.readOnly) return {ok: false, reason: "Duplicate requires the owning workspace. Open it to continue."};
+      if (request.args.actor !== "agent") return {ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".'};
+      if (!context.duplicateFile) return {ok: false, reason: "Restart dohc before duplicating this file."};
+      return await onceForRequestId(context, options, request.args.requestId, ["fileDuplicate", request.args.path, request.args.agent ?? null], async () => {
+        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(request.args.agent, context, options), request.args.requestId)
+          .catch(error => pathFreeFailure(error, "dohc could not duplicate the file."));
+        if (result.ok) await notifyWrite(options, context);
+        return { done: result.ok, result };
+      }, completion);
+    }
     case "fileMove":
     case "fileDelete": {
       const change = request.verb === "fileMove" ? "move" : "delete";
@@ -2900,6 +2996,71 @@ async function dispatchWorkspace(
         return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
+      }
+    }
+
+    case "retainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list old file copies");
+      }
+    }
+
+    case "deleteRetainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies || context.readOnly) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.delete(request.args.copies)) };
+      } catch (error) {
+        return mcpFailure(error, "failed to delete old file copies");
+      }
+    }
+
+    case "liveKeptEdits": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        return { ok: true as const, keptEdits: await keptEdits.list() };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept edits");
+      }
+    }
+
+    case "saveRecoveryCopy": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        const saved = await keptEdits.saveRecoveryCopy(request.args.path, request.args.incident);
+        await notifyWrite(options, context);
+        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn, keptEdits: saved.keptEdits };
+      } catch (error) {
+        return pathFreeFailure(error, `dohc could not save a recovery copy of ${request.args.path}.`);
+      }
+    }
+
+    case "retryKeptEdits": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        await keptEdits.retry(request.args.path, request.args.incident);
+        return { ok: true as const, path: request.args.path };
+      } catch (error) {
+        return mcpFailure(error, `failed to try again for ${request.args.path}`);
+      }
+    }
+
+    case "stopAgain": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        const stopped = await keptEdits.stopAgain(request.args.path, request.args.incident);
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits };
+      } catch (error) {
+        return mcpFailure(error, `failed to stop live editing again for ${request.args.path}`);
       }
     }
 
@@ -3003,7 +3164,10 @@ async function dispatchWorkspace(
 
   switch (request.verb) {
     case "groups":
-      return { groups: channels.map(({ cli }) => cli) };
+      return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
+        ...cli,
+        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }).catch(() => null),
+      }))) };
 
     case "threads": {
       const channel = resolveChannel(request.args.group, channels);
@@ -3235,8 +3399,8 @@ async function dispatchWorkspace(
         }
       }
       const actor = writeActor(request.args.actor, context, options);
-      const message = await options.chatWrites.sendMessage(context, {
-        writer: { via: "cli", actor },
+      const reply = {
+        writer: { via: "cli" as const, actor },
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -3244,30 +3408,29 @@ async function dispatchWorkspace(
         ...(request.args.options ? { options: request.args.options } : {}),
         resolveAttachments: () =>
           resolveAttachments(context, request.args.cwd, request.args.attachments),
-      });
+      };
+      const sent = decisionMessage
+        ? await options.chatWrites.answer(context, {
+            ...reply,
+            resolves: {
+              messageId: decisionMessage.id,
+              ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
+            },
+          })
+        : { message: await options.chatWrites.sendMessage(context, reply) };
+      const { message } = sent;
       const linkWarning = await linkRunMessage(context, {
         actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
       }, options);
-      let resolvedByReply = false;
+      const resolvedByReply = "decision" in sent && sent.decision.resolvedByMessageId === message.id;
       let resolutionFailure: string | null = null;
-      if (decisionMessage) {
-        try {
-          const resolution = await options.chatWrites.resolveDecision(context, {
-            threadId,
-            messageId: decisionMessage.id,
-            resolvedByMessageId: message.id,
-            ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
-            reply: message,
-          });
-          resolvedByReply = resolution.resolvedByMessageId === message.id;
-        } catch (error) {
-          resolutionFailure = oneLine(
-            error instanceof Error ? error.message : "decision update failed",
-          );
-          options.onError?.(error);
-        }
+      if ("failure" in sent) {
+        resolutionFailure = oneLine(
+          sent.failure instanceof Error ? sent.failure.message : "decision update failed",
+        );
+        options.onError?.(sent.failure);
       }
       if (actor === "agent") {
         try {
@@ -3452,13 +3615,34 @@ async function dispatchWorkspace(
   }
 }
 
-async function dispatchLinks(
-  request: Extract<CliRequest, { verb: "linksIn" | "linksResolve" }>,
+async function dispatchMentionAndLinkReads(
+  request: Extract<CliRequest, { verb: "chatLinks" | "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
   options: CliServerOptions,
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (request.verb === "chatLinks") {
+    if (!options.chatLinks) throw new CliCommandError("Chat links are unavailable.");
+    let channelWireId: string | null;
+    if ("group" in request.args) {
+      const context = await workspaceContextForRequest(request, options);
+      const loaded = await loadChannels(context);
+      if (loaded.provisioned) await notifyWrite(options, context);
+      const channel = resolveChannel(request.args.group, loaded.channels);
+      channelWireId = await context.store.getChannelWireId({
+        workspaceId: context.workspaceId, channelId: channel.engine.id,
+      }).catch(() => null);
+    } else {
+      channelWireId = request.args.channelWireId;
+    }
+    return channelWireId === null ? null : options.chatLinks(workspace, { channelWireId, cursor: request.args.cursor });
+  }
+  if (request.verb === "chatFileMentions") {
+    if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");
+    return options.chatFileMentions(workspace, { subject: request.args.subject, cursor: request.args.cursor });
+  }
   if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
+  if (request.verb === "linksEdges") return options.links.edges(workspace, { cursor: request.args.cursor });
   return request.verb === "linksIn"
     ? options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor })
     : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
@@ -3480,10 +3664,17 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if ("runId" in request.args && request.args.runId) {
+    const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
+    if (runWorkspaceId !== undefined) {
+      if (runWorkspaceId !== workspace.workspaceId) throw new CliCommandError("Agent runs cannot write in another workspace.");
+      request.args.actor = "agent";
+    }
+  }
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
-  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete";
+  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "fileDuplicate";
   const documentWriteRequest =
     request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
   const writeRequest =
@@ -3564,8 +3755,8 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : request.verb === "linksIn" || request.verb === "linksResolve"
-        ? await dispatchLinks(request, options)
+      : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
+        ? await dispatchMentionAndLinkReads(request, options)
         : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({

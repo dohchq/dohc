@@ -50,7 +50,7 @@ const supervisor=createReplicaSupervisor({storage,onError:(_workspace,error)=>fa
     collections++;const start=performance.now(),page=await child.currentView(...args);
     if(profile)collectWalls.push(performance.now()-start);return page;
   }};
-  return {...child,currentView:async()=>({workspaceId:"w",revision:0,logCursor:0,journalCursor:0,files:[],texts:[],moved:false,nextCursor:null,refusedFiles:[]})};
+  return {...child,currentView:async()=>({workspaceId:"w",revision:0,logCursor:0,journalCursor:0,files:[],texts:[],delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})};
 }});
 const lag=monitorEventLoopDelay({resolution:1});let cpu=process.cpuUsage(),started=0;
 let closing:Promise<void>|undefined;

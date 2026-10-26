@@ -16,11 +16,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
-import type {
-  SitePackageInfo,
-  SitePreviewMode,
-  StartSitePreviewResult,
-  WorkspaceSettingsResult,
+import {
+  previewRunsAppCode,
+  type SitePackageInfo,
+  type SitePreviewMode,
+  type StartSitePreviewResult,
+  type WorkspaceSettingsResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
@@ -28,7 +29,9 @@ import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
 import { ipcErrorMessage } from "./ipcError";
-import { withErrorWords } from "../ipc/errorWords";
+import { isWorkspaceRestricted, withErrorWords } from "../ipc/errorWords";
+import { RestrictedModeState, TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
+import { useWorkspaceTrust } from "./useWorkspaceTrust";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
@@ -239,6 +242,17 @@ export function SitePreviewPage(props: {
   // whichever one is set), so one field is the whole state instead of two
   // booleans that can only ever disagree by construction.
   const [idleReason, setIdleReason] = useState<"exited" | "stopped" | null>(null);
+  // A preview that would run the app's code, held back because the workspace
+  // is in Restricted Mode. Trusting the workspace starts it, or shares again
+  // when sharing needed the build.
+  const [blocked, setBlocked] = useState<{ mode: SitePreviewMode; share: boolean } | null>(null);
+  // A failed read holds back only what runs app code, and says so with Try
+  // again. The static preview never waits for trust.
+  const reportTrustError = props.reportError;
+  const trust = useWorkspaceTrust(props.workspaceId, !props.sharedView, (error, retry) =>
+    reportTrustError?.(TRUST_READ_FAILED_MESSAGE, error, retry));
+  const trustedRef = useRef(trust.trusted);
+  trustedRef.current = trust.trusted;
   // Counts changes to this app's approval on this device, from either
   // publication control, so the page entry reads the approval again.
   const [localApprovals, setLocalApprovals] = useState(0);
@@ -281,6 +295,7 @@ export function SitePreviewPage(props: {
     generationRef.current = 0;
     setRunningMode(null);
     setIdleReason(null);
+    setBlocked(null);
     autoStartKeyRef.current = null;
     try {
       const [site, workspaceResult] = await Promise.all([
@@ -399,7 +414,9 @@ export function SitePreviewPage(props: {
 
   // `restart` is a start the person asked for: it runs the preview again
   // even when another surface already shows it in this mode.
-  const start = useCallback(async (mode: SitePreviewMode, restart: boolean) => {
+  // `remember` false keeps the person's mode for next time: the static
+  // preview Restricted Mode shows in place of Dev or Build is not a choice.
+  const start = useCallback(async (mode: SitePreviewMode, restart: boolean, remember = true) => {
     const request = ++previewStartRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
@@ -431,13 +448,18 @@ export function SitePreviewPage(props: {
       // A newer start another surface made is already on screen, and its
       // mode is the one to open next time.
       if (result.generation < generationRef.current) return result;
-      rememberMode(props.workspaceId, props.siteRoot, mode);
+      if (remember) rememberMode(props.workspaceId, props.siteRoot, mode);
       generationRef.current = result.generation;
       showPreview(result);
       return result;
     } catch (error) {
       // A newer start another surface made replaced this one.
       if (!isCurrent() || generationRef.current > generationAtStart) return;
+      // Main refused before it touched the preview that shows now.
+      if (isWorkspaceRestricted(error)) {
+        setBlocked({ mode, share: false });
+        return null;
+      }
       setPreview(null);
       setActionError(
         ipcErrorMessage(error, `Could not start ${modeLabel(mode)} preview.`),
@@ -485,6 +507,10 @@ export function SitePreviewPage(props: {
           if (isCurrent()) {
             setActionError("This app needs a static build before it can be shared.");
           }
+          return;
+        }
+        if (trustedRef.current !== true && previewRunsAppCode(latest, "build")) {
+          setBlocked({ mode: "build", share: true });
           return;
         }
         const built = await start("build", true);
@@ -598,11 +624,21 @@ export function SitePreviewPage(props: {
       props.sharedView,
     );
     if (!mode) return;
+    // Only a mode that runs the app's code waits for main's answer about
+    // trust. Without one, it is held back as in Restricted Mode.
+    const runsCode = !props.sharedView && previewRunsAppCode(load.site, mode);
+    if (runsCode && trust.trusted === null && !trust.readFailed) return;
+    const held = runsCode && trust.trusted !== true;
 
     const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
-    void start(mode, false);
+    if (!held) {
+      void start(mode, false);
+      return;
+    }
+    setBlocked({ mode, share: false });
+    if (modes.includes("static")) void start("static", false, false);
   }, [
     idleReason,
     load,
@@ -612,7 +648,40 @@ export function SitePreviewPage(props: {
     props.siteRoot,
     props.workspaceId,
     start,
+    trust.readFailed,
+    trust.trusted,
   ]);
+
+  // Trusting the workspace runs what Restricted Mode held back. Restricting it
+  // again stopped every preview of the workspace, so the page starts over.
+  const trustedBefore = useRef(trust.trusted);
+  const blockedRef = useRef(blocked);
+  blockedRef.current = blocked;
+  useEffect(() => {
+    const before = trustedBefore.current;
+    trustedBefore.current = trust.trusted;
+    if (before === true && trust.trusted === false) {
+      void reloadSite();
+      return;
+    }
+    const held = blockedRef.current;
+    if (before === true || trust.trusted !== true || !held) return;
+    setBlocked(null);
+    if (held.share) void prepareShareRef.current();
+    else void start(held.mode, true);
+  }, [reloadSite, start, trust.trusted]);
+
+  const { requestTrust } = trust;
+  const reportError = props.reportError;
+  const trustWorkspaceRef = useRef<() => Promise<void>>(async () => undefined);
+  const trustWorkspace = useCallback(async () => {
+    try {
+      await requestTrust();
+    } catch (error) {
+      reportError?.("dohc could not trust this workspace.", error, () => void trustWorkspaceRef.current());
+    }
+  }, [reportError, requestTrust]);
+  trustWorkspaceRef.current = trustWorkspace;
 
   async function stop() {
     const request = ++previewStartRequestRef.current;
@@ -756,6 +825,11 @@ export function SitePreviewPage(props: {
                     onClick={() => {
                       setOptionsOpen(false);
                       optionsTriggerRef.current?.focus();
+                      if (trust.trusted !== true && !props.sharedView && site && previewRunsAppCode(site, mode)) {
+                        setBlocked({ mode, share: false });
+                        return;
+                      }
+                      setBlocked(null);
                       void start(mode, true);
                     }}
                     className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
@@ -820,6 +894,10 @@ export function SitePreviewPage(props: {
             </div>
           ) : null}
 
+          {blocked && (preview || runningMode) ? (
+            <RestrictedModeState variant="band" asking={trust.asking} onTrust={() => void trustWorkspace()} />
+          ) : null}
+
           {preview && !previewUrlAllowed ? (
             <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
               This app tried to preview from an address dohc does not trust. Reload the preview.
@@ -852,7 +930,9 @@ export function SitePreviewPage(props: {
             </div>
           ) : null}
 
-          {!preview ? (
+          {!preview && blocked && !runningMode ? (
+            <RestrictedModeState variant="page" asking={trust.asking} onTrust={() => void trustWorkspace()} />
+          ) : !preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
               {needsPublication ? <OwnerAppEntry workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
@@ -865,6 +945,9 @@ export function SitePreviewPage(props: {
                     ? "Preview stopped. Use Preview options to run it again."
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
+                    // The start waits for main's answer about trust.
+                    : !props.sharedView && trust.trusted === null && !trust.readFailed
+                    ? null
                     : "This app did not start automatically. Choose another mode in Preview options."
                   : "This app has no previewable entry, dev script, or build output yet."}
               </div>}

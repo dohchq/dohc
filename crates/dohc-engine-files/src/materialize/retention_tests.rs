@@ -57,7 +57,7 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 &row.target_path,
             )
             .unwrap();
-            match inspect(root, &row, now, held, 0).unwrap() {
+            match inspect(root, store.database_path(), &row, now, held, 0).unwrap() {
                 Inspection::Release(token) => {
                     if crate::materialize::placement_is_held_in(
                         store,
@@ -94,6 +94,9 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                     }
                 }
                 Inspection::Oversized => store.keep_oversized_retained(&row, now).unwrap(),
+                Inspection::BusyCheck { unsupported } => {
+                    store.record_retained_busy_check(&row, unsupported).unwrap()
+                }
                 Inspection::Keep => {}
             }
         }
@@ -151,6 +154,43 @@ fn p0_thousand_settles_bound_staging_and_save_latency() {
         late <= early * 3 + 1000,
         "save latency grew: {early} -> {late}us"
     );
+}
+/// #2205: on a volume that cannot refuse to unlink an open file, a replace
+/// records why its original stays, and the sweep never releases it.
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn an_unchecked_volume_keeps_every_original_and_counts_it() {
+    let scratch = ScratchDir::new_named("unchecked-originals").unwrap();
+    let root = scratch.path();
+    let _simulated = crate::retained::unchecked::simulate(root);
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"v0").unwrap();
+    for n in 1..=3 {
+        let before = format!("v{}", n - 1);
+        let after = format!("v{n}");
+        let j = job(
+            &mut store,
+            &format!("settle-{n}"),
+            "notes.md",
+            before.as_bytes(),
+            after.as_bytes(),
+            n,
+        );
+        assert_eq!(
+            materialize_one(&store, root, &j, &options(n, &StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+    }
+    let rows = store.retained_displacements_after(0).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.busy_check_unsupported));
+    sweep(&store, root, 1_000_000);
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 3);
+    assert_eq!(
+        store.retained_summary("ws").unwrap(),
+        dohc_engine_storage::RetainedSummary { count: 3, bytes: 6 }
+    );
+    assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"v3");
 }
 #[cfg(unix)]
 #[test]
@@ -281,6 +321,109 @@ fn p0_restart_recovery_keeps_retained_rows_and_sources() {
         std::fs::read(root.join(row.source_path)).unwrap(),
         b"before"
     );
+}
+/// A store opened through its engine folder, as the engine opens one, by the
+/// folder's ID on a Mac and by the descriptor held for it on Linux, with that
+/// folder held open, and the path to open it by again.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn store_by_id(root: &Path) -> (EngineStore, PathBuf, std::fs::File) {
+    let engine = root.join(".dohc/engine");
+    std::fs::create_dir_all(&engine).unwrap();
+    let folder = std::fs::File::open(&engine).unwrap();
+    let shown = Path::new(".dohc/engine");
+    #[cfg(target_vendor = "apple")]
+    let dir = dohc_macos_files::path_by_id(&folder, shown)
+        .unwrap()
+        .expect("APFS reaches a folder by ID");
+    #[cfg(target_os = "linux")]
+    let dir = dohc_linux_files::held::held_path(std::os::fd::AsFd::as_fd(&folder), shown).unwrap();
+    let db = dir.join("engine.db");
+    (EngineStore::open(&db, 0).unwrap(), db, folder)
+}
+/// Move the engine folder aside and put an empty one at its name.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn swap_engine_folder(root: &Path) -> PathBuf {
+    let moved = root.join(".dohc/moved");
+    std::fs::rename(root.join(".dohc/engine"), &moved).unwrap();
+    std::fs::create_dir(root.join(".dohc/engine")).unwrap();
+    moved
+}
+/// The engine folder moves after the store opens, and another takes its
+/// name. A replace sets the old version aside in the folder the store opened
+/// through, under the workspace-relative name main stores, and the other
+/// folder gets nothing (#2468).
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+#[test]
+fn a_replace_sets_the_old_version_aside_in_the_folder_the_store_opened_through() {
+    let scratch = ScratchDir::new_named("displaced-by-id").unwrap();
+    let root = std::fs::canonicalize(scratch.path()).unwrap();
+    let (mut store, _, _folder) = store_by_id(&root);
+    let moved = swap_engine_folder(&root);
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "by-id", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, &root, &j, &options(0, &StdReplacer)).unwrap();
+    assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"after");
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    let name = row.source_path.strip_prefix(".dohc/engine/displaced/");
+    let name = name.expect("the name main stores");
+    let kept = moved.join("displaced").join(name);
+    assert_eq!(std::fs::read(kept).unwrap(), b"before");
+    let replacement = root.join(".dohc/engine");
+    assert_eq!(std::fs::read_dir(replacement).unwrap().count(), 0);
+}
+/// A replace stops after it sets the old version aside and before any row
+/// names it. The engine folder then moves and another takes its name. After
+/// a restart, recovery still finds the version in the folder the store opens
+/// through and puts it back, and the retained-file check finds a retained
+/// version there by the name main stores (#2468).
+#[cfg(all(
+    any(target_vendor = "apple", target_os = "linux"),
+    feature = "fault-injection"
+))]
+#[test]
+fn recovery_after_a_restart_reaches_the_folder_the_store_opens_through() {
+    use crate::retained::{Inspection, inspect};
+    struct CrashAt(FaultPoint);
+    impl FaultInjector for CrashAt {
+        fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == self.0 {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+    let scratch = ScratchDir::new_named("recovery-by-id").unwrap();
+    let root = std::fs::canonicalize(scratch.path()).unwrap();
+    let (mut store, db, _folder) = store_by_id(&root);
+    std::fs::write(root.join("kept.md"), b"kept before").unwrap();
+    let kept = job(
+        &mut store,
+        "kept",
+        "kept.md",
+        b"kept before",
+        b"kept after",
+        1,
+    );
+    materialize_one(&store, &root, &kept, &options(0, &StdReplacer)).unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "crashed", "notes.md", b"before", b"after", 2);
+    let crash = CrashAt(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+    let mut opts = options(0, &StdReplacer);
+    opts.faults = &crash;
+    let crashed = materialize_one(&store, &root, &j, &opts).unwrap();
+    assert!(matches!(crashed, JobOutcome::Crashed(_)));
+    assert!(!root.join("notes.md").exists());
+    drop(store);
+    swap_engine_folder(&root);
+    let store = EngineStore::open(&db, 1000).unwrap();
+    recover_displacements(&store, &root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
+    assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"before");
+    let found = inspect(&root, store.database_path(), &row, 1000, false, 0).unwrap();
+    assert!(matches!(found, Inspection::Keep));
+    let replacement = root.join(".dohc/engine");
+    assert_eq!(std::fs::read_dir(replacement).unwrap().count(), 0);
 }
 struct CrossVolume(AtomicUsize);
 impl AtomicReplacer for CrossVolume {
@@ -472,13 +615,41 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         })
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
+    // The same bytes under a new identity are recorded once (#2205); the
+    // source is then released after its quiet period.
+    match inspect(root, store.database_path(), &row, 30_000, false, 0).unwrap() {
+        Inspection::Changed { current, bytes } => {
+            assert_eq!(bytes, b"before");
+            assert_eq!(current.digest, row.digest);
+            assert_ne!(current.device, row.device);
+            store
+                .record_retained_read(&row, &current, &bytes, 30_000)
+                .unwrap();
+        }
+        _ => panic!("a new identity is recorded once"),
+    }
+    let refreshed = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, &row, 30_000, false, 0).unwrap(),
+        inspect(root, store.database_path(), &refreshed, 30_001, false, 0).unwrap(),
+        Inspection::Keep
+    ));
+    assert!(matches!(
+        inspect(root, store.database_path(), &refreshed, 60_000, false, 0).unwrap(),
         Inspection::Release(_)
     ));
+    // Another remount, with bytes changed meanwhile.
+    store
+        .read_with(|c| {
+            c.execute(
+                "UPDATE materialization_retained SET device='changed-device'",
+                [],
+            )
+        })
+        .unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
-    match inspect(root, &row, 30_001, false, 0).unwrap() {
+    match inspect(root, store.database_path(), &row, 30_001, false, 0).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"outside after mount");
             assert_ne!(current.device, row.device);
@@ -522,7 +693,7 @@ fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
         .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        inspect(root, &row, 1, false, 0).unwrap(),
+        inspect(root, store.database_path(), &row, 1, false, 0).unwrap(),
         Inspection::Oversized
     ));
     store.keep_oversized_retained(&row, 1).unwrap();
@@ -1142,7 +1313,8 @@ fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
         } else {
             assert!(!root.join(&row.source_path).exists());
             assert!(matches!(
-                crate::retained::inspect(root, &row, 1000, false, 0).unwrap(),
+                crate::retained::inspect(root, store.database_path(), &row, 1000, false, 0)
+                    .unwrap(),
                 crate::retained::Inspection::Missing
             ));
         }
@@ -1356,7 +1528,7 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
         .load_materialization_job(&write.job_id)
         .unwrap()
         .unwrap();
-    let staging = staging_dir(root, true).unwrap();
+    let staging = staging_dir(store.database_path(), root, true).unwrap();
     let name = staged_name(&write.job_id, 0);
     let source = staging.join(&name);
     std::fs::write(&source, b"late outside bytes").unwrap();
@@ -1373,6 +1545,7 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
         mtime: "0:0".into(),
         ctime: "0:0".into(),
         changed_at_ms: 0,
+        busy_check_unsupported: false,
     };
     retained.displacement_id = store.retain_displacement(&retained).unwrap();
     let sibling = root.join(".dohc-write-displaced");

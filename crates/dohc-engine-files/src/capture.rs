@@ -27,7 +27,9 @@ use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePl
 use dohc_engine_storage::FaultInjector;
 #[cfg(feature = "fault-injection")]
 use dohc_engine_storage::FaultPoint;
-use std::collections::BTreeSet;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::Mutex;
 
 /// A contained per-path domain apply failure. It is deliberately content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -61,6 +63,13 @@ pub enum IngestOutcome {
     /// The capture driver asks for that scan once a session releases its
     /// lease.
     Deferred,
+    /// An outside write waits for the document session. Keep the prior
+    /// manifest entry so release retries it as a change to the recorded head.
+    WriteDeferred,
+    /// The file was gone when the sink read it, and retiring its record waits
+    /// for a live document session, as with [`RetireOutcome::Deferred`]. The
+    /// manifest keeps the path's entry, so a later scan retires it.
+    RetireDeferred,
     /// The bytes were durably observed but could not be recorded. A separate
     /// hold protects them; acknowledging this identity must not claim capture.
     Held { size: u64, sha256: String },
@@ -106,7 +115,7 @@ pub trait CaptureSink {
         reason: IngestReason,
     ) -> Result<IngestOutcome, CaptureError>;
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError>;
 
     /// Retire `path`, a tracked spelling the reconcile proved respelled to
     /// `to`: the old spelling still opens the file, which is stored under the
@@ -120,7 +129,7 @@ pub trait CaptureSink {
         to: &Respelling,
     ) -> Result<RespelledRetire, CaptureError> {
         let _ = to;
-        self.retire(path).map(|()| RespelledRetire::Retired)
+        self.retire(path).map(RespelledRetire::from)
     }
 
     /// Try one bounded all-ingest prefix. `None` asks the capture loop to use
@@ -134,12 +143,34 @@ pub trait CaptureSink {
     }
 }
 
+/// How a sink disposed of a planned retire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetireOutcome {
+    Retired,
+    /// A live document session holds the file, so the store keeps it until
+    /// the session lets go. As with [`IngestOutcome::Deferred`], the op is
+    /// neither acknowledged nor failed and the run stays clean. The manifest
+    /// keeps the path, so the rescan the capture driver asks for once the
+    /// session releases its lease retires it.
+    Deferred,
+}
+
 /// How a sink disposed of a respelled path's retire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RespelledRetire {
     Retired,
     /// Refused for now. The path stays dirty for a later pass.
     Waits,
+}
+
+/// A retire that must wait for an editor makes the new spelling wait too.
+impl From<RetireOutcome> for RespelledRetire {
+    fn from(outcome: RetireOutcome) -> Self {
+        match outcome {
+            RetireOutcome::Retired => Self::Retired,
+            RetireOutcome::Deferred => Self::Waits,
+        }
+    }
 }
 
 const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
@@ -161,9 +192,15 @@ pub struct CaptureApplyResult {
     pub not_owned_paths: Vec<String>,
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
-    /// Ingests the sink deferred to a live document session, in plan order.
-    /// Their manifest entries are dropped, and they do not degrade the run.
+    /// Ops the sink deferred to a live document session, in plan order. They
+    /// do not degrade the run, and their manifest entries are dropped unless
+    /// they are in [`Self::deferred_retires`].
     pub deferred_paths: Vec<String>,
+    /// The deferred paths whose record waits to be retired. Their manifest
+    /// entries stay, so the next scan retires them.
+    pub deferred_retires: Vec<String>,
+    /// Outside writes waiting for a session, with their prior manifest kept.
+    pub deferred_writes: Vec<String>,
     pub held_observations: Vec<HeldObservation>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
@@ -199,81 +236,154 @@ pub fn apply_reconcile_plan(
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
-    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new())
+    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new(), None)
+}
+
+/// The most waiting paths an import keeps. Further requests are dropped, and
+/// those callers open once the import settles.
+const MAX_IMPORT_PRIORITY_REQUESTS: usize = 16;
+
+/// Lets callers waiting on single paths steer a running import of new files.
+///
+/// A request moves its path's pending ingest ahead of the rest of an all-Added
+/// plan and applies it alone. `committed` runs after every durable unit, so a
+/// caller that subscribed before its last check knows when to check again.
+/// Both are advisory: a dropped request or wake only delays the caller until
+/// the import settles.
+pub struct ImportPriority {
+    requested: Mutex<VecDeque<String>>,
+    committed: Box<dyn Fn() + Send + Sync>,
+}
+
+impl ImportPriority {
+    pub fn new(committed: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            requested: Mutex::new(VecDeque::new()),
+            committed: Box::new(committed),
+        }
+    }
+
+    /// Ask the running import to capture `path` next.
+    pub fn request(&self, path: &str) {
+        let mut requested = self
+            .requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if requested.len() < MAX_IMPORT_PRIORITY_REQUESTS && !requested.iter().any(|p| p == path) {
+            requested.push_back(path.to_owned());
+        }
+    }
+
+    fn take(&self) -> Option<String> {
+        self.requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
 }
 
 /// Apply a prepared plan, stopping cooperatively between bounded sink calls.
 /// The unprocessed suffix is reported failed so acknowledgement leaves it
 /// dirty for the next startup instead of losing it during close.
+///
+/// `priority` reorders only a plan of Added ingests, which are independent of
+/// each other. A plan with retires keeps its order, so a respelled path's
+/// retire still runs before its new spelling's ingest.
 pub fn apply_reconcile_plan_cancellable(
     plan: &ReconcilePlan,
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
     cancel: &CancellationToken,
+    priority: Option<&ImportPriority>,
 ) -> CaptureApplyResult {
     let mut receipt = Receipt::with_capacity(plan.ops.len());
+    let reorderable = priority.is_some()
+        && plan.ops.iter().all(|op| {
+            matches!(
+                op,
+                CaptureOp::Ingest {
+                    reason: IngestReason::Added,
+                    ..
+                }
+            )
+        });
+    let committed = || {
+        if let Some(priority) = priority {
+            (priority.committed)();
+        }
+    };
+    let mut ops = Cow::Borrowed(plan.ops.as_slice());
     // Peers must receive a respelled path's retire before the new spelling's
     // ingest: on a disk that ignores case, a later retire deletes the new
     // file. When that retire has to wait, so does the ingest. Respelled
     // retires come first in a plan, so the set is complete once they ran.
     let mut unretired: BTreeSet<String> = BTreeSet::new();
-    let next_waiting = |from: usize, unretired: &BTreeSet<String>| {
+    let next_waiting = |ops: &[CaptureOp], from: usize, unretired: &BTreeSet<String>| {
         if unretired.is_empty() {
-            return plan.ops.len();
+            return ops.len();
         }
-        plan.ops[from..]
+        ops[from..]
             .iter()
             .position(|op| {
                 matches!(op, CaptureOp::Ingest { path, .. }
                     if unretired.contains(&path_collision_key(path)))
             })
-            .map_or(plan.ops.len(), |offset| from + offset)
+            .map_or(ops.len(), |offset| from + offset)
     };
-    let mut waiting = plan.ops.len();
+    let mut waiting = ops.len();
     let mut waits_known = true;
     let mut cursor = 0;
     let mut try_batch = true;
-    while cursor < plan.ops.len() {
+    while cursor < ops.len() {
         if cancel.is_cancelled() {
-            receipt.fail_all(&plan.ops[cursor..]);
+            receipt.fail_all(&ops[cursor..]);
             break;
+        }
+        let mut alone = false;
+        if reorderable
+            && let Some(path) = priority.and_then(ImportPriority::take)
+            && let Some(offset) = ops[cursor..].iter().position(|op| op.path() == path)
+        {
+            ops.to_mut()[cursor..=cursor + offset].rotate_right(1);
+            alone = true;
         }
         // Only ingests wait, so the boundary is found once the loop reaches
         // one, after every respelled retire before it ran.
-        if !waits_known && matches!(&plan.ops[cursor], CaptureOp::Ingest { .. }) {
-            waiting = next_waiting(cursor, &unretired);
+        if !waits_known && matches!(&ops[cursor], CaptureOp::Ingest { .. }) {
+            waiting = next_waiting(&ops, cursor, &unretired);
             waits_known = true;
         }
         if cursor == waiting {
-            receipt.fail_all(&plan.ops[cursor..=cursor]);
+            receipt.fail_all(&ops[cursor..=cursor]);
             cursor += 1;
-            waiting = next_waiting(cursor, &unretired);
+            waiting = next_waiting(&ops, cursor, &unretired);
             continue;
         }
-        if try_batch {
-            match sink.ingest_batch(&plan.ops[cursor..waiting]) {
+        if try_batch && !alone {
+            match sink.ingest_batch(&ops[cursor..waiting]) {
                 Some(BatchIngestResult::Committed(outcomes)) => {
                     let count = outcomes.len();
-                    if !valid_batch_prefix(&plan.ops[cursor..waiting], count) {
-                        receipt.fail_all(&plan.ops[cursor..]);
+                    if !valid_batch_prefix(&ops[cursor..waiting], count) {
+                        receipt.fail_all(&ops[cursor..]);
                         break;
                     }
-                    let boundary = &plan.ops[cursor + count - 1];
+                    let boundary = &ops[cursor + count - 1];
                     if should_crash(faults) {
                         return receipt.crashed(boundary.path());
                     }
-                    for (op, outcome) in plan.ops[cursor..cursor + count].iter().zip(outcomes) {
+                    for (op, outcome) in ops[cursor..cursor + count].iter().zip(outcomes) {
                         receipt.fold(op, outcome.map(Applied::from));
                     }
+                    committed();
                     cursor += count;
                     continue;
                 }
                 Some(BatchIngestResult::Uncertain { attempted }) => {
-                    if !valid_batch_prefix(&plan.ops[cursor..waiting], attempted) {
-                        receipt.fail_all(&plan.ops[cursor..]);
+                    if !valid_batch_prefix(&ops[cursor..waiting], attempted) {
+                        receipt.fail_all(&ops[cursor..]);
                         break;
                     }
-                    receipt.fail_all(&plan.ops[cursor..cursor + attempted]);
+                    receipt.fail_all(&ops[cursor..cursor + attempted]);
                     cursor += attempted;
                     continue;
                 }
@@ -281,7 +391,7 @@ pub fn apply_reconcile_plan_cancellable(
             }
         }
 
-        let op = &plan.ops[cursor];
+        let op = &ops[cursor];
         let outcome = match op {
             CaptureOp::Ingest {
                 path,
@@ -305,13 +415,17 @@ pub fn apply_reconcile_plan_cancellable(
                     }
                     Err(error) => Err(error),
                 },
-                None => sink.retire(path).map(|()| Applied::Retired),
+                None => sink.retire(path).map(Applied::from),
             },
         };
         if outcome.is_ok() && should_crash(faults) {
             return receipt.crashed(op.path());
         }
+        let applied = outcome.is_ok();
         receipt.fold(op, outcome);
+        if applied {
+            committed();
+        }
         cursor += 1;
     }
     receipt.finish(plan.degraded)
@@ -330,7 +444,18 @@ enum Applied {
     Retired,
     NotOwned,
     Deferred,
+    DeferredWrite,
+    DeferredRetire,
     Held { size: u64, sha256: String },
+}
+
+impl From<RetireOutcome> for Applied {
+    fn from(outcome: RetireOutcome) -> Self {
+        match outcome {
+            RetireOutcome::Retired => Self::Retired,
+            RetireOutcome::Deferred => Self::DeferredRetire,
+        }
+    }
 }
 
 impl From<IngestOutcome> for Applied {
@@ -339,6 +464,8 @@ impl From<IngestOutcome> for Applied {
             IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
             IngestOutcome::NotOwned => Self::NotOwned,
             IngestOutcome::Deferred => Self::Deferred,
+            IngestOutcome::WriteDeferred => Self::DeferredWrite,
+            IngestOutcome::RetireDeferred => Self::DeferredRetire,
             IngestOutcome::Held { size, sha256 } => Self::Held { size, sha256 },
         }
     }
@@ -350,6 +477,8 @@ struct Receipt {
     not_owned_paths: Vec<String>,
     failed_applies: Vec<String>,
     deferred_paths: Vec<String>,
+    deferred_retires: Vec<String>,
+    deferred_writes: Vec<String>,
     held_observations: Vec<HeldObservation>,
 }
 
@@ -361,6 +490,8 @@ impl Receipt {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
         }
     }
@@ -378,6 +509,14 @@ impl Receipt {
             Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
             Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
             Ok(Applied::Deferred) => self.deferred_paths.push(op.path().to_owned()),
+            Ok(Applied::DeferredWrite) => {
+                self.deferred_paths.push(op.path().to_owned());
+                self.deferred_writes.push(op.path().to_owned());
+            }
+            Ok(Applied::DeferredRetire) => {
+                self.deferred_paths.push(op.path().to_owned());
+                self.deferred_retires.push(op.path().to_owned());
+            }
             Ok(Applied::Held { size, sha256 }) => self.held_observations.push(HeldObservation {
                 path: op.path().to_owned(),
                 size,
@@ -399,6 +538,8 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            deferred_retires: self.deferred_retires,
+            deferred_writes: self.deferred_writes,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: Some(boundary_path.to_owned()),
             degraded: true,
@@ -413,6 +554,8 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            deferred_retires: self.deferred_retires,
+            deferred_writes: self.deferred_writes,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: None,
             degraded,

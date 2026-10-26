@@ -1,6 +1,7 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
+import { accountDisplayName } from "./accountDisplayName";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
@@ -21,6 +22,22 @@ export const SERVICE_HOST_ORIGIN_PREFIX = "service-host:";
 export function namedShareOrigin(shareId: string, userId: string, originId: string): string {
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
+
+// A link holder's posts, one origin per link principal. Only the relay writes it.
+export const LINK_CHAT_ORIGIN_PREFIX = "relay:share-link:";
+
+export function linkChatOrigin(principalId: string): string {
+  return `${LINK_CHAT_ORIGIN_PREFIX}${principalId}`;
+}
+
+// A desktop stores a received share's op under `shared:<shareId>:<source>` and
+// checks a link post against its source, so no client may write from it.
+export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
+
+// The IDs of a link post's message and new thread. Only the relay mints them,
+// so no client can take one first and drop the link post on every desktop.
+export const LINK_CHAT_MESSAGE_ID_PREFIX = "link-message:";
+export const LINK_CHAT_THREAD_ID_PREFIX = "link-thread:";
 
 // Clients can publish their agent and automation authors, or an exact
 // unattributed coverage marker. The marker claims no identity. The relay
@@ -46,6 +63,12 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
+  }
+  if (originId.startsWith(LINK_CHAT_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for link posts");
+  }
+  if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for replayed share ops");
   }
   if (originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection creates");
@@ -90,7 +113,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
 async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = "Unnamed"): Promise<string> {
-  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
+  const name = await accountDisplayName(lookupUserDisplayName, actorUserId) ?? fallback;
   try {
     parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
     return name;
@@ -106,13 +129,12 @@ export async function parseNamedShareLogOps(
 ): Promise<SyncRelayLogInput[]> {
   let lookup: Promise<string | null> | undefined;
   // A failed lookup leaves the post unnamed rather than refusing it.
-  const accountName = () => lookup ??= Promise.resolve().then(() => lookupUserDisplayName?.(actorUserId) ?? null).catch(() => null);
+  const accountName = () => lookup ??= accountDisplayName(lookupUserDisplayName, actorUserId);
   const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
   const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
   if (chatOps.length === 0) return ops;
   // Chat names a person without an account name "Unnamed", as the relay's other chat and discussion routes do.
-  const name = await authenticatedDisplayName(actorUserId, accountName, "Unnamed");
-  const humanName = name.length <= 200 && name.isWellFormed() ? name : "Unnamed";
+  const humanName = await authenticatedDisplayName(actorUserId, accountName);
   const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
   for (const op of chatOps) {
     op.admittedAuthorSnapshot = snapshot;
@@ -171,12 +193,7 @@ export async function parseAuthenticatedLogOps(
     op.payloadJson = stableJsonStringify(stored);
   }
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  let humanName: string;
-  try {
-    humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
-  } catch {
-    return ops;
-  }
+  const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
@@ -257,6 +274,12 @@ export function assertChatAuthorship(
     if (!opKind.startsWith("chat.")) continue;
     const policy = CHAT_OP_POLICY[opKind];
     if (!policy) throw relayError("unknown_chat_op"); // fail-closed: an unrecognized chat op.
+    // Only the relay names a link post's message and new thread.
+    const reserved = op.payload && typeof op.payload === "object" ? op.payload as Record<string, unknown> : {};
+    if ((opKind === "chat.message.append" && String(reserved.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)) ||
+        (opKind === "chat.thread.create" && String(reserved.threadId).startsWith(LINK_CHAT_THREAD_ID_PREFIX))) {
+      throw relayError("authorship_mismatch");
+    }
     if (policy.kind === "structural") continue;
     const payload = op.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -265,6 +288,11 @@ export function assertChatAuthorship(
       throw relayError("authorship_mismatch");
     }
     const bag = payload as Record<string, unknown>;
+    // Only the relay writes a link post, from the link holder's own session.
+    if (opKind === "chat.message.append" && (bag.authorKind === "link" ||
+        Object.hasOwn(bag, "linkGrantId") || Object.hasOwn(bag, "linkPrincipalId"))) {
+      throw relayError("authorship_mismatch");
+    }
     const claimed = bag[policy.field];
     if (claimed === undefined || claimed === null) {
       throw relayError("authorship_mismatch");

@@ -213,7 +213,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // needs.
     await newCollection.getByTestId("new-collection-create").click();
     await expect(page.getByTestId(CLIENTS_TAB)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("collection-empty")).toBeVisible({
+    await expect(page.getByRole("grid").getByRole("button", { name: "New record", exact: true })).toBeVisible({
       timeout: 30_000,
     });
 
@@ -235,12 +235,11 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await newCollection.getByLabel("Collection name").fill("projects");
     await newCollection.getByTestId("new-collection-create").click();
     await expect(page.getByTestId(PROJECTS_TAB)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("collection-empty")).toBeVisible({
+    await expect(page.getByRole("grid").getByRole("button", { name: "New record", exact: true })).toBeVisible({
       timeout: 30_000,
     });
 
-    // The Fields button lives on the populated collection header, so the
-    // first record comes before the schema takes shape.
+    // The first record comes before the schema takes shape.
     await page.getByTestId("collection-new-record").click();
     await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toBeVisible({
       timeout: 15_000,

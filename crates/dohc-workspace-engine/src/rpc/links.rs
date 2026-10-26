@@ -8,6 +8,11 @@ use serde_json::Value;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EdgesParams {
+    cursor: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IncomingParams {
     subject: Value,
     cursor: Option<String>,
@@ -37,7 +42,7 @@ impl EngineService {
         ctx: &RequestContext,
         workspace: Option<WorkspaceHandle>,
         params: Value,
-        incoming: bool,
+        method: &str,
     ) -> Result<Value, WireError> {
         if params.to_string().len() > 48 * 1024 {
             return Err(WireError::new(
@@ -47,7 +52,16 @@ impl EngineService {
         }
         let open = self.open(workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        if incoming {
+        if method == "links.edges" {
+            let p: EdgesParams = parse(params)?;
+            Self::read_under_ctx(
+                &cancellation,
+                "links.edges",
+                open.actor
+                    .link_edges(open.workspace_id.clone(), p.cursor, cancellation.token()),
+            )
+            .await
+        } else if method == "links.in" {
             let p: IncomingParams = parse(params)?;
             Self::read_under_ctx(
                 &cancellation,

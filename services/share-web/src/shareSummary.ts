@@ -35,7 +35,9 @@ export function shareLinkSummary(
     subject: typeof metadata.subjectName === "string" ? metadata.subjectName : "Shared files",
     permissions,
     included: `${scope} ${version}`,
-    history: "You can read retained history of files that remain in this share. " +
-      "Deleted files and files moved out lose their readable history.",
+    history: access === "edit"
+      ? "You can read retained History of files that remain in this share, including changes saved before this link existed. " +
+        "Deleted files and files moved out lose their readable History."
+      : "You can read current files. History is unavailable with view or comment access.",
   };
 }

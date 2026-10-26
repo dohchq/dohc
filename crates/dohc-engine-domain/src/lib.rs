@@ -37,10 +37,11 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 pub use store::{
-    FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
-    ensure_operation_published_in, operation_moments_in, preflight_undo_operation_in,
-    replayed_undo_operation_in, undo_correlation_id, undo_operation_in_tx,
-    undo_request_is_replay_in, validate_operation_id,
+    DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
+    duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_compensation_moments_in,
+    undo_correlation_id, undo_member_in_tx, undo_member_moment_id, undo_progress_key,
+    undo_request_fingerprint, validate_operation_id,
 };
 
 pub use automations::{
@@ -75,16 +76,16 @@ pub use chats::{
     BookmarkTargetKind, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChannelOpeningMessage,
     ChannelThreadSummary, ChatActorKind, ChatAgentReadState, ChatAttachment, ChatBookmark,
     ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatChannelType,
-    ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState,
-    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessageAutomation, ChatMessagePage,
+    ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow,
+    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread, ChatThreadLane,
     ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord,
     DispatchRecovery, FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
     FollowTargetResolution, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
-    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_FILE_MENTION_RESULTS,
-    MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    PendingBookmarkRow, PendingChatRefusal, PendingChatReplay, ResolveDecision, RunRecordLink,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
+    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_MESSAGE_BODY_BYTES,
+    MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingBookmarkRow,
+    PendingChatRefusal, PendingChatReplay, ResolveDecision, RunRecordLink, SaveBookmark,
+    SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
     ThreadMessageResolution, UnreadFileThread, attachment_id_for, base32_lowercase_no_padding,
     bookmark_id_for, bump_chat_conversation_revision, channel_slug_for_name, decode_feed_cursor,
     decode_poll_options, encode_feed_cursor, encode_poll_options, feed_coordinate_visible,
@@ -96,6 +97,7 @@ pub use chats::{
     reaction_id_for, render_chat_thread_projection, replay_pending_chat_coordinates_for_change,
     replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
     resolve_thread_message, thread_has_message, validate_follow_target,
+    validate_replicated_link_author,
 };
 pub use collections::{
     AgentDeclaration, AutomationDeclaration, AutomationRunAttribution, COLLECTION_SCHEMA_FILENAME,
@@ -209,3 +211,5 @@ pub(crate) fn received_object_token(id: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
+
+pub use store::{ensure_no_pending_undo_in, get_active_version_in, validate_moment_metadata};

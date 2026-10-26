@@ -1,3 +1,6 @@
+import { CHANNELS } from "./channels";
+import { ListWorkspaceHeadingsPayload, ListWorkspaceHeadingsResult } from "./bridgeContract";
+import { extractWorkspaceHeadings, workspaceHeadingRecords } from "../workspaces/workspaceHeadings";
 import { basename, isAbsolute } from "node:path";
 import { validateUserReadPath } from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
@@ -40,6 +43,7 @@ import {
   MAX_ZIP_ENTRIES,
   MAX_ZIP_TOTAL_BYTES,
   ZIP_TOO_LARGE_REFUSAL,
+  type ImportCopyOutcome,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
@@ -235,7 +239,7 @@ export function createWorkspaceFilesIpc<
   function shareViewImportResult(
     workspaceId: string,
     outcome: ShareViewFileChangeOutcome,
-  ): { imported: string[]; skipped: number; interrupted?: true } {
+  ): ImportCopyOutcome {
     if (outcome.status === "committed") {
       if (outcome.projection === "pending") notifyRenderer({ workspaceId });
       if (
@@ -246,7 +250,7 @@ export function createWorkspaceFilesIpc<
       ) {
         throw new Error("Shared file import returned an invalid result.");
       }
-      return outcome.value as { imported: string[]; skipped: number };
+      return outcome.value as ImportCopyOutcome;
     }
     notifyRenderer({ workspaceId });
     console.error("[desktop] shared file import did not finish cleanly", outcome);
@@ -282,6 +286,7 @@ export function createWorkspaceFilesIpc<
 
     createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),
     createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
+    duplicateWorkspaceFile: (input, {event}) => workspaceFileMutations.duplicateFile(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
     undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),
@@ -613,4 +618,25 @@ export function createWorkspaceFilesIpc<
       if (error) throw new Error(error);
     },
   } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;
+}
+
+export function registerWorkspaceHeadingsIpcHandlers<
+  Sender, Event extends { sender: Sender }, Workspace extends RegistryEntry,
+  Operation extends { workspace: Workspace },
+>(dependencies: {
+  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
+  assertTrustedSender(event: Event): void;
+  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, inactiveMessage: string,
+    work: (operation: Operation) => Result | Promise<Result>): Promise<Result>;
+  readOwnedWorkspaceTextFor(workspace: Workspace, path: string): Promise<ReadWorkspaceTextResult>;
+}): void {
+  dependencies.registerHandler(CHANNELS.listWorkspaceHeadings, async (event, payload) => {
+    dependencies.assertTrustedSender(event);
+    const input = ListWorkspaceHeadingsPayload.parse(payload);
+    return dependencies.withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "Heading read stopped because this window changed workspaces.", async operation => {
+        const source = await dependencies.readOwnedWorkspaceTextFor(operation.workspace, input.path);
+        return ListWorkspaceHeadingsResult.parse({ headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)) });
+      });
+  });
 }

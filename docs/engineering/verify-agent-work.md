@@ -252,6 +252,7 @@ The dashboard refuses the lane switch there. Do not write `verification-lanes` o
 
 On the shared Windows host, a run that selects Rust also checks Rust in WSL. A change that breaks only the Linux build then fails before merge.
 A PR run runs the gate's clippy command there, which builds every target, tests included, without running them.
+It then runs the app compiler owner's tests, which check its Landlock and seccomp rules. Those compile only on Linux.
 A full run, such as the nightly, runs the whole Rust job there, tests included.
 A full Rust job on every PR would take as long as the Windows one, and the host runs one Linux job at a time for every lane.
 
@@ -274,6 +275,7 @@ Without that file, nothing runs on Linux. Other hosts and CI do not have it.
 - The job waits at most 75 minutes in all for the Linux slot, a cargo lane, and memory, or 55 minutes in a full run. The run's own Windows jobs hold a cargo lane and memory for about 45 minutes, or 60 in a full run, so the wait outlasts them. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
 - The step is `rust-linux`. Its evidence is in the attempt's `rust-linux` folder: a `result.json`, the logs, and the scripts that ran in WSL. In a full run, that `result.json` and the logs are the Linux verifier's own.
 - A clippy error or warning, or a failed Linux test, fails the change. A failed test appears under `failed` and `flaky` with the step `rust-linux`. A failure of WSL, of the transfer, or of the Linux host is a machine failure, and the queue retries it.
+  The distro keeps its own cargo home, so the job first runs `cargo fetch --locked`. If cargo gives up after network errors, the run is a machine failure too. Any other failed fetch, such as a lockfile that needs an update, fails the change.
 - `pnpm verify:plan` shows the distro under `linux`. A run that reuses Rust evidence with `--reuse-rust` runs nothing on Linux, because a reuse covers renderer changes only.
 
 To run a failed Linux check again, use your own clone in the distro, not the queue's checkout.

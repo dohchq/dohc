@@ -23,14 +23,13 @@ describe("targeted chat navigation", () => {
         messageId: "message-dm",
         threadId: "dm-thread",
         targetKind: "file",
+        objectId: "object-1", pathHint: "docs/plan.md",
         createdAtMs: 0,
       },
-      message: { presentation: { group: "fixture", hue: null, self: false },
+      message: {
         id: "message-dm",
-        threadId: "dm-thread",
-        authorKind: "human",
         authorDisplayName: "Alice",
-        body: "DM attachment",
+        preview: "DM attachment",
         createdAtMs: 0,
       },
       thread: {

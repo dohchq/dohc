@@ -75,6 +75,7 @@ async function run(
         resultPath: request.resultPath,
         logPath: request.logPath,
         statePath: request.statePath,
+        storageIdentity: request.storageIdentity,
         edit: request.edit,
         operation: request.operation,
         pageOffset: request.pageOffset,

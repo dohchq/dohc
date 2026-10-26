@@ -8,13 +8,14 @@ const DATE_PATTERN = /^\d{8}$/;
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
-export function desktopReleaseTargets(platforms = "windows") {
+// Each target uses a pinned GitHub-hosted image.
+export function desktopReleaseTargets(platforms = "windows-linux") {
   const targets = [
     {
       label: "Windows x64",
       os: "Windows",
       artifact_platform: "win",
-      runner: ["self-hosted", "windows", "x64"],
+      runner: "windows-2025",
       arch: "x64",
       target: "x86_64-pc-windows-msvc",
       require_signing: "1",
@@ -23,7 +24,7 @@ export function desktopReleaseTargets(platforms = "windows") {
       label: "Linux x64",
       os: "Linux",
       artifact_platform: "linux",
-      runner: ["self-hosted", "linux", "x64"],
+      runner: "ubuntu-24.04",
       arch: "x64",
       target: "x86_64-unknown-linux-gnu",
       require_signing: "0",

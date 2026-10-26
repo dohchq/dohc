@@ -1,3 +1,4 @@
+import type { createChatLinksReader } from "../workspaces/chatLinks";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
@@ -13,7 +14,6 @@ import {
   GetChatThreadRevisionResult,
   SendChatMessageResult,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionResult,
   ListChatThreadAttachmentsResult,
   ListChatChannelsResult,
   ListChatFollowsResult,
@@ -27,12 +27,12 @@ import {
   SetChatReactionResult,
   ChatThreadRecord,
   ChatMessageRecord,
-  ListChatFileMentionsResult,
   ListChatBookmarksResult,
   SaveChatBookmarkResult,
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { registerOperations, type OperationHandlers } from "./operationTable";
+import { ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -56,7 +56,7 @@ import type {
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { resolveChatFileMentionPath } from "../workspaces/chatFileReferenceResolution";
+import { createChatFileMentionsReader } from "../workspaces/chatFileMentions";
 import { chatBookmarkDestination } from "../workspaces/desktopChatBookmarks";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ChatScope, createChatScopeCapability } from "./chatScope";
@@ -168,6 +168,7 @@ export function registerChatsIpcHandlers<
   localInstallationId(): string;
   readWorkspace(workspaceId: string): RegistryEntry | null;
   currentCredentials(): CloudCredentials | null;
+  currentCredentialGeneration(): number;
   chatRelayIdentityFor(
     workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
   ): Promise<ResolvedChatRelayIdentity>;
@@ -180,6 +181,7 @@ export function registerChatsIpcHandlers<
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
+  chatLinks: ReturnType<typeof createChatLinksReader>;
   resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   activity: { queueCloudSync(workspaceId: string): void };
   desktopChatBookmarks: {
@@ -196,6 +198,8 @@ export function registerChatsIpcHandlers<
   automationCollectionOf(workspaceId: string): AutomationCollectionOf;
   // A group is a folder. Main creates it when the group is created.
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
+  // Whether the person's message asks an agent that Restricted Mode holds.
+  agentWaitsForTrust(workspaceId: string, messageId: string): Promise<boolean>;
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
@@ -203,10 +207,14 @@ export function registerChatsIpcHandlers<
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
-    notifyRenderer, ensureGroupFolder, automationCollectionOf,
+    notifyRenderer, ensureGroupFolder, automationCollectionOf, agentWaitsForTrust,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
+  const readFileMentions = createChatFileMentionsReader({
+    requireChatScope, syncWorkspaceSharedChannels, readWorkspace: dependencies.readWorkspace,
+    principalGeneration: dependencies.currentCredentialGeneration,
+  });
   type ChatHandler<Name extends keyof typeof chatOperations> = OperationHandlers<typeof chatOperations, Event, Operation>[Name];
 
   async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
@@ -267,88 +275,8 @@ export function registerChatsIpcHandlers<
     });
   };
 
-  const listChatFileMentions: ChatHandler<"listChatFileMentions"> = async (input, { event, operation }) => {
-    const { workspace, capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    const rowsUncovered = await syncWorkspaceSharedChannels(
-      workspace.workspaceId,
-    );
-    const requestedFile = await capture.resolveFileForPath(input.path);
-    const objectId = requestedFile?.objectId ?? null;
-    const store = linkedChatStoreFor(workspace);
-    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
-    const mentions = await store.listFileMentions({
-      workspaceId: workspace.workspaceId,
-      ...(objectId ? { objectId } : { pathHint: input.path }),
-    });
-    const pathByObjectId = new Map<string, string>();
-    if (requestedFile) pathByObjectId.set(requestedFile.objectId, requestedFile.path);
-    const mentionChannelWireIds = new Map(
-      await Promise.all(
-        [
-          ...new Set(
-            mentions.flatMap((mention) =>
-              mention.channel ? [mention.channel.id] : [],
-            ),
-          ),
-        ].map(
-          async (channelId) =>
-            [
-              channelId,
-              await store.getChannelWireId({
-                workspaceId: workspace.workspaceId,
-                channelId,
-              }),
-            ] as const,
-        ),
-      ),
-    );
-    return ListChatFileMentionsResult.parse({
-      ...(rowsUncovered > 0
-        ? { sharedChannelRowsUncovered: rowsUncovered }
-        : {}),
-      mentions: (await Promise.all(mentions.map(async (mention) => {
-        const currentPath = resolveChatFileMentionPath({
-          requestedObjectId: objectId,
-          ...(mention.attachment.objectId
-            ? { attachmentObjectId: mention.attachment.objectId }
-            : {}),
-          ...(mention.attachment.pathHint
-            ? { attachmentPathHint: mention.attachment.pathHint }
-            : {}),
-          pathByObjectId,
-        });
-        if (!currentPath) return [];
-        return [
-          {
-            attachment: chatAttachmentForIpc({
-              ...mention.attachment,
-              pathHint: currentPath,
-            }),
-            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId), await presentation(mention.message, mention.message.threadId)),
-            thread: chatThreadForIpc(mention.thread),
-            ...(mention.channel
-              ? {
-                  channelId: mention.channel.id,
-                  ...(mentionChannelWireIds.get(mention.channel.id)
-                    ? {
-                        channelWireId: mentionChannelWireIds.get(
-                          mention.channel.id,
-                        )!,
-                      }
-                    : {}),
-                  channelName: mention.channel.name,
-                  channelSlug: mention.channel.slug,
-                  channelKind: mention.channel.kind,
-                }
-              : {}),
-          },
-        ];
-      }))).flat(),
-    });
-  };
+  const chatFileMentionsPage: ChatHandler<"chatFileMentionsPage"> = async ({ workspaceId, ...input }, { operation }) =>
+    readFileMentions(workspaceId, input, operation.assertCurrent);
   const listChatBookmarks: ChatHandler<"listChatBookmarks"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -464,11 +392,21 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   };
 
+  // The message is saved whatever this answers, so a failed answer is none.
+  async function waitsForTrust(workspaceId: string, messageId: string): Promise<{ waitsForTrust?: true }> {
+    try {
+      return await agentWaitsForTrust(workspaceId, messageId) ? { waitsForTrust: true } : {};
+    } catch (error) {
+      console.warn("[desktop] could not read whether a message waits for workspace trust", error);
+      return {};
+    }
+  }
+
   const sendChatMessage: ChatHandler<"sendChatMessage"> = async (input, { event, operation }) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    const message = await chatWrites.sendMessage(chatWritePlace(scope), {
+    const reply = {
       writer: RENDERER,
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
@@ -481,11 +419,18 @@ export function registerChatsIpcHandlers<
           (path) => chatFileObjectId(scope, path),
           input.fileReferences,
         ),
-    });
+    };
+    const sent = input.resolves
+      ? await chatWrites.answer(chatWritePlace(scope), { ...reply, resolves: input.resolves })
+      : { message: await chatWrites.sendMessage(chatWritePlace(scope), reply) };
+    const { message } = sent;
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+      ...("decision" in sent ? { resolved: chatDecisionForIpc(sent.decision) } : {}),
+      ...("failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {}),
+      ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   };
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
@@ -498,30 +443,6 @@ export function registerChatsIpcHandlers<
       input.threadId,
     );
     return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
-  };
-
-  const resolveChatDecision: ChatHandler<"resolveChatDecision"> = async (input) => {
-    // Reads are reachable from a share view; this mutation is not.
-    const scope = await requireChatScope(input.workspaceId);
-    const decision = await chatWrites.resolveDecision(chatWritePlace(scope), {
-      threadId: input.threadId,
-      messageId: input.messageId,
-      resolvedByMessageId: input.resolvedByMessageId,
-      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-    });
-    return ResolveChatDecisionResult.parse({
-      decision: {
-        threadId: decision.threadId,
-        messageId: decision.messageId,
-        state: decision.state,
-        ...(decision.resolvedByMessageId
-          ? { resolvedByMessageId: decision.resolvedByMessageId }
-          : {}),
-        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
-        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-        atMs: decision.atMs,
-      },
-    });
   };
 
   const listChatThreadAttachments: ChatHandler<"listChatThreadAttachments"> = async (input) => {
@@ -984,6 +905,7 @@ export function registerChatsIpcHandlers<
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
       ...await askedDecision(linkedChatStoreFor(workspace), workspace.workspaceId, input, started.message),
+      ...await waitsForTrust(workspace.workspaceId, started.message.id),
     });
   };
   const markChatThreadRead: ChatHandler<"markChatThreadRead"> = async (input) => {
@@ -1072,7 +994,6 @@ export function registerChatsIpcHandlers<
     createFileChat,
     getChatThreadRevision,
     listChatThreadDecisions,
-    resolveChatDecision,
     listChatThreadAttachments,
     listChatChannels,
     listChatFollows,
@@ -1082,7 +1003,8 @@ export function registerChatsIpcHandlers<
     markChatThreadRead,
     listChatReactions,
     setChatReaction,
-    listChatFileMentions,
+    chatLinks: ({workspaceId,...input}, {operation}) => dependencies.chatLinks(workspaceId,input,operation.assertCurrent),
+    chatFileMentionsPage,
     listChatMessages,
     sendChatMessage,
     listPersonalChatFeed,

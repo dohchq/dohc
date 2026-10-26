@@ -17,6 +17,7 @@ import { readDesktopPackageVersion, repoRootFromScript, resolveDesktopRelease, s
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
 import { sourceMapUpload } from "./upload-desktop-source-maps.mjs";
 import { parseUpdateManifest, verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
+import { underReleaseLock } from "./release-lock.mjs";
 import { withBuildBudget } from "./verification/build.mjs";
 
 // The repository whose releases the packaged updater reads (publish in electron-builder.yml).
@@ -24,10 +25,16 @@ export const RELEASE_REPOSITORY = "dohchq/dohc";
 export const DEFAULT_KEYCHAIN = join(homedir(), "Library/Keychains/dohc-release.keychain-db");
 export const DEFAULT_KEYCHAIN_PROFILE = "dohc-notary";
 export const POSTHOG_KEYCHAIN_SERVICE = "dohc-posthog-cli-api-key";
+// Saved in the login keychain, the release keychain's password lets the command unlock it without anyone at the Mac.
+export const SAVED_PASSWORD_SERVICE = "dohc-release-keychain-password";
 // Each release's throwaway checkout and built files live here, outside every checkout.
 export const WORK_ROOT = join(homedir(), "dohc-release");
+// One release command at a time on this Mac, including the scheduled nightly job (release-lock.mjs).
+export const RELEASE_LOCK = join(WORK_ROOT, "release.lock");
 // The workflow's publish job. It runs only after Preflight, which runs only on refs/heads/main.
 export const PUBLISH_JOB = "Publish";
+// The workflow's first job. It stamps a nightly's version with its run attempt.
+export const PREFLIGHT_JOB = "Preflight";
 export const UNLOCK_WAIT_MS = 30 * 60_000;
 const TARGET = "aarch64-apple-darwin";
 const DIST = "mac-arm64";
@@ -95,6 +102,27 @@ const jsonLines = text => text.split("\n").filter(line => line.trim()).map(line 
 function readKeychainStatus(path) {
   const script = `ObjC.import("Security"); var ref = Ref(); $.SecKeychainOpen(${JSON.stringify(path)}, ref); var status = Ref(); var code = $.SecKeychainGetStatus(ref[0], status); code === 0 ? status[0] : code`;
   return Number(read(capture, "osascript", ["-l", "JavaScript", "-e", script]).trim());
+}
+
+// security reads a password from the terminal when it has one. A child in its
+// own session has no terminal, so it reads the password from its input, which
+// no other program can see.
+function unlockWithPassword(keychain, password) {
+  const result = spawnSync("security", ["unlock-keychain", keychain], { input: Buffer.concat([password, Buffer.from("\n")]), detached: true, encoding: "utf8", timeout: 60_000 });
+  return { status: result.error ? null : result.status, stderr: result.error?.message ?? result.stderr ?? "" };
+}
+
+// -w prints a password with non-ASCII text or a control character as bare hex,
+// which a password of hex digits also looks like. -g marks that form with 0x,
+// quotes every other password, and prints nothing after the label for an
+// empty one. It prints the password on stderr, so never log this output.
+function savedPassword(output) {
+  const line = output.split("\n").find(entry => entry.startsWith("password: "));
+  const hex = line && /^password: 0x([0-9A-F]+)(?: |$)/.exec(line);
+  if (hex) return Buffer.from(hex[1], "hex");
+  const quoted = line && /^password: "(.*)"$/.exec(line);
+  if (quoted) return Buffer.from(quoted[1]);
+  return line === "password: " ? Buffer.alloc(0) : null;
 }
 
 /** Locks the release keychain, and returns why it could not, or null. */
@@ -220,10 +248,22 @@ export async function preflightMacRelease(options, {
     "api", "--paginate", `repos/${repo}/actions/workflows/desktop-release.yml/runs?head_sha=${plan.commit}&event=workflow_dispatch&per_page=100`,
     "--jq", ".workflow_runs[] | {id, run_number, event}",
   ])).filter(candidate => candidate.event === "workflow_dispatch" && (!nightly || candidate.run_number === Number(nightly[1])));
-  const published = runs.some(candidate => jsonLines(read(run, "gh", [
-    "api", "--paginate", `repos/${repo}/actions/runs/${candidate.id}/jobs?filter=all&per_page=100`,
-    "--jq", ".jobs[] | {name, conclusion, run_attempt, head_sha}",
-  ])).some(job => job.name === PUBLISH_JOB && job.conclusion === "success" && job.head_sha === plan.commit && (!nightly || job.run_attempt === Number(nightly[2]))));
+  const published = runs.some(candidate => {
+    const jobs = jsonLines(read(run, "gh", [
+      "api", "--paginate", `repos/${repo}/actions/runs/${candidate.id}/jobs?filter=all&per_page=100`,
+      "--jq", ".jobs[] | {name, conclusion, run_attempt, head_sha, started_at}",
+    ]));
+    // Re-running failed jobs starts an attempt that reuses the earlier
+    // attempt's Preflight, start time included, and so publishes the version
+    // that attempt stamped.
+    const preflightStart = attempt => jobs.find(job => job.name === PREFLIGHT_JOB && job.run_attempt === attempt)?.started_at;
+    const attempt = nightly ? Number(nightly[2]) : 0;
+    const stamped = preflightStart(attempt);
+    // The tag's attempt must have run that Preflight, not kept it from an earlier one.
+    const ranPreflight = Boolean(stamped) && !jobs.some(job => job.name === PREFLIGHT_JOB && job.run_attempt < attempt && job.started_at === stamped);
+    return jobs.some(job => job.name === PUBLISH_JOB && job.conclusion === "success" && job.head_sha === plan.commit
+      && (!nightly || (ranPreflight && preflightStart(job.run_attempt) === stamped)));
+  });
   if (!published) {
     refuse(`Tag ${tag} points to ${plan.commit}, but no dispatched Desktop Release run${nightly ? ` ${nightly[1]}, attempt ${nightly[2]},` : ""} published that commit from main.`);
   }
@@ -266,18 +306,32 @@ export async function preflightMacRelease(options, {
 }
 
 /**
- * Waits for the release keychain to unlock. In a terminal, security asks for
- * its password; otherwise, the command waits for someone to unlock it. Before
- * packaging, a keychain that is already unlocked was open while the build ran
- * other code, so it is locked and unlocked again the same way.
+ * Unlocks the release keychain with the password saved in the login keychain.
+ * Without a saved password, security asks for it in a terminal; otherwise, the
+ * command waits for someone to unlock the keychain. Before packaging, a
+ * keychain that is already unlocked was open while the build ran other code,
+ * so it is locked and unlocked again the same way.
  */
-export async function unlockReleaseKeychain(plan, purpose, { keychainStatus, step, run, interactive, cancelled, wait = delay, now = Date.now, pollMs = 5000 }, { relock = false } = {}) {
+export async function unlockReleaseKeychain(plan, purpose, {
+  keychainStatus, step, run, interactive, cancelled, unlockWith = unlockWithPassword, wait = delay, now = Date.now, pollMs = 5000,
+}, { relock = false } = {}) {
   const unlocked = () => (keychainStatus(plan.keychain) & UNLOCKED) !== 0;
   if (unlocked()) {
     if (!relock) return;
     console.warn("\nThe release keychain was unlocked before packaging, so the install and builds ran with it open. Locking it, then unlocking it again.");
     const failure = lockKeychain(run, plan.keychain);
     if (failure) throw new Error(failure);
+  }
+  // add-generic-password saves to the default keychain, so the search covers the keychain list, which excludes the release keychain.
+  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-g"]);
+  if (saved.status === 0) {
+    console.log(`\n${purpose} unlocks the release keychain with the password saved in the login keychain.`);
+    const password = savedPassword(`${saved.stdout}\n${saved.stderr}`);
+    const result = password ? unlockWith(plan.keychain, password) : { status: null, stderr: "security printed no password." };
+    if (result.status !== 0 || !unlocked()) {
+      throw new Error(`The password saved as ${SAVED_PASSWORD_SERVICE} in the login keychain did not unlock the release keychain: ${result.stderr.trim()}\nSave the right one, or delete it, as docs/engineering/desktop-release.md describes. Nothing was signed or uploaded.`);
+    }
+    return;
   }
   if (interactive) {
     console.log(`\n${purpose} needs the release keychain.`);
@@ -569,6 +623,14 @@ export async function withReleaseKeychain({ dryRun, keychain }, action, run = ca
 }
 
 async function main() {
+  // A usage error does not wait for the lock.
+  const options = parseMacReleaseArgs(process.argv.slice(2));
+  // One release command at a time on this Mac. Under the scheduled nightly job, this command already holds the lock.
+  const locked = process.platform === "darwin" ? await underReleaseLock(RELEASE_LOCK) : null;
+  if (locked !== null) {
+    process.exitCode = locked;
+    return;
+  }
   // A signal stops the command between steps. It still locks the release
   // keychain and removes the throwaway checkout, and starts no further upload.
   let stopping = false;
@@ -578,7 +640,6 @@ async function main() {
       console.error(`\n${signal}: stopping. Nothing further uploads.`);
     });
   }
-  const options = parseMacReleaseArgs(process.argv.slice(2));
   await withReleaseKeychain(options, async () => {
     const plan = await preflightMacRelease(options);
     for (const notice of plan.notices) console.log(notice);

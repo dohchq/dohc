@@ -28,9 +28,11 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  "links edges": [],
   "links in": ['{"path":"a.md"}'],
   "links resolve": ["a.md", '[{"kind":"wikilink","literal":"b"}]'],
   "sync stop": [],
+  "access refresh": [],
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],
   "access sharing": ["received"],
   "share copy": ["share", "grant"],
@@ -39,9 +41,16 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document create": ["Notes/new.md"],
   "document chats": ["Notes/a.md"],
   "document comment": ["Notes/a.md", "--title", "Review", "--text", "Comment"],
+  "document kept-edits": [],
+  "document save-recovery-copy": ["Notes/a.md"],
+  "document retry-kept-edits": ["Notes/a.md", "outbox:delivery:0"],
+  "document stop-again": ["Notes/a.md", "release:a:0"],
+  "chat file-mentions": [],
+  "chat links": ["general"],
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],
   "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],
   "chat grep": ["pattern"], "chat export": ["--out", "exports"],
+  "file duplicate": ["Notes/a.md"],
   "history operation": ["dohc-operation:11111111-1111-4111-8111-111111111111"], "history undo": ["dohc-operation:11111111-1111-4111-8111-111111111111"],
   "history list": [], "history show": ["change"],
   "automation list": ["Tasks"], "automation buttons": ["Tasks"],

@@ -23,9 +23,13 @@ signs and notarizes a release. An unsigned build is not a stable release.
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
 installs an AppArmor profile that allows them. The profile covers every process
-dohc starts, including the engine, chat runners, and the commands agents run, so
-each of them can also create user namespaces. Point Ubuntu and Debian users to
-the `.deb`.
+the desktop app starts, including the engine, chat runners, and the commands
+agents run, so each of them can also create user namespaces. Point Ubuntu and
+Debian users to the `.deb`.
+
+On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
+`/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
+([reference](../reference/cli-mcp-sdk.md)).
 
 ## Keep signing credentials on reviewed code
 
@@ -38,59 +42,40 @@ Confirm that changes reaching `main` receive review before enabling signing.
 
 The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
-Pull requests use local verification. Dry runs receive empty signing credentials.
+Pull requests never run this workflow. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
-Only the Windows package job receives the Windows signing secrets. Linux receives none.
+Only Windows signing and packaging steps receive the Windows signing secrets.
+Linux receives no signing secrets.
+Both package targets receive `POSTHOG_CLI_API_KEY` only in the source map upload step.
+Dry runs receive no release secrets.
 
 The macOS signing identity and notarization credentials stay in a release
 keychain on the release owner's Mac. They never enter GitHub, and no workflow
-can read them. The keychain stays locked between releases, so publishing the
-macOS files needs the release owner to unlock it.
+can read them. The keychain stays locked between releases. Publishing the
+macOS files needs the release owner to unlock it, or the password that the
+owner [saved for unattended releases](#let-releases-run-unattended).
 
-## Provide self-hosted runners
+## GitHub-hosted release jobs
 
-Every release job runs on a self-hosted runner. Cloud runners stay off.
+Every workflow job runs on a fresh GitHub-hosted runner with a pinned image.
+Windows and Linux packages build in parallel on separate machines.
 
-| Jobs | Runner labels |
+| Jobs | Image |
 | --- | --- |
-| Preflight, version check, and Publish for `linux` | `self-hosted`, `linux`, `x64` |
-| Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
-| Windows x64 package | `self-hosted`, `windows`, `x64` |
-| Linux x64 package | `self-hosted`, `linux`, `x64` |
+| Preflight for `linux` | `ubuntu-24.04` |
+| Preflight for other selections | `windows-2025` |
+| Version check and Publish | `ubuntu-24.04` |
+| Windows x64 package | `windows-2025` |
+| Linux x64 package | `ubuntu-24.04` |
 
-A job waits in the queue until a runner with its labels is online.
-Each runner needs Git with bash, rustup, and the platform's native build tools.
-The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run the Windows runner in a signed-in desktop session for the packaged app check.
-The Linux runner also needs `xvfb-run` for the fuse smoke.
-After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
-The smoke looks for `apps/desktop/release/linux-unpacked` on Linux and for `apps/desktop/release/mac-arm64/dohc.app` on a Mac. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
-The package and publish jobs receive the environment's secrets.
-Register only runners that the release owner controls.
-On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
-This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
-Start the runner's `run.cmd` when building a release.
-The runner can stay offline between releases.
-
-### Use WSL2 for Linux builds
-
-Ubuntu on WSL2 can build the Linux x64 AppImage and `.deb` on a Windows PC.
-Register a separate Linux runner inside the distribution with the `self-hosted`, `linux`, and `x64` labels.
-Keep its checkout and dependencies in the Linux filesystem, such as under `/home/<user>/`, rather than `/mnt/c`.
-Use Linux Node 24.16 or newer, pnpm 11.20.0, rustup, and native compiler tools.
-Do not reuse Windows `node_modules` or a Windows pnpm executable.
-Install Electron's Linux runtime libraries, `xvfb-run`, and AppImage's FUSE library.
-Confirm these tools are on the runner's noninteractive `PATH` before starting its `run.sh`.
-
-WSL shares the PC's CPU, memory, and physical disk with Windows.
-Check host disk space and build admission before a release.
-Coordinate WSL builds with other work on the PC and cap Cargo parallelism to the host's build budget.
-Do not share Windows slot records with Linux processes because their PID namespaces differ.
-The `windows-linux` selection packages its two targets sequentially.
-
-WSLg can display the packaged app, and Xvfb supports automated startup checks.
-These checks do not prove Linux desktop installation, protocol registration, or real AppImage or `.deb` upgrades.
-Use a normal Linux desktop or desktop VM for those release rehearsals.
+The workflow installs the pinned Node, pnpm, and Rust versions before building.
+The Windows package runs the packaged app check in its runner's desktop session.
+The Linux package runs its fuse smoke with `xvfb-run`.
+The smoke checks the executable's fuse values and starts it with an isolated profile.
+It uses `apps/desktop/release/linux-unpacked` on Linux and `apps/desktop/release/mac-arm64/dohc.app` on a Mac.
+For a local smoke with another package path, set `DOHC_SMOKE_PACKAGE_DIRECTORY` to that directory or app bundle.
+These checks do not prove installation, protocol registration, or installer upgrades.
+Use a disposable desktop account or VM for those release rehearsals.
 
 ## Contributor access to releases
 
@@ -98,15 +83,13 @@ The committed `dohc-release` skill is a public procedure. It contains no credent
 Contributors can use it to build local packages or operate workflows in their own forks.
 They need repository write access to dispatch this repository's workflow.
 Trusted collaborators with write access can also request publication through `dry_run=false`.
+While the repository is private, workflows from fork PRs never run. Before it goes public, require approval for every outside contributor's run ([setup](enable-blacksmith.md#prepare-the-account-at-launch)).
 
 The publish job receives a short-lived token scoped to this repository, with `contents: write`.
 A fork's token does not grant access to this repository's releases or signing secrets.
 Protect changes to `main` and restrict the `desktop-release` environment to reviewed code.
 If publication must require the owner's approval, configure required reviewers on that environment where the repository plan supports them.
 A branch restriction alone does not require an owner's approval.
-
-Keep self-hosted runners restricted to trusted code when the repository becomes public.
-Do not enable fork pull-request execution on the owner's PC.
 
 ## Choose versions
 
@@ -121,31 +104,102 @@ With package version `0.1.0`, a nightly becomes `0.1.1-nightly.YYYYMMDD.RUN.ATTE
 The date uses UTC. GitHub supplies the run number and attempt.
 Each published release retains its tag, source commit, notes, and installers in GitHub Releases.
 
+## Publish a nightly
+
+The public alpha is the nightly channel. A nightly publishes only when all of these hold:
+
+- The dispatch selects `platforms=windows-linux`, so every installation the workflow builds for receives the update.
+- The Windows and Linux packages each pass their packaged smoke.
+- No other nightly published on the same UTC day.
+
+Before packaging, the workflow refuses a dispatch that breaks the platform or day rule.
+The publish job checks both rules again before it creates the release.
+A run that publishes after 00:00 UTC therefore counts for the day it published on.
+A dry run skips both rules, so a dry run can test one platform at any time.
+If any package fails, the publish job does not run.
+
+To publish, dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`.
+Then [add the macOS files](#add-the-macos-files) the same day. The Mac command always signs and notarizes.
+
+### Publish nightlies on a schedule
+
+On the Mac mini, a LaunchAgent publishes each nightly with nobody at the Mac.
+Ice decided on 2026-10-20 that it publishes without asking each time.
+Every rule above still applies.
+
+At 04:00 local time, launchd fetches `main` into its own clone in `~/dohc-release/driver`.
+It fetches from the `dohchq/dohc` URL that `install` checked, whatever the clone's own origin says.
+`install` makes that clone afresh each time. When the fetch or checkout fails, `gh` reports it, so no code from the clone runs.
+It discards anything else in that clone, then runs `node scripts/release-nightly.mjs run` from it.
+The job stops unless the clone is clean and on `main`. The job:
+
+1. Waits up to 3 hours until the Mac's verification queue has no request queued or running. The nightly verification starts at 03:07.
+2. Adds the macOS files to the newest nightly if it published without them, after a failure or a lost run.
+3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
+4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
+5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
+6. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
+
+The job comments on #2281 after each published nightly and each failure.
+It also comments when it skips for a reason someone must fix, such as missing verification, and when launchd cannot update its clone.
+A night with nothing new posts nothing.
+The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
+The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.
+The system releases the lock when the last process holding it exits, so a crash leaves no stale lock.
+A command that finds it held stops at once, and the job reports that night on #2281.
+`install` and `uninstall` also run under the lock, so stopping the job through them never interrupts the macOS command.
+A logout, a shutdown, a forced kill, or stopping the LaunchAgent by hand with `launchctl bootout` still can. The release keychain then locks itself after 30 minutes without use, or when the Mac sleeps.
+
+The job needs all of these:
+
+- The Mac's verification queue, installed with `pnpm verify:queue install`.
+- A [saved release keychain password](#let-releases-run-unattended).
+- `gh` signed in with write access to `dohchq/dohc` for dispatch, uploads, and issue comments.
+- A signed-in session. launchd runs the job only there, where the login keychain is open.
+
+Each night the job runs `main`'s code, and the release commit's dependency install scripts, with nobody watching.
+It runs them with your `gh` token and while the saved keychain password can be read.
+Anyone who can merge to `main` therefore controls what runs with those credentials.
+Keep `main` protected: require a review and allow no bypass, including for administrators.
+
+Install or remove the LaunchAgent from a login shell, in a checkout of `main` whose origin is `dohchq/dohc`.
+The LaunchAgent keeps the `PATH` of the shell that installs it, which must find `node`, `git`, `gh`, `pnpm`, and the Xcode tools:
+
+```sh
+node scripts/release-nightly.mjs install
+node scripts/release-nightly.mjs uninstall
+```
+
+To check the workflow without publishing, run a dry run by hand. It dispatches with `dry_run=true`, waits for the run, and adds no macOS files:
+
+```sh
+node scripts/release-nightly.mjs run --dry-run
+```
+
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
-The Windows runner performs every job for this selection.
+Preflight and packaging run on `windows-2025`. The version check runs on `ubuntu-24.04`.
 The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
 Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
 Pass `--channel nightly` and the run's generated version to that command.
 The Windows package job checks the executable with an isolated profile and test workspace before uploading it.
-For publication, dispatch again with `dry_run=false`.
-The new dispatch generates a new nightly version.
+A Windows-only nightly dispatch cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
+Each dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
-Then [add the macOS files](#add-the-macos-files).
 
 ## Build a Linux nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
-The Linux runner performs every job for this selection. A Windows runner is not required.
+Every job for this selection runs on `ubuntu-24.04`.
 Download the run's `desktop-Linux-x64` artifact after every job passes.
 It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
 Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
-The Linux package job checks artifact hashes and runs the packaged fuse smoke before uploading.
+The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
 
 Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
-Both runners must be available. The Windows runner performs the coordinator jobs.
+The packages build in parallel. Preflight runs on `windows-2025`; the version check and Publish run on `ubuntu-24.04`.
 Download both platform artifacts from the same run.
 
 Only the selected platforms receive installers and update packages.
@@ -186,6 +240,8 @@ GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
 
 Follow these steps for every published release, nightly or stable.
 Run the command as soon as the workflow publishes.
+The [scheduled nightly job](#publish-nightlies-on-a-schedule) runs it for each nightly it publishes.
+The command stops at once while another release command, such as the nightly job, runs on the Mac.
 A Mac updater reads `<channel>-mac.yml` from the newest release on its channel.
 Until this command uploads that file, a Mac on that channel shows no update and no error.
 It updates at its first check after the file arrives.
@@ -202,7 +258,7 @@ The release is not finished until the command reports that the release holds the
    ```
 
 4. Update a clean checkout of `main`, then run the same command from it without `--dry-run`.
-5. The command asks for the release keychain's password twice: before it builds, and before it packages. Type it each time.
+5. If you [saved the release keychain's password](#let-releases-run-unattended), the command unlocks the keychain itself. Otherwise, it asks for the password twice: before it builds, and before it packages. Type it each time.
 
 A real run opens the release keychain for two short periods. Before it builds,
 the command unlocks the keychain, checks that the identity is valid and that the
@@ -217,9 +273,10 @@ packaging starts, someone opened it while the build ran. The command says so,
 locks it, and unlocks it again the usual way. The command also locks the
 keychain when it ends, however it ends.
 
-To unlock the keychain in a terminal, `security` asks for the password. Without
-a terminal, the command prints the `security unlock-keychain` command and waits
-up to 30 minutes for someone to run it.
+With a saved password, the command unlocks the keychain itself. Otherwise, in a
+terminal, `security` asks for the password. Without a terminal, the command
+prints the `security unlock-keychain` command and waits up to 30 minutes for
+someone to run it.
 
 While the release keychain is unlocked, any program running as you can sign
 with the Developer ID identity through `codesign` and notarize with the profile
@@ -241,8 +298,10 @@ The command stops before it builds unless all of these are true:
 - The release has no macOS files, or only part of an upload that the command
   can finish, as [Finish an upload that stopped](#finish-an-upload-that-stopped) describes.
 - A Desktop Release run dispatched on `main` published the tag's commit: its
-  `Publish` job succeeded for that commit. For a nightly, that run and attempt
-  are the ones in the tag. The workflow runs `Publish` only after Preflight
+  `Publish` job succeeded for that commit. For a nightly, that run is the one
+  in the tag. Its attempt is the tag's attempt, or a later attempt that re-ran
+  only the failed jobs and so kept the tag attempt's Preflight, which stamped
+  the version. The workflow runs `Publish` only after Preflight
   passes on `refs/heads/main`, so a run dispatched on a tag named `main` does
   not count. The commit must also be on the `main` branch's current commit.
 - The version is the one the workflow stamped. The command resolves it with
@@ -327,8 +386,10 @@ already has a Mac update manifest, because Macs may already update from it.
 The Mac needs the repository's development tools, the Xcode command line
 tools, and `gh` signed in with write access to `dohchq/dohc`. The signing
 identity, the notarization credentials, and the PostHog key live only in a
-release keychain with its own password. Nothing goes in the login keychain or
-an environment variable, and no key file stays on the Mac. The release keychain
+release keychain with its own password. Nothing goes in an environment
+variable, and no key file stays on the Mac. Only the release keychain's own
+password can go in the login keychain, if you
+[let releases run unattended](#let-releases-run-unattended). The release keychain
 is not in the keychain search list, so programs that search your keychains do
 not find it.
 
@@ -354,8 +415,9 @@ not find it.
    The command locks the keychain itself, so this limit matters only if the
    command cannot. During a release, the longest time without use is one
    notarization wait.
-4. Import the Developer ID Application certificate. `-x` makes its private key
-   non-exportable, and `-T` lets `codesign` use the key without asking. While
+4. Import the Developer ID Application certificate. `-x` makes macOS refuse to
+   export its private key, though anyone with the keychain file and its
+   password can still decrypt it. `-T` lets `codesign` use the key without asking. While
    the keychain is unlocked, any program running as you can run `codesign`
    with this identity:
 
@@ -408,6 +470,50 @@ not find it.
 The first signed run can show a dialog that asks whether `codesign` may use
 the key. Enter the release keychain's password and choose **Always Allow**.
 
+### Let releases run unattended
+
+To run releases with nobody at the Mac, save the release keychain's password
+in your login keychain. `security` asks for the password twice:
+
+```sh
+security add-generic-password -U -a "$USER" -s dohc-release-keychain-password -w
+```
+
+The command then unlocks the release keychain itself at the same two points,
+and locks it again as before.
+
+This gives up what the release keychain's own password protects. While you
+are logged in, any program running as you can read the saved password with
+`security`. With it, a program can:
+
+- Unlock the release keychain at any time, sign with your Developer ID,
+  notarize, and read the PostHog key.
+- Copy the keychain file and decrypt it on another computer. That gives it the
+  Developer ID private key, the App Store Connect API key, and the PostHog key.
+  `-x` does not prevent this. Deleting the saved password afterwards does not
+  take the keys back.
+
+The 30-minute and sleep locks no longer limit this. Code that runs during a
+build can unlock the keychain, sign, and lock it again without the command
+noticing. Anyone with your login password can also open the release keychain,
+including from a backup of both keychain files. Without a saved password, a
+program can sign, notarize, and read the PostHog key only while a release has
+the keychain unlocked, and cannot take the Developer ID key or the App Store
+Connect API key.
+
+If you think a program took the keys, revoke the App Store Connect API key and the
+PostHog key, and email product-security@apple.com to ask Apple to revoke the
+Developer ID certificate. You cannot revoke it from your account. After Apple
+revokes it, Macs no longer install releases signed with it.
+
+If the saved password does not unlock the release keychain, the command stops
+before it signs anything. Save the right one with the same command, or delete
+it. To type the password again at each release, delete the saved one:
+
+```sh
+security delete-generic-password -s dohc-release-keychain-password
+```
+
 ## Choose an update feed
 
 Packaged desktop builds normally check GitHub Releases.
@@ -420,7 +526,10 @@ AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
 asks once for an administrator password. If `dpkg` reports missing dependencies,
 `apt-get` adds them under the same password but never removes a package, then
 `dpkg` installs again (`patches/electron-updater@6.8.9.patch`). A cancelled
-prompt or any other failed install fails the update.
+prompt or any other failed install fails the update. Restart tries again.
+When the password prompt was not cancelled, the failure also shows the
+`sudo apt install` command for the downloaded `.deb`, with a copy control. That
+covers a desktop where no authentication agent can ask for the password.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
 Windows publisher checks depend on the packaged `app-update.yml` configuration.
@@ -526,7 +635,9 @@ frame's chunk ID. No later step may rebuild `apps/desktop/dist`.
 
 Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
 `POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
-add the missing value or clear the key. A dry run skips the step.
+add the missing value or clear the key. A dry run uploads nothing. It only
+installs the CLI and runs `posthog-cli --version`, so a CLI that cannot install
+fails the dry run before it can fail a release.
 
 ### Check a release against PostHog
 
@@ -662,6 +773,18 @@ It then boots that package with an isolated profile and checks that the window c
 Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
+
+The Linux job also checks that a workspace survives an engine upgrade, because any nightly can add an engine migration.
+It extracts the engine from the newest published nightly's AppImage.
+That engine captures a test workspace with an edited Markdown file, a binary file, a nested folder, and a non-ASCII file name.
+The packaged engine then opens the same workspace.
+The check fails when a file's hash or latest moment changes, a recorded moment or its content disappears or changes, bytes on disk change, or a new edit is not captured.
+It covers the engine store and workspace files, not app settings or the desktop profile.
+It runs only on Linux, dry runs included.
+It fails when the newest published nightly has no AppImage or no executable engine.
+It skips with a notice when no nightly is published, or when the newest one predates the packaged engine.
+Those nightlies are listed in `scripts/select-upgrade-nightly.mjs`.
+To repeat a failure locally, set `DOHC_UPGRADE_PREVIOUS_ENGINE` to the older engine and run `pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts`.
 
 The workflow's checks do not prove code signing, OS installer registration, update
 installation, or an upgrade that preserves a user's profile. Release owners

@@ -35,19 +35,19 @@ const AUTOMATION: &str = "collection:tasks#triage";
 async fn received_share_handles_refuse_local_automation_claims_and_execution() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
             "captureMode": "none", "projectCollections": true }),
-            ),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     let mut id = 1;
@@ -201,21 +201,21 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     let service = Arc::new(EngineService::new());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let mut id = 1;
@@ -980,22 +980,22 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
     let service = Arc::new(EngineService::new());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "captureMode": "none",
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "captureMode": "none",
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let mut id = 1;
@@ -1224,22 +1224,22 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
     let mut id = 0;
     let open = async |id: &mut u64| -> WorkspaceHandle {
         *id += 1;
-        let opened = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    *id,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": WORKSPACE_ID,
-                        "captureMode": "none",
-                    }),
-                ),
-            )
-            .await
-            .expect("open workspace");
+        let opened = call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                *id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "captureMode": "none",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
     };
     let handle = open(&mut id).await;
@@ -1349,22 +1349,22 @@ async fn group_messages_written_here_claim_through_rpc() {
     let service = Arc::new(EngineService::new());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "captureMode": "none",
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "captureMode": "none",
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let mut id = 1;
@@ -1633,22 +1633,22 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     let service = Arc::new(EngineService::new());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                    "captureMode": "none",
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+                "captureMode": "none",
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let mut id = 1;
@@ -1879,18 +1879,18 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
     write_root_binding(scratch.path(), TOKEN).unwrap();
     seed_claims(&scratch);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID}),
-            ),
-        )
-        .await
-        .unwrap();
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID}),
+        ),
+    )
+    .await
+    .unwrap();
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     let mut id = 1;
@@ -2032,7 +2032,7 @@ async fn make_durable_requires_a_running_local_claim_and_preserves_recovery_age(
 async fn make_durable_record_creation_replay_does_not_resurrect_a_deleted_record() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None,
+    let opened = call_with_busy_retry(&transport,RequestContext::unbounded(), request(1, "workspace.open", None,
         json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID, "captureMode": "none"}))).await.unwrap();
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();

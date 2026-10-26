@@ -1866,6 +1866,7 @@ fn adopt_collection_record_on_store(
             None,
             None,
             super::ydoc::SettlementKind::CollectionAdoption,
+            false,
         )?
         .into_settlement_for_internal_caller()?
         .path,
@@ -2064,6 +2065,7 @@ fn cleanup_collection_relation_on_store(
         None,
         None,
         super::ydoc::SettlementKind::Document,
+        false,
     )?
     .into_settlement_for_internal_caller()?;
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))

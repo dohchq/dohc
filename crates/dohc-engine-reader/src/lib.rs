@@ -44,8 +44,10 @@ pub struct Document {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Construct,
+    ConstructFold,
     Prove,
 }
+#[derive(Clone)]
 pub struct Request {
     pub method: Method,
     pub document: Document,
@@ -94,6 +96,10 @@ pub enum Outcome {
         proof: Proof,
         checkpoint_sha256: String,
     },
+    Expired {
+        proof: Proof,
+        checkpoint_sha256: String,
+    },
     Refused {
         reason: RefusalReason,
         checkpoint_sha256: String,
@@ -107,6 +113,7 @@ impl fmt::Debug for Outcome {
                 .field("delta_bytes", &delta.len())
                 .finish(),
             Self::Proved { .. } => f.write_str("Proved"),
+            Self::Expired { .. } => f.write_str("Expired"),
             Self::Refused { reason, .. } => f.debug_tuple("Refused").field(reason).finish(),
         }
     }
@@ -120,6 +127,7 @@ struct Pending {
 }
 #[derive(Default)]
 struct State {
+    build_digest: Option<String>,
     queue: VecDeque<Pending>,
     retained: usize,
     closed: bool,
@@ -152,8 +160,14 @@ pub struct Reader {
     shared: Arc<Shared>,
     owner: Option<JoinHandle<()>>,
     deadlines: Deadlines,
+    #[cfg(any(test, feature = "test-support"))]
+    dispatches: std::sync::atomic::AtomicU64,
 }
 impl Reader {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dispatch_count(&self) -> u64 {
+        self.dispatches.load(std::sync::atomic::Ordering::SeqCst)
+    }
     /// Configured readers own an idle thread; the child starts with the first request.
     pub fn new(config: Option<Config>) -> Self {
         Self::with_deadlines(config, Deadlines::default())
@@ -172,10 +186,15 @@ impl Reader {
             shared,
             owner,
             deadlines,
+            #[cfg(any(test, feature = "test-support"))]
+            dispatches: std::sync::atomic::AtomicU64::new(0),
         }
     }
     /// Admission is immediate. Dropping the returned future cancels queued work.
     pub fn request(&self, request: Request) -> impl Future<Output = Result> + Send + use<> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.dispatches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (reply, receiver) = oneshot::channel();
         let mut s = self.shared.state.lock().unwrap();
         expire(&mut s);
@@ -287,12 +306,22 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
         let result = (|| {
             if worker.is_none() {
                 let deadline = Instant::now() + d.startup;
-                worker = Some(
-                    process::Worker::start(&config, shared.clone(), deadline)
-                        .map_err(|_| Failure::Unavailable)?,
-                );
-                wait_event(worker.as_ref().unwrap(), &shared, deadline)
-                    .map_err(|_| Failure::Unavailable)?;
+                let startup = process::Worker::start(&config, shared.clone(), deadline);
+                match startup {
+                    Ok(started) => worker = Some(started),
+                    Err(failure) => {
+                        if failure == Failure::Unavailable {
+                            shared.state.lock().unwrap().closed = true;
+                        }
+                        return Err(failure);
+                    }
+                }
+                if let Err(failure) = wait_event(worker.as_ref().unwrap(), &shared, deadline) {
+                    if failure == Failure::Unavailable {
+                        shared.state.lock().unwrap().closed = true;
+                    }
+                    return Err(failure);
+                }
             }
             let w = worker.as_ref().unwrap();
             w.send(p.request)?;

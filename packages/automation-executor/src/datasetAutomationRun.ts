@@ -122,7 +122,7 @@ export interface DatasetRunHost {
 
 export interface DatasetAutomationRunDependencies extends Pick<
   CollectionAutomationRunDependencies,
-  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess"
+  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded"
 >, Partial<Pick<CollectionAutomationRunDependencies, "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach">> {
   /** The dataset host; resolves null when it is not open. */
   withHost<T>(work: (host: DatasetRunHost) => T | Promise<T>): Promise<T | null>;

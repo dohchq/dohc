@@ -110,67 +110,78 @@ function captureWith(
 }
 
 describe("the document open's capture-chain hold", () => {
-  it("wakes the opening document on capture settlement and still checks the active version", async () => {
+  // The daemon's answer to opening a file a new folder's import has not
+  // captured yet. The active version is not fenced: only this open waits.
+  const importRefusal = () => new DaemonRefusalError({
+    code: "OVERLOADED",
+    message: "Workspace is still updating. Try again.",
+    retry: "afterBackoff",
+  }, undefined);
+
+  function importingClient(loopback: VersionedLoopbackEngine) {
+    const handlers = new Set<(event: Event) => void>();
+    const methods: string[] = [];
+    return {
+      handlers,
+      methods,
+      wake(name: "capture.importProgress" | "capture.initialSettled") {
+        for (const handler of [...handlers]) handler({
+          name, payload: { workspaceId: WORKSPACE_ID }, seq: 1, sessionGeneration: 1,
+        });
+      },
+      client: {
+        close: () => undefined,
+        onEvent(handler: (event: Event) => void) {
+          handlers.add(handler);
+          return () => { handlers.delete(handler); };
+        },
+        async sendRequest(request: Request): Promise<Response> {
+          methods.push(request.method);
+          if (request.method === "workspace.open") {
+            return { id: request.id, result: { workspace: WORKSPACE_ID } };
+          }
+          if (request.method === "workspace.close") {
+            return { id: request.id, result: { closed: true } };
+          }
+          return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
+        },
+      },
+    };
+  }
+
+  it("opens the document once the import captures it, before the import settles", async () => {
     const root = await createTestScratch("dohc-ydoc-capture-wake-");
     await write(root, "note.md", "hello\n");
-    const loopback = new VersionedLoopbackEngine();
-    const handlers = new Set<(event: Event) => void>();
-    let importing = false;
-    let activeReads = 0;
+    const daemon = importingClient(new VersionedLoopbackEngine());
     const sleep = vi.fn(async () => undefined);
-    const providerOpen = vi.fn();
-    const client = {
-      close: () => undefined,
-      onEvent(handler: (event: Event) => void) {
-        handlers.add(handler);
-        return () => { handlers.delete(handler); };
-      },
-      async sendRequest(request: Request): Promise<Response> {
-        if (request.method === "workspace.open") {
-          return { id: request.id, result: { workspace: WORKSPACE_ID } };
-        }
-        if (request.method === "workspace.close") {
-          return { id: request.id, result: { closed: true } };
-        }
-        if (importing && request.method === "versions.active") {
-          activeReads += 1;
-          throw new EngineRequestError(request.id, {
-            code: "OVERLOADED",
-            message: "Workspace is still updating. Try again.",
-            retry: "afterBackoff",
-          });
-        }
-        return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
-      },
-    };
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
-    const engine = captureWith(root, sessions, providerOpen);
-    const notify = () => {
-      for (const handler of [...handlers]) handler({
-        name: "capture.initialSettled", payload: { workspaceId: WORKSPACE_ID },
-        seq: 1, sessionGeneration: 1,
-      });
-    };
+    let captured = false;
+    let providerOpens = 0;
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon.client }, { sleep });
+    const engine = captureWith(root, sessions, () => {
+      providerOpens += 1;
+      if (!captured) throw importRefusal();
+    });
     engine.start();
     await engine.flush();
     vi.useFakeTimers();
-    importing = true;
+    const methodsBefore = daemon.methods.length;
     const opening = engine.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
     try {
       await vi.advanceTimersByTimeAsync(42_000);
-      expect(activeReads).toBe(1);
-      notify();
+      expect(daemon.methods.slice(methodsBefore)).toContain("versions.active");
+      expect(providerOpens).toBe(1);
+      // Another file was captured; this one was not.
+      daemon.wake("capture.importProgress");
       await vi.advanceTimersByTimeAsync(0);
-      expect(providerOpen).not.toHaveBeenCalled();
-      expect(activeReads).toBe(2);
-      importing = false;
-      notify();
+      expect(providerOpens).toBe(2);
+      captured = true;
+      daemon.wake("capture.importProgress");
       await opening;
-      expect(providerOpen).toHaveBeenCalledOnce();
+      expect(providerOpens).toBe(3);
       expect(sleep).not.toHaveBeenCalled();
-      expect(handlers.size).toBe(0);
+      expect(daemon.handlers.size).toBe(0);
     } finally {
-      importing = false;
+      captured = true;
       sessions.beginShutdown();
       await opening.catch(() => undefined);
       vi.useRealTimers();
@@ -178,90 +189,62 @@ describe("the document open's capture-chain hold", () => {
     }
   });
 
-  it.each(["ready", "deadline", "shutdown", "stop"] as const)(
-    "waits for the initial capture before opening the provider: %s",
+  it.each(["captured", "settled", "deadline", "shutdown", "stop"] as const)(
+    "waits for the import to capture the document before opening it: %s",
     async (outcome) => {
       const root = await createTestScratch("dohc-ydoc-initial-capture-");
       await write(root, "note.md", "hello\n");
-      const loopback = new VersionedLoopbackEngine();
-      let importing = false;
-      let activeReads = 0;
-      let workspaceOpens = 0;
+      const daemon = importingClient(new VersionedLoopbackEngine());
+      let captured = false;
       let providerOpens = 0;
-      const handlers = new Set<(event: Event) => void>();
       const sleep = vi.fn(async () => undefined);
-      const client = {
-        close: () => undefined,
-        onEvent(handler: (event: Event) => void) {
-          handlers.add(handler);
-          return () => { handlers.delete(handler); };
-        },
-        async sendRequest(request: Request): Promise<Response> {
-          if (request.method === "workspace.open") {
-            workspaceOpens += 1;
-            return { id: request.id, result: { workspace: WORKSPACE_ID } };
-          }
-          if (request.method === "workspace.close") {
-            return { id: request.id, result: { closed: true } };
-          }
-          if (importing && request.method === "versions.active") {
-            activeReads += 1;
-            throw new EngineRequestError(request.id, {
-              code: "OVERLOADED",
-              message: "Workspace is still updating. Try again.",
-              retry: "afterBackoff",
-            });
-          }
-          return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
-        },
-      };
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
-      const engine = captureWith(root, sessions, () => { providerOpens += 1; });
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon.client }, { sleep });
+      const engine = captureWith(root, sessions, () => {
+        providerOpens += 1;
+        if (!captured) throw importRefusal();
+      });
       engine.start();
       await engine.flush();
-      const opensBefore = workspaceOpens;
-      importing = true;
+      const workspaceOpens = () => daemon.methods.filter((method) => method === "workspace.open").length;
+      const opensBefore = workspaceOpens();
       vi.useFakeTimers();
       try {
         const opening = engine.openYDocSession({
           path: "note.md", onRemoteUpdate: () => undefined,
         }).catch((error: unknown) => error);
         await vi.advanceTimersByTimeAsync(42_000);
-        expect(providerOpens).toBe(0);
-        expect(activeReads).toBe(1);
-        if (outcome === "ready") {
-          importing = false;
-          for (const handler of [...handlers]) handler({
-            name: "capture.initialSettled", payload: { workspaceId: WORKSPACE_ID },
-            seq: 1, sessionGeneration: 1,
-          });
+        expect(providerOpens).toBe(1);
+        if (outcome === "captured" || outcome === "settled") {
+          captured = true;
+          daemon.wake(outcome === "captured" ? "capture.importProgress" : "capture.initialSettled");
         } else if (outcome === "deadline") {
           await vi.advanceTimersByTimeAsync(78_000);
         } else if (outcome === "stop") {
-          importing = false;
+          captured = true;
           await engine.stop();
         } else {
           sessions.beginShutdown();
         }
         const opened = await opening;
-        if (outcome === "ready") {
+        if (outcome === "captured" || outcome === "settled") {
           expect(opened).not.toBeInstanceOf(Error);
-          expect(providerOpens).toBe(1);
+          expect(providerOpens).toBe(2);
         } else {
           expect(opened).toBeInstanceOf(DaemonRefusalError);
           expect(isEngineWorkspaceOpenRefusedError(opened)).toBe(true);
-          expect(providerOpens).toBe(0);
+          // At the deadline the open checks once more, and is refused again.
+          expect(providerOpens).toBe(outcome === "deadline" ? 2 : 1);
         }
         expect(sleep).not.toHaveBeenCalled();
-        expect(handlers.size).toBe(0);
-        expect(workspaceOpens).toBe(opensBefore);
-        importing = false;
+        expect(daemon.handlers.size).toBe(0);
+        expect(workspaceOpens()).toBe(opensBefore);
+        captured = true;
         // A finished or refused open must release the capture chain.
         await engine.listMoments({ limit: 1 });
       } finally {
         sessions.beginShutdown();
         vi.useRealTimers();
-        importing = false;
+        captured = true;
         await engine.stop();
       }
     },

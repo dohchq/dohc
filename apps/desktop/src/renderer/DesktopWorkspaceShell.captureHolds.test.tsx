@@ -10,14 +10,14 @@ import type { CaptureFileHold, SyncStatusResult } from "../ipc/bridgeContract";
 const held = { workspaceId: WORKSPACE.workspaceId, sourceVersionId: "main", objectId: "held-object", path: "notes/held.md",
   observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
   observedAtMs: 1, attemptCount: 1, retryRequested: false };
-const message = 'dohc did not record the outside edit to "notes/held.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.';
+const message = 'dohc did not record the outside edit to "notes/held.md". dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.';
 
 function fixture() {
   const bridge = makeBridge(Promise.resolve(null));
   let files = [held];
   const original = bridge.getSyncStatus.getMockImplementation()!;
   bridge.getSyncStatus.mockImplementation(async () => ({ ...await original(), heldFiles: files }));
-  const retryHeldCapture = vi.fn(async () => { listener?.({ workspaceId: WORKSPACE.workspaceId, heldFiles: files }); return { settled: true, running: true, degraded: false, retried: true, heldFiles: files }; });
+  const retryHeldCapture = vi.fn(async () => { listener?.({ workspaceId: WORKSPACE.workspaceId, heldFiles: files }); return { deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: files }; });
   Object.assign(bridge, { retryHeldCapture });
   let listener: ((event: { workspaceId: string; heldFiles: CaptureFileHold[] }) => void) | undefined;
   Object.assign(bridge, { onCaptureHolds: vi.fn((callback: typeof listener) => {
@@ -141,7 +141,7 @@ it.each([{ staleFiles: [] }, { staleFiles: [held] }])("ignores a stale status co
   const other = { ...held, workspaceId: OTHER_WORKSPACE.workspaceId, path: "other.md" };
   f.set([other]);
   view.rerender(<DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(f.bridge)} onSwitchWorkspace={() => {}} />);
-  await screen.findByText('dohc did not record the outside edit to "other.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  await screen.findByText('dohc did not record the outside edit to "other.md". dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
   const current = await f.bridge.getSyncStatus();
   await act(async () => stale.resolve({ ...current, heldFiles: staleFiles }));
   expect(screen.queryByText(message)).toBeNull();
@@ -159,14 +159,14 @@ it("ignores a retry that answers after leaving and reopening the same workspace"
   await waitFor(() => expect(screen.queryByText(message)).toBeNull());
   f.set([held]); view.rerender(shell(WORKSPACE));
   await screen.findByText(message);
-  await act(async () => stale.resolve({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] }));
+  await act(async () => stale.resolve({ deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: [] }));
   expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(message);
 });
 
 it.each([true, false])("keeps an unfinished healthy retry out of degraded capture notices (running=%s)", async running => {
   const f = fixture(); const user = userEvent.setup(); renderShell(f.bridge);
   const toast = await screen.findByTestId("workspace-shell-notice");
-  f.retryHeldCapture.mockResolvedValueOnce({ settled: false, running, degraded: false, retried: true, heldFiles: [held] });
+  f.retryHeldCapture.mockResolvedValueOnce({ deferredWrites: [], settled: false, running, degraded: false, retried: true, heldFiles: [held] });
   await user.click(within(toast).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(f.retryHeldCapture).toHaveBeenCalledOnce());
   await user.click(screen.getByTestId("notice-center-toggle"));
@@ -178,7 +178,7 @@ it.each([true, false])("keeps an unfinished healthy retry out of degraded captur
 it("reports genuine degraded capture after retry", async () => {
   const f = fixture(); const user = userEvent.setup(); renderShell(f.bridge);
   const toast = await screen.findByTestId("workspace-shell-notice");
-  f.retryHeldCapture.mockResolvedValueOnce({ settled: false, running: true, degraded: true, retried: true, heldFiles: [held] });
+  f.retryHeldCapture.mockResolvedValueOnce({ deferredWrites: [], settled: false, running: true, degraded: true, retried: true, heldFiles: [held] });
   await user.click(within(toast).getByRole("button", { name: "Try again" }));
   await screen.findByText("dohc could not record outside edits. Reopen the workspace.");
 });

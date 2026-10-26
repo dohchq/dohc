@@ -10,6 +10,7 @@ import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChang
 import { deferred } from "../testing/deferred";
 import { readDeleteRecovery } from "./workspaceDeleteRecovery";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const faults = vi.hoisted(() => ({ beforeLink: undefined as undefined | ((to: string) => Promise<void>), failRecord: false }));
 vi.mock("node:fs/promises", async original => {
@@ -33,6 +34,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   await write("folder/rowless.txt", "not retained");
   const operation = { workspace: { workspaceId: "test", rootPath: root, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown }, state: {},
     signal: new AbortController().signal, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const groups: string[] = [];
   let afterCommit: ((id: string) => void) | undefined;
   const recordDisk = vi.fn(async () => tracked);
@@ -50,11 +52,11 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   let placement: Promise<void> | undefined;
   let interrupted = false;
   let refuse: string | undefined;
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
+  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
     if (refuse) throw new Error(refuse);
     if (!committed) placement = placementGate.then(async () => { for (const path of tracked) await write(path, "tracked"); });
     committed ??= { operationId: input.operationId, versionId: "main", momentCount: tracked.length,
-      compensationOperationId: "dohc-operation:undo:one", deduped: false, materialized: false };
+      notRestored: [], compensationOperationId: "dohc-operation:undo:one", deduped: false, materialized: false };
     if (interrupted) { interrupted = false; faults.failRecord = true; }
     return committed;
   }) };
@@ -74,6 +76,15 @@ function recovery(result: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>
 }
 
 describe("delete recovery", () => {
+  it("reports skipped tracked members even when they have no manual trash entry", async () => {
+    const f = await fixture();
+    const id = recovery(await f.remove());
+    f.history.undoHistoryOperation.mockResolvedValue({ operationId: id, versionId: "main", notRestored: ["folder/tracked.txt"],
+      compensationOperationId: "dohc-operation:undo:one", momentCount: 0, deduped: false, materialized: true });
+    const result = await f.undo(id);
+    expect(result).toMatchObject({ ok: true, remaining: [{ path: "folder/tracked.txt", retry: false }] });
+    expect(await f.undo(id)).toEqual(result);
+  });
   it.each([false, true])("keeps History readable and the invalid-path Undo refusal (system accepts=%s)", async accepts => {
     const f = await fixture(undefined, accepts);
     await f.write("folder/.dohc", "untracked");
@@ -279,8 +290,8 @@ describe("delete recovery", () => {
     });
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe(body);
-    const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-    expect(await readFile(join(f.root, ".dohc/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
+    const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+    expect(await readFile(join(f.root, ".dohc/local/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
   });
   it("keeps a raced file in trash without replacing its new occupant", async () => {
     const f = await fixture();
@@ -290,8 +301,8 @@ describe("delete recovery", () => {
       const result = await f.undo(id);
       expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
       expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("raced occupant");
-      const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-      expect(await readFile(join(f.root, ".dohc/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
+      const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+      expect(await readFile(join(f.root, ".dohc/local/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.beforeLink = undefined; }
   });
 });
@@ -311,8 +322,8 @@ describe("recovery durability and path authority", () => {
     const id = recovery(await f.remove(true));
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/node_modules", "folder/rowless.txt"], remaining: [] });
     expect(await readFile(join(f.root, "folder/node_modules/nested/file.txt"), "utf8")).toBe("excluded bytes");
-    const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
-    expect(existsSync(join(f.root, ".dohc/trash", entry, "node_modules"))).toBe(false);
+    const entry = (await readdir(join(f.root, ".dohc/local/trash"))).find(name => name.endsWith("-folder"))!;
+    expect(existsSync(join(f.root, ".dohc/local/trash", entry, "node_modules"))).toBe(false);
   });
   it("replays a placement completed before its final receipt reached disk", async () => {
     const f = await fixture();

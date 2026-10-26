@@ -10,6 +10,10 @@ export const AgentLaunchProfile = z.object({
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 
+// What a person reads when Restricted Mode holds an agent back: main's
+// notice and the band in Chats.
+export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
+
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
   if (tool !== "claude" || !version) return false;
@@ -21,7 +25,7 @@ export function supportsAgentProfile(tool: AgentToolId, version: string | null):
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Uses your Claude permissions. Requests that need approval are denied." },
+    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -30,10 +34,13 @@ export const AGENT_TOOLS = [
     permissions: "No launch profile yet" },
 ] as const;
 
-export function agentProfileArguments(profile: AgentLaunchProfile): string[] {
+// replyServer holds the arguments that start the dohc MCP server a run replies through.
+export function agentProfileArguments(profile: AgentLaunchProfile, replyServer: readonly string[] = []): string[] {
+  // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
+  // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
-    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...replyServer, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"]
+    : ["exec", "--config", "approval_policy=never", ...replyServer, "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {
@@ -42,7 +49,7 @@ function quoteRunnerToken(value: string): string {
 
 export function configuredRunnerCommand(runner: { command: string; profile?: AgentLaunchProfile }): string {
   return runner.profile
-    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile)].join(" ")
+    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
     : runner.command.trim();
 }
 

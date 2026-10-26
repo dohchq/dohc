@@ -1,4 +1,64 @@
 {
+  "group-channel": [
+    {
+      "name": "dohc_post_channel",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$",
+            "description": "Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."
+          },
+          "threadId": {
+            "description": "A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "Your display name. This link sets it once; later posts must send the same name or none."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_channel",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "before": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
   "view/current/without-live": [
     {
       "name": "dohc_list_automations",

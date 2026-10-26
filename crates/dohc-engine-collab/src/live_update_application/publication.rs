@@ -12,14 +12,62 @@ pub(crate) fn read_native_accepted_in(
     };
     let result = native_accepted(conn, key, &mut budget);
     *remaining = budget.remaining;
-    result
+    result.map(|read| read.map(|(held, doc)| (held.binding, held.namespace, doc)))
+}
+
+/// The accepted state through the last applied cursor of `binding`'s lineage
+/// and that cursor, while its document's application registration, live or
+/// not, is still on that lineage and restore generation: accepted history is
+/// durable. Rebuilt record by record under `policy`. An applied update still
+/// waiting on a missing dependency refuses the read as
+/// [`AcceptedStateIncomplete`](ApplicationError::AcceptedStateIncomplete).
+pub(crate) fn read_native_accepted_cut_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    policy: NativeHistoryReconstruction,
+) -> Result<Option<(i64, crate::Ydoc)>, ApplicationError> {
+    let Some((held, through)) = applied_cursor(conn, binding)? else {
+        return Ok(None);
+    };
+    let doc = accepted_history::read_state(conn, &held, through, policy)?;
+    Ok(Some((through, doc)))
+}
+
+/// That cursor alone, without rebuilding any state.
+pub(crate) fn read_native_applied_cursor_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<i64>, ApplicationError> {
+    Ok(applied_cursor(conn, binding)?.map(|(_, through)| through))
+}
+
+fn applied_cursor(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<(Registration, i64)>, ApplicationError> {
+    let key = DocKey::new(
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )?;
+    let mut budget = Budget {
+        remaining: usize::MAX,
+    };
+    let Some(held) = registration_in(conn, &key, &mut budget)?.filter(|held| {
+        held.binding.lineage_claim_id == binding.lineage_claim_id
+            && held.binding.restore_fence_generation == binding.restore_fence_generation
+    }) else {
+        return Ok(None);
+    };
+    let through = settlement::latest_receipt(conn, &held)?.map_or(0, |r| r.journal_cursor);
+    Ok(Some((held, through)))
 }
 
 fn native_accepted(
     conn: &Connection,
     key: &DocKey,
     budget: &mut Budget,
-) -> Result<Option<(LiveObjectBinding, String, crate::Ydoc)>, ApplicationError> {
+) -> Result<Option<(Registration, crate::Ydoc)>, ApplicationError> {
     let Some(held) = registration_in(conn, key, budget)? else {
         return Ok(None);
     };
@@ -32,9 +80,9 @@ fn native_accepted(
         through,
         budget,
         accepted_history::CHECKPOINT_EVENTS as usize,
-        false,
+        accepted_history::HistoryPurpose::Native,
     )?;
-    Ok(Some((held.binding, held.namespace, history.doc)))
+    Ok(Some((held, history.doc)))
 }
 
 /// The accepted head that the restore producing this exact binding replaced,

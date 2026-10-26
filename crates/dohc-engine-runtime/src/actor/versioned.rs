@@ -238,6 +238,7 @@ impl ActorHandle {
                     Some(&root),
                     restore_before_moment_id.as_deref(),
                     Some(&conditions),
+                    None,
                     faults.as_ref(),
                     &token,
                 )?;
@@ -744,18 +745,22 @@ pub(super) fn versioned_text_write_on_store(
         root_dir,
         restore_before_moment_id,
         None,
+        None,
         faults,
         token,
     )
 }
 
+type TextCommitHook<'a> = &'a dyn Fn(&rusqlite::Transaction<'_>) -> Result<(), RuntimeError>;
+
 #[allow(clippy::too_many_arguments)]
-fn versioned_text_write_with_publication_on_store(
+pub(super) fn versioned_text_write_with_publication_on_store(
     store: &mut EngineStore,
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
     restore_before_moment_id: Option<&str>,
     conditions: Option<&WriteConditions>,
+    commit_hook: Option<TextCommitHook<'_>>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -872,6 +877,9 @@ fn versioned_text_write_with_publication_on_store(
             result.deduped,
         )
         .map_err(RuntimeError::from)?;
+        if let Some(commit_hook) = commit_hook {
+            commit_hook(tx)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -4774,6 +4782,7 @@ mod doc_cache_reset_tests {
                         progress: None,
                         file_outcomes_settled: false,
                         released_hold_paths: None,
+                        planned_against_active_heads: false,
                     },
                     4,
                     &NoFaults,
@@ -4813,6 +4822,7 @@ mod doc_cache_reset_tests {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 5,
                 &NoFaults,
@@ -4908,6 +4918,7 @@ mod doc_cache_reset_tests {
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             5,
             &NoFaults,
@@ -4982,6 +4993,7 @@ mod doc_cache_reset_tests {
                 Some(root),
                 None,
                 Some(&WriteConditions::default()),
+                None,
                 &NoFaults,
                 &CancellationToken::new(),
             )
@@ -5370,6 +5382,7 @@ mod doc_cache_reset_tests {
                         progress: None,
                         file_outcomes_settled: false,
                         released_hold_paths: None,
+                        planned_against_active_heads: false,
                     },
                     6,
                     &NoFaults,
@@ -5782,6 +5795,7 @@ mod doc_cache_reset_tests {
                             progress: None,
                             file_outcomes_settled: false,
                             released_hold_paths: None,
+                            planned_against_active_heads: false,
                         },
                         4,
                         &NoFaults,
@@ -5927,6 +5941,7 @@ mod doc_cache_reset_tests {
                             progress: None,
                             file_outcomes_settled: false,
                             released_hold_paths: None,
+                            planned_against_active_heads: false,
                         },
                         4,
                         &NoFaults,
@@ -6107,6 +6122,7 @@ mod doc_cache_reset_tests {
                         progress: None,
                         file_outcomes_settled: false,
                         released_hold_paths: None,
+                        planned_against_active_heads: false,
                     },
                     4,
                     &NoFaults,

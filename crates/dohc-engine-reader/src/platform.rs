@@ -57,13 +57,85 @@ fn check_owner(metadata: &std::fs::Metadata, directory: bool) -> std::io::Result
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no pointer arguments or side effects.
     let owner = unsafe { libc::geteuid() };
-    let sticky_root = directory && metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
-    if !sticky_root
-        && (metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner))
-    {
+    let trusted_admin_gid = if cfg!(target_os = "macos") {
+        Some(80)
+    } else {
+        None
+    };
+    if !trusted_owner(
+        metadata.uid(),
+        metadata.gid(),
+        metadata.mode(),
+        directory,
+        owner,
+        trusted_admin_gid,
+    ) {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok(())
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn trusted_owner(
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    directory: bool,
+    effective_uid: u32,
+    trusted_admin_gid: Option<u32>,
+) -> bool {
+    let sticky_root = directory && uid == 0 && mode & 0o1000 != 0;
+    // macOS administrators can already become root; this adds no new writer.
+    let admin_root = directory
+        && uid == 0
+        && trusted_admin_gid == Some(gid)
+        && mode & 0o020 != 0
+        && mode & 0o002 == 0;
+    sticky_root || admin_root || (mode & 0o022 == 0 && (uid == 0 || uid == effective_uid))
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::trusted_owner;
+
+    #[test]
+    fn macos_applications_accepts_root_admin_group_writes() {
+        assert!(trusted_owner(0, 80, 0o775, true, 501, Some(80)));
+        assert!(trusted_owner(0, 80, 0o775, true, 502, Some(80)));
+    }
+
+    #[test]
+    fn admin_trust_does_not_extend_to_files_or_other_writers() {
+        for (uid, gid, mode, directory) in [
+            (0, 80, 0o775, false),
+            (0, 80, 0o777, true),
+            (0, 20, 0o775, true),
+            (502, 80, 0o755, true),
+            (502, 80, 0o444, false),
+            (501, 80, 0o775, true),
+        ] {
+            assert!(!trusted_owner(uid, gid, mode, directory, 501, Some(80)));
+        }
+    }
+
+    #[test]
+    fn linux_policy_without_admin_trust_is_unchanged() {
+        for uid in [0, 501, 502] {
+            for gid in [0, 80, 501] {
+                for mode in 0..=0o7777 {
+                    for directory in [false, true] {
+                        let sticky_root = directory && uid == 0 && mode & 0o1000 != 0;
+                        let original =
+                            sticky_root || (mode & 0o022 == 0 && (uid == 0 || uid == 501));
+                        assert_eq!(
+                            trusted_owner(uid, gid, mode, directory, 501, None),
+                            original
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 #[cfg(windows)]
 pub(super) fn asset_identity(file: &std::fs::File) -> std::io::Result<(u32, u32, u32)> {
@@ -95,6 +167,44 @@ mod os {
         reaped: bool,
     }
     pub type Pipes = (Process, ChildStdout, ChildStdin, ChildStderr);
+    #[cfg(target_os = "linux")]
+    fn descriptor_fallback(limit: i32) -> io::Result<()> {
+        if limit > 65_536 {
+            return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        for fd in 3..limit {
+            // SAFETY: fcntl changes only the inherited descriptor's close-on-exec flag.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EBADF) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn descriptor_fallback_refuses_unbounded_scans() {
+        assert_eq!(
+            descriptor_fallback(65_537).unwrap_err().raw_os_error(),
+            Some(libc::ENOTSUP)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "release measurement; run alone with pinned affinity"]
+    fn descriptor_fallback_measurement() {
+        for round in 0..31 {
+            let start = std::time::Instant::now();
+            descriptor_fallback(65_536).unwrap();
+            println!(
+                "fallback {round} {}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
     pub fn spawn(command: &mut Command) -> io::Result<Pipes> {
         #[cfg(target_os = "linux")]
         // SAFETY: getrlimit writes a correctly sized local struct.
@@ -159,15 +269,20 @@ mod os {
                         return Ok(());
                     }
                 }
-                for fd in 3..limit {
-                    if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
-                        let error = io::Error::last_os_error();
-                        if error.raw_os_error() != Some(libc::EBADF) {
-                            return Err(error);
+                #[cfg(target_os = "linux")]
+                return descriptor_fallback(limit);
+                #[cfg(target_os = "macos")]
+                {
+                    for fd in 3..limit {
+                        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                            let error = io::Error::last_os_error();
+                            if error.raw_os_error() != Some(libc::EBADF) {
+                                return Err(error);
+                            }
                         }
                     }
+                    Ok(())
                 }
-                Ok(())
             });
         }
         let mut child = command.spawn()?;

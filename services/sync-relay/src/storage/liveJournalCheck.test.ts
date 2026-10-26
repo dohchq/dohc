@@ -114,7 +114,7 @@ it.each(['ERR_OUT_OF_RANGE', undefined])('continues past an unreadable document 
     const statement = originalPrepare(sql), all = statement.all.bind(statement);
     if (sql.includes('SELECT') && sql.includes('FROM sync_relay_live_update_struct_provenance')) {
       statement.all = (...args) => {
-        if (args[2] === key[2]) throw Object.assign(new RangeError('private document content'), {code});
+        if (args[2] === key[2]) throw Object.assign(new RangeError('private document content'), {code, errcode: '5'});
         return all(...args);
       };
     }
@@ -129,7 +129,59 @@ it.each(['ERR_OUT_OF_RANGE', undefined])('continues past an unreadable document 
     expect(report.mock.calls[1]?.[1].document.objectId).toBe('second');
     expect(JSON.stringify(report.mock.calls)).not.toContain('private document content');
     await vi.advanceTimersByTimeAsync(86_400_100);
+    expect(report).toHaveBeenCalledTimes(3);
+    expect(report.mock.calls[2]?.[0]).toBe('[sync-relay] live journal unreadable');
+  } finally {check.close();}
+});
+
+it('retries a transient page-read failure on the next daily pass and reports damage once', async () => {
+  const db = fixture(2), report = vi.fn(), originalPrepare = db.prepare.bind(db);
+  const read = vi.fn();
+  vi.spyOn(db, 'prepare').mockImplementation(sql => {
+    const statement = originalPrepare(sql), all = statement.all.bind(statement);
+    if (sql.includes('FROM sync_relay_live_update_struct_provenance')) statement.all = (...args) => {
+      read();
+      if (read.mock.calls.length === 1) throw Object.assign(new Error('busy'), {code: 'ERR_SQLITE_ERROR', errcode: 5});
+      return all(...args);
+    };
+    return statement;
+  });
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(report.mock.calls[0]?.[0]).toBe('[sync-relay] live journal unreadable');
+    db.exec('UPDATE sync_relay_live_update_struct_provenance SET end_clock=3 WHERE start_clock=0');
+    await vi.advanceTimersByTimeAsync(86_400_100);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(report.mock.calls[1]?.[0]).toBe('[sync-relay] live journal damaged');
+    expect(report.mock.calls[1]?.[1].document).toEqual(document);
+    await vi.advanceTimersByTimeAsync(86_400_100);
+    expect(read).toHaveBeenCalledTimes(2);
     expect(report).toHaveBeenCalledTimes(2);
+  } finally {check.close();}
+});
+
+it.each(['page', 'document-list'])('keeps distinct numeric SQLite codes for %s failures', async kind => {
+  const db = fixture(1), report = vi.fn(), originalPrepare = db.prepare.bind(db);
+  const faults = [5, 11].map(errcode => Object.assign(new Error('private content'), {code: 'ERR_SQLITE_ERROR', errcode}));
+  vi.spyOn(db, 'prepare').mockImplementation(sql => {
+    if (kind === 'document-list') throw faults.shift();
+    const statement = originalPrepare(sql);
+    if (sql.includes('FROM sync_relay_live_update_struct_provenance')) statement.all = () => {throw faults.shift();};
+    return statement;
+  });
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(86_400_100);
+    const label = kind === 'page' ? '[sync-relay] live journal unreadable' : '[sync-relay] live journal check failed';
+    expect(report.mock.calls).toEqual([5, 11].map(errcode => [label, {
+      ...(kind === 'page' ? {document} : {}), errorCode: 'ERR_SQLITE_ERROR', errcode,
+    }]));
+    expect(JSON.stringify(report.mock.calls)).not.toContain('private content');
   } finally {check.close();}
 });
 

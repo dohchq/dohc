@@ -435,17 +435,32 @@ fn advance_generation_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     // Native state past the old accepted checkpoint is private work its pending
-    // rows may not hold. Retain it in the old generation before quarantine.
+    // rows may not hold. Retain it in the old generation before quarantine. A
+    // queue that takes no more edits, such as one already refused, keeps it
+    // without reopening: its refusal stays.
     if local_bytes != bounded_blob(tx, &previous.checkpoint_digest)? {
-        super::draft::append_draft_in_tx(
-            tx,
-            workspace,
-            old,
-            previous.revision,
-            format!("owner-restore-fenced:{}", input.captured.local_state_digest),
-            local_bytes.clone(),
-            now_ms,
-        )?;
+        let append_key = format!("owner-restore-fenced:{}", input.captured.local_state_digest);
+        match find_parent_for_binding(tx, old)? {
+            Some(parent) if parent.state != OwnerOutboxState::Active => super::retain_fenced_in_tx(
+                tx,
+                &parent,
+                previous.revision,
+                &append_key,
+                &local_bytes,
+                now_ms,
+            )?,
+            _ => {
+                super::draft::append_draft_in_tx(
+                    tx,
+                    workspace,
+                    old,
+                    previous.revision,
+                    append_key,
+                    local_bytes.clone(),
+                    now_ms,
+                )?;
+            }
+        }
     }
     let outboxes = {
         let mut stmt = tx.prepare(
@@ -505,6 +520,12 @@ fn advance_generation_in_tx(
     if changed != 1 {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    // Old-generation work can build on accepted updates only the old checkpoint
+    // holds, so each queue still waiting keeps it, and its blob stays referenced.
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET kept_checkpoint_digest=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_bytes>0",
+        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,previous.checkpoint_digest],
+    ).map_err(write_sql)?;
     if previous.checkpoint_digest != checkpoint_digest {
         delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
     }

@@ -5,8 +5,9 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
-    bump_chat_conversation_revision, chat_thread_display_title,
-    index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
+    LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, bump_chat_conversation_revision,
+    chat_thread_display_title, index_replicated_chat_message_search_rows, replicated_source_origin,
+    upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
@@ -18,7 +19,7 @@ use dohc_engine_domain::{
     normalize_display_name, normalize_feed_identity, normalize_poll_options,
     normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
     replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path,
+    resolve_thread_message, validate_addressable_plaintext_path, validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -468,6 +469,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
             reason: "operation kind is not supported by this client".to_owned(),
         }),
         SyncError::Storage(_)
+        | SyncError::MarkdownReaderPending(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }
@@ -766,6 +768,12 @@ struct MessageAppend {
     /// computers. A person's message never carries one.
     #[serde(default)]
     chain_depth: Option<u32>,
+    /// The link grant and link principal of a link message, which only the
+    /// relay writes.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    link_grant_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    link_principal_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1248,6 +1256,15 @@ fn apply_thread(
             reason: "chat thread payload is invalid",
         });
     }
+    // Only the relay names a link post's new thread, so no device can take
+    // one first and leave the link post on a thread of its own making.
+    if payload.thread_id.starts_with(LINK_THREAD_ID_PREFIX)
+        && !replicated_source_origin(&op.origin_id).starts_with(LINK_ORIGIN_PREFIX)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread id is reserved for link posts",
+        });
+    }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
     // A file-linked thread names its file one way: by object id (a replica's
     // own op) or by path (an op that crossed a share boundary).
@@ -1519,7 +1536,7 @@ fn apply_message(
         || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
         // Another computer's automation posts as an automation, without its local provenance.
-        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation")
+        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation" | "link")
         || payload
             .parent_message_id
             .as_ref()
@@ -1562,6 +1579,19 @@ fn apply_message(
     }
     let body = normalize_body(&payload.body)
         .map_err(|error| map_chat_rule(error, "chat message body is invalid"))?;
+    let link_author = validate_replicated_link_author(
+        &op.origin_id,
+        &payload.message_id,
+        &payload.author_kind,
+        payload.link_grant_id.as_deref(),
+        payload.link_principal_id.as_deref(),
+        author_user_id.is_some()
+            || owner_name.is_some()
+            || payload.origin.is_some()
+            || payload.chain_depth.is_some(),
+        &body,
+    )
+    .map_err(|error| map_chat_rule(error, "chat message link author is invalid"))?;
     let thread_exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2)",
@@ -1600,9 +1630,10 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name],
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
+            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id)],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

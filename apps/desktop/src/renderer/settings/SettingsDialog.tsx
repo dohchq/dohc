@@ -1,6 +1,7 @@
 import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
+import { CopyField } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
@@ -44,6 +45,7 @@ import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
+import { KeyboardSettings } from "./KeyboardSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
@@ -59,6 +61,7 @@ import { SettingsNav } from "./SettingsNav";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { useWorkspaceTrust } from "../useWorkspaceTrust";
 import type { SharingFocus } from "../workbench/SharingView";
 import { SharingSearchResults, useSharingSearch } from "./SharingSearchResults";
 import { SidebarViewsControl } from "./SidebarViewsControl";
@@ -144,6 +147,8 @@ export function SettingsDialog(props: {
   onOpenLiveDocuments?: () => void;
 }) {
   const { onWorkspaceSettingsRead } = props;
+  // A shared view never runs app code, so it has no trust to change.
+  const workspaceTrust = useWorkspaceTrust(props.workspaceId, props.workspaceIsReady && !props.sharedView);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const userSaveRequestRef = useRequestSequence();
@@ -174,6 +179,10 @@ export function SettingsDialog(props: {
   const { updateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed(() => setUpdateError(null));
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workspaceWritesRef = useRef<{
+    save: (patch: WorkspaceSettingsPatch) => Promise<void>;
+    reset: () => Promise<void>;
+  }>({ save: async () => undefined, reset: async () => undefined });
   const [settingsFilePath, setSettingsFilePath] = useState<string | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
@@ -383,7 +392,11 @@ export function SettingsDialog(props: {
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(ipcErrorMessage(cause));
-        props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
+        props.onError?.(
+          ipcErrorMessage(cause, "dohc could not save this workspace's settings."),
+          cause,
+          () => workspaceWritesRef.current.save(patch),
+        );
       }
     },
     [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
@@ -455,9 +468,34 @@ export function SettingsDialog(props: {
       }
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
+      props.onError?.(
+        ipcErrorMessage(cause, "dohc could not reset this workspace's settings."),
+        cause,
+        () => workspaceWritesRef.current.reset(),
+      );
     }
   }, [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId]);
+  // Try again runs the save or reset this dialog would run now, so a retried
+  // save merges onto the settings shown then.
+  workspaceWritesRef.current = { save: saveWorkspaceSettings, reset: resetWorkspaceSettings };
+
+  // Trusted opens main's dialog, and the person answers there. Restricted
+  // Mode also stops the workspace's running app commands.
+  const { requestTrust, restrict } = workspaceTrust;
+  const changeWorkspaceTrust = useCallback(async (value: "trusted" | "restricted") => {
+    try {
+      if (value === "trusted") await requestTrust();
+      else await restrict();
+    } catch (cause) {
+      props.onError?.(
+        ipcErrorMessage(cause, value === "trusted"
+          ? "dohc could not trust this workspace."
+          : "dohc could not put this workspace in Restricted Mode."),
+        cause,
+        () => changeWorkspaceTrust(value),
+      );
+    }
+  }, [props.onError, requestTrust, restrict]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateBusy("check");
@@ -490,11 +528,10 @@ export function SettingsDialog(props: {
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);
+      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
       if (!result.accepted) {
         setUpdateError(
-          result.state.status === "error"
-            ? result.state.message
-            : "Could not restart into the update.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
         );
       } else if (result.state.status === "error") {
         setUpdateError(result.state.message);
@@ -750,6 +787,12 @@ export function SettingsDialog(props: {
             </SettingRow>
           </div>
         );
+      case "keyboard":
+        return (
+          <div data-testid={settingsSectionPin("keyboard")}>
+            <KeyboardSettings platform={shortcutPlatform} devTools={bridge().devTools} query={query} />
+          </div>
+        );
       case "agents":
         return (
           <div data-testid={settingsSectionPin("agents")}>
@@ -935,6 +978,27 @@ export function SettingsDialog(props: {
       case "privacy":
         return (
           <div data-testid={settingsSectionPin("privacy")}>
+            {!props.sharedView ? (
+              <SettingRow
+                title="Workspace trust"
+                description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer."
+                testId="settings-row-workspace-trust"
+              >
+                <div className="shrink-0 whitespace-nowrap">
+                  <SegmentedControl
+                    label="Workspace trust"
+                    testId="workspace-trust-control"
+                    value={workspaceTrust.trusted ? "trusted" : "restricted"}
+                    options={[
+                      { value: "trusted", label: "Trusted" },
+                      { value: "restricted", label: "Restricted Mode" },
+                    ]}
+                    disabled={workspaceTrust.trusted === null || workspaceTrust.asking}
+                    onChange={(value) => void changeWorkspaceTrust(value)}
+                  />
+                </div>
+              </SettingRow>
+            ) : null}
             <SettingRow
               title="Confirm external links"
               description="Ask before dohc opens a link in another app."
@@ -983,7 +1047,7 @@ export function SettingsDialog(props: {
               {settingsFilePath ? (
                 <code
                   title={settingsFilePath}
-                  className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
+                  className="max-w-70 select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
                 >
                   {settingsFilePath}
                 </code>
@@ -1063,6 +1127,14 @@ export function SettingsDialog(props: {
                   {updateError ?? updateState?.message ?? "Update status unavailable."}
                 </span>
               }
+              aside={updateState?.installCommand ? (
+                <CopyField label="Copy install command" copiedLabel="Install command copied"
+                  copyTestId="desktop-updates-install-command-copy" getText={() => updateState.installCommand ?? null}>
+                  <code data-testid="desktop-updates-install-command" title={updateState.installCommand}>
+                    {updateState.installCommand}
+                  </code>
+                </CopyField>
+              ) : undefined}
               testId="settings-row-desktop-updates"
             >
               <span className="mr-1 shrink-0 font-mono text-[11px] text-subtle">

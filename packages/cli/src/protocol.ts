@@ -1,4 +1,6 @@
-import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -6,7 +8,7 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
-import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
+import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
@@ -24,8 +26,8 @@ export const CLI_JSON_SCHEMA_VERSION = 3;
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
-// Who wrote a message the CLI reads back.
-const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
+// Who wrote a message the CLI reads back. Only the relay writes a link author.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -130,6 +132,9 @@ const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
 const groupsFullArgsSchema = z.object(argsBase).strict();
+export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
+  group: z.string().min(1).max(500),
+}).strict();
 
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
@@ -181,6 +186,7 @@ const fileMoveArgsSchema = z.object({
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
+const fileDuplicateArgsSchema = z.object({...argsBase, path: documentPathArg, agent: documentAgentNameSchema.optional(), requestId: requestIdSchema}).strict();
 const fileDeleteArgsSchema = z.object({
   ...argsBase,
   path: documentPathArg,
@@ -192,6 +198,31 @@ const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
   .strict();
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. A delete takes at most 100 listed copies and must
+// accept that a program still using one may lose what it writes next.
+const MAX_RETAINED_COPIES_PER_DELETE = 100;
+const retainedCopySchema = z.object({ id: z.number().int(), revision: z.number().int() }).strict();
+const retainedCopiesArgsSchema = z.object(argsBase).strict();
+const deleteRetainedCopiesArgsSchema = z
+  .object({
+    ...argsBase,
+    copies: z.array(retainedCopySchema).max(MAX_RETAINED_COPIES_PER_DELETE),
+    acceptLateWriteRisk: z.literal(true),
+  })
+  .strict();
+
+// Edits the server refused for good that this computer keeps for a live
+// document, found by the document's path. Try again and Stop again name the
+// refusal they answer, so a newer one is read before either runs. Save
+// recovery copy may name one, to save exactly those edits.
+const liveKeptEditsArgsSchema = z.object(argsBase).strict();
+const keptEditsIncidentSchema = z.string().min(1).max(1024);
+const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() }).strict();
+const retryKeptEditsArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
+  .strict();
+const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
@@ -364,9 +395,11 @@ const automationSwitchArgsSchema = z.object({ ...automationArgs, enabled: z.bool
   expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean(), submitId: requestIdSchema,
 }).strict();
 // `page` is the `next` of an earlier listing: the runs older than it.
-const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
+// `server` reads the runs of the workspace's self-hosted server instead of
+// this computer's.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() }).strict();
 const automationRunArgsSchema = z
-  .object({ ...automationArgs, run: automationRunIdArg })
+  .object({ ...automationArgs, run: automationRunIdArg, server: z.boolean().optional() })
   .strict();
 // `startOver` confirms running an automation that changed since the run
 // failed, or a run whose progress is gone, from its first step.
@@ -395,12 +428,18 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("chatLinks"), args: z.union([
+    ChatLinksInput.extend(argsBase).strict(), chatLinksGroupInputSchema.extend(argsBase).strict(),
+  ]) }).strict(),
+  z.object({ ...requestBase, verb: z.literal("chatFileMentions"), args: ChatFileMentionsInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("linksEdges"), args: LinksEdgesInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -448,12 +487,19 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("historyOperation"), args: historyOperationArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema }).strict(),
+  z.object({...requestBase, verb: z.literal("fileDuplicate"), args: fileDuplicateArgsSchema}).strict(),
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -489,11 +535,15 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  chatLinks: ["chat.read"],
+  chatFileMentions: ["chat.read"],
+  linksEdges: ["links.edges"],
   linksIn: ["links.in"],
   linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
+  accessRefresh: ["access.refresh"],
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
@@ -517,12 +567,19 @@ export const CLI_CAPABILITIES = {
   collectionSetFields: ["collection.record.edit"],
   collectionCreateRecord: ["collection.record.create"],
   fileWrite: ["file.write"],
+  fileDuplicate: ["file.duplicate"],
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
+  retainedCopies: ["file.retained.list"],
+  deleteRetainedCopies: ["file.retained.delete"],
+  liveKeptEdits: ["workspace.status"],
+  saveRecoveryCopy: ["share.live.document.recovery.save"],
+  retryKeptEdits: ["share.live.document.retry"],
+  stopAgain: ["share.live.document.stop"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -648,7 +705,7 @@ const cliGrepMatchSchema = z
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
 const groupsResultSchema = z
-  .object({ groups: z.array(cliGroupSchema) })
+  .object({ groups: z.array(cliGroupSchema.extend({ channelWireId: z.string().min(1).max(500).nullable().optional() }).strict()) })
   .strict();
 const threadsResultSchema = z
   .object({
@@ -919,6 +976,7 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
         z
           .object({
             id: rawChannelIdSchema,
+            channelWireId: z.string().min(1).max(500).nullable().optional(),
             name: z.string().min(1),
             slug: z.string().min(1),
             kind: z.enum(["group", "dm", "agent"]),
@@ -1109,6 +1167,91 @@ const saveKeptCopyResultSchema = z.union([
   rawFailureSchema,
 ]);
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open: how many, and their logical size in bytes. Deleting
+// them may free less disk space than `bytes`.
+const retainedCopiesSummarySchema = z.object({
+  count: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+}).strict();
+// `copies` names those a delete may remove now, oldest first, each with the
+// revision the delete must match; `more` says there are others past these.
+// `total` counts every one, including copies that changed in the last 30
+// seconds or whose file waits for review.
+const retainedCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copies: z.array(retainedCopySchema),
+    more: z.boolean(),
+    total: retainedCopiesSummarySchema,
+  }).strict(),
+  rawFailureSchema,
+]);
+// A copy that changed since it was listed, whose file waits for review, or
+// that recovery may still need is skipped and stays.
+const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    deleted: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    remaining: retainedCopiesSummarySchema,
+  }).strict(),
+  rawFailureSchema,
+]);
+
+// Live documents whose edits the server refused for good, as dohc keeps them
+// on this computer or, for a document the server hosts, on the server
+// (`storedOn`). `recovery` is paused while they wait for the owner, retrying
+// while Try again waits for the server, stopping while a Stop waits for it,
+// stopped-kept or not-written after a Stop kept them, cannot-write once only
+// a recovery copy can return them, copied once a recovery copy of edits the
+// server keeps is saved, maybe by another of the owner's computers, and
+// unreadable while this computer's engine refuses to read them, for `reason`.
+// `earlier` marks edits the server keeps in an earlier copy of the workspace,
+// copied or not, which only a recovery copy can reach.
+const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
+const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptEdits: z.array(z.object({
+      path: z.string().min(1),
+      reason: z.string().min(1),
+      storedOn: keptEditsStoredOnSchema,
+      incident: keptEditsIncidentSchema,
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
+      earlier: z.literal(true).optional(),
+    }).strict()),
+  }).strict(),
+  rawFailureSchema,
+]);
+// The package always holds every kept edit. `copyPath` is null when dohc
+// could not read the edits as a document. Both sit in `folder`. The edits
+// came from where `storedOn` says. `keptEdits` is kept while they stay there,
+// copied once the server may release them, and ended once dohc no longer
+// keeps a Stop's edits it could not write.
+const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copyPath: z.string().min(1).nullable(),
+    packagePath: z.string().min(1),
+    folder: z.string().min(1),
+    storedOn: keptEditsStoredOnSchema,
+    keptEdits: z.enum(["kept", "copied", "ended"]),
+  }).strict(),
+  rawFailureSchema,
+]);
+const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+// What the Stop did with the kept edits: wrote them into the file, still
+// keeps them, or kept none.
+const stopAgainResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1200,6 +1343,9 @@ const automationRunFields = {
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
+  // The server lost the copy it ran in, and may not have sent its changes
+  // from updatedAtMs on. Nothing can run or undo it again.
+  unsentChangesLost: z.literal(true).optional(),
 };
 const automationRunsResultSchema = z.discriminatedUnion("ok", [
   z
@@ -1216,7 +1362,7 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      run: z
+      run: z.union([z
         .object({
           ...automationRunFields,
           findMs: z.number().nonnegative().optional(),
@@ -1239,6 +1385,8 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
           startsOver: z.boolean(),
         })
         .strict(),
+      // A run the server ran, with what it changed there, oldest first.
+      z.object({ ...automationRunFields, server: z.literal(true), changes: z.array(automationRunChangeSchema) }).strict()]),
     })
     .strict(),
   rawFailureSchema,
@@ -1347,11 +1495,15 @@ export const cliResultSchemas = {
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
+  chatLinks: ChatLinksPage,
+  chatFileMentions: ChatFileMentionsPage,
+  linksEdges: LinksEdgesResult,
   linksIn: LinksInResult,
   linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
+  accessRefresh: AccessRefreshResult,
   accessObject: AccessAnswer,
   accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [
@@ -1365,6 +1517,7 @@ export const cliResultSchemas = {
   fileWrite: fileWriteResultSchema,
   historyOperation: HistoryOperationReadResult,
   historyUndo: HistoryOperationUndoResult,
+  fileDuplicate: z.discriminatedUnion("ok", [z.object({ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), materialized: z.boolean()}).strict(), z.object({ok: z.literal(false), reason: z.string()}).strict()]),
   fileMove: fileMoveResultSchema,
   fileDelete: fileDeleteResultSchema,
   dataset: DatasetResult,
@@ -1396,6 +1549,12 @@ export const cliResultSchemas = {
     rawFailureSchema,
   ]),
   saveKeptCopy: saveKeptCopyResultSchema,
+  retainedCopies: retainedCopiesResultSchema,
+  deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+  liveKeptEdits: liveKeptEditsResultSchema,
+  saveRecoveryCopy: saveRecoveryCopyResultSchema,
+  retryKeptEdits: retryKeptEditsResultSchema,
+  stopAgain: stopAgainResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

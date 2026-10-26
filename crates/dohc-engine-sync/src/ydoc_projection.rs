@@ -59,6 +59,11 @@ pub fn project_ydoc_updates<'a>(
             )),
             _ => Invalid("the ydoc projection is invalid"),
         })?;
+    if content_kind == ContentKind::Richdoc && doc.has_reader_source() {
+        return Err(Invalid(
+            "Markdown reader output requires an authoritative snapshot",
+        ));
+    }
     if content_kind == ContentKind::Richdoc
         && let Some(source) = doc.preserved_markdown_source(&projection.content)
     {

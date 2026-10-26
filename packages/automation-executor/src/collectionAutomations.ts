@@ -16,7 +16,7 @@ import {
 import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import { AUTOMATION_HOST_REACH_MAX_BYTES, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import { AUTOMATION_HOST_REACH_MAX_BYTES, AUTOMATION_SERVER_OFF, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import { automationControlsTarget, AUTOMATION_SWITCHED_OFF_BODY } from "./automationFailedNotice";
 import type {
   DatasetAutomationClaim,
@@ -180,6 +180,8 @@ const MOVED_SINCE_PRESSED = "This Collection moved after the button was pressed.
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
 // A dataset's records are kept on one computer, and its schedules and Group messages run only there.
 const DATASET_TRIGGERS_ELSEWHERE = "Schedules and Group messages run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
+// A Collection on the server: the server runs its schedules and Group messages only where Schedules run on names it.
+export const SERVER_TRIGGERS_ELSEWHERE = "Your server runs this only when you choose it under Schedules run on in Settings.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // A workspace that synced before, or that has no record of whether it did,
@@ -305,7 +307,31 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   pressed(pressId: string): DatasetRememberedPress | null;
 }
 
+/**
+ * A dataset Collection on the workspace's server, as the server's approved
+ * rules and grants describe it. The server runs its automations; this
+ * computer only shows them and sends its presses there.
+ */
+export interface ServerDataset {
+  approved: import("@dohc/security-contract/dataset").DatasetRevision;
+  /** Whether dohc generated the dataset's operations. */
+  generated: boolean;
+  grants: ReachDatasetGrants;
+  /**
+   * What the server runs: "all"; "no-schedules" when Schedules run on names
+   * another computer or none, so the server runs no schedules or Group
+   * messages; "off" when it runs no automations; null when dohc could not ask.
+   */
+  runs: "all" | "no-schedules" | "off" | null;
+}
+
 export interface CollectionAutomationsOptions {
+  /**
+   * The dataset Collection with this id on the workspace's server, read now,
+   * or null when it is not there. Asked only for a person: nothing the server
+   * runs is subscribed, claimed or run here.
+   */
+  serverDataset?(datasetId: string): Promise<ServerDataset | null>;
   resolveRelayedPress?(hostPressId: string): Promise<RelayedPressAuthority>;
   resolveButtonInspection?(inspectionId: string): Promise<RelayButtonAuthority>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -377,6 +403,8 @@ export interface CollectionAutomationsOptions {
    */
   onRunsChanged(): void;
   onUsageSuccess?: CollectionAutomationRunDependencies["onUsageSuccess"];
+  beforeEffect?: CollectionAutomationRunDependencies["beforeEffect"];
+  onRunEnded?: CollectionAutomationRunDependencies["onRunEnded"];
   /**
    * Sends the notice for an automation's newest failure on this computer,
    * and takes back the notice for its failure `replaces` counted, if any.
@@ -447,6 +475,10 @@ export interface RunAdmission {
 }
 
 type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | null };
+/** A dataset Collection by its folder, or undefined. */
+type DatasetAt = (path: string) => IndexedDataset | undefined;
+/** A dataset Collection on the workspace's server, at its folder here. */
+type OnServer = { collectionPath: string; dataset: IndexedDataset; runs: ServerDataset["runs"] };
 /**
  * A dataset Collection's approved rules, whether dohc generated its
  * operations, and its data grants, as the reach check reads them.
@@ -503,6 +535,12 @@ export type CollectionAutomationsFile =
        * can edit.
        */
       addsStay: string[];
+      /**
+       * For a Collection on the workspace's server, which runs its
+       * automations: whether the server runs automations, or null when dohc
+       * could not ask.
+       */
+      onServer?: { runs: boolean | null };
       you?: string;
     };
 
@@ -674,6 +712,12 @@ export interface CollectionAutomationRun {
   /** A person undid what it changed. */
   undone: boolean;
   undoUnfinished: boolean;
+  /**
+   * The server lost the copy it ran in, and may not have sent its changes
+   * from `updatedAtMs` on. Nothing can run or undo it, since its run history
+   * is gone.
+   */
+  unsentChangesLost?: true;
 }
 
 /** One run with what each of its steps changed, for reading a single run. */
@@ -1646,6 +1690,12 @@ export class CollectionAutomations {
     while (this.draining) await this.draining;
   }
 
+  /** Whether an enabled automation starts on a schedule or a Group message, which only the host runs. */
+  hasHostTriggers(): boolean {
+    return this.state === "open" && this.everyAutomation().some(({ automation }) =>
+      automation.enabled && (automation.when.kind === "schedule" || automation.when.kind === "group-message"));
+  }
+
   /** The enabled schedules this executor can run, or null until it has opened. */
   schedules(): ScheduledAutomation[] | null {
     if (this.state !== "open") return null;
@@ -1752,8 +1802,10 @@ export class CollectionAutomations {
   /** The automations in one Collection's file, with why each can or cannot run. */
   async automationsIn(collectionPath: string): Promise<CollectionAutomationsFile> {
     await this.indexCollection(collectionPath);
-    // A dataset whose rules are not approved is not in the index.
+    // A dataset whose rules are not approved is not in the index, and neither is one on the server.
     const unapproved = await this.maybeDataset(collectionPath);
+    const server = unapproved ? await this.onServer({ folder: collectionPath }) : null;
+    if (server !== null) return await this.serverAutomationsIn(server);
     const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
     const roster = await this.options.cachedRoster();
@@ -1960,8 +2012,11 @@ export class CollectionAutomations {
   async pinOperations(collectionPath: string, automations: readonly Automation[], saved: readonly Automation[]): Promise<Automation[]> {
     await this.ready();
     await this.openDataset(collectionPath);
+    // A Collection on the server pins against the server's rules.
+    const server = await this.onServer({ folder: collectionPath });
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    return automations.map((automation) => this.pinned(collectionPath, automation, held));
+    const datasetAt = server === null ? undefined : await this.serverDatasetsFor(server, automations);
+    return automations.map((automation) => this.pinned(collectionPath, automation, held, datasetAt));
   }
 
   /**
@@ -1970,13 +2025,13 @@ export class CollectionAutomations {
    * reaches, each against that dataset's approved rules. A step in `held`
    * stays as the file holds it.
    */
-  private pinned(collectionPath: string, automation: Automation, held: ReadonlySet<string>): Automation {
+  private pinned(collectionPath: string, automation: Automation, held: ReadonlySet<string>, datasetAt: DatasetAt = (path) => this.datasets.get(path)): Automation {
     const kept = (step: object) => held.has(JSON.stringify(step));
     let pinned = automation;
-    const own = this.datasets.get(collectionPath);
+    const own = datasetAt(collectionPath);
     if (own !== undefined && own.generated !== null) pinned = pinDatasetOperations(pinned, { ...own, generated: own.generated === true }, kept);
     for (const path of new Set(recordStepDestinations(automation, collectionPath).values())) {
-      const dataset = path === collectionPath ? undefined : this.datasets.get(path);
+      const dataset = path === collectionPath ? undefined : datasetAt(path);
       if (dataset === undefined || dataset.generated === null) continue;
       pinned = pinDatasetOperations(pinned, { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath }, kept);
     }
@@ -2876,7 +2931,7 @@ export class CollectionAutomations {
    */
   async datasetIn(collectionPath: string): Promise<string | null> {
     await this.indexCollection(collectionPath);
-    return this.datasets.get(collectionPath)?.definition.datasetId ?? null;
+    return this.datasets.get(collectionPath)?.definition.datasetId ?? (await this.onServer({ folder: collectionPath }))?.dataset.definition.datasetId ?? null;
   }
 
   /** Whether the dataset ledger remembers a press by this id, so sending it again answers its claim. */
@@ -2894,12 +2949,15 @@ export class CollectionAutomations {
   ): Promise<AutomationButtonState[]> {
     await this.ready();
     const collectionPath = await this.datasetFolder(datasetId);
+    const server = collectionPath === null ? await this.onServer({ datasetId }) : null;
     const roster = await this.options.cachedRoster();
     const descriptions = this.buttonDescriptions(describe);
     const description = await descriptions(datasetId);
     const states: AutomationButtonState[] = [];
     for (const button of buttons) {
-      states.push(collectionPath === null
+      states.push(server !== null
+        ? await this.serverButton(server, button, description, roster, descriptions)
+        : collectionPath === null
         ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
         : (await this.datasetButton(collectionPath, button, description, roster, descriptions)).state);
     }
@@ -3029,8 +3087,132 @@ export class CollectionAutomations {
    */
   async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
     await this.ready();
-    const collectionPath = await this.datasetFolder(datasetId);
+    const collectionPath = await this.datasetFolder(datasetId) ?? (await this.onServer({ datasetId }))?.collectionPath ?? null;
     return collectionPath === null ? { status: "cannot-run", reason: DATASET_NOT_APPROVED } : { status: "found", collectionPath };
+  }
+
+  /**
+   * The dataset Collection on the workspace's server with this id, or at
+   * this folder, read from the server now, or null. Its folder here must name
+   * it, as an indexed dataset's must. A Collection this computer indexed is
+   * not on the server. Nothing here subscribes, claims or runs it.
+   */
+  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | null> {
+    if (this.options.serverDataset === undefined) return null;
+    const datasetId = "datasetId" in place ? place.datasetId : await this.describedDatasetId(place.folder);
+    if (datasetId === null || this.collectionPathOf(datasetId) !== null) return null;
+    const server = await this.options.serverDataset(datasetId);
+    if (server === null) return null;
+    const { definition } = server.approved;
+    const folder = datasetBaseFolder(definition);
+    if (definition.datasetId !== datasetId || folder === "." || ("folder" in place && place.folder !== folder) ||
+      this.collections.has(folder) || this.datasets.has(folder) || (await this.describedDatasetId(folder)) !== datasetId) return null;
+    return { collectionPath: folder, dataset: { approved: server.approved, definition, generated: server.generated, grants: server.grants }, runs: server.runs };
+  }
+
+  /**
+   * Datasets by folder as automations in a Collection on the server see
+   * them: that Collection, each other Collection on the server their steps
+   * reach, read from the server now, then the index's. Only the panel and
+   * button checks read it; no run does.
+   */
+  private async serverDatasetsFor(server: OnServer, automations: readonly Automation[]): Promise<DatasetAt> {
+    const found = new Map<string, IndexedDataset>([[server.collectionPath, server.dataset]]);
+    const reached = new Set(automations.flatMap((automation) => [...recordStepDestinations(automation, server.collectionPath).values()]));
+    const others = [...reached].filter((folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder));
+    for (const other of await Promise.all(others.map((folder) => this.onServer({ folder })))) {
+      if (other !== null) found.set(other.collectionPath, other.dataset);
+    }
+    return (path) => found.get(path) ?? this.datasets.get(path);
+  }
+
+  /** Why the server does not run `automation` in its Collection, as far as this computer can tell, or null. */
+  private serverCannotRun(server: OnServer, automation: Automation, datasetAt: DatasetAt): string | null {
+    if (server.runs === "off") return AUTOMATION_SERVER_OFF;
+    const cannot = this.cannotRun(server.collectionPath, automation, datasetAt);
+    if (cannot !== null) return cannot;
+    const hostTrigger = automation.when.kind === "schedule" || automation.when.kind === "group-message";
+    return server.runs === "no-schedules" && hostTrigger ? SERVER_TRIGGERS_ELSEWHERE : null;
+  }
+
+  /**
+   * A Collection on the server's automations, as automationsIn lists one
+   * kept here. The server keeps their runs and held steps, so no run or held
+   * step of this computer's shows, and each step's reach is the roster's.
+   */
+  private async serverAutomationsIn(server: OnServer): Promise<CollectionAutomationsFile> {
+    const { collectionPath, dataset } = server;
+    const indexed = await this.parsedFile(collectionPath);
+    const roster = await this.options.cachedRoster();
+    const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
+    if (!indexed) return { status: "missing", ...you };
+    if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
+    const collection = collectionNamed(collectionPath);
+    const datasetAt = await this.serverDatasetsFor(server, indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : [])));
+    const [waiting] = roster.kind === "unknown"
+      ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
+      : [];
+    const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
+      if (entry.status === "invalid") return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
+      const { automation } = entry;
+      const summary = {
+        valid: true as const, automationId: collectionAutomationId(dataset.definition.datasetId, automation.id), automation,
+        definitionHash: definitionHash(automation), cannotRun: this.serverCannotRun(server, automation, datasetAt), lastRun: null,
+      };
+      if (roster.kind === "unknown") return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
+      let steps: ReachStep[];
+      try { steps = this.buildInventory(collectionPath, automation, datasetAt).reach; }
+      catch (error) { steps = [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]; }
+      const reach = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps })
+        .map((step): CollectionAutomationStepReach => (step.allowed ? { verdict: "allowed" } : { verdict: "stopped", reason: step.reason }));
+      return { ...summary, reach: { kind: "checked", steps: reach } };
+    });
+    const codeFiles = indexed.file.entries.flatMap((entry) => entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : []);
+    const addsStay = roster.kind === "unknown" ? [] : dataset.definition.tables
+      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants, codeFiles).length === 0)
+      .map((table) => table.name);
+    return { status: "read", contentHash: indexed.contentHash, automations, addsStay,
+      onServer: { runs: server.runs === null ? null : server.runs !== "off" }, ...you };
+  }
+
+  /**
+   * A button of a Collection on the server, checked as datasetButton checks
+   * one kept here, against the server's rules. The server checks it again,
+   * with its own held steps, when the press reaches it.
+   */
+  private async serverButton(
+    server: OnServer,
+    button: { field: string; table: string | null },
+    description: DatasetDescription,
+    roster: ReachRoster,
+    describe: (datasetId: string) => Promise<DatasetDescription>,
+  ): Promise<AutomationButtonState> {
+    const disabled = (reason: string) => ({ kind: "disabled" as const, reason });
+    const { collectionPath, dataset: { definition } } = server;
+    const table = datasetTableNamed(definition, button.table);
+    if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
+      return disabled(noAccessReason(table?.name ?? button.table ?? definition.name));
+    }
+    const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
+    if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
+    if (server.runs === "off") return disabled(AUTOMATION_SERVER_OFF);
+    const resolved = resolveButton((await this.parsedFile(collectionPath))?.file ?? null, button.field,
+      (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
+    if (resolved.kind === "state") return resolved.state;
+    const { automation } = resolved;
+    let inventory: AutomationInventory;
+    try { inventory = this.buildInventory(collectionPath, automation, await this.serverDatasetsFor(server, [automation])); }
+    catch (error) { return disabled(errorText(error)); }
+    if (!await canPressInventory(inventory, describe)) return disabled(noAccessReason(table.name));
+    if (roster.kind !== "unknown") {
+      const reaches = checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps: inventory.reach });
+      for (const [index, reach] of reaches.entries()) {
+        if (!reach.allowed && inventory.reach[index]!.kind !== "dataset-field") return disabled(reach.reason);
+      }
+    }
+    const ready = { kind: "ready" as const, automationId: collectionAutomationId(definition.datasetId, automation.id) };
+    const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
+    return irreversible.length === 0 ? ready : { ...ready, irreversible };
   }
 
   /**
@@ -3374,7 +3556,7 @@ export class CollectionAutomations {
         ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
         : stored.runs;
       if (unreadable) {
-        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
+        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/local/automations, so it undid nothing." };
       }
       const statusRow: CollectionAutomationRun = { claimId: input.claimId, state: claim.state, error: null,
         createdAtMs: 0, updatedAtMs: 0, trigger: claim.history.trigger, definitionChanged: false,
@@ -3969,8 +4151,8 @@ export class CollectionAutomations {
    * Collection does not have keeps it off until someone fixes the file or
    * the Collection: a write would add a field nobody defined.
    */
-  private cannotRun(collectionPath: string, automation: Automation): string | null {
-    const unsupported = this.unsupportedIn(collectionPath, automation);
+  private cannotRun(collectionPath: string, automation: Automation, datasetAt?: DatasetAt): string | null {
+    const unsupported = this.unsupportedIn(collectionPath, automation, datasetAt);
     if (unsupported !== null) return unsupported;
     for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
       const fields = this.schemaFields.get(collection);
@@ -4198,9 +4380,10 @@ export class CollectionAutomations {
     return result;
   }
 
-  private buildInventory(collectionPath: string, automation: Automation): AutomationInventory {
+  /** `datasetAt` finds a dataset Collection by folder: the index's, unless the caller shows a server's. */
+  private buildInventory(collectionPath: string, automation: Automation, datasetAt: DatasetAt = (path) => this.datasets.get(path)): AutomationInventory {
     return automationInventory(automation, collectionPath, (path) => {
-      const dataset = this.datasets.get(path);
+      const dataset = datasetAt(path);
       if (dataset !== undefined) {
         if (dataset.generated === null || dataset.approved === null) throw new AutomationRunWait(`The dataset host for ${path} is unavailable.`);
         return { kind: "dataset", collection: collectionNamed(path), approved: dataset.approved,
@@ -4213,14 +4396,17 @@ export class CollectionAutomations {
     }, this.chat);
   }
 
-  private unsupportedIn(collectionPath: string, automation: Automation): string | null {
-    const dataset = this.datasets.get(collectionPath);
+  private unsupportedIn(collectionPath: string, automation: Automation, datasetAt?: DatasetAt): string | null {
+    const dataset = datasetAt ? datasetAt(collectionPath) : this.datasets.get(collectionPath);
     if (dataset !== undefined) {
       const subscription = datasetSubscriptionFor(automation, dataset.definition);
       if (subscription !== null && "problem" in subscription) return subscription.problem;
     }
-    try { this.inventory(collectionPath, automation); return null; }
-    catch (error) { return errorText(error); }
+    try {
+      if (datasetAt) this.buildInventory(collectionPath, automation, datasetAt);
+      else this.inventory(collectionPath, automation);
+      return null;
+    } catch (error) { return errorText(error); }
   }
 
   /** Uses the indexed destination metadata, as every reach consumer does. */
@@ -5430,6 +5616,8 @@ export class CollectionAutomations {
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
       onUsageSuccess: this.options.onUsageSuccess,
+      beforeEffect: this.options.beforeEffect,
+      onRunEnded: this.options.onRunEnded,
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,

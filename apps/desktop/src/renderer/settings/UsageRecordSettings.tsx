@@ -108,7 +108,7 @@ function Table(props: { rows: readonly UsageRecordRow[]; today: string }) {
             {["Capability", ...DOORS.map(({ name }) => name), "Last used"].map((name, index) => {
               const door = DOORS[index - 1]?.door;
               return (
-                <th key={name} scope="col" className="border-b border-line px-3 py-2 text-left font-mono text-[10px] font-normal uppercase tracking-wide text-subtle">
+                <th key={name} scope="col" className="border-b border-line px-3 py-2 text-left text-[12px] font-medium text-subtle">
                   <span className="inline-flex items-center gap-1">
                     {name}
                     {door && neverCounted.has(door) ? <NotCounted /> : null}

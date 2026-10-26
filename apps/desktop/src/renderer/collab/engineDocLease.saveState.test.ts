@@ -128,7 +128,7 @@ it.each([false, true])("flushes and closes Stop's draft before the request, then
     if (waiting) throw new Error("Stop live editing is waiting. You can keep editing.");
   });
   await act(async () => {
-    const stop = withClosedEngineDocSession("ws-1", "notes/big.md", work);
+    const stop = withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, work);
     if (waiting) await expect(stop).rejects.toThrow("waiting"); else await stop;
   });
   await waitFor(() => expect(harness.openCount()).toBe(2));
@@ -143,9 +143,28 @@ it.each([false, true])("flushes and closes Stop's draft before the request, then
 it("does not close another document when Stop changes one document", async () => {
   retainDocument();
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
-  await withClosedEngineDocSession("other-workspace", "notes/big.md", async () => undefined);
+  await withClosedEngineDocSession("other-workspace", {path: "notes/big.md"}, async () => undefined);
   expect(harness.closed).toEqual([]);
   expect(harness.openCount()).toBe(1);
+});
+
+// A record keeps the path its document had when it stopped. A Stop that names
+// the document by its object id closes the panes that opened it at a new path,
+// and none of another document that now has its old path.
+it("closes the panes of the document a Stop names, at whatever path they opened it, and only those", async () => {
+  const open = harness.api.openEngineYDocSession.bind(harness.api);
+  vi.spyOn(harness.api, "openEngineYDocSession").mockImplementation(async payload => Object.assign(await open(payload), { objectId: "object-1" }));
+  retainDocument("notes/new.md");
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  // The pane at notes/new.md now holds object-1; a Stop of another document there closes nothing.
+  await withClosedEngineDocSession("ws-1", {objectId: "other-object"}, async () => undefined);
+  await withClosedEngineDocSession("other-workspace", {objectId: "object-1"}, async () => undefined);
+  expect(harness.closed).toEqual([]);
+  const work = vi.fn(async () => {expect(harness.closed).toContain(previous);});
+  await act(async () => {await withClosedEngineDocSession("ws-1", {objectId: "object-1"}, work);});
+  expect(work).toHaveBeenCalledOnce();
+  await waitFor(() => expect(harness.openCount()).toBe(2));
 });
 
 it("refuses Stop when its lease is disposed while the draft closes", async () => {
@@ -154,7 +173,7 @@ it("refuses Stop when its lease is disposed while the draft closes", async () =>
   const closing = new Promise<void>(resolve => {finish = resolve;});
   const close = vi.spyOn(harness.api, "closeEngineYDocSession").mockImplementationOnce(async () => {await closing;return undefined;});
   const work = vi.fn(async () => undefined);
-  const stop = withClosedEngineDocSession("ws-1", "notes/big.md", work);
+  const stop = withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, work);
   const result = expect(stop).rejects.toThrow("could not stop live editing");
   await waitFor(() => expect(close).toHaveBeenCalled());
   const disposal = retained.lease.dispose();
@@ -170,10 +189,10 @@ it("refuses a superseded Stop while the next transition still runs",async () => 
   const closing=new Promise<void>(resolve=>{finish=resolve;});
   const close=vi.spyOn(harness.api,"closeEngineYDocSession").mockImplementationOnce(async()=>{await closing;return undefined;});
   const first=vi.fn(async()=>undefined),second=vi.fn(async()=>undefined);
-  const stop=withClosedEngineDocSession("ws-1","notes/big.md",first);
+  const stop=withClosedEngineDocSession("ws-1",{path:"notes/big.md"},first);
   const result=expect(stop).rejects.toThrow("could not stop live editing");
   await waitFor(()=>expect(close).toHaveBeenCalled());
-  const successor=withClosedEngineDocSession("ws-1","notes/big.md",second);
+  const successor=withClosedEngineDocSession("ws-1",{path:"notes/big.md"},second);
   finish();await result;await successor;
   expect(first).not.toHaveBeenCalled();expect(second).toHaveBeenCalledOnce();
 });
@@ -235,6 +254,50 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   // Only main's real report clears it.
   harness.emit("saved", harness.applied.at(-1)!.seq);
   expect(retained.snapshot.saveState.kind).toBe("saved-here");
+});
+
+// #2463. Main counts the edits it has. A change outside dohc must not read as
+// nothing unsaved while this editor still has edits main has not confirmed.
+it("counts an edit main has not confirmed when the file changed outside dohc", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+});
+
+it("makes a change outside dohc unsaved when typing lands after it", async () => {
+  await retainBound();
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(false);
+  act(() => {
+    editDocument();
+  });
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+  // A later report from main cannot make it saved again.
+  harness.emitChangedOutside(false, 0);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+});
+
+// An agent's edit through dohc reaches this editor from main, so it is not a
+// local edit. Landing after main said nothing was unsaved, it still is one.
+it("makes a change outside dohc unsaved when an agent's edit lands after it", async () => {
+  await retainBound();
+  harness.emitChangedOutside(false, 0);
+  harness.emitRemoteEdit(" agent", 1);
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
+  expect(retained.lease.unsavedEditsPending()).toBe(true);
+});
+
+it("keeps a change outside dohc reported while a history replacement installs", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  harness.emitChangedOutside(true, 0);
+  // The replacement keeps only the newest save state for after it installs.
+  harness.emit("settling", 0);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
 });
 
 it("observes unsaved edits on a replacement document", async () => {

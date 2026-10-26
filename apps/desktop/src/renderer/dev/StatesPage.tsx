@@ -9,6 +9,7 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatFileMentionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
@@ -22,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -38,6 +39,7 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
+import { KeyboardSettings } from "../settings/KeyboardSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -59,7 +61,7 @@ import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
 import { AppRows } from "../workbench/AppsView";
-import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
@@ -73,7 +75,7 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { EXPLORER_MENU_WIDTH, TreeRow, explorerMenuItems, type VisibleRow } from "../workbench/Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, TreeRow, explorerMenuItems, type VisibleRow } from "../workbench/Explorer";
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
@@ -83,12 +85,16 @@ import {
   AboutChatRow,
   AboutHeader,
   AboutHistoryView,
+  AboutLinksView,
   AboutSection,
-  type AccessReason,
   type AccessSetup,
   type AccessView,
+  type ChatLinksView,
+  type LinksView,
 } from "../workbench/About";
+import type { AccessReason } from "../workbench/accessReason";
 import type { AboutConversation } from "../workbench/aboutConversation";
+import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
@@ -123,7 +129,7 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
 const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
-const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
 // the dark theme, and its whole shadow must stay in its own capture, which
@@ -348,6 +354,21 @@ function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; ac
   );
 }
 
+// The sidebar's Collections section, at a width the sidebar takes.
+function CollectionsSectionSpecimen(props: { width: number; children: ReactNode }) {
+  return (
+    <div style={{ width: props.width }} className="rounded-lg border border-line bg-panel px-1 py-1">
+      <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+      {props.children}
+    </div>
+  );
+}
+
+const STUDIO_MAC = { label: "Studio Mac", sameName: false };
+const UNCLAIMED_REFUSAL = { kind: "unclaimed", words: "dohc doesn't know which computer keeps this workspace's Collections." } as const;
+const ELSEWHERE_REFUSAL = { kind: "elsewhere", computer: STUDIO_MAC.label, words: collectionsElsewhereWords(STUDIO_MAC) } as const;
+const OTHERS_ELSEWHERE = { computer: STUDIO_MAC.label, others: true, words: collectionsElsewhereWords(STUDIO_MAC, true) };
+
 function treeRow(name: string, folder = false): VisibleRow {
   return {
     fullPath: name,
@@ -554,7 +575,8 @@ const REFUSED_RESTORE = new Error(
 );
 const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",
-  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  title: "dohc could not restore notes/plan.md",
+  message: readError(REFUSED_RESTORE).words ?? "",
   details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
   atMs: 0,
   canRetry: true,
@@ -746,6 +768,21 @@ const ABOUT_CHAT_ACCESS: AccessAnswer = {
       selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
   ],
 };
+// The files #general mentions: the funnel by Nova, the landscape by Sam, and
+// the plan by both.
+const mentionedBy = (displayName: string, presentation: ActorPresentation, kind: "human" | "agent" = "human") =>
+  ({ kind, displayName, presentation });
+const ABOUT_MENTIONED: MentionedFile[] = [
+  { objectId: "states-funnel", path: "data/funnel.csv", authors: [mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+  { objectId: "states-competitors", path: "research/competitors.md", authors: [mentionedBy("Sam Rivera", SAMPLE_SAM)] },
+  { objectId: "states-plan", path: ABOUT_PATH, authors: [mentionedBy("Sam Rivera", SAMPLE_SAM), mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+];
+const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
+  status: "ready", files: ABOUT_MENTIONED, more: false, building: false, partial: false,
+};
+function ConversationLinks(props: { view: ConversationLinksView }) {
+  return <AboutConversationLinksView view={props.view} expanded onToggle={noop} onOpenFile={noop} onMore={noop} onRetry={noop} />;
+}
 
 // A group's feed and a thread, from the drawing's #general.
 const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
@@ -861,7 +898,7 @@ function AgentOfferComposer(props: {
       agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
       above={props.replying ? (
         <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
-          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
   const focused = props.focus ? (
@@ -906,6 +943,43 @@ function ChatRunSpecimen() {
         </div>
       </AboutPanelSpecimen>
     </div>
+  );
+}
+
+// The drawing's document, linked from the meeting notes twice and from the
+// research, and named in #general.
+const aboutLink = (source: string, title: string, line: number, snippet: string, ordinal = 0) => {
+  const start = snippet.indexOf("[[");
+  const end = snippet.indexOf("]]") + 2;
+  return { source, title, ordinal, span: [start, end] as [number, number], line, snippet, highlightStart: start, highlightEnd: end };
+};
+const ABOUT_LINK_ROWS = [
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("research/competitors.md", "Competitor landscape", 7,
+    "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
+];
+const ABOUT_LINKS: Extract<LinksView, { status: "ready" }> = { status: "ready", rows: ABOUT_LINK_ROWS, next: "states-next", gathering: 0 };
+const ABOUT_CHAT_LINK: ChatFileMentionRecord = {
+  attachment: {
+    attachmentId: "states-attachment", threadId: "states-thread", messageId: "states-message", targetKind: "file",
+    objectId: "states-plan", pathHint: ABOUT_PATH, createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+  },
+  message: {
+    id: "states-message", authorDisplayName: "Sam Rivera", createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+    preview: "Can we get the launch checklist into shape before Friday? It's in product-plan.md.",
+  },
+  thread: { id: "states-thread", title: "Launch checklist", createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT },
+  channelKind: "channel", channelName: "general",
+};
+const ABOUT_CHAT_LINKS: Extract<ChatLinksView, { status: "ready" }> = { status: "ready", rows: [ABOUT_CHAT_LINK], next: null, gathering: 0 };
+
+function LinksSpecimen(props: { links: LinksView | null; chats?: ChatLinksView | null }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutLinksView links={props.links} chats={props.chats ?? null} expanded onToggle={noop} onOpenLink={noop}
+        onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+    </AboutPanelSpecimen>
   );
 }
 
@@ -1021,6 +1095,18 @@ function notice(id: string, tone: "danger" | "success") {
   };
 }
 
+// A failure whose text runs past three lines: the row clips it and offers Show more.
+const LONG_NOTICE = {
+  id: "self-test",
+  tone: "danger" as const,
+  title: "The self-test did not finish",
+  body: "dohc stopped the self-test at its third step and kept the log at C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log. Open the log to see the step that stopped, then try again.",
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop }],
+  copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1044,7 +1130,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/trash if that fails, and you can
+            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
             restore them.
           </p>
         </ConfirmDialogCard>
@@ -1576,6 +1662,24 @@ function Pane(props: { theme: "light" | "dark" }) {
         </ul>
       </Section>
 
+      <Section part="collections-rows" title="Collections rows">
+        {[SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH].map((width) => (
+          <Specimen key={width} label={`no computer keeps them; another one does; others beside the server's, ${width}px`}>
+            <div className="flex flex-col gap-2">
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={UNCLAIMED_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={ELSEWHERE_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsElsewhereRow elsewhere={OTHERS_ELSEWHERE} onKeep={noop} />
+              </CollectionsSectionSpecimen>
+            </div>
+          </Specimen>
+        ))}
+      </Section>
+
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
           first row takes keyboard focus when it opens; forcing focus and
@@ -1728,9 +1832,10 @@ function Pane(props: { theme: "light" | "dark" }) {
             On this computer
           </SectionLabel>
           <ul className="m-0 list-none p-0" data-force-state="focus-visible" data-force-target="li:nth-child(2)">
-            <LocalNoticeRow notice={notice("sync", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("sync-focused", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("moved", "success")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2072,7 +2177,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      <Section part="capture-recovery" title="Typing kept in History">
+      <Section part="capture-recovery" title="Text kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />
@@ -2081,8 +2186,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="Notices: History Restore, then a shared live file">
           <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
             <ul className="m-0 list-none p-0">
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             </ul>
           </div>
         </Specimen>
@@ -2179,6 +2284,31 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Its rows' menus rest; the menu part draws an open one. */}
+      <Section part="about-links" title="About: Links">
+        <Specimen label="files that link here, a chat that does, and more to read">
+          <LinksSpecimen links={ABOUT_LINKS} chats={ABOUT_CHAT_LINKS} />
+        </Specimen>
+        <Specimen label="a link hovered, and keyboard focus on a chat's link">
+          <div data-force-state="hover" data-force-target='[data-line="12"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="chat-file-mention"]'>
+              <LinksSpecimen links={{ ...ABOUT_LINKS, next: null }} chats={ABOUT_CHAT_LINKS} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the workspace's link index builds">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: ABOUT_LINK_ROWS.slice(0, 1), next: null, gathering: 1 }} />
+        </Specimen>
+        <Specimen label="nothing links here yet">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: [], next: null }} chats={{ ...ABOUT_CHAT_LINKS, rows: [] }} />
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <LinksSpecimen links={{ status: "failed" }} />
+        </Specimen>
+        <Specimen label="a file shared with you">
+          <LinksSpecimen links={null} />
+        </Specimen>
+      </Section>
+
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
@@ -2397,6 +2527,34 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* The page at Settings' content width, whatever this host's keys. */}
+      <Section part="settings-keyboard" title="Settings: Keyboard">
+        <Specimen label="Windows keys">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="win32" devTools={false} />
+          </div>
+        </Specimen>
+        <Specimen label="macOS keys, with dev tools">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="darwin" devTools />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Privacy's rows in the narrowest pane, an 840px window's, and the widest. */}
+      <Section part="settings-privacy" title="Settings: Privacy">
+        <Specimen label="narrowest pane: Diagnostics' buttons under its text; usage reports changed, keyboard focus on its switch">
+          <div className="w-[504px]" data-force-state="focus focus-visible" data-force-target='[role="switch"][aria-label="Send usage reports"]'>
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="widest pane: every control beside its text">
+          <div className="w-[640px]">
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -2460,9 +2618,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="about-conversation" title="About a conversation">
-        <Specimen label="a Group: who is here, and its access checked">
+        <Specimen label="a Group: who is here, the files it mentions, and its access checked">
           <AboutPanelSpecimen>
             <AboutHeader subject={ABOUT_GROUP} />
+            <ConversationLinks view={ABOUT_MENTIONS} />
             <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2470,13 +2629,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="a person, with Access closed">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(1, 2) }} />
             <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
               setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="an agent, alone: no share includes it">
+        <Specimen label="an agent, alone: no file mentioned and no share includes it">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: [] }} />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
               onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2487,6 +2648,35 @@ function Pane(props: { theme: "light" | "dark" }) {
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
               onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      <Section part="about-conversation-links" title="About a conversation: Links">
+        <Specimen label="a file hovered, keyboard focus on another, and more to read">
+          <div data-force-state="hover" data-force-target='[data-path="data/funnel.csv"]'>
+            <div data-force-state="focus focus-visible" data-force-target={`[data-path="${ABOUT_PATH}"]`}>
+              <AboutPanelSpecimen>
+                <ConversationLinks view={{ ...ABOUT_MENTIONS, more: true }} />
+              </AboutPanelSpecimen>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the conversation's link index builds">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 1), building: true, partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a list that may be missing files">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 2), partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="loading, a failed read with its words in Notices, then a conversation dohc does not list">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ status: "loading" }} />
+            <ConversationLinks view={{ status: "failed" }} />
+            <ConversationLinks view={{ status: "unlisted" }} />
           </AboutPanelSpecimen>
         </Specimen>
       </Section>
@@ -2567,6 +2757,27 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
             <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* A workspace CSV past the preview's cap: the count, then Import to
+          SQLite, which runs the tab row's import and is busy as it is. */}
+      <Section part="csv-bound" title="CSV offer">
+        <Specimen label="at rest">
+          <CsvPreviewBound rowCount={1240} onImport={noop} />
+        </Specimen>
+        <Specimen label="hovered">
+          <div data-force-state="hover" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus">
+          <div data-force-state="focus-visible" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="busy: the import running">
+          <CsvPreviewBound rowCount={1240} onImport={noop} importing />
         </Specimen>
       </Section>
 
@@ -2920,7 +3131,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={
                 <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
-                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
               }
               poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>
@@ -3130,6 +3341,43 @@ function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
       reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
       increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
+  );
+}
+
+const TRUST_OPTIONS = [
+  { value: "trusted", label: "Trusted" },
+  { value: "restricted", label: "Restricted Mode" },
+];
+const DIAGNOSTICS_BUTTON =
+  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+
+// Privacy's rows as Settings draws them: a segmented control, two switches,
+// and Diagnostics' three buttons, the widest controls in Settings.
+function PrivacyRowsSpecimen() {
+  return (
+    <>
+      <SettingRow title="Workspace trust" description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer.">
+        <div className="shrink-0 whitespace-nowrap">
+          <SegmentedControl label="Workspace trust" value="trusted" options={TRUST_OPTIONS} onChange={noop} />
+        </div>
+      </SettingRow>
+      <SettingRow
+        title="Send usage reports"
+        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        modified
+        onReset={noop}
+      >
+        <SwitchControl label="Send usage reports" checked={false} onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Send error reports" description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.">
+        <SwitchControl label="Send error reports" checked onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Diagnostics" description="Version, system, report settings, and recent problems. They stay on this computer until you copy or save them.">
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Show</button>
+        <CopyButton label="Copy diagnostics" getText={() => ""} />
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Save…</button>
+      </SettingRow>
+    </>
   );
 }
 

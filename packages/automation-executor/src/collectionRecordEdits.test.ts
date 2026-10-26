@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { getEventListeners } from "node:events";
@@ -318,6 +319,62 @@ it("rejects an unkeyed field write when the session declines the decided update"
   })).rejects.toThrow("did not accept the field change");
   expect(log.order).toEqual(["close"]);
   expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
+});
+
+it("refuses to set fields on a lossy note before any session opens", async () => {
+  const root = await createTestScratch("dohc-record-lossy-");
+  const text = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "a.md"), text);
+  const { session, log } = fakeSession();
+  const context = contextFor(root, session);
+  await expect(setCollectionRecordFields(context, {
+    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
+  })).rejects.toThrow(
+    "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+  );
+  expect(context.openedPaths).toEqual([]);
+  expect(log.order).toEqual([]);
+  expect(await readFile(join(root, "tasks", "a.md"), "utf8")).toBe(text);
+});
+
+it("refuses a field write when its safety read fails, though a session could open", async () => {
+  const { session, log } = fakeSession();
+  const context = contextFor(await createTestScratch("dohc-record-unread-"), session, {
+    readText: async () => { throw new Error("read refused"); },
+  });
+  await expect(setCollectionRecordFields(context, {
+    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
+  })).rejects.toThrow("dohc couldn't read tasks/a.md to check it, so nothing changed. Try again.");
+  expect(context.openedPaths).toEqual([]);
+  expect(log.order).toEqual([]);
+  expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
+});
+
+it("refuses a field write when the session holds a lossy note the read did not see", async () => {
+  const root = await createTestScratch("dohc-record-replaced-");
+  await mkdir(join(root, "tasks"));
+  await writeFile(join(root, "tasks", "a.md"), "---\nstatus: open\n---\n\nPlain.\n");
+  // The file was replaced after the read: the session's document carries the
+  // replacement and its witness, as a seed of that file does.
+  const replacement = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  const lossy = markdownToYDoc(replacement);
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  lossy.getMap("meta").set("dohcMarkdownSource", replacement);
+  lossy.getMap("meta").set("dohcMarkdownSourceSha256", sha(replacement));
+  lossy.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(lossy)));
+  const { session, log } = fakeSession({ beforeTurn: (doc) => Y.applyUpdate(doc, Y.encodeStateAsUpdate(lossy)) });
+  const context = contextFor(root, session);
+  await expect(setCollectionRecordFields(context, {
+    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
+  })).rejects.toThrow(
+    "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+  );
+  expect(context.openedPaths).toEqual(["tasks/a.md"]);
+  expect(log.journaled).toEqual([]);
+  expect(log.order).not.toContain("settle");
+  expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  lossy.destroy();
 });
 
 /**
@@ -1746,7 +1803,8 @@ it("continues an automation replay when the bound file still has the requested i
   await expect(createCollectionRecord(context, {
     collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields: { status: "done" },
   })).resolves.toEqual({ path: "tasks/two.md", recordId });
-  expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
+  // Once for its id, and once to check it is not a lossy note before its fields are set.
+  expect(read.mock.calls).toEqual([["tasks/two.md"], ["tasks/two.md"]]);
   expect(context.createdFiles).toEqual([]);
   expect(context.openedPaths).toEqual(["tasks/two.md"]);
   expect(log.doc.getMap("frontmatter").get("status")).toBe("done");

@@ -3,6 +3,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+import { ImportWorkspaceFilesResult } from "./bridgeContract";
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
@@ -33,7 +34,7 @@ import { UPDATE_STATUSES } from "../updates/updateMachine";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
-  ListChatFileMentionsResult,
+  ChatFileMentionsPageResult,
   ChatChannelRecord,
   ChatFeedItemRecord,
   ChatFileMentionRecord,
@@ -105,7 +106,6 @@ import {
   TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
-  WorkspaceGraphResult,
   WorkspaceVersionConflict,
   ListSitesResult,
   GetSitePreviewLogsPayload,
@@ -1388,6 +1388,7 @@ describe("shared view refresh IPC contract", () => {
         unjournalablePaths: [
           { path: "docs/oversized.md", reason: "oversized-text" },
           { path: "docs/local.md", reason: "local-collision" },
+          { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
         ],
         refusedOps: 0,
         refusedDetail: null,
@@ -1400,6 +1401,7 @@ describe("shared view refresh IPC contract", () => {
       unjournalablePaths: [
         { path: "docs/oversized.md", reason: "oversized-text" },
         { path: "docs/local.md", reason: "local-collision" },
+        { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
       ],
       refusedOps: 0,
       refusedDetail: null,
@@ -1775,51 +1777,7 @@ describe("chat IPC contract", () => {
   });
 });
 
-describe("workspace graph IPC contract", () => {
-  const graph = (node: Record<string, unknown>) => ({
-    nodes: [node],
-    edges: [],
-    unresolvedLinks: 0,
-    scannedFileCount: 1,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
-  });
-  const common = { path: "node", title: "Node", incoming: 0, outgoing: 0 };
 
-  it("keeps legacy file nodes while requiring navigable metadata for typed nodes", () => {
-    expect(WorkspaceGraphResult.safeParse(graph({ ...common, path: "a.md" })).success)
-      .toBe(true);
-    expect(
-      WorkspaceGraphResult.safeParse(
-        graph({
-          ...common,
-          kind: "heading",
-          filePath: "a.md",
-          headingAnchor: "scope",
-        }),
-      ).success,
-    ).toBe(true);
-    expect(
-      WorkspaceGraphResult.safeParse(
-        graph({ ...common, kind: "chat-thread", threadId: "thread-1" }),
-      ).success,
-    ).toBe(true);
-
-    expect(
-      WorkspaceGraphResult.safeParse(
-        graph({ ...common, kind: "heading", filePath: "a.md" }),
-      ).success,
-    ).toBe(false);
-    expect(
-      WorkspaceGraphResult.safeParse(graph({ ...common, kind: "chat-thread" })).success,
-    ).toBe(false);
-    expect(
-      WorkspaceGraphResult.safeParse(
-        graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
-      ).success,
-    ).toBe(false);
-  });
-});
 
 describe("collection IPC contracts", () => {
   it("round-trips a queried record with a bigint value and a flagged validation", () => {
@@ -3428,7 +3386,7 @@ describe("sync status IPC contract", () => {
   it("carries a document the server refused or whose server copy diverged to the status and the live documents list", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
-    const row = { path: "docs/a.md", status: "unavailable", canResume: true };
+    const row = { path: "docs/a.md", objectId: "object", status: "unavailable", canResume: true };
     for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"] as const) {
       expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
@@ -3564,7 +3522,7 @@ describe("engine history and linked Chats IPC contract", () => {
           recordedAtMs: 100,
           operation: "write",
           origin: "local-file",
-          summary: "Reconciled offline edits",
+          summary: "Changed while dohc was closed",
           correlationId: "reconcile-1",
           momentOrder: 7,
         },
@@ -3574,7 +3532,7 @@ describe("engine history and linked Chats IPC contract", () => {
       activeVersionId: "main",
       ...historyPageFields,
     });
-    expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.moments[0].summary).toBe("Changed while dohc was closed");
     expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
@@ -4142,7 +4100,6 @@ describe("partial-freshness marker on aggregate chat reads", () => {
   const RESULTS = {
     ListChatChannelsResult: () => ({ channels: [], fileThreads: [] }),
     ListPersonalChatFeedResult: () => ({ items: [] }),
-    ListChatFileMentionsResult: () => ({ mentions: [] }),
   } as const;
 
   it("carries the remainder when a pass left rows, and omits it when none", () => {
@@ -4159,7 +4116,7 @@ describe("partial-freshness marker on aggregate chat reads", () => {
 
   it("refuses a zero remainder, on every surface that reports one", () => {
     for (const [name, base] of Object.entries(RESULTS)) {
-      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ListChatFileMentionsResult }[
+      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ChatFileMentionsPageResult }[
         name as keyof typeof RESULTS
       ];
       expect(
@@ -4502,14 +4459,12 @@ it("accepts expanded Unicode slugs up to 200 UTF-8 bytes", () => {
   expect(ChatChannelRecord.safeParse({ ...record, slug: "界".repeat(67) }).success).toBe(false);
 });
 
-it("uses the engine slug byte bound in feed, mentions, and graph results", () => {
+it("uses the engine slug byte bound in feed and mentions", () => {
   const feedChannel = ChatFeedItemRecord.shape.channel.unwrap();
   const mentionChannel = ChatFileMentionRecord.pick({ channelSlug: true });
   for (const [slug, valid] of [["i\u0307".repeat(60), true], ["a".repeat(200), true], ["界".repeat(67), false]] as const) {
     expect(feedChannel.safeParse({ id: "channel", name: "Group", slug, kind: "channel" }).success).toBe(valid);
     expect(mentionChannel.safeParse({ channelSlug: slug }).success).toBe(valid);
-    const graph = { nodes: [{ path: "chat-thread/thread", title: "Thread", outgoing: 0, incoming: 0, kind: "chat-thread", threadId: "thread", channelSlug: slug }], edges: [], unresolvedLinks: 0, scannedFileCount: 0, omittedFileCount: 0, truncatedFileCount: 0 };
-    expect(WorkspaceGraphResult.safeParse(graph).success).toBe(valid);
   }
 });
 
@@ -4587,4 +4542,17 @@ describe("poll send payloads", () => {
       expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
     });
   }
+});
+
+describe("ImportWorkspaceFilesResult", () => {
+  // On Windows, a skip deep in a dropped folder can pass the 4,096 characters
+  // a landed path keeps to.
+  it("takes a skipped path longer than a landed one", () => {
+    const path = `${"deep/".repeat(1000)}key.txt`;
+    expect(ImportWorkspaceFilesResult.safeParse({
+      imported: ["ok.md"],
+      skipped: 1,
+      skippedSources: [{ path, reason: "link" }],
+    }).success).toBe(true);
+  });
 });

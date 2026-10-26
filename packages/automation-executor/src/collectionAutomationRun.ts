@@ -85,7 +85,7 @@ const WAKE_TARGET_NAME = "your agent";
 export const DEFINITION_CHANGED_ERROR =
   "This automation changed after this run began. Try again to run the new version from the start. It may repeat changes, posts, direct messages, and notices the earlier run already made.";
 export const UNREADABLE_RUN_ERROR =
-  "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
+  "dohc could not read this run's saved progress in .dohc/local/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
 export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
@@ -141,6 +141,10 @@ export interface CollectionRecordWrites {
 export interface CollectionAutomationRunDependencies {
   /** Local aggregate observer, after the run's durable successful completion. */
   onUsageSuccess?(invocation: import("./automationUsage").AutomationUsageInvocation): void;
+  /** Before each effect this attempt lands. Throwing fails the run before the effect changes anything. */
+  beforeEffect?(run: StoredRun, effect: StoredStep["effects"][number]): void;
+  /** After a run that saved its steps is saved done or failed, so this attempt changes nothing more. */
+  onRunEnded?(run: StoredRun): void;
   /** Sync earlier writes in this workspace's engine before saving run completion. */
   makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;

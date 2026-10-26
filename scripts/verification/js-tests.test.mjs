@@ -129,14 +129,15 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
         await new Promise(done=>setTimeout(done,10));
       }
     }
-    export async function run(_command,args,{log,signal}){
+    export async function run(_command,args,{log,signal,env}){
       if(args.includes('list'))return {stdout:JSON.stringify(['a-fail','b-sibling','c-queued'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
       const name=args[0]==='run'?'repository':args[1];
       writeFileSync(log,'ok');
       if(scenario==='flaky'){
         if(name==='repository'&&!existsSync('ran')){writeFileSync('ran','');await until('sibling-started',signal);writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
         if(name==='repository')writeFileSync('repository-passed','');
-        if(name==='@dohc/b-sibling'){writeFileSync('sibling-started','');await until('repository-passed',signal);}
+        if(name==='@dohc/b-sibling'){writeFileSync('sibling-started','');await until('repository-passed',signal);
+          writeFileSync(env.DOHC_TEST_RECORD,JSON.stringify({test:'src/b.test.ts › settles on retry',flaky:true,failed:false,passed:true,seconds:0.1,error:'EPERM: operation not permitted, rmdir'})+'\\n');}
         return {stdout:''};
       }
       if(name==='@dohc/a-fail'){await until('sibling-started',signal);writeFileSync('failed','');throw Object.assign(Error('package failed'),{commandExitFailure:true});}
@@ -181,7 +182,9 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
   assert.equal(flaky.stoppedBy, null);
   assert.equal(flaky.verdict, "PASS");
   assert.deepEqual(flaky.steps, { repository: "PASS", "@dohc/a-fail": "PASS", "@dohc/b-sibling": "PASS", "@dohc/c-queued": "PASS", proofs: "PASS" });
-  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" }]);
+  // A vitest test that passed on retry keeps what its failed try threw.
+  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" },
+    { step: "@dohc/b-sibling", test: "src/b.test.ts › settles on retry", error: "EPERM: operation not permitted, rmdir" }]);
 });
 
 // The vitest the desktop package runs, for a fixture that runs a real file alone.
@@ -227,7 +230,7 @@ function isolatedRetry(t) {
     const record=(env,...lines)=>appendFileSync(env.DOHC_TEST_RECORD,lines.map(line=>JSON.stringify(line)+'\n').join(''));
     const failure=()=>Object.assign(Error('tests failed'),{commandExitFailure:true});
     const failing=(...tests)=>tests.map(([,name])=>'✖ '+name+' (30231ms)\n').join('')+'✖ failing tests:\n\n'+tests.map(([file,name])=>'test at '+file+':3:1\n✖ '+name+' (30231ms)\n').join('\n');
-    const failed=test=>({test,flaky:false,failed:true,passed:false,seconds:0.1});
+    const failed=(test,error)=>({test,flaky:false,failed:true,passed:false,seconds:0.1,...(error?{error}:{})});
     const passed=test=>({test,flaky:false,failed:false,passed:true,seconds:0.1});
     // The tests the tail fails both tries.
     const tailFailed=scenario==='inexact'?['fails without a file']
@@ -272,7 +275,7 @@ function isolatedRetry(t) {
       }
       if(step==='@dohc/tail'&&!alone&&!scenario.startsWith('node-')){
         if(scenario==='fails-alone')await until('sibling-started',signal);
-        record(env,...tailFailed.map(failed),{run:'failed',outside:scenario==='outside'?1:0});
+        record(env,...tailFailed.map(test=>failed(test,scenario==='pass-alone'?'EBUSY: '+test:undefined)),{run:'failed',outside:scenario==='outside'?1:0});
         throw failure();
       }
       if(step==='@dohc/tail'&&alone&&scenario==='skipped-alone'){
@@ -289,7 +292,7 @@ function isolatedRetry(t) {
         const mine=tailFailed.filter(test=>test.startsWith(args[5]+' › '));
         // In "order", an earlier test in the file leaves state behind that fails this one, so it passes only when filtered to itself.
         if(scenario==='fails-alone'||scenario==='order'&&!args.includes('-t')){
-          record(env,...mine.map(failed),...scenario==='fails-alone'?[failed('src/a.test.ts › load > checks its setup')]:[],{run:'failed',outside:0});
+          record(env,...mine.map(test=>failed(test)),...scenario==='fails-alone'?[failed('src/a.test.ts › load > checks its setup')]:[],{run:'failed',outside:0});
           throw failure();
         }
         record(env,...scenario==='unmatched'?[]:mine.map(passed),{run:'passed',outside:0});
@@ -305,7 +308,8 @@ function isolatedRetry(t) {
     import {calls} from './scripts/verification/process.mjs';
     const stop=cancellationScope('Fixture',{stopOnFailure:true});
     const repositoryTests=process.env.REPOSITORY_TESTS?{repositoryTests:process.env.REPOSITORY_TESTS}:{};
-    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'},...repositoryTests}).then(()=>null,error=>error);
+    const onlyPackage=process.env.ONLY_PACKAGE?{onlyPackage:process.env.ONLY_PACKAGE}:{};
+    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'},...repositoryTests,...onlyPackage}).then(()=>null,error=>error);
     await stop.dispose();
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
     const repository=calls.filter(call=>call.step==='repository'&&!call.alone);
@@ -315,11 +319,11 @@ function isolatedRetry(t) {
       repository:repository.length,repositoryArgs:repository.map(call=>call.args),recorded:report.steps.find(step=>step.name==='repository')?.args,
       alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
   `);
-  return (scenario, repositoryTests) => {
+  return (scenario, repositoryTests, onlyPackage) => {
     for (const file of ["ran", "sibling-started", "tail-alone-started", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
     writeFileSync(join(root, "package.json"), scenario === "node-bad-manifest" ? "{ not json" : manifest);
     const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "" } });
+      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "", ONLY_PACKAGE: onlyPackage ?? "" } });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
@@ -333,13 +337,33 @@ test("vitest files whose tests failed both tries pass alone, so the step passes 
   assert.equal(passed.error, null);
   assert.equal(passed.verdict, "PASS");
   assert.deepEqual(passed.steps, { repository: "PASS", "@dohc/sibling": "PASS", "@dohc/tail": "PASS" });
+  // Each keeps what it threw when it failed both tries.
   assert.deepEqual(passed.flaky, [underLoad, "src/a.test.ts › load > also fails under load", "src/c.test.ts › waits under load"]
-    .map(test => ({ step: "@dohc/tail", test, passedAlone: true })));
+    .map(test => ({ step: "@dohc/tail", test, passedAlone: true, error: `EBUSY: ${test}` })));
   assert.deepEqual(passed.failed, [], "a test that passed alone did not fail");
   assert.deepEqual(passed.alone.map(call => call.args.split(" --reporter=")[0]), ["src/a.test.ts", "src/c.test.ts"]
     .map(file => `--filter @dohc/tail exec vitest run ${file} --maxWorkers=1 --no-file-parallelism --retry=0`), "each file runs once, whole, with one worker");
   assert.ok(passed.alone.every(call => call.require === "1"), "the files run alone with the step's env");
   assert.deepEqual(passed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "passed"), outcome("@dohc/tail", "src/c.test.ts", "passed")]);
+});
+
+test("one package's run retries and runs files alone as its step in a full run does, without the repository lane or other packages", t => {
+  const drive = isolatedRetry(t);
+  const full = drive("pass-alone");
+  const tail = drive("pass-alone", undefined, "@dohc/tail");
+  assert.equal(tail.error, null);
+  assert.equal(tail.verdict, "PASS");
+  assert.deepEqual(tail.steps, { "@dohc/tail": "PASS" });
+  assert.equal(tail.repository, 0, "the repository lane does not run");
+  assert.deepEqual(tail.flaky, full.flaky);
+  assert.deepEqual(tail.alone, full.alone);
+  const failed = drive("order", undefined, "@dohc/tail");
+  assert.equal(failed.verdict, "FAIL", "a test that fails alone still fails the package");
+  assert.deepEqual(failed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "failed")]);
+  const unknown = drive("pass-alone", undefined, "@dohc/missing");
+  assert.equal(unknown.verdict, "FAIL");
+  assert.equal(unknown.error, "No workspace package named @dohc/missing has tests.");
+  assert.deepEqual(unknown.alone, []);
 });
 
 test("a test that fails alone too fails its step, and only then stops the run", t => {
@@ -721,7 +745,8 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
   });
 }
 
-for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false} of [
+for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false, onlyDesktop = false} of [
+  {name:"desktop preflight finishes unit tests before starting isolated scripts",onlyDesktop:true},
   {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},
   {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
   {name:"packaging waits for the external runtime reader",barrier:true},
@@ -732,7 +757,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
   {name:"isolated script cancellation settles running packages and skips runtime packaging",overlap:true,scriptOverlap:true,scriptCancel:true},
 ]) test(name, () => {
   // The inventory's package without a test script is not scheduled.
-  const expectedPackages = ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
+  const expectedPackages = onlyDesktop ? ["@dohc/desktop"] : ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
   const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
@@ -780,7 +805,8 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
         if(args.includes('test:scripts:isolated')) {
-          assert.ok(existsSync('repository-complete'));
+          if(process.env.FIXTURE_ONLY_DESKTOP==='1')assert.ok(completed.has('test:@dohc/desktop'),'desktop unit tests finished before scripts start');
+          else assert.ok(existsSync('repository-complete'));
           writeFileSync('isolated-started','yes');
           if(process.env.FIXTURE_SCRIPT_FAIL==='1'){writeFileSync('isolated-finished','yes');throw Error('fixture isolated script failed');}
           if(process.env.FIXTURE_SCRIPT_CANCEL==='1'){writeFileSync('isolated-finished','yes');process.emit('SIGTERM');throw Error('fixture isolated script interrupted');}
@@ -791,6 +817,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
           return {stdout:''};
         }
         if(args[2]==='run')writeFileSync('package-started','yes');
+        if(args.includes('test:unit') && process.env.FIXTURE_ONLY_DESKTOP==='1')await new Promise(setImmediate);
         // Hold the running packages until the repository fails, so the queued one must not start.
         if(args[2]==='run' && process.env.FIXTURE_REPO_FAIL==='1' && process.env.FIXTURE_PACKAGE_FAIL!=='1')await waitFor('repository-failed');
         if(args[1]==='@dohc/new-package' && process.env.FIXTURE_PACKAGE_FAIL==='1'){writeFileSync('package-failed','yes');throw Error('fixture package failed');}
@@ -808,7 +835,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
       }
     `);
     // The standalone CLI runs every case except the packaging barrier, which needs a caller.
-    const args = !barrier ? ["scripts/verification/js-tests.mjs", "--output", "evidence"] : ["--input-type=module", "-e", `
+    const args = !barrier ? ["scripts/verification/js-tests.mjs", "--output", "evidence", ...onlyDesktop ? ["--package", "@dohc/desktop"] : []] : ["--input-type=module", "-e", `
       import {testWorkspace} from './scripts/verification/js-tests.mjs';
       import assert from 'node:assert/strict';
       import {readFileSync,writeFileSync} from 'node:fs';
@@ -826,7 +853,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     const result = spawnSync(process.execPath, args, {
       cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
         FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0",
-        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0"},
+        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0", FIXTURE_ONLY_DESKTOP:onlyDesktop ? "1" : "0"},
     });
     assert.equal(result.error, undefined);
     const failed = repoFail || packageFail || scriptFail;
@@ -838,7 +865,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
     if (scriptOverlap) assert.ok(existsSync(join(root,"package-saw-isolated")),"isolated scripts must start while package commands remain active");
     const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
-    assert.ok(commands.some(args => args[0] === "run" && args[1] === "test:repo"));
+    assert.equal(commands.some(args => args[0] === "run" && args[1] === "test:repo"), !onlyDesktop);
     assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
     if (barrierCancel) {
       assert.match(report.error, /interrupted by SIGTERM/);

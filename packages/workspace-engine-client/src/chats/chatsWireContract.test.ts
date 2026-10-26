@@ -186,39 +186,16 @@ describe("chats result decoder rejection", () => {
     expect(mentions.mentions[0]?.createdAtMs).toBe(-40);
 
     const fileMentions = decodeChatsResult(CHATS_METHOD.attachmentsListFileMentions, {
-      mentions: [{
-        attachment: {
-          attachmentId: "attachment",
-          threadId: "thread",
-          messageId: "negative-message",
-          targetKind: "file",
-          objectId: "object",
-          createdAtMs: -39,
-        },
-        message: negativeMessage,
-        thread: {
-          id: "thread",
-          workspaceId: "workspace",
-          title: "Imported",
-          createdAtMs: -41,
-          updatedAtMs: -40,
-          channelId: "channel",
-        },
-        channel: {
-          workspaceId: "workspace",
-          channelId: "channel",
-          name: "Imported",
-          slug: "imported",
-          kind: "channel",
-          type: "posts",
-          purpose: "",
-          createdAtMs: -42,
-          updatedAtMs: -41,
-        },
+      versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false,
+      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null,
+      entries: [{
+        attachment: { attachmentId: "attachment", threadId: "thread", messageId: "negative-message",
+          targetKind: "file", objectId: "object", pathHint: "a.md", createdAtMs: -39 },
+        message: { id: "negative-message", authorDisplayName: "Ada", preview: "Preview", createdAtMs: -40 },
+        thread: { id: "thread", title: "Imported", createdAtMs: -41, updatedAtMs: -40 },
       }],
-      nextCursor: null,
     });
-    expect(fileMentions.mentions[0]?.channel?.updatedAtMs).toBe(-41);
+    expect(fileMentions?.entries[0]?.message.createdAtMs).toBe(-40);
   });
 
   it("reports a wrong-typed nested field path", () => {
@@ -275,5 +252,63 @@ describe("chats result decoder rejection", () => {
         attachments: [],
       }),
     ).toThrow(ProtocolShapeError);
+  });
+});
+
+describe("link messages", () => {
+  const linkAuthor = { kind: "link", displayName: "Guest", grantId: "grant-1", principalId: "principal-1" };
+  const linkMessage = {
+    id: "m",
+    workspaceId: "w",
+    threadId: "t",
+    author: linkAuthor,
+    body: "Hello from the link",
+    createdAtMs: 1,
+    attachments: [],
+  };
+
+  it("decodes a link holder's message with its link and name", () => {
+    expect(decodeChatMessage(linkMessage).author).toEqual(linkAuthor);
+    const opening = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+      threads: [{
+        thread: { id: "t", workspaceId: "w", title: "Hello", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
+        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+        openingMessage: { id: "m", author: linkAuthor, createdAtMs: 1, bodySnippet: "Hello", reactions: [] },
+      }],
+      nextCursor: null,
+    });
+    expect(opening.threads[0]?.openingMessage?.author).toEqual(linkAuthor);
+    expect(decodeChatsResult(CHATS_METHOD.mentionsListForHandle, {
+      mentions: [{ threadId: "t", messageId: "m", handle: "ada", authorKind: "link", createdAtMs: 1 }],
+      nextCursor: null,
+    }).mentions[0]?.authorKind).toBe("link");
+  });
+
+  it("rejects a link message that names an account or lacks its link", () => {
+    for (const extra of [
+      { authorUserId: "user-ada" },
+      { authorOwnerDisplayName: "Ada" },
+      { authorActorKey: "{\"kind\":\"unknown\"}" },
+      { origin: "cli" },
+      { automation: { automationId: "collection:tasks#stamp" } },
+    ]) {
+      expect(() => decodeChatMessage({ ...linkMessage, ...extra }), JSON.stringify(extra)).toThrow(ProtocolShapeError);
+    }
+    for (const author of [
+      { kind: "link", displayName: "Guest", grantId: "grant-1" },
+      { kind: "link", displayName: "Guest", principalId: "principal-1" },
+      { ...linkAuthor, grantId: "" },
+      { ...linkAuthor, kind: "human" },
+    ]) {
+      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(ProtocolShapeError);
+    }
+    expect(() => decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+      threads: [{
+        thread: { id: "t", workspaceId: "w", title: "Hello", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
+        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+        openingMessage: { id: "m", author: linkAuthor, authorUserId: "user-ada", createdAtMs: 1, bodySnippet: "Hello", reactions: [] },
+      }],
+      nextCursor: null,
+    })).toThrow(ProtocolShapeError);
   });
 });

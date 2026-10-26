@@ -1,4 +1,4 @@
-// One rule for naming an entry in <workspace>/.dohc/trash, because two
+// One rule for naming an entry in <workspace>/.dohc/local/trash, because two
 // surfaces move files there and both must produce a name the filesystem can
 // hold.
 //

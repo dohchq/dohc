@@ -1,3 +1,4 @@
+import type { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { createHmac, randomBytes } from "node:crypto";
 import { actorHueInput, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
@@ -98,6 +99,11 @@ export function ownActorPresentation(installationId: string, credentials: CloudC
 }
 
 export function chatActorForPresentation(message: DisplayMessage, issuer: ActorIssuer | null): ActorRef {
+  // A link holder is its link alone: no local key, issuer, or account.
+  if (message.author.kind === "link") {
+    const { displayName, grantId, principalId } = message.author;
+    return deriveRelayChatActor({ issuer: null, kind: "link", grantId, principalId, displayName });
+  }
   return readLocalChatActor(message) ?? deriveRelayChatActor({
     issuer, authorUserId: message.authorUserId, displayName: message.author.displayName,
     ...(message.origin ? { origin: message.origin } : {}),
@@ -167,5 +173,19 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
     input.assertCurrent();
     return authors.map(author => presentationFor(input.workspaceId, deriveMomentActor(author, context, "").key,
       () => JSON.stringify(["unknown", author]), own, colors()));
+  };
+}
+
+export function chatLinkMessageForPresentation(
+  author: NonNullable<ChatLinksEnginePage>["entries"][number]["author"],
+): DisplayMessage {
+  if (author.authorKind === "link") {
+    return { author: { kind: "link", displayName: author.authorDisplayName, grantId: author.linkGrantId, principalId: author.linkPrincipalId } };
+  }
+  // Relay origin changes assurance, not the key used for grouping, hue and self.
+  return {
+    author: { kind: author.authorKind, displayName: author.authorDisplayName },
+    ...(author.authorUserId === undefined ? {} : { authorUserId: author.authorUserId }),
+    ...(author.authorActorKey === undefined ? {} : { authorActorKey: author.authorActorKey }),
   };
 }

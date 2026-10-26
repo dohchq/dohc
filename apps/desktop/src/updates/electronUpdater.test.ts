@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  debInstallFailure,
   publicUpdateState,
   resolveUpdateChannel,
   startAutoUpdates,
@@ -8,6 +9,7 @@ import {
 } from "./electronUpdater";
 import { initialUpdateState, transition } from "./updateMachine";
 import { deferred } from "../testing/deferred";
+import { UpdateStateEvent } from "../ipc/bridgeContract";
 
 type Listener = (...args: unknown[]) => void;
 
@@ -368,6 +370,53 @@ describe("electron updater actions", () => {
         message: "Could not restart into the update.",
       },
     });
+  });
+
+  it("on Linux says why a .deb did not install and gives the command that installs it", async () => {
+    const deb = "/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb";
+    const install = `sudo apt install '${deb}'`;
+    // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
+    for (const [error, message, installCommand] of [
+      ["Command pkexec exited with code 126", "The update did not install without your password. Choose Restart to try again.", undefined],
+      ["Command pkexec exited with code 127", "dohc did not get permission to install the update. Run this command in a terminal to install it.", install],
+      ["Command sudo exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
+      ["Command pkexec exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
+    ] as const) {
+      const updater = fakeUpdater();
+      updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error(error)));
+      const controller = await startWith(updater, { platform: "linux" });
+      updater.emit("checking-for-update");
+      updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: deb });
+
+      const result = await controller!.installUpdate();
+      expect(result, error).toMatchObject({ accepted: false, reason: message, state: { status: "ready", canInstall: true, message } });
+      expect(result.state.installCommand, error).toBe(installCommand);
+      // electron-updater clears its one-shot latch after a failed install, so Restart tries again.
+      await expect(controller!.installUpdate()).resolves.toMatchObject({ accepted: true });
+      expect(updater.quitAndInstall).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("keeps the generic install failure for a Linux AppImage and on Windows", async () => {
+    for (const [platform, downloadedFile] of [["linux", "/home/sam/dohc-1.2.4-linux-x86_64.AppImage"], ["win32", "C:/Users/sam/dohc-1.2.4.exe"]] as const) {
+      const updater = fakeUpdater();
+      updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
+      const controller = await startWith(updater, { platform });
+      updater.emit("checking-for-update");
+      updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
+
+      const result = await controller!.installUpdate();
+      expect(result, platform).toMatchObject({ accepted: false, reason: "Could not restart into the update.", state: { message: "Could not restart into the update." } });
+      expect(result.state.installCommand, platform).toBeUndefined();
+    }
+  });
+
+  it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
+    expect(debInstallFailure(new Error("Command sudo exited with code 1"), "/home/o'brien/dohc 1.2.4.deb").installCommand)
+      .toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
+    // A Linux path is at most 4,096 bytes; quoting makes each ' four characters.
+    const longest = debInstallFailure(new Error("Command sudo exited with code 1"), `/${"'".repeat(4095)}`).installCommand;
+    expect(UpdateStateEvent.parse({ status: "ready", message: "The update did not install.", installCommand: longest }).installCommand).toBe(longest);
   });
 
   describe("awaitUpdate", () => {

@@ -1,0 +1,115 @@
+# Deploys the marketing site to Cloudflare after a change on main reaches it.
+# The site's demo builds from the desktop renderer and shared packages, so
+# changes there deploy it too. Deploys run only while the repository variable
+# SITE_DEPLOY_ENABLED is true. The site environment holds the Cloudflare
+# token and account ID, and only main can deploy to it. Both jobs run on
+# GitHub's hosted runners, which start fresh for each job.
+name: Site deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/site/**
+      - apps/desktop/src/**
+      - apps/desktop/package.json
+      - apps/desktop/tsconfig*.json
+      - packages/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - tsconfig.base.json
+      - .node-version
+      - .github/workflows/site-deploy.yml
+  workflow_dispatch:
+
+# A newer push waits for the running deploy, then deploys the newest main.
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  WRANGLER_VERSION: "4.151.3"
+
+jobs:
+  # Builds with the workspace's dependencies and no secrets.
+  build:
+    name: build site
+    if: vars.SITE_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      # No pnpm cache: this job holds the deploy token, so it installs from scratch.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      # The site builds desktop sources, not the Electron app.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+      - name: Test and build the site
+        run: |
+          pnpm --filter @dohc/site test
+          pnpm --filter @dohc/site build
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: site
+          path: apps/site/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  # The token reaches only this job. It runs wrangler with the commit's
+  # wrangler.jsonc on the built files, and nothing from the workspace.
+  deploy:
+    name: deploy site
+    needs: build
+    environment: site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # The pinned pnpm and Node versions, and the Worker's configuration.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /package.json
+            /.node-version
+            /apps/site/wrangler.jsonc
+          sparse-checkout-cone-mode: false
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: site
+          path: apps/site/dist
+
+      # A fresh dlx cache for each run, and only versions published a day ago.
+      - name: Deploy
+        working-directory: apps/site
+        run: >-
+          pnpm dlx
+          --config.cache-dir="$RUNNER_TEMP/pnpm-dlx"
+          --config.minimum-release-age=1440
+          "wrangler@${WRANGLER_VERSION}" deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"

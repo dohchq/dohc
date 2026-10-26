@@ -7,6 +7,7 @@ import { join } from "node:path";
 // The flags below are the ones @posthog/cli 0.18.10 reads. Its install
 // script downloads the binary, so pnpm must allow that script to run.
 export const POSTHOG_CLI = "@posthog/cli@0.18.10";
+const CLI = ["dlx", "--allow-build=@posthog/cli", POSTHOG_CLI];
 const DIST_PATTERN = /^[\w.-]{1,64}$/;
 // The folders whose scripts error reports name. The CLI writes a chunk ID
 // into each of their scripts, and the installer must ship those files.
@@ -23,7 +24,18 @@ const REQUIRED_POSTHOG_SETTINGS = ["POSTHOG_CLI_API_KEY", "POSTHOG_CLI_PROJECT_I
  * release name, version, and build match the release and dist the app
  * reports.
  */
-export function sourceMapUpload(env) {
+export function sourceMapUpload(env, platform = process.platform) {
+  const childEnv = { ...env };
+  for (const name of OPTIONAL_POSTHOG_SETTINGS) {
+    if (!env[name]?.trim()) delete childEnv[name];
+  }
+  // The CLI's Windows installer unzips with Windows PowerShell, which cannot load
+  // Expand-Archive from the PowerShell 7 folders a pwsh step puts on PSModulePath.
+  for (const name of Object.keys(childEnv)) {
+    if (platform === "win32" && name.toUpperCase() === "PSMODULEPATH") delete childEnv[name];
+  }
+  // A dry run uploads nothing, but installs and runs the CLI as a release does.
+  if (env.DOHC_SOURCE_MAPS_DRY_RUN === "true") return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
   if (!env.DOHC_POSTHOG_KEY?.trim()) {
     return { skip: "DOHC_POSTHOG_KEY is not set, so this build sends no error reports and needs no source maps." };
   }
@@ -37,13 +49,9 @@ export function sourceMapUpload(env) {
   if (!version) throw new Error("DESKTOP_VERSION is required to name the release.");
   const dist = env.DOHC_DESKTOP_DIST?.trim() ?? "";
   if (!DIST_PATTERN.test(dist)) throw new Error(`DOHC_DESKTOP_DIST '${dist}' is not a dist the app accepts.`);
-  const childEnv = { ...env };
-  for (const name of OPTIONAL_POSTHOG_SETTINGS) {
-    if (!env[name]?.trim()) delete childEnv[name];
-  }
   return {
     args: [
-      "dlx", "--allow-build=@posthog/cli", POSTHOG_CLI, "sourcemap", "process",
+      ...CLI, "sourcemap", "process",
       ...REPORTED_CODE.flatMap((directory) => ["--directory", directory]),
       "--release-name", "dohc-desktop",
       "--release-version", version,
@@ -68,7 +76,7 @@ export function scriptsWithoutChunkIds(directories) {
   return missing;
 }
 
-/** Injects and uploads this build's source maps, or says why it needs none. */
+/** Injects and uploads this build's source maps, or says why it needs none. A dry run only runs the CLI. */
 export function uploadSourceMaps(env, spawn = spawnSync, directories = REPORTED_CODE) {
   const upload = sourceMapUpload(env);
   if (upload.skip) {
@@ -79,6 +87,7 @@ export function uploadSourceMaps(env, spawn = spawnSync, directories = REPORTED_
   if (result.status !== 0) {
     throw new Error(`The source map upload failed${result.error ? `: ${result.error.message}` : ` with exit code ${result.status}`}.`);
   }
+  if (upload.dryRun) return;
   const missing = scriptsWithoutChunkIds(directories);
   if (missing.length > 0) {
     throw new Error(`These scripts carry no chunk ID, so PostHog cannot read their frames:\n${missing.join("\n")}`);

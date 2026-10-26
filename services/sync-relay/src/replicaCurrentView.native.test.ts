@@ -16,7 +16,7 @@ async function open(root:string,passive=true) {
   const termination=new Promise<void>(resolve=>child.once("close",()=>resolve()));
   const client=new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable:child.stdout,writable:child.stdin})),{authToken:"view-test",protocolVersion:2,capabilities:["blobs"]},()=>child.kill("SIGKILL"),termination);
   child.on("close",(code,signal)=>client.notifyProcessExit(code,signal));child.stderr.resume();let id=1,workspace:string|undefined;
-  const request=async(method:string,params:Record<string,unknown>={})=>(await client.sendRequest({id:id++,method,workspace,deadlineMs:120_000,params:params as never})).result as any;
+  const request=async(method:string,params:Record<string,unknown>={})=>(await client.sendRequest({id:id++,method,workspace,deadlineMs:120_000,params:(method==="replica.cut"?{incarnation:"native",...params}:params) as never})).result as any;
   await client.ready();workspace=(await request("workspace.open",{rootDir:root,workspaceId:"w",captureMode:"none",...(passive?{storeMode:"passive"}:{})})).workspace;
   const readText=async(sha256:string)=>{let finish!:(bytes:Uint8Array)=>void;const bytes=new Promise<Uint8Array>(resolve=>{finish=resolve;});const off=client.onBlob(blob=>{if(blob.sha256===sha256)finish(blob.bytes);});try{const result=await request("versionedText.readBlob",{workspaceId:"w",sha256});return Buffer.from(typeof result.bytesBase64==="string"?Buffer.from(result.bytesBase64,"base64"):await bytes).toString();}finally{off();}};
   const close=async()=>{client.close();child.kill("SIGKILL");await termination;};return {request,close,readText,pid:child.pid!};

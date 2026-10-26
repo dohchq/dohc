@@ -86,6 +86,27 @@ describe("workspaceActivity capture hooks", () => {
     hooks.onHeldFiles([held]);
     expect(onHeldFiles).toHaveBeenCalledTimes(2);
   });
+  it("carries the old file copies the engine reports, pushing only a change, until the capture retires", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").retainedCopies).toBeUndefined();
+    notify.mockClear();
+    hooks.onRetainedCopies({ count: 3, bytes: 300 });
+    expect(activity.getStatus("activity-test").retainedCopies).toEqual({ count: 3, bytes: 300 });
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "activity-test" });
+    hooks.onRetainedCopies({ count: 3, bytes: 300 });
+    expect(notify).toHaveBeenCalledOnce();
+    await activity.stopAll();
+    hooks.onRetainedCopies({ count: 4, bytes: 400 });
+    expect(notify).toHaveBeenCalledOnce();
+  });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
@@ -734,6 +755,44 @@ describe("workspaceActivity cloud sync nudge", () => {
     await atOpen.promise;
     expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("sync");
     await service.stop(state);
+  });
+
+  it("opens without waiting for the network-share check, then pushes what it found", async () => {
+    const notify = vi.fn();
+    const check = Promise.withResolvers<boolean>();
+    const onNetworkShare = vi.fn(() => check.promise);
+    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, onNetworkShare });
+    const state = new WorkspaceActivityState();
+    const opened = await service.open(workspace(), state);
+    expect(onNetworkShare).toHaveBeenCalledWith(workspace().rootPath);
+    expect(opened.onNetworkShare).toBeUndefined();
+    notify.mockClear();
+    check.resolve(true);
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" }));
+    expect(service.getStatus(workspace(), state).onNetworkShare).toBe(true);
+    await service.stop(state);
+  });
+
+  it("says nothing about a root on this computer's disk, or after the workspace closed", async () => {
+    const notify = vi.fn();
+    const late = Promise.withResolvers<boolean>();
+    let answer: Promise<boolean> = Promise.resolve(false);
+    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, onNetworkShare: () => answer });
+    const state = new WorkspaceActivityState();
+    await service.open(workspace(), state);
+    await answer;
+    expect(service.getStatus(workspace(), state).onNetworkShare).toBeUndefined();
+    await service.stop(state);
+
+    answer = late.promise;
+    const reopened = new WorkspaceActivityState();
+    await service.open(workspace(), reopened);
+    await service.stop(reopened);
+    notify.mockClear();
+    late.resolve(true);
+    await late.promise;
+    expect(notify).not.toHaveBeenCalled();
+    expect(service.getStatus(workspace(), reopened).onNetworkShare).toBeUndefined();
   });
 
   it("never lets a slow Collections answer for one workspace change another", async () => {

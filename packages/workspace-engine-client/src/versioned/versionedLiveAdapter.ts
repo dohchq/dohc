@@ -1,5 +1,5 @@
-import { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
-import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult, HistoryLinkRewriteResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -69,6 +69,9 @@ import {
   type ConflictResolveResult,
   type KeptCopiesListResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopy,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
@@ -914,6 +917,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
+  async linkEdges(input: LinksEdgesInput): Promise<LinksEdgesResult> {
+    return LinksEdgesResult.parse(await this.requester.request("links.edges", LinksEdgesInput.parse(input), { workspace: this.workspace }));
+  }
   async incomingLinks(input: LinksInInput): Promise<LinksInResult> {
     return LinksInResult.parse(await this.requester.request("links.in", LinksInInput.parse(input), { workspace: this.workspace }));
   }
@@ -1195,6 +1201,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryUndoResult> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
+  }
+
+  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryLinkRewriteResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
   }
 
   async getMoment(input: {
@@ -1683,6 +1694,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
   }
 
+  async listRetainedCopies(): Promise<RetainedCopiesListResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.retainedCopiesList, {});
+  }
+
+  /** Deletes listed copies; a program that still has one open may lose what it writes next. */
+  async deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.retainedCopiesDelete, {
+      copies: copies.map(({ id, revision }) => ({ id, revision })),
+      acceptLateWriteRisk: true,
+    });
+  }
+
   async flushCapture(): Promise<CaptureFlushResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {});
   }
@@ -1714,6 +1737,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   // One rename that refuses to replace, of a visible regular file, under a hold.
+  async duplicateFileUnderHold(input: { holdId: string; fromPath: string; toPath: string; author?: WriteAuthor }): Promise<{path: string; materialized: boolean}> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureDuplicateFile, input);
+  }
+
   async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
   }

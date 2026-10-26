@@ -62,7 +62,7 @@ function harness(entry: Pick<RegistryEntry, "workspaceId" | "remote" | "shareVie
     received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" as const }),
     account: () => account ? { ...account, generation: 1 } : null,
     scope: () => "workspace-account-scope", assertCurrent: () => undefined,
-    permissions: async () => { throw new Error("unused"); }, refresh: async () => undefined,
+    permissions: async () => { throw new Error("unused"); }, refresh: async () => ({ status: "requested" }),
   });
   return { owner, readObservation };
 }

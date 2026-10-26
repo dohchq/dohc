@@ -21,7 +21,7 @@ import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 import {authorizeLinkShareAction} from "./shareAuthorization";
 import {createAccountlessPathProjection} from "./accountlessPathProjection";
 import {linkRefusal} from "./linkRefusal";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
 

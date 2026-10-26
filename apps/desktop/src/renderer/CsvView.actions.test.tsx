@@ -70,7 +70,7 @@ function Shell(props: { children: (onError: ReturnType<typeof useShellError>["re
 }
 
 const SAVED: SaveState = { kind: "saved-here" };
-const importResult = (path: string): ImportResult => ({ path, tableName: "data", rowCount: 1 });
+const importResult = (path: string): ImportResult => ({ operationId: "dohc-operation:test-import", path, tableName: "data", rowCount: 1 });
 // What the renderer receives when main's import rejects: Electron prefixes
 // the channel to the error's text.
 const importRejected = (text: string) =>

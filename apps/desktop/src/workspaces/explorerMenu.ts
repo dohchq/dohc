@@ -22,7 +22,7 @@ export interface ExplorerMenuScope {
   isMountPath: boolean;
   // That path is a mount ROOT with a matching mount record.
   hasMountRecord: boolean;
-  // Sharing onward is offered only from a synced workspace this account owns.
+  // Sharing onward is offered only from this account's own files, not the root.
   canShare: boolean;
   // The share view this workspace IS, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;

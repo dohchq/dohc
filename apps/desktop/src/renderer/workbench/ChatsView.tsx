@@ -18,7 +18,7 @@ import {
   type PostData,
 } from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -114,6 +114,8 @@ import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
+import { useChatDispatchPaused } from "../useChatDispatchPaused";
+import { withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
@@ -496,6 +498,9 @@ export function ChatsView(props: {
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   // The user settings the add-agent form writes, and the save that persists
   // them. Absent in embedded surfaces, which then offer no add-agent form.
   userSettings?: DesktopUserSettings | null;
@@ -609,6 +614,8 @@ export function ChatsView(props: {
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
   // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
+  const computerDispatchPaused = useChatDispatchPaused((error) =>
+    props.onError(withErrorWords("dohc could not read whether agent dispatch is paused.", error), error));
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
   const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
@@ -2105,6 +2112,7 @@ export function ChatsView(props: {
         ticket,
       }]);
       if (token !== liveToken.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       props.onThreadStarted?.();
       setNewThreadBody("");
       setNewThreadPoll(null);
@@ -2130,7 +2138,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, newThreadPoll, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onAgentWaitsForTrust, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2200,7 +2208,6 @@ export function ChatsView(props: {
     };
     sendingRef.current = true;
     setSending(true);
-    let sentMessage: SendChatMessageResult | null = null;
     try {
       const result = await bridge().sendChatMessage({
         workspaceId,
@@ -2208,6 +2215,9 @@ export function ChatsView(props: {
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
         ...(options ? { needsDecision: true, options } : {}),
+        ...(resolvingMessageId
+          ? { resolves: { messageId: resolvingMessageId, ...(chosenOption ? { chosenOption } : {}) } }
+          : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2216,20 +2226,9 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      sentMessage = result;
-      let resolvedDecision: ChatDecisionRecord | null = null;
-      if (resolvingMessageId) {
-        const resolution = await bridge().resolveChatDecision({
-          workspaceId,
-          threadId: nav.thread.id,
-          messageId: resolvingMessageId,
-          resolvedByMessageId: result.message.id,
-          ...(chosenOption ? { chosenOption } : {}),
-        });
-        if (!requestOwnsActiveContext()) return;
-        resolvedDecision = resolution.decision;
-      }
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       showSent(result);
+      const resolvedDecision = result.resolved;
       if (resolvedDecision) {
         const decisionWasOpen = reconcileResolvedChatDecision(
           latestDecisions.current,
@@ -2255,23 +2254,19 @@ export function ChatsView(props: {
           );
         }
       }
+      // A reply whose answer failed still leaves the mode, so retrying cannot
+      // silently post the reply twice.
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
+      if (result.resolveFailure) {
+        props.onError(
+          ipcErrorMessage(result.resolveFailure, "Your reply was sent, but the decision is still open."),
+          result.resolveFailure,
+        );
+      }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      if (sentMessage && resolvingMessageId) {
-        // The two durable writes are intentionally separate. If the reply
-        // landed but resolution failed, show the real posted message and exit
-        // the mode so retrying cannot silently duplicate the reply.
-        showSent(sentMessage);
-        clearMatchingComposer();
-        props.onError(
-          ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
-          error,
-        );
-      } else {
-        props.onError(ipcErrorMessage(error, "Could not send that message."), error);
-      }
+      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
     } finally {
       const ownsContext =
         inFlightSendByContext.current.get(sendContextKey) === request;
@@ -2287,6 +2282,7 @@ export function ChatsView(props: {
     composer,
     nav,
     poll,
+    props.onAgentWaitsForTrust,
     props.onError,
     replyTarget,
     resolveChosenOption,
@@ -2631,6 +2627,7 @@ export function ChatsView(props: {
           : {}),
       });
       if (!requestOwnsActiveContext()) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       dmRefreshSeq.current += 1;
       setMessages((current) =>
         current.some((message) => message.id === result.message.id)
@@ -2659,7 +2656,7 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props.onError, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
@@ -3789,7 +3786,6 @@ export function ChatsView(props: {
                     })
                   : false;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
-                const isAgent = item.message.authorKind === "agent";
                 const time = formatChatTime(item.message.createdAtMs);
                 const itemView = reactions.view(item.thread.id, item.message.id);
                 const itemReactions = itemView.reactions.filter(
@@ -3870,21 +3866,22 @@ export function ChatsView(props: {
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
-                        kind={isAgent ? "agent" : "human"}
+                        kind={item.message.authorKind}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-1.5 leading-[18px]">
                           <span className="truncate text-[13px] font-semibold text-ink">
-                            <AgentName kind={isAgent ? "agent" : "human"} presentation={item.message.presentation}>
+                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation}>
                               {chatAuthorLabel(item.message)}
                             </AgentName>
                           </span>
-                          <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
+                          {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" /> : null}
+                          <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
                           <time
                             dateTime={time.iso}
                             title={time.label}
-                            className="shrink-0 font-mono text-[11px] text-subtle"
+                            className="shrink-0 text-[11px] tabular-nums text-subtle"
                           >
                             {formatShortTime(item.message.createdAtMs)}
                           </time>
@@ -4191,7 +4188,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -4213,11 +4210,31 @@ export function ChatsView(props: {
             </>
           }
         />
-        {dispatchState?.paused ? (
+        {computerDispatchPaused && dispatchState && dispatchState.pendingCount > 0 && liveRunId === null ? (
+          <div
+            data-testid="chats-dispatch-status"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
+          >
+            <span>dispatch paused on this computer — </span>
+            {!threadLocked ? (
+              <button
+                type="button"
+                data-testid="chats-resume-computer-dispatch"
+                onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
+                  props.onError(withErrorWords("dohc could not resume agent dispatch.", error), error))}
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
+              >
+                Resume
+              </button>
+            ) : (
+              <span>read-only</span>
+            )}
+          </div>
+        ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
             <span>dispatch paused — </span>
             {!threadLocked ? (
@@ -4238,7 +4255,7 @@ export function ChatsView(props: {
           dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
           >
             {liveRunId !== null
               ? `agent working${
@@ -4322,7 +4339,7 @@ export function ChatsView(props: {
                         setReplyTarget(null);
                       }}
                     >
-                      Replying to {replyTarget.authorLabel} ·
+                      Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>
                   ) : null}
                 </>}
@@ -4522,7 +4539,7 @@ export function ChatsView(props: {
               <span
                 data-testid="chats-agent-screen-reach"
                 title={props.workspacePath}
-                className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
+                className="hidden shrink-0 truncate text-[10px] tabular-nums text-subtle sm:inline"
               >
                 reaches {reachName(props.workspacePath)}
               </span>
@@ -4587,7 +4604,7 @@ export function ChatsView(props: {
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
                     ) : null}
                     <button
                       type="button"
@@ -4664,6 +4681,7 @@ export function ChatsView(props: {
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
             onSetupAgent={props.onSetupAgent}
+            onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
           />
         ) : (
@@ -4914,7 +4932,7 @@ export function ChatsView(props: {
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 font-mono text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
+                    <span className="shrink-0 text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"
@@ -4956,7 +4974,7 @@ export function ChatsView(props: {
                       trailing={
                         <>
                           {dm.connected ? null : (
-                            <span className="shrink-0 font-mono text-[10px] text-subtle">ended</span>
+                            <span className="shrink-0 text-[10px] text-subtle">ended</span>
                           )}
                           <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
                         </>
@@ -5055,7 +5073,7 @@ export function ChatsView(props: {
                       {agentReady ? null : (
                         <span
                           data-testid="chats-my-agent-state"
-                          className="shrink-0 font-mono text-[10px] text-subtle"
+                          className="shrink-0 text-[10px] text-subtle"
                         >
                           not set up
                         </span>
@@ -5088,7 +5106,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="shrink-0 truncate font-mono text-[10px] text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
                             via {agent.owner}
                           </span>
                         }

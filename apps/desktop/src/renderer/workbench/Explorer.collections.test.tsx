@@ -129,3 +129,84 @@ describe("Explorer collection folders", () => {
     );
   });
 });
+
+// The words a row's tooltip shows, opened from the keyboard and from the
+// pointer, and closed by Escape and by leaving. The words are their own tab
+// stop, apart from the row's buttons.
+function expectTooltip(trigger: HTMLElement, words: string) {
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  expect(trigger.tabIndex).toBe(0);
+  expect(trigger.tagName).not.toBe("BUTTON");
+  fireEvent.focus(trigger);
+  expect(screen.getByRole("tooltip").textContent).toBe(words);
+  expect(trigger.getAttribute("aria-describedby")).toBe(screen.getByRole("tooltip").id);
+  fireEvent.keyDown(trigger, { key: "Escape" });
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.blur(trigger);
+  fireEvent.mouseEnter(trigger.closest("p")!);
+  expect(screen.getByRole("tooltip").textContent).toBe(words);
+  fireEvent.mouseLeave(trigger.closest("p")!);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+}
+
+describe("Collections this computer cannot use", () => {
+  it("says where they are in a few words, and offers to keep Collections no computer keeps here", () => {
+    const onKeepCollections = vi.fn(), onRetryCollections = vi.fn();
+    const words = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+    const { rerender } = render(<Explorer {...explorerProps({ collectionsRefusal: { kind: "unclaimed", words }, onKeepCollections, onRetryCollections,
+      dataCollections: [], onRestoreCollection: vi.fn() })} />);
+    const section = screen.getByRole("region", { name: "Collections" });
+    expect(within(section).getByTestId("collections-refusal").textContent).toBe("Which computer keeps these Collections?Use this computer");
+    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledOnce();
+    expect(within(section).queryByRole("button", { name: "Try again" })).toBeNull();
+    const elsewhere = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: "Laptop" }, onKeepCollections, onRetryCollections })} />);
+    expectTooltip(screen.getByText("On Laptop"), elsewhere);
+    // Main named no computer: the row says the whole sentence, and still offers both steps.
+    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: null }, onKeepCollections, onRetryCollections })} />);
+    expect(screen.getByTestId("collections-refusal").textContent).toBe(`${elsewhere}Use this computerTry again`);
+    expect(screen.getByText(elsewhere).tabIndex).toBe(-1);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryCollections).toHaveBeenCalledOnce();
+    // Behind main's question, which names the other computer.
+    fireEvent.click(screen.getByRole("button", { name: "Use this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledTimes(2);
+    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." }, onKeepCollections, onRetryCollections })} />);
+    expect(screen.getByTestId("collections-refusal").textContent).toContain("Another copy replaced it.");
+    expect(screen.queryByRole("button", { name: "Use this computer" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+});
+
+describe("Collections on this computer's server, where another computer keeps the workspace's own", () => {
+  it("lists them as rows and names the computer that keeps the others, without offering recovery here", () => {
+    const onKeepCollections = vi.fn();
+    const rows = [{ datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "registrations/dataset.json", tableId: "00000000-0000-4000-8000-000000000002", name: "Registrations" }];
+    const words = "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    const { rerender } = render(<Explorer {...explorerProps({ dataCollections: rows, collectionsElsewhere: { computer: "Laptop", others: true, words }, onKeepCollections,
+      onIncludeArchivedCollections: vi.fn(), onRestoreCollection: vi.fn() })} />);
+    const section = screen.getByRole("region", { name: "Collections" });
+    expect(within(section).getByRole("button", { name: "Registrations" })).toBeTruthy();
+    expectTooltip(within(section).getByText("Others on Laptop"), words);
+    expect(within(section).getByTestId("collections-elsewhere").textContent).toBe(`Others on Laptop${words}Use this computer`);
+    expect(within(section).queryByTestId("collections-refusal")).toBeNull();
+    expect(within(section).getByLabelText("Archived collections")).toBeTruthy();
+    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    // Behind main's question, which names the other computer.
+    fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
+    expect(onKeepCollections).toHaveBeenCalledOnce();
+    // The server didn't answer: no rows, the line, and Keep.
+    const offline = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    rerender(<Explorer {...explorerProps({ dataCollections: [], collectionsElsewhere: { computer: "Laptop", others: false, words: offline }, onKeepCollections, onRestoreCollection: vi.fn() })} />);
+    expectTooltip(screen.getByText("On Laptop"), offline);
+    expect(screen.queryByRole("button", { name: "Registrations" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
+    expect(screen.queryByText("Restore from recovery file")).toBeNull();
+    // Main named no computer: the row says the whole sentence, with the same step.
+    rerender(<Explorer {...explorerProps({ dataCollections: [], collectionsElsewhere: { computer: null, others: false, words: offline }, onKeepCollections })} />);
+    expect(screen.getByTestId("collections-elsewhere").textContent).toBe(`${offline}Use this computer`);
+    expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
+  });
+});

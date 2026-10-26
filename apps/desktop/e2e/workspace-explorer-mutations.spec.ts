@@ -222,19 +222,25 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
       await cdp.detach();
     };
 
+    // The Explorer shows what landed, so the drop selects it instead of a toast.
     await dropFromOs(trip);
-    await expect(page.getByText("Imported 2 files.").first()).toBeVisible();
+    await expect(explorerRow(page, "Trip")).toHaveAttribute("aria-selected", "true");
+    await expect(explorerRow(page, "Trip")).toBeFocused();
+    await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "Trip/photos/beach.txt");
     await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
     expect(await readFile(join(temp.rootPath, "Trip", "photos", "beach.txt"), "utf8")).toBe("sand\n");
     expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
 
-    // A drop of empty folders lands no file, and says how many folders it made.
+    // A drop of empty folders lands no file, and the folder it landed is
+    // selected all the same.
     await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
     await dropFromOs(join(outside, "Empty"));
-    await expect(page.getByText("Created 2 folders.").first()).toBeVisible();
+    await expect(explorerRow(page, "Empty")).toHaveAttribute("aria-selected", "true");
+    await expect(explorerRow(page, "Empty")).toBeFocused();
     await revealExplorerPath(page, "Empty/Inner");
+    await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("empty-folder-drop.png") });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

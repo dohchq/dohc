@@ -100,16 +100,160 @@ it("drains an existing-binding operation before close and refuses new work while
   await sessions.closeAll();
 });
 
+it("gives the open under way to wait on, without a run, and nothing while closing", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("ready", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  const waited = sessions.openInProgress(workspace)!;
+  held.resolve();
+  await waited;
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+  await opening;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  // A close waits for runs, so a caller inside one is given nothing to wait on.
+  const inRun = deferred<void>(), finish = deferred<void>();
+  const running = sessions.run(workspace, async () => { inRun.resolve(); await finish.promise; });
+  await inRun.promise;
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  finish.resolve();
+  await running; await closing;
+  await sessions.closeAll();
+});
+
+it("gives nothing to wait on while the workspace rebuilds", async () => {
+  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebuild") };
+  const client = new MockClient("rebuild", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  sessions.beginRebuild(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  sessions.endRebuild(workspace);
+  held.resolve();
+  await opening;
+  await sessions.closeAll();
+});
+
+it("ends the wait for an open under way when its preparation outlasts the open deadline", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("stalled", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  // The workspace's own preparation, which runs before the daemon deadline starts.
+  vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
+    .mockReturnValue(new Promise<void>(() => {}));
+  vi.useFakeTimers();
+  try {
+    void sessions.run(workspace, async () => undefined).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(over).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+    expect(sessions.currentBinding(workspace)).toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
+it("waits out an open whose daemon request starts late but finishes within its own deadline", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("cold", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  vi.useFakeTimers();
+  try {
+    // Preparation takes 40 of its 50 ms; the daemon then answers 45 ms after its request starts.
+    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
+      .mockImplementation(() => new Promise<void>((resolve) => setTimeout(() => {
+        client.holdOpen = new Promise<void>((answer) => setTimeout(answer, 45));
+        resolve();
+      }, 40)));
+    const opening = sessions.run(workspace, async () => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    await vi.advanceTimersByTimeAsync(84);
+    expect(over).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+    expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+    await opening;
+  } finally { vi.useRealTimers(); }
+  await sessions.closeAll();
+});
+
+it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
+  const workspace = await tempWorkspace();
+  const ready = new MockClient("ready", { localStateReady: true });
+  const unmarked = new MockClient("unmarked", { localStateReady: false });
+  const silent = new MockClient("silent");
+  let client = ready;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const readiness = () => sessions.currentBinding(workspace)?.localStateReady ?? null;
+  expect(readiness()).toBeNull();
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(true);
+  // A new client makes the old binding stale before any reopen starts.
+  client = unmarked;
+  expect(readiness()).toBeNull();
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(false);
+  client = silent;
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(false);
+
+  // Closing ends it at once, and a reopen sets it only when it finishes.
+  client = ready;
+  await sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBe(true);
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  expect(readiness()).toBeNull();
+  await closing;
+  const held = deferred<void>();
+  ready.holdOpen = held.promise;
+  const reopening = sessions.run(workspace, async () => undefined);
+  expect(readiness()).toBeNull();
+  held.resolve();
+  await reopening;
+  expect(readiness()).toBe(true);
+
+  // A reopen that fails leaves nothing current.
+  await sessions.closeWorkspaceBinding(workspace);
+  ready.failOpen = true;
+  await expect(sessions.run(workspace, async () => undefined)).rejects.toThrow("open refused");
+  expect(readiness()).toBeNull();
+  await sessions.closeAll();
+});
+
 class MockClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   private readonly eventHandlers = new Set<(event: Event) => void>();
 
-  constructor(private readonly handle: string) {}
+  holdOpen: Promise<void> | null = null;
+  failOpen = false;
+
+  constructor(
+    private readonly handle: string,
+    private readonly opened: { localStateReady?: boolean } = {},
+  ) {}
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
     if (request.method === "workspace.open") {
-      return { id: request.id, result: { workspace: this.handle } };
+      await this.holdOpen;
+      if (this.failOpen) throw new Error("open refused");
+      return { id: request.id, result: { workspace: this.handle, ...this.opened } };
     }
     if (request.method === "workspace.close") {
       return { id: request.id, result: { closed: true } };
@@ -460,7 +604,7 @@ describe("EngineWorkspaceSessions", () => {
     }
   });
 
-  it("wakes an initial-capture retry on the scoped settled event", async () => {
+  it.each(["capture.initialSettled", "capture.importProgress"])("wakes an initial-capture retry on the scoped %s event", async (name) => {
     const workspace = await tempWorkspace("workspace-initial-settled-wake");
     const client = new MockClient("initial-settled-wake");
     let attempts = 0;
@@ -490,7 +634,7 @@ describe("EngineWorkspaceSessions", () => {
                 client.emit({
                   seq: 1,
                   sessionGeneration: 1,
-                  name: "capture.initialSettled",
+                  name,
                   payload: { workspaceId: workspace.workspaceId },
                 }),
               );
@@ -647,6 +791,28 @@ describe("EngineWorkspaceSessions", () => {
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
   });
 
+  it("keeps a file a degraded capture has not read read-only without waiting for a wake", async () => {
+    const refusal = new DaemonRefusalError({
+      code: "OVERLOADED",
+      message: "dohc has not read this file yet. Open it again once dohc has read it.",
+      retry: "no",
+    }, undefined);
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+    const workspace = await tempWorkspace(), client = new MockClient("file-not-read");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    let attempts = 0;
+    try {
+      await expect(sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
+        attempts += 1;
+        throw refusal;
+      }, { retryInitialCapture: true }))).rejects.toBe(refusal);
+      expect(attempts).toBe(1);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      await sessions.closeAll();
+    }
+  });
+
   it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
     const refusal = new DaemonRefusalError(
       {
@@ -697,14 +863,15 @@ describe("EngineWorkspaceSessions", () => {
     ).toBe(true);
   });
 
-  it("prepares an ordinary workspace before opening it in the daemon", async () => {
+  it("prepares an ordinary workspace and leaves its engine folder to the daemon", async () => {
     const rootPath = await tempRoot();
     let opened = false;
     const client: EngineDaemonClient = {
       close: () => undefined,
       async sendRequest(request) {
-        const engineDirectory = await lstat(join(rootPath, ".dohc", "engine"));
-        expect(engineDirectory.isDirectory()).toBe(true);
+        expect((await lstat(join(rootPath, ".dohc"))).isDirectory()).toBe(true);
+        // The daemon creates it, so on a Mac it inherits no ACL entries.
+        await expect(lstat(join(rootPath, ".dohc", "engine"))).rejects.toMatchObject({ code: "ENOENT" });
         opened = true;
         return {
           id: request.id,

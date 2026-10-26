@@ -19,13 +19,14 @@ fn corrupt(reason: &str) -> CollabError {
 }
 
 /// Retain the exact source only when this transaction originated a richdoc base.
-/// A missing or stale artifact leaves no bridge. It does not prevent local editing.
+/// Native misses leave no bridge; reader-built notes hold and roll back the seed append.
 pub fn retain_owner_base_source_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     path: &str,
     baseline_digest: &str,
     source: &OwnerSeedSource,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<bool, CollabError> {
     let marker = durable::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.content_kind != ContentKind::Richdoc
@@ -43,17 +44,6 @@ pub fn retain_owner_base_source_in_tx(
     if original.as_deref() != Some(baseline_digest) {
         return Err(corrupt("original owner base missing"));
     }
-    let artifact: Option<(String, i64)> = tx.query_row(
-        "SELECT b.sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
-        params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
-        |row| Ok((text::from_row(tx, row, 0)?,row.get(1)?)),
-    ).optional().map_err(durable::map_sql)?;
-    let Some((text, byte_length)) = artifact else {
-        return Ok(false);
-    };
-    if text.len() as i64 != byte_length || hex_sha256(text.as_bytes()) != source.blob_sha256 {
-        return Err(corrupt("owner source artifact integrity"));
-    }
     let baseline = durable::binary_blob_for_gate(tx, baseline_digest)?;
     let doc = Ydoc::wire();
     doc.apply(&baseline)?;
@@ -67,12 +57,44 @@ pub fn retain_owner_base_source_in_tx(
         }
         Err(error) => return Err(error),
     };
-    let projection = doc
-        .preserved_markdown_source(&canonical)
-        .unwrap_or(canonical);
-    if projection != text {
-        return Ok(false);
-    }
+    let byte_length = if doc.has_reader_source() {
+        let text = crate::reader_snapshot::resolve(
+            tx,
+            key,
+            &doc,
+            &canonical,
+            &crate::reader_snapshot::SnapshotIdentity {
+                moment: &source.moment_id,
+                path,
+                digest: &source.blob_sha256,
+                lineage: baseline_digest,
+                restore_fence: None,
+                authority: baseline_digest,
+            },
+            resolver,
+        )?;
+        text.len() as i64
+    } else {
+        let artifact: Option<(String, i64)> = tx.query_row(
+            "SELECT b.sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
+            params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
+            |row| Ok((text::from_row(tx, row, 0)?,row.get(1)?)),
+        ).optional().map_err(durable::map_sql)?;
+        let Some((text, byte_length)) = artifact else {
+            return Ok(false);
+        };
+        if text.len() as i64 != byte_length || hex_sha256(text.as_bytes()) != source.blob_sha256 {
+            return Err(corrupt("owner source artifact integrity"));
+        }
+        if doc
+            .preserved_markdown_source(&canonical)
+            .unwrap_or(canonical)
+            != text
+        {
+            return Ok(false);
+        }
+        byte_length
+    };
     let retained: Option<(String,String,String,i64)> = tx.query_row(
         "SELECT path,source_moment_id,source_blob_sha256,source_byte_length FROM ydoc_owner_base_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
         params![key.workspace_id,key.version_id,key.object_id,baseline_digest],
@@ -100,6 +122,60 @@ mod tests {
     use super::*;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+
+    #[test]
+    fn reader_origination_never_substitutes_a_seed_for_a_larger_document() {
+        let (baseline, _) = crate::reader_resolver::tests::witness_case("valid");
+        let scratch = dohc_test_scratch::ScratchDir::new_named("reader-origination").unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        write(&mut store, "source", "source", 1);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        durable::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &baseline,
+            &NoFaults,
+            1,
+        )
+        .unwrap();
+        let independent = Ydoc::wire();
+        independent
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "independent seed")
+            .unwrap();
+        let update = independent.encode_full_state();
+        crate::record_local_update(
+            &mut store,
+            &mut crate::WriterDocCache::new(),
+            &key,
+            &update,
+            crate::LocalAppend {
+                is_seed: true,
+                ..Default::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let encoded = durable::encode_origination_base_in_tx(tx, &key)?.unwrap();
+                let doc = durable::load_doc_in(tx, &key)?;
+                let replay = Ydoc::wire();
+                replay.apply(&encoded.base)?;
+                assert!(crate::replay_parity::structurally_equal_v2(&doc, &replay)?);
+                assert!(!crate::replay_parity::structurally_equal_v2(
+                    &doc,
+                    &independent
+                )?);
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+    }
 
     fn write(store: &mut EngineStore, text: &str, moment: &str, now: i64) {
         VersionedTextStore::new(store)
@@ -184,6 +260,7 @@ mod tests {
                         "owner.md",
                         &hex_sha256(&baseline),
                         &source,
+                        None,
                     )
                 })
                 .unwrap();
@@ -232,7 +309,7 @@ mod tests {
                 .write_with(&NoFaults, |tx| {
                     tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
                         .unwrap();
-                    retain_owner_base_source_in_tx(tx, &key, "owner.md", &digest, &source)
+                    retain_owner_base_source_in_tx(tx, &key, "owner.md", &digest, &source, None)
                 })
                 .unwrap(),
             TxnOutcome::Committed(true)
@@ -276,7 +353,7 @@ mod tests {
         };
         let rollback = store.write_with(&NoFaults, |tx| {
             assert!(retain_owner_base_source_in_tx(
-                tx, &key, "owner.md", &digest, &source
+                tx, &key, "owner.md", &digest, &source, None
             )?);
             Err::<(), _>(corrupt("abort after retaining source"))
         });
@@ -289,7 +366,7 @@ mod tests {
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &missing
+                    tx, &key, "owner.md", &digest, &missing, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(false)
@@ -297,7 +374,7 @@ mod tests {
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &source
+                    tx, &key, "owner.md", &digest, &source, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(true)
@@ -310,13 +387,13 @@ mod tests {
         };
         assert!(store
             .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                tx, &key, "owner.md", &digest, &later
+                tx, &key, "owner.md", &digest, &later, None
             ))
             .is_err());
         assert!(matches!(
             store
                 .write_with(&NoFaults, |tx| retain_owner_base_source_in_tx(
-                    tx, &key, "owner.md", &digest, &source
+                    tx, &key, "owner.md", &digest, &source, None
                 ))
                 .unwrap(),
             TxnOutcome::Committed(true)

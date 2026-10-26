@@ -3,8 +3,8 @@ use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
     ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
-    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention,
+    ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
     ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
     DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
     ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
@@ -261,28 +261,6 @@ impl ActorHandle {
         self.run_chats(move |chats| {
             chats
                 .list_thread_attachments(&workspace_id, &thread_id, after, limit)
-                .map_err(RuntimeError::from)
-        })
-        .await
-    }
-
-    pub async fn chat_attachments_list_file_mentions(
-        &self,
-        workspace_id: String,
-        object_id: Option<String>,
-        path_hint: Option<String>,
-        after: Option<(i64, String)>,
-        limit: i64,
-    ) -> Result<Vec<ChatFileMention>, RuntimeError> {
-        self.run_chats(move |chats| {
-            chats
-                .list_file_mentions(
-                    &workspace_id,
-                    object_id.as_deref(),
-                    path_hint.as_deref(),
-                    after,
-                    limit,
-                )
                 .map_err(RuntimeError::from)
         })
         .await

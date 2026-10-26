@@ -32,6 +32,20 @@ import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
 
+it("sends the link rewrite request identity and author in the correct fields", async () => {
+  const requests: Request[] = [];
+  const reply = {documents: 2, links: 4, unchecked: ["open.md"], uncheckedCount: 1, complete: false};
+  const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+    requests.push(request);
+    return {id: request.id, result: reply};
+  }}, WORKSPACE, {workspaceId: WORKSPACE});
+  expect(await adapter.rewriteHistoryLinks({workspaceId: WORKSPACE, operationId: "dohc-operation:rename", requestId: "rewrite-retry", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}})).toEqual(reply);
+  expect(requests[0]).toMatchObject({method: "history.rewriteLinks", idempotencyKey: "rewrite-retry", params: {operationId: "dohc-operation:rename", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}}});
+  expect(requests[0]?.params).not.toHaveProperty("requestId");
+  await expect(adapter.rewriteHistoryLinks({workspaceId: "other", operationId: "dohc-operation:rename", requestId: "retry"})).rejects.toThrow();
+  expect(requests).toHaveLength(1);
+});
+
 type VersionedRequestCase = {
   method: VersionedMethod;
   params: VersionedMethodParamsMap[VersionedMethod];
@@ -373,7 +387,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
     },
   },
   {
@@ -382,7 +396,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.captureFlush,
-    valid: { settled: true, running: true, degraded: false, heldFiles: [] },
+    valid: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] },
   },
   {
     method: WORKSPACE_METHOD.captureSetAuthor,
@@ -402,7 +416,7 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 
 describe("VersionedLiveAdapter", () => {
   it("retries a held path with the real flush and retried result", async () => {
-    const result = { settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
+    const result = { deferredWrites: [], settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
       requests.push(request); return { id: request.id, result };
@@ -2179,11 +2193,11 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   const requests: Request[]=[];
   const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
     requests.push(request);
-    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{kind:"file-duplicate"})}};
   }};
   const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
   await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
-  await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"});
+  expect(await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"})).toMatchObject({kind:"file-duplicate"});
   await adapter.undoHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted",requestId:"retry"});
   expect(requests[0]?.params).toEqual({operationId:"dohc-operation:minted"});
   expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});
@@ -2204,4 +2218,14 @@ it("forwards link batches through the workspace handle and rejects malformed rep
   expect(await adapter.incomingLinks({ subject: { objectId: "absent" } })).toBeNull();
   result = { entries: [] };
   await expect(adapter.incomingLinks({ subject: { path: "target.md" } })).rejects.toThrow();
+});
+
+it("binds edge pages to the workspace handle and validates the shared record budget", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = {versionId:"main",files:[{objectId:"a",path:"a.md",title:"A"}],entries:[],unchecked:[],complete:false,indexBuilding:true,mountsCovered:false,nextCursor:"sealed"};
+  const adapter = new VersionedLiveAdapter({close(){},async sendRequest(request){requests.push(request);return {id:request.id,result};}}, WORKSPACE, {workspaceId:WORKSPACE});
+  expect(await adapter.linkEdges({cursor:"previous"})).toEqual(result);
+  expect(requests[0]).toMatchObject({method:"links.edges",workspace:WORKSPACE,params:{cursor:"previous"}});
+  result = {...result,unchecked:Array.from({length:100},()=> "pending.md")};
+  await expect(adapter.linkEdges({})).rejects.toThrow("100 records");
 });

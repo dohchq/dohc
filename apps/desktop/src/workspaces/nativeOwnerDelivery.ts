@@ -2,8 +2,11 @@ import {isDeepStrictEqual} from "node:util";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {OwnerYDocFrameDelivery, type OwnerAcceptedState} from "./ownerYDocFrameDelivery";
-import {OwnerYDocOutboxDrainer} from "./ownerYDocOutbox";
+import {OwnerYDocOutboxDrainer, type OwnerKnownRefusals} from "./ownerYDocOutbox";
 import type {DesktopOwnerDeliveryConfig, DesktopOwnerDeliveryDocument} from "./desktopOwnerDelivery";
+import {isOwnerDeliveryBackoff} from "./ownerDeliveryBackoff";
+
+export {OwnerKnownRefusals} from "./ownerYDocOutbox";
 
 /** The authority lease and engine session must remain held until this pass settles. */
 export async function runNativeOwnerDeliveryPass(options: {
@@ -11,6 +14,8 @@ export async function runNativeOwnerDeliveryPass(options: {
   workspaceHandle: string;
   document: DesktopOwnerDeliveryDocument;
   config: DesktopOwnerDeliveryConfig;
+  /** Kept by the caller across passes, so a refusal received once is recorded, not admitted again. */
+  refusals: OwnerKnownRefusals;
   signal: AbortSignal;
   /** The bearer and its account come from one credential; assertCurrent retires both. */
   bearer: string;
@@ -93,7 +98,7 @@ export async function runNativeOwnerDeliveryPass(options: {
     }
     if (preparation.status !== "observed") return "retry";
     if (preparation.draft.outboxId === null) return "empty";
-    drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery);
+    drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery, options.refusals);
     const result = await drainer.drainOnce();
     if (result === "empty" && !synchronized) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
@@ -106,5 +111,8 @@ export async function runNativeOwnerDeliveryPass(options: {
       if (authority.kind !== "authority") return "retry";
     }
     return result;
+  } catch (error) {
+    if (isOwnerDeliveryBackoff(error)) return "retry";
+    throw error;
   } finally {drainer?.dispose(); delivery.dispose(); outbox.dispose(); await Promise.allSettled([...pending]);}
 }

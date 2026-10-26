@@ -240,7 +240,7 @@ export async function stageDatasetRecovery(options: RecoveryControls & {
     if (header.kind !== MANIFEST || sha(header.bytes) !== options.expectedManifestSha256) fail("manifest integrity differs.");
     const parsed = manifest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(header.bytes)), options.limits);
     // Only a validated, reservation-bounded manifest can allocate staging space.
-    directory = await mkdtemp(join(parent, "dohc-recovery-"));
+    directory = await mkdtemp(join(parent, "r-"));
     const files: Array<{ entry: RecoveryEntry; path: string }> = [];
     for (const [index, entry] of parsed.entries.entries()) {
       await authorize(options);

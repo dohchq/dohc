@@ -48,4 +48,9 @@ export type AccessAnswer = z.infer<typeof AccessAnswer>;
 const AccessPageInput = z.object({ cursor: z.string().min(1).max(2048).optional() });
 export const ObjectAccessInput = AccessPageInput.extend({ ref: AccessObjectRef });
 export const SharingAccessInput = AccessPageInput.extend({ lane: z.enum(["granted", "received"]) });
+export const AccessRefreshResult = z.discriminatedUnion("status", [
+  z.object({ status: z.enum(["requested", "joined", "paced"]) }),
+  z.object({ status: z.literal("unavailable"), reason: z.enum(["signed-out", "unreadable"]) }),
+]);
+export type AccessRefreshResult = z.infer<typeof AccessRefreshResult>;
 export const AccessRefreshInput = z.object({ reason: z.enum(["sharing-open", "access-expand"]) });

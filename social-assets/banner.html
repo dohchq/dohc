@@ -1,28 +1,43 @@
 <!doctype html><meta charset="utf-8"><style>
-  html,body{margin:0;width:1200px;height:630px}
-  body{position:relative;background:#f7f6f1;overflow:hidden;
-       font-family:'Aptos','Segoe UI',system-ui,sans-serif}
+  /* Fonts and the engine image come from the site; run pnpm install first. */
+  @font-face{font-family:'Inter';font-weight:100 900;
+    src:url('../apps/site/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2')}
+  @font-face{font-family:'Source Serif 4';font-weight:200 900;
+    src:url('../apps/site/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2') format('woff2')}
+  @font-face{font-family:'Source Serif 4';font-style:italic;font-weight:200 900;
+    src:url('../apps/site/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-italic.woff2') format('woff2')}
+  *{box-sizing:border-box;margin:0}
+  html,body{width:1280px;height:640px}
+  body{position:relative;background:#f7f6f1;color:#151515;overflow:hidden;
+       font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
   .grid{position:absolute;inset:0;
-        background-image:linear-gradient(rgba(21,21,21,.04) 1px,transparent 1px),
-                         linear-gradient(90deg,rgba(21,21,21,.04) 1px,transparent 1px);
-        background-size:48px 48px}
-  .wrap{position:absolute;left:120px;top:150px}
-  svg{width:115px;height:125px;display:block}
+        background-image:linear-gradient(rgba(21,21,21,.06) 1px,transparent 1px),
+                         linear-gradient(90deg,rgba(21,21,21,.06) 1px,transparent 1px),
+                         linear-gradient(rgba(21,21,21,.028) 1px,transparent 1px),
+                         linear-gradient(90deg,rgba(21,21,21,.028) 1px,transparent 1px);
+        background-size:120px 120px,120px 120px,24px 24px,24px 24px;background-position:40px -40px}
+  .engine{position:absolute;left:624px;top:-4px;width:648px;height:648px}
+  .copy{position:absolute;left:96px;top:0;bottom:0;display:flex;flex-direction:column;justify-content:center}
+  .brand{display:flex;align-items:center;gap:14px}
+  .brand svg{width:34px;height:37px}
   .lobe{fill:none;stroke:#2d342e;stroke-width:8;stroke-linejoin:round}
   .dot{fill:#2d342e}
-  .word{margin:28px 0 0;font-size:120px;font-weight:780;color:#151515;line-height:1}
-  .tag{margin:18px 0 0;font-family:'Iowan Old Style','Charter',Georgia,serif;
-       font-size:40px;color:#66635d}
-  .sub{margin:14px 0 0;font-family:'IBM Plex Mono',ui-monospace,monospace;
-       font-size:22px;color:#8b867b}
+  .word{font-weight:780;font-size:34px;line-height:1}
+  h1{margin-top:44px;font:500 76px/1.02 'Source Serif 4',Georgia,serif;letter-spacing:-.028em}
+  em{position:relative;display:inline-block}
+  em svg{position:absolute;left:-2%;bottom:-.12em;width:104%;height:.18em;overflow:visible}
+  .note{margin-top:40px;color:#66635d;font:500 26px/1.4 'Inter',system-ui,sans-serif}
 </style>
 <div class="grid"></div>
-<div class="wrap">
-  <svg viewBox="0 0 96 104" xmlns="http://www.w3.org/2000/svg">
-    <path class="lobe" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"/>
-    <circle class="dot" cx="38" cy="58" r="9"/>
-  </svg>
-  <div class="word">dohc</div>
-  <div class="tag">Build with your agents.</div>
-  <div class="sub">documents · data · dashboards · workflows</div>
+<img class="engine" src="../apps/site/public/inline-six-engine.webp" alt="">
+<div class="copy">
+  <div class="brand">
+    <svg viewBox="0 0 96 104" xmlns="http://www.w3.org/2000/svg">
+      <path class="lobe" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"/>
+      <circle class="dot" cx="38" cy="58" r="9"/>
+    </svg>
+    <span class="word">dohc</span>
+  </div>
+  <h1>A workspace<br>for you and<br><em>your AI agents.<svg viewBox="0 0 220 22" preserveAspectRatio="none"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="#2d342e" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
+  <p class="note">Open source · Early alpha</p>
 </div>

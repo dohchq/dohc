@@ -6,7 +6,8 @@ import {
   type BinaryLike,
 } from "node:crypto";
 import { authorizeLinkShareAction } from "./shareAuthorization";
-import type { ShareSelector } from "./shareFilter";
+import { isLiveEditShareSelector, type ShareSelector } from "./shareFilter";
+import type { PublicEditRelease } from "@dohc/security-contract";
 import type {
   SyncRelayLinkSessionRow,
   SyncRelayStorage,
@@ -213,6 +214,7 @@ export function validateLinkCapability(input: {
   capabilityToken: string;
   linkKey: BinaryLike;
   nowMs: number;
+  publicEditRelease: PublicEditRelease | undefined;
 }): ValidatedLinkCapability | null {
   const capabilityHash = hashLinkBearer(input.capabilityToken, input.linkKey);
   const session = input.storage.findLinkSessionByCapabilityHash(capabilityHash);
@@ -229,7 +231,8 @@ export function validateLinkCapability(input: {
     grantId: session.grantId,
     action: "read",
   });
-  if (!authorized.ok || authorized.grant.generation !== session.generation) {
+  if (!authorized.ok || authorized.grant.generation !== session.generation ||
+    !servableFiles(authorized.effectiveSelector, input.publicEditRelease)) {
     return null;
   }
   return {
@@ -240,6 +243,12 @@ export function validateLinkCapability(input: {
     access: authorized.effectiveSelector.access,
     effectiveSelector: authorized.effectiveSelector,
   };
+}
+
+// A link serves the access its files carry: its own, or a Group folder's.
+export function servableFiles(selector: ShareSelector, release?: PublicEditRelease): boolean {
+  return isPublicLinkAccess(selector.access, release) &&
+    (selector.access !== "edit" || isLiveEditShareSelector(selector));
 }
 
 export function isPublicLinkAccess(value: string, release?: import("@dohc/security-contract").PublicEditRelease): value is "view" | "comment" | "edit" {

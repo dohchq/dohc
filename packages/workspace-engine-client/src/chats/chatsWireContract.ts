@@ -1,3 +1,5 @@
+import { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
+import { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -31,6 +33,7 @@ export const CHATS_METHOD = {
   reactionSet: "chats.reactions.set",
   reactionsList: "chats.reactions.list",
   attachmentsListForThread: "chats.attachments.listForThread",
+  conversationLinks: "chats.conversations.listLinks",
   attachmentsListFileMentions: "chats.attachments.listFileMentions",
   mentionsListForHandle: "chats.mentions.listForHandle",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
@@ -108,7 +111,6 @@ export type ChatThreadWireRecord = typeof ChatThreadWireRecordSchema.Type;
 export type ChatThreadReadState = typeof ChatThreadReadStateSchema.Type;
 export type ChatUnreadFileThread = typeof ChatUnreadFileThreadSchema.Type;
 export type ChatFollow = typeof ChatFollowSchema.Type;
-export type ChatFileMention = typeof ChatFileMentionSchema.Type;
 
 export type ChatChannelThreadSummary =
   typeof ChatChannelThreadSummarySchema.Type;
@@ -171,8 +173,10 @@ type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
 // Only the automation executor names an automation, and the engine accepts an
-// automation author only with it.
+// automation author only with it. Only the relay writes a link author, so no
+// local write names one.
 type ChatMessageAuthorKind = "human" | "agent" | "automation";
+export type ChatWriteActor = { kind: ChatMessageAuthorKind; displayName: string };
 type ChatMessageAutomationParams = ChatsJsonObject & {
   automationId: string;
   chainDepth: number;
@@ -226,10 +230,7 @@ type ChatReactionSetParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatThreadPageParams = ChatPageParams & { threadId: string };
-type ChatFileMentionsParams = ChatPageParams & {
-  objectId?: string;
-  pathHint?: string;
-};
+type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
   unreadByAgentOnly?: boolean;
@@ -383,6 +384,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;
   [CHATS_METHOD.reactionsList]: ChatThreadPageParams;
   [CHATS_METHOD.attachmentsListForThread]: ChatThreadPageParams;
+  [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatPageParams;
@@ -425,7 +427,8 @@ export type ChatsMethodParamsMap = {
 };
 
 export type ChatsMethodResultMap = {
-  [M in ChatsMethod]: (typeof ChatsResultSchemas)[M]["Type"];
+  [M in ChatsMethod]: M extends typeof CHATS_METHOD.attachmentsListFileMentions
+    ? ChatFileMentionsPage : M extends typeof CHATS_METHOD.conversationLinks ? ChatLinksEnginePage : (typeof ChatsResultSchemas)[M]["Type"];
 };
 
 function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
@@ -458,7 +461,7 @@ const AnyInt = Schema.Int;
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
 // Message and mention authors. Reaction authors stay human or agent.
-const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation"]);
+const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation", "link"]);
 const ReactorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
 const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
@@ -470,10 +473,27 @@ const FollowTargetKindSchema = Schema.Literals([
 ]);
 const NextCursorFields = { nextCursor: NullableString } as const;
 
-const ChatActorSchema = mutableStruct({
-  kind: MessageAuthorKindSchema,
-  displayName: Schema.String,
-});
+// A link author names its link grant and link principal, and no other author does.
+const ChatActorSchema = Schema.Union([
+  mutableStruct({
+    kind: Schema.Literals(["human", "agent", "automation"]),
+    displayName: Schema.String,
+  }),
+  mutableStruct({
+    kind: Schema.Literal("link"),
+    displayName: Schema.String,
+    grantId: Schema.NonEmptyString,
+    principalId: Schema.NonEmptyString,
+  }),
+]);
+// A link message names no account, owner, actor key, origin or automation.
+const ACCOUNT_FIELDS = ["authorUserId", "authorOwnerDisplayName", "authorActorKey", "origin", "automation"] as const;
+const noAccountOnLinkMessage = Schema.makeFilter(
+  (message: { author: { kind: string } } & Partial<Record<(typeof ACCOUNT_FIELDS)[number], unknown>>) =>
+    message.author.kind !== "link" ||
+    ACCOUNT_FIELDS.every((field) => message[field] === undefined) ||
+    "A link message names no account.",
+);
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
 });
@@ -519,7 +539,7 @@ const ChatMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
-});
+}).check(noAccountOnLinkMessage);
 const ChatDecisionSchema = mutableStruct({
   threadId: Schema.String,
   messageId: Schema.String,
@@ -670,12 +690,6 @@ const ChatFeedReadStateSchema = mutableStruct({
   lastSeenMessageId: Schema.String,
   updatedAtMs: AnyInt,
 });
-const ChatFileMentionSchema = mutableStruct({
-  attachment: ChatAttachmentSchema,
-  message: ChatMessageSchema,
-  thread: ChatThreadSchema,
-  channel: Schema.optionalKey(ChatChannelSchema),
-});
 const ChatMentionSchema = mutableStruct({
   threadId: Schema.String,
   messageId: Schema.String,
@@ -694,7 +708,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
-});
+}).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
   thread: ChatThreadSchema,
   messageCount: NonnegativeInt,
@@ -796,9 +810,8 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.attachmentsListForThread]: pageSchema({
     attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   }),
-  [CHATS_METHOD.attachmentsListFileMentions]: pageSchema({
-    mentions: Schema.mutable(Schema.Array(ChatFileMentionSchema)),
-  }),
+  [CHATS_METHOD.conversationLinks]: Schema.Unknown,
+  [CHATS_METHOD.attachmentsListFileMentions]: Schema.Unknown,
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
   }),
@@ -921,6 +934,10 @@ export function decodeChatsResult<M extends ChatsMethod>(
 ): ChatsMethodResultMap[M] {
   if (!Object.hasOwn(ChatsResultSchemas, method)) {
     throw new ProtocolShapeError(`Unsupported chats method: ${method}`);
+  }
+  if (method === CHATS_METHOD.conversationLinks) return ChatLinksEnginePage.parse(value) as ChatsMethodResultMap[M];
+  if (method === CHATS_METHOD.attachmentsListFileMentions) {
+    return ChatFileMentionsPage.parse(value) as ChatsMethodResultMap[M];
   }
   const schema = ChatsResultSchemas[method];
   const label = `${method} result`;

@@ -98,7 +98,8 @@ function logOpForDigest(
 ): Record<string, unknown> | undefined {
   return log.ops?.find(
     (op) =>
-      op.opKind === "moment.append" && op.payload?.payloadAfterBlobSha256 === digest,
+      op.opKind === "file.current" &&
+      (op.payload?.file as Record<string, unknown> | undefined)?.blobSha256 === digest,
   )?.payload;
 }
 
@@ -208,7 +209,7 @@ test(
       const linkLogResponse = await readViewLink(
         relay.baseUrl,
         capability,
-        "/sync/link/log?since=0&limit=500",
+        "/sync/link/log?since=0&limit=500&current=true",
       );
       expect(linkLogResponse.status).toBe(200);
       const linkLog = JSON.parse(linkLogResponse.body) as LinkLog;
@@ -247,13 +248,20 @@ test(
       const convergedLogResponse = await readViewLink(
         relay.baseUrl,
         capability,
-        "/sync/link/log?since=0&limit=500",
+        "/sync/link/log?since=0&limit=500&current=true",
       );
       expect(convergedLogResponse.status).toBe(200);
       const convergedLog = JSON.parse(convergedLogResponse.body) as LinkLog;
       const convergedOp = logOpForDigest(convergedLog, sha256Hex(RECORD_V2));
       expect(convergedOp).toBeDefined();
-      expect(convergedOp?.payloadBeforeBlobSha256).toBe(sha256Hex(RECORD_V1));
+      expect(convergedOp).not.toHaveProperty("payloadBeforeBlobSha256");
+      expect(logOpForDigest(convergedLog, sha256Hex(RECORD_V1))).toBeUndefined();
+      const oldBlob = await readViewLink(
+        relay.baseUrl,
+        capability,
+        `/sync/link/blobs/${sha256Hex(RECORD_V1)}`,
+      );
+      expect(oldBlob.status).toBe(404);
       const convergedBlob = await readViewLink(
         relay.baseUrl,
         capability,

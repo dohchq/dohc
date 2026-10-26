@@ -14,6 +14,19 @@ export function foldPathSegment(segment: string): string {
   return folded.normalize("NFC");
 }
 
+/**
+ * The engine's `path_collision_key`: one key for every spelling of a path
+ * that a disk ignoring case or Unicode normalization may treat as the same.
+ */
+export function pathCollisionKey(path: string): string {
+  return path
+    .split("/")
+    .map((segment) =>
+      foldPathSegment(segment.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase())
+        .replace(/[. ]+$/, ""))
+    .join("/");
+}
+
 const reservedSegments = [".dohc", ".git", "node_modules"];
 
 // Names the OS writes beside user files, with AppleDouble `._*` files checked
@@ -48,6 +61,14 @@ export function isIgnoredPathSegment(segment: string, stripAliases = true): bool
     || reservedSegments.some((reserved) => isReserved83Alias(name, reserved))
     || name.startsWith(".dohc-write-")
     || isReserved83Alias(name, ".dohc-write-")
-    || osMetadataSegments.includes(name)
-    || name.startsWith("._");
+    || isOsMetadataName(name);
+}
+
+/** A name the OS writes beside user files, such as .DS_Store or Thumbs.db. */
+export function isOsMetadataSegment(segment: string): boolean {
+  return isOsMetadataName(foldPathSegment(segment).replace(/[. ]+$/, ""));
+}
+
+function isOsMetadataName(name: string): boolean {
+  return osMetadataSegments.includes(name) || name.startsWith("._");
 }

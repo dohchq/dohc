@@ -1,10 +1,12 @@
 //! Persisted derived links. Reads and writes here run only on the owning actor;
 //! body integrity checks, parsing and lexical key construction run off it.
 pub(crate) mod cache;
-mod incoming;
+mod edges;
+pub(crate) mod incoming;
 mod parser;
-mod query;
-mod resolver;
+pub(crate) mod query;
+pub(crate) mod resolver;
+pub(crate) mod rewrite;
 #[cfg(test)]
 #[path = "link_tests.rs"]
 mod tests;
@@ -61,9 +63,19 @@ fn sql(error: rusqlite::Error) -> StorageError {
         source: Some(Box::new(error)),
     }
 }
-fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, StorageError> {
+fn head(
+    conn: &Connection,
+    w: &Work,
+    hydrate: bool,
+    current_paths: bool,
+) -> Result<Option<Head>, StorageError> {
+    let aliases = if current_paths {
+        "path_aliases"
+    } else {
+        "link_aliases"
+    };
     let mut h = conn.query_row(
-        "WITH effective AS (
+        &format!("WITH effective AS (
           SELECT path,blob_sha256,binary_sha256,content_kind FROM snapshots
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
           UNION ALL SELECT path,blob_sha256,binary_sha256,content_kind FROM fork_base_snapshots
@@ -72,7 +84,7 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
         ) SELECT e.path,COALESCE(e.blob_sha256,e.binary_sha256),e.content_kind,COALESCE(b.byte_length,-1),
           CASE WHEN ?4 AND b.byte_length<=?5 THEN b.sha256 ELSE NULL END
           FROM effective e LEFT JOIN blobs b ON b.sha256=e.blob_sha256
-          WHERE EXISTS(SELECT 1 FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
+          WHERE EXISTS(SELECT 1 FROM {aliases} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1"),
         params![w.workspace,w.version,w.object,hydrate,MAX_DOCUMENT_BYTES as i64],
         |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:text::optional_from_row(conn, r, 4)?,aliases:Vec::new(),unindexed_reason:None}),
     ).optional().map_err(sql)?;
@@ -80,7 +92,7 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
         if h.kind == "text" && h.byte_length < 0 {
             return Err(StorageError::StateCorrupt { source: None });
         }
-        let mut stmt=conn.prepare_cached("SELECT path FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65").map_err(sql)?;
+        let mut stmt=conn.prepare_cached(&format!("SELECT path FROM {aliases} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65")).map_err(sql)?;
         h.aliases = stmt
             .query_map(params![w.workspace, w.version, w.object], |r| r.get(0))
             .map_err(sql)?
@@ -124,12 +136,12 @@ fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, Sto
         let mut hydrated_bytes = 0;
         for w in work {
             let h = (|| {
-                let mut h = head(conn,&w,false)?;
+                let mut h = head(conn,&w,false,false)?;
                 if let Some(h)=h.as_mut() {
                     let reason:Option<String>=conn.query_row("SELECT reason FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND source_hash=?4 AND parser_generation=?5 AND status='unindexed'",params![w.workspace,w.version,w.object,h.hash,PARSER_GENERATION],|r|r.get(0)).optional().map_err(sql)?;
                     h.unindexed_reason=match reason.as_deref(){Some("byte-bound")=>Some("byte-bound"),Some("parse-refused")=>Some("parse-refused"),_=>None};
                 }
-                if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true)?;}
+                if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true,false)?;}
                 Ok::<_, StorageError>(h)
             })();
             if let Ok(Some(h)) = &h { hydrated_bytes += h.text.as_ref().map_or(0,String::len); }
@@ -163,7 +175,7 @@ fn current(conn: &Connection, p: &Parsed) -> Result<bool, StorageError> {
     if !exists {
         return Ok(false);
     }
-    let h = head(conn, &p.work, false)?;
+    let h = head(conn, &p.work, false, false)?;
     Ok(match (&h, &p.head) {
         (None, None) => true,
         (Some(a), Some(b)) => {

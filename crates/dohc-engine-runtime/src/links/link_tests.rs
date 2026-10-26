@@ -1,6 +1,6 @@
 use super::*;
 use dohc_engine_domain::{
-    CreateNamedVersion, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    CreateNamedVersion, DomainError, RollbackTextFileMutation, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{FaultPoint, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -88,36 +88,13 @@ fn write_fixture(
         now_ms: n,
         request_id: None,
     };
-    let deadline = Instant::now() + client_busy_budget();
-    let mut backoff = Duration::from_millis(5);
-    loop {
-        let result = (|| {
-            VersionedTextStore::new(s).ensure_main_version("ws", "main", 1, &NoFaults)?;
-            if seed_empty {
-                while seed_step(s)? {}
-            }
-            VersionedTextStore::new(s).write_text(&input, &NoFaults)
-        })();
-        match result {
-            Ok(_) => return,
-            Err(dohc_engine_domain::DomainError::Storage(
-                dohc_engine_storage::StorageError::FileLocked,
-            )) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                assert!(
-                    !remaining.is_zero(),
-                    "link fixture write stayed locked until its deadline"
-                );
-                std::thread::sleep(backoff.min(remaining));
-                assert!(
-                    Instant::now() < deadline,
-                    "link fixture write stayed locked until its deadline"
-                );
-                backoff = (backoff * 2).min(Duration::from_millis(200));
-            }
-            Err(error) => panic!("link fixture write failed: {error:?}"),
+    retry_file_locked("link fixture write", || {
+        VersionedTextStore::new(s).ensure_main_version("ws", "main", 1, &NoFaults)?;
+        if seed_empty {
+            while seed_step(s)? {}
         }
-    }
+        VersionedTextStore::new(s).write_text(&input, &NoFaults)
+    });
 }
 
 fn count(s: &EngineStore, table: &str) -> i64 {
@@ -128,14 +105,39 @@ fn parsed(s: &EngineStore) -> Staged {
     let (w, h) = prepare(s).unwrap().unwrap();
     Staged::new(parser::parse(w, h).unwrap())
 }
+fn retry_file_locked<T, E: Into<DomainError>>(
+    label: &str,
+    mut operation: impl FnMut() -> Result<T, E>,
+) -> T {
+    let deadline = Instant::now() + client_busy_budget();
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        match operation().map_err(Into::into) {
+            Ok(value) => return value,
+            Err(DomainError::Storage(StorageError::FileLocked)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "{label} stayed FileLocked until the client busy deadline"
+                );
+                std::thread::sleep(backoff.min(remaining));
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            Err(error) => panic!("{label} failed: {error:?}"),
+        }
+    }
+}
+
 fn drain(s: &mut EngineStore) {
     for _ in 0..10000 {
-        if seed_step(s).unwrap() {
+        if retry_file_locked("link alias seeding", || seed_step(s)) {
             continue;
         }
         let jobs = prepare_batch(s, SOURCE_SLICE).unwrap();
         if jobs.is_empty() {
-            if gc_step(s).unwrap() || reseed_step(s).unwrap() {
+            if retry_file_locked("link cleanup", || gc_step(s))
+                || retry_file_locked("link reseeding", || reseed_step(s))
+            {
                 continue;
             }
             return;
@@ -145,7 +147,9 @@ fn drain(s: &mut EngineStore) {
             .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
             .collect();
         while !staged.is_empty() {
-            stage_batch(&mut staged, s, &NoFaults).unwrap();
+            retry_file_locked("link batch staging", || {
+                stage_batch(&mut staged, s, &NoFaults)
+            });
         }
     }
     panic!("drain did not make progress");
@@ -162,6 +166,48 @@ fn source_hash(s: &EngineStore) -> String {
 }
 fn certified_literals(s: &EngineStore) -> Vec<String> {
     s.read_with(|c|c.prepare("SELECT l.literal FROM links l JOIN link_sources s USING(workspace_id,version_id,object_id,index_key) WHERE l.object_id='a' ORDER BY ordinal")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()).unwrap()
+}
+#[test]
+fn staging_retries_a_locked_writer_without_losing_progress() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    let links = ROW_SLICE * 3;
+    write(&mut store, "a", "a.md", &"[[target]] ".repeat(links), 2);
+    let mut staged = std::collections::VecDeque::from([parsed(&store)]);
+    retry_file_locked("link batch staging", || {
+        stage_batch(&mut staged, &mut store, &NoFaults)
+    });
+    assert_eq!(staged.len(), 1);
+    let committed_progress = (staged[0].offset, staged[0].target_offset);
+    assert!(committed_progress.0 > 0 && committed_progress.0 < links);
+    let committed_rows = count(&store, "links");
+    assert_eq!(committed_rows, committed_progress.0 as i64);
+    assert_eq!(count(&store, "link_sources"), 0);
+    store.read_with(|c| c.busy_timeout(Duration::ZERO)).unwrap();
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut refusals = 0;
+    while !staged.is_empty() {
+        retry_file_locked("link batch staging", || {
+            let result = stage_batch(&mut staged, &mut store, &NoFaults);
+            if matches!(result, Err(StorageError::FileLocked)) {
+                assert_eq!(refusals, 0);
+                refusals += 1;
+                assert_eq!(staged.len(), 1);
+                assert_eq!(
+                    (staged[0].offset, staged[0].target_offset),
+                    committed_progress
+                );
+                assert_eq!(count(&store, "links"), committed_rows);
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
+            result
+        });
+    }
+    assert_eq!(refusals, 1);
+    assert_eq!(count(&store, "link_pending"), 0);
+    assert_eq!(certified_literals(&store), vec!["target"; links]);
 }
 #[test]
 fn persisted_queue_zero_links_and_metadata_only_updates() {
@@ -200,18 +246,14 @@ fn stale_parse_and_crash_preserve_last_certified_rows() {
     write(&mut s, "a", "a.md", "[[new]]", 3);
     let mut stale = parsed(&s);
     write(&mut s, "a", "a.md", "[[newest]]", 4);
-    assert!(stale.step(&mut s, &NoFaults).unwrap());
+    assert!(retry_file_locked("link source staging", || stale.step(&mut s, &NoFaults)));
     assert_eq!(certified_literals(&s), vec!["old"]);
     assert_eq!(count(&s, "link_pending"), 1);
     let mut latest = parsed(&s);
-    assert!(
-        latest
-            .step(
-                &mut s,
-                &*ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist)
-            )
-            .unwrap()
-    );
+    assert!(retry_file_locked("link source staging", || latest.step(
+        &mut s,
+        &*ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist)
+    )));
     drop(s);
     let mut s = open(&db);
     assert_eq!(certified_literals(&s), vec!["old"]);
@@ -228,7 +270,7 @@ fn partial_batches_are_unpublished_and_resume_after_restart() {
     drain(&mut s);
     write(&mut s, "a", "a.md", &"[[new]] ".repeat(500), 3);
     let mut staged = parsed(&s);
-    assert!(!staged.step(&mut s, &NoFaults).unwrap());
+    assert!(!retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)));
     assert_eq!(certified_literals(&s), vec!["old"]);
     drop(s);
     let mut s = open(&db);
@@ -249,7 +291,7 @@ fn interrupted_prior_parser_staging_does_not_certify_leftover_rows() {
         let w = staged.parsed.work.clone();
         let key = w.index_key();
         for _ in 0..5 {
-            assert!(!staged.step(&mut s, &NoFaults).unwrap());
+            assert!(!retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)));
         }
         drop(staged);
         // Model committed slices from the preceding build, including the
@@ -414,7 +456,7 @@ fn alias_displacement_and_moves_fence_inflight_work() {
     })
     .unwrap();
     assert_eq!(count(&s, "link_pending"), 2);
-    assert!(old.step(&mut s, &NoFaults).unwrap());
+    assert!(retry_file_locked("link source staging", || old.step(&mut s, &NoFaults)));
     drain(&mut s);
     assert!(certified_literals(&s).is_empty());
     let paths: Vec<String> = s
@@ -597,7 +639,7 @@ fn terminal_refusal_reuses_hash_after_alias_only_change() {
     assert!(h.as_ref().unwrap().text.is_none());
     assert_eq!(h.as_ref().unwrap().unindexed_reason, Some("parse-refused"));
     let mut staged = Staged::new(parser::parse(w, h).unwrap());
-    while !staged.step(&mut s, &NoFaults).unwrap() {}
+    while !retry_file_locked("link source staging", || staged.step(&mut s, &NoFaults)) {}
     assert_eq!(count(&s, "link_pending"), 0);
     let reason: String = s
         .read_with(|c| c.query_row("SELECT reason FROM link_sources", [], |r| r.get(0)))
@@ -925,6 +967,7 @@ fn link_drain_holds_pause_the_actor_and_last_release_resumes_it() {
                     request_id: None,
                     claim_foreign_head: false,
                 },
+                scratch.path().to_owned(),
                 std::sync::Arc::clone(&policy),
                 dohc_engine_collab::LeaseRegistry::new(),
                 std::sync::Arc::new(NoFaults),
@@ -953,6 +996,7 @@ fn link_drain_holds_pause_the_actor_and_last_release_resumes_it() {
                 request_id: None,
                 claim_foreign_head: false,
             },
+            scratch.path().to_owned(),
             std::sync::Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             std::sync::Arc::new(NoFaults),
@@ -995,7 +1039,9 @@ fn source_batches_resume_on_both_sides_of_the_commit_boundary() {
             .into_iter()
             .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
             .collect();
-        stage_batch(&mut batch, &mut s, &*ScriptedFaults::crash_at(point)).unwrap();
+        retry_file_locked("link batch staging", || {
+            stage_batch(&mut batch, &mut s, &*ScriptedFaults::crash_at(point))
+        });
         drop(s);
         let mut s = open(&db);
         assert_eq!(count(&s, "link_sources") + count(&s, "link_pending"), 16);
@@ -1060,12 +1106,16 @@ fn batch_rechecks_stale_items_and_retains_partial_suffix_progress() {
     let mut staged = s.read_with(|c| {
         let mut stmt = c.prepare("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending ORDER BY pending_id").map_err(sql)?;
         let jobs = stmt.query_map([], |r| Ok(Work { id:r.get(0)?,revision:r.get(1)?,workspace:r.get(2)?,version:r.get(3)?,object:r.get(4)?,queued_at_ms:r.get(5)? })).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
-        jobs.into_iter().map(|w| { let h=head(c,&w,true)?; Ok(Staged::new(parser::parse(w,h)?)) }).collect::<Result<std::collections::VecDeque<_>,StorageError>>()
+        jobs.into_iter().map(|w| { let h=head(c,&w,true,false)?; Ok(Staged::new(parser::parse(w,h)?)) }).collect::<Result<std::collections::VecDeque<_>,StorageError>>()
     }).unwrap();
     write(&mut s, "stale", "stale.md", "[[new]]", 5);
-    stage_batch(&mut staged, &mut s, &NoFaults).unwrap();
+    retry_file_locked("link batch staging", || {
+        stage_batch(&mut staged, &mut s, &NoFaults)
+    });
     while staged.len() > 1 || staged.front().unwrap().offset == 0 {
-        stage_batch(&mut staged, &mut s, &NoFaults).unwrap();
+        retry_file_locked("link batch staging", || {
+            stage_batch(&mut staged, &mut s, &NoFaults)
+        });
     }
     assert_eq!(staged.front().unwrap().parsed.work.object, "large");
     assert!(staged.front().unwrap().offset > 0);
@@ -1100,7 +1150,9 @@ fn drain_resumes_after_abrupt_process_exit() {
             .into_iter()
             .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
             .collect();
-        stage_batch(&mut staged, &mut store, &NoFaults).unwrap();
+        retry_file_locked("link batch staging", || {
+            stage_batch(&mut staged, &mut store, &NoFaults)
+        });
         assert!(count(&store, "link_sources") > 0);
         assert!(count(&store, "link_pending") > 0);
         // No destructors or close-time checkpoint: leave committed WAL and pending work.
@@ -1348,7 +1400,9 @@ fn initial_capture_defers_all_link_rows_and_restart_reseeds() {
     drop(s);
     let mut s = open(&db);
     assert_eq!(seed_phase(&s), "deferred");
-    assert!(seed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain seed_step", || seed_step(
+        &mut s
+    )));
     assert_eq!(count(&s, "link_aliases"), 32);
     assert!(prepare_batch(&s, SOURCE_SLICE).unwrap().is_empty());
     drain(&mut s);
@@ -1375,7 +1429,9 @@ fn outside_edits_behind_and_ahead_of_the_seed_cursor_are_captured() {
             n + 2,
         );
     }
-    assert!(seed_step(&mut s).unwrap());
+    assert!(retry_file_locked("link drain seed_step", || seed_step(
+        &mut s
+    )));
     let revision_before: i64 = s.read_with(|c| c.query_row(
         "SELECT revision FROM link_pending WHERE workspace_id='ws' AND version_id='main' AND object_id='note-0'", [], |r| r.get(0))).unwrap();
     // Capture newer disk bytes while the cursor is between these paths.
@@ -1436,21 +1492,24 @@ fn seed_cursor_and_last_certification_obligation_commit_atomically() {
         let db = engine_db_path(&scratch).unwrap();
         let mut s = open(&db);
         write_deferred(&mut s, "a", "a.md", "[[b]]", 2);
-        assert!(!seed_step_with(&mut s, &*ScriptedFaults::crash_at(point)).unwrap());
+        assert!(!retry_file_locked("link drain seed_step_with", || {
+            seed_step_with(&mut s, &*ScriptedFaults::crash_at(point))
+        }));
         assert_eq!(
             count(&s, "link_aliases"),
             i64::from(point == FaultPoint::StorageAfterCommitBeforeAck)
         );
         drop(s);
         let mut s = open(&db);
-        while seed_step(&mut s).unwrap() {}
+        while retry_file_locked("link drain seed_step", || seed_step(&mut s)) {}
         assert_eq!(seed_phase(&s), "draining");
         let staged = parsed(&s);
         // Keep the publication boundary independent of the host's slice clock.
-        s.write_with(&*ScriptedFaults::crash_at(point), |tx| {
-            staged.step_in_tx(tx, Instant::now() + Duration::from_secs(60))
-        })
-        .unwrap();
+        retry_file_locked("link source publication", || {
+            s.write_with(&*ScriptedFaults::crash_at(point), |tx| {
+                staged.step_in_tx(tx, Instant::now() + Duration::from_secs(60))
+            })
+        });
         drop(s);
         let mut s = open(&db);
         assert_eq!(
@@ -1481,7 +1540,9 @@ fn alias_seeding_resumes_after_abrupt_process_exit() {
                 n + 2,
             );
         }
-        assert!(seed_step(&mut s).unwrap());
+        assert!(retry_file_locked("link drain seed_step", || seed_step(
+            &mut s
+        )));
         assert_eq!(count(&s, "link_aliases"), 32);
         std::process::exit(73);
     }
@@ -1535,7 +1596,7 @@ fn fork_of_a_partial_seed_preserves_its_cursor_and_obligation() {
             n + 2,
         );
     }
-    seed_step(&mut s).unwrap();
+    retry_file_locked("link drain seed_step", || seed_step(&mut s));
     VersionedTextStore::new(&mut s)
         .create_named_version(
             &CreateNamedVersion {
@@ -1592,9 +1653,16 @@ fn passive_links_never_queue_seed_or_drain_even_with_leftover_work() {
     let before = store
         .read_with(|c| Ok::<_, rusqlite::Error>(c.total_changes()))
         .unwrap();
-    assert!(!seed_step(&mut store).unwrap());
-    assert!(!reseed_step(&mut store).unwrap());
-    assert!(!gc_step(&mut store).unwrap());
+    assert!(!retry_file_locked("link drain seed_step", || seed_step(
+        &mut store
+    )));
+    assert!(!retry_file_locked(
+        "link drain reseed_step",
+        || reseed_step(&mut store)
+    ));
+    assert!(!retry_file_locked("link drain gc_step", || gc_step(
+        &mut store
+    )));
     assert!(prepare_batch(&store, SOURCE_SLICE).unwrap().is_empty());
     let metrics = SharedMetrics::default();
     let mut worker = DrainWorker::new(metrics.clone()).unwrap();
@@ -1623,3 +1691,6 @@ mod incoming_tests;
 
 #[path = "query_tests.rs"]
 mod query_tests;
+
+#[path = "edges_tests.rs"]
+mod edges_tests;

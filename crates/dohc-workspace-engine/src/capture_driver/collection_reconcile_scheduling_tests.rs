@@ -170,6 +170,7 @@ fn collection_apply_context<'a>(
         provenance: CaptureProvenance::default(),
         events: EngineEvents::default(),
         apply_probe: None,
+        import_priority: None,
     }
 }
 
@@ -774,6 +775,8 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 not_owned_paths: Vec::new(),
                 failed_applies: Vec::new(),
                 deferred_paths: Vec::new(),
+                deferred_retires: Vec::new(),
+                deferred_writes: Vec::new(),
                 held_observations: Vec::new(),
                 crashed_after_durable_boundary: None,
                 degraded: false,
@@ -825,6 +828,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -985,6 +989,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 not_owned_paths: Vec::new(),
                 failed_applies: Vec::new(),
                 deferred_paths: Vec::new(),
+                deferred_retires: Vec::new(),
+                deferred_writes: Vec::new(),
                 held_observations: Vec::new(),
                 crashed_after_durable_boundary: None,
                 degraded: false,
@@ -1027,6 +1033,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -1079,6 +1086,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -1220,6 +1228,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun {
@@ -1315,6 +1324,7 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
             provenance: CaptureProvenance::default(),
             events,
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun {

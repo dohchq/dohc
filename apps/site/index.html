@@ -8,6 +8,18 @@
 <meta property="og:title" content="dohc | a workspace for you and your AI agents" />
 <meta property="og:description" content="A free desktop app where you and your AI agents work side by side. Docs, tables, chats, and apps, all stored on your computer." />
 <meta property="og:type" content="website" />
+<meta property="og:image" content="https://dohc.computer/og-image.png" />
+<meta property="og:image:width" content="2400" />
+<meta property="og:image:height" content="1260" />
+<meta property="og:image:alt" content="dohc: a workspace for you and your AI agents. Open source, early alpha. Beside the words, a 3D model of an inline-six engine." />
+<meta property="og:video" content="https://dohc.computer/og-video.mp4" />
+<meta property="og:video:secure_url" content="https://dohc.computer/og-video.mp4" />
+<meta property="og:video:type" content="video/mp4" />
+<meta property="og:video:width" content="1920" />
+<meta property="og:video:height" content="1008" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="dohc | a workspace for you and your AI agents" />
+<meta name="twitter:description" content="A free desktop app where you and your AI agents work side by side. Docs, tables, chats, and apps, all stored on your computer." />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="preload" href="/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="preload" href="/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
@@ -43,14 +55,17 @@
 </svg>
 
 <header class="nav">
-  <a class="nav-brand" href="/" aria-label="dohc home">
-    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
-      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
-            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
-      <circle cx="38" cy="58" r="9" fill="currentColor"/>
-    </svg>
-    <span class="wordmark">dohc</span>
-  </a>
+  <div class="nav-start">
+    <a class="nav-brand" href="/" aria-label="dohc home">
+      <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+        <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+              fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+        <circle cx="38" cy="58" r="9" fill="currentColor"/>
+      </svg>
+      <span class="wordmark">dohc</span>
+    </a>
+    <span class="alpha-tag">Alpha</span>
+  </div>
   <nav class="nav-links" aria-label="Site">
     <a href="#demo">demo</a>
     <a href="#drive">drive</a>
@@ -377,14 +392,15 @@
       </div>
       <div class="sync-controls">
         <label class="sync-switch">
-          <input type="checkbox" checked data-sync-toggle />
+          <input type="checkbox" role="switch" checked data-sync-toggle aria-label="Online" />
+          <span class="sync-switch-side" data-sync-side="offline" aria-hidden="true">offline</span>
           <span class="sync-switch-track theme-track" aria-hidden="true">
             <span class="theme-dial">
               <svg class="sync-on" viewBox="0 0 24 24"><path d="M12 6v12"/></svg>
               <svg class="sync-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>
             </span>
           </span>
-          <span>online</span>
+          <span class="sync-switch-side" data-sync-side="online" aria-hidden="true">online</span>
         </label>
         <span class="sync-hint" data-sync-hint>watching. click or type to take over.</span>
       </div>
@@ -422,6 +438,7 @@
               <button class="btn btn-primary" type="submit">Join the waitlist</button>
             </div>
             <p class="waitlist-status" data-waitlist-status role="status" tabindex="-1">We'll email you when Drive opens.</p>
+            <p class="waitlist-note">Your email address goes to Loops, which sends our updates. <a href="/privacy.html">Privacy</a></p>
           </form>
         </div>
 
@@ -460,6 +477,8 @@
       </div>
 
       <div class="downloads-meta reveal d2">
+        <a data-download-asset="linux-appimage" href="https://github.com/dohchq/dohc/releases">Linux AppImage</a>
+        <span aria-hidden="true">·</span>
         <a href="https://github.com/dohchq/dohc/releases">View all releases</a>
       </div>
     </div>
@@ -482,6 +501,7 @@
     <a href="#drive">Drive</a>
     <a href="#downloads">Downloads</a>
     <a href="https://github.com/dohchq/dohc">GitHub</a>
+    <a href="/privacy.html">Privacy</a>
   </nav>
   <p class="footer-line">© 2026</p>
 </footer>

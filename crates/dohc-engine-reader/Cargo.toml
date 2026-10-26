@@ -8,6 +8,8 @@ edition = "2024"
 description = "Trusted-startup Markdown reader process owner; no engine dispatch."
 autotests = false
 
+[features]
+test-support = []
 [dependencies]
 dohc-engine-protocol = { path = "../dohc-engine-protocol", default-features = false }
 serde = { version = "1", features = ["derive"] }

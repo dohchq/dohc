@@ -17,7 +17,7 @@ function harness() {
   const resolve = vi.fn(async (_workspace: string, ref: AccessObjectRef): Promise<ResolvedAccessObject> => ({ ref, visibility: "visible" }));
   const permissions = vi.fn(async () => ({ permissions: [{ kind: "data", principal: "recipient", current: true,
     metadata: { revision: 1, revisionSha256: "a".repeat(64), operationIds: [operationId], discover: true } }], nextCursor: null }));
-  const refresh = vi.fn(async (): Promise<void> => undefined);
+  const refresh = vi.fn(async (): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult> => ({ status: "requested" }));
   const received = vi.fn((): ReceivedObservation => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }));
   const scopePort = vi.fn(() => scope);
   const owner = createAccessOwner({ resolve, permissions, refresh, account: () => signedIn ? ({ userId: "recipient", email: "recipient@test.dev", relayUrl, generation }) : null,
@@ -53,11 +53,11 @@ it("binds Collection cursors to the object and workspace/account scope", async (
   expect(h.permissions).toHaveBeenCalledTimes(2);
 });
 it("passes concurrent surface requests to the existing coalescing owners", async () => {
-  const waiting = deferred<void>(), roster = vi.fn(() => waiting.promise), received = vi.fn(() => waiting.promise);
+  const waiting = deferred<"requested">(), roster = vi.fn(() => waiting.promise), received = vi.fn(() => waiting.promise);
   const acquisition = createAccessAcquisition({ roster, received });
   const first = acquisition.request("w"), second = acquisition.request("w");
   expect(roster).toHaveBeenCalledTimes(2); expect(received).toHaveBeenCalledTimes(2);
-  waiting.resolve(); await Promise.all([first, second]);
+  waiting.resolve("requested"); await Promise.all([first, second]);
 });
 it("resolves current aliases after rename and reports missing objects", async () => {
   const workspace = { workspaceId: "w", rootPath: "/w" } as RegistryEntry;
@@ -136,7 +136,7 @@ it("uses one scope capture and rejects a credential generation change during res
   expect(h.scopePort).toHaveBeenCalledOnce();
 });
 it("answers CLI object and Sharing reads from observations without waiting for refresh", async () => {
-  const h = harness(), never = deferred<void>();
+  const h = harness(), never = deferred<import("@dohc/workspace-contracts/access").AccessRefreshResult>();
   h.refresh.mockReturnValue(never.promise);
   const cli = accessCliQueries(h.owner, work => Promise.resolve(work("w")));
   expect(await cli.object({ ref: path })).toMatchObject({ freshness: "unknown", checkedAtMs: null, unknownReason: "not-listed-yet" });
@@ -182,7 +182,7 @@ it("keeps the received list on the signed-in account when a share view's server 
     resolve: async (_workspace, ref) => ({ ref, visibility: "visible" }), roster, received,
     account: () => ({ userId: "recipient", email: "recipient@test.dev", relayUrl: "https://relay.test", generation: 1 }),
     scope: () => "current-account-scope", assertCurrent: () => undefined,
-    permissions: async () => { throw new Error("unused"); }, refresh: async () => undefined,
+    permissions: async () => { throw new Error("unused"); }, refresh: async () => ({ status: "requested" }),
   });
   expect(owner.sharing(workspace, { lane: "received" })).toMatchObject({ unknownReason: null, freshness: "fresh",
     coverage: { kind: "received-account", complete: true }, rows: [{ shareId: "current-account-share", recipientUserId: "recipient" }] });
@@ -236,3 +236,8 @@ it.each([{ recipientUserId: "another-account" }, { recipientEmail: "another@test
     expect(h.received).not.toHaveBeenCalled();
   },
 );
+
+it("reports unavailable when neither acquisition can observe access", async () => {
+  const acquisition = createAccessAcquisition({ roster: async () => "unavailable", received: async () => "unavailable" });
+  expect(await acquisition.request("w")).toEqual({ status: "unavailable", reason: "unreadable" });
+});

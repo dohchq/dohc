@@ -974,7 +974,17 @@ it("recovery replies only authorize retirement after a committed decision", () =
 
 it("decodes whether a recovery keeps typing for a deleted file",()=>{
  const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
- expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,deferredWrites:[],keptFiles:[],captureRecoveries:[record],heldFiles:[],retainedCopies:{count:0,bytes:0}})).toMatchObject({captureRecoveries:[record],heldFiles:[],retainedCopies:{count:0,bytes:0}});
+});
+
+it("decodes outside writes waiting for an open document", () => {
+  const status = { running: true, degraded: false, terminal: false, phase: "ready",
+    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+    heldFiles: [], retainedCopies: { count: 0, bytes: 0 }, deferredWrites: ["notes/open.md"] };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
+  for (const deferredWrites of [null, [""], [1]]) {
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, deferredWrites })).toThrow(ProtocolShapeError);
+  }
 });
 
 const heldFile = {
@@ -990,9 +1000,9 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
-  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
-  [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
-  [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
+  ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
+  [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.watcherStatus, {
     running: true,
     degraded: false,
@@ -1000,12 +1010,21 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
     phase: "ready",
     noAtomicPlacement: false,
     recoveryUnavailable: false,
+    deferredWrites: [],
     keptFiles: [],
     captureRecoveries: [],
+    retainedCopies: { count: 0, bytes: 0 },
   }],
 ];
 
 for (const [method, base] of holdReplies) {
+  it(`decodes ${method} waiting paths and rejects malformed lists`, () => {
+    const result = { ...base, heldFiles: [], deferredWrites: ["notes/open.md"] };
+    expect(decodeWorkspaceResult(method, result)).toEqual(result);
+    for (const deferredWrites of [null, [""], [1]]) {
+      expect(() => decodeWorkspaceResult(method, { ...result, deferredWrites })).toThrow(ProtocolShapeError);
+    }
+  });
   it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
     `decodes ${method} held files (%j)`,
     ({ heldFiles }) => {
@@ -1035,7 +1054,25 @@ for (const [method, base] of holdReplies) {
 
 it("decodes the passive current view manifest and rejects a frontier-only placeholder",()=>{
   const file={versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256:"a".repeat(64),byteLength:4,lineageClaimId:null,restoreGeneration:null};
-  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
+  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,view)).toEqual(view);
   expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,{revision:1,logCursor:3,journalCursor:5})).toThrow(ProtocolShapeError);
+});
+
+it("decodes retained copy listings and deletes, and rejects negative counts", () => {
+  const listed = { copies: [{ id: 3, revision: 10 }], more: false, total: { count: 4, bytes: 4096 } };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.retainedCopiesList, listed)).toEqual(listed);
+  const deleted = { deleted: 1, skipped: 2, failed: 0, remaining: { count: 3, bytes: 3072 } };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.retainedCopiesDelete, deleted)).toEqual(deleted);
+  for (const reply of [
+    { ...listed, copies: [{ id: 3 }] },
+    { ...listed, total: { count: -1, bytes: 0 } },
+    { ...deleted, remaining: { count: 0 } },
+    { ...deleted, deleted: 1.5 },
+  ]) {
+    expect(() => decodeWorkspaceResult(
+      "copies" in reply ? WORKSPACE_METHOD.retainedCopiesList : WORKSPACE_METHOD.retainedCopiesDelete,
+      reply,
+    )).toThrow(ProtocolShapeError);
+  }
 });

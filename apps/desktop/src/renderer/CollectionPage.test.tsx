@@ -79,6 +79,11 @@ vi.mock("./collab/useEngineDoc", () => ({
     return typeof current === "function" ? current(input) : current;
   },
 }));
+// The record's file check runs in a worker and has its own tests
+// (recordFieldWrites.test.tsx); here every record is clear.
+vi.mock("./collections/recordSourceCheck", () => ({
+  useRecordSourceCheck: () => ({ state: "clear", contentHash: "c".repeat(64) }),
+}));
 
 function engineDocState(
   partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,
@@ -533,25 +538,20 @@ describe("CollectionPage", () => {
     expect(screen.getByTestId("collection-page")).toBeDefined();
   });
 
-  it("shows one line and the New record action for an empty collection", async () => {
+  it("shows the columns and a New record row for an empty collection", async () => {
     const bridge = makeBridge([]);
     const onNewRecord = vi.fn();
     renderPage(bridge, onNewRecord);
 
-    expect(
-      await screen.findByText("No records in this collection yet."),
-    ).toBeDefined();
-    // Settled 2026-08-31: the line and the action, nothing else. Amended
-    // 2026-09-25: the header keeps what sets the Collection up.
-    const empty = screen.getByTestId("collection-empty");
-    expect(empty.querySelectorAll("button")).toHaveLength(1);
-    expect(screen.getByTestId("collection-automations-button")).toBeDefined();
+    const grid = await screen.findByRole("grid");
+    expect(within(grid).getAllByRole("columnheader").length).toBeGreaterThan(0);
+    expect(screen.queryByText("No records in this collection yet.")).toBeNull();
     expect(screen.getByTestId("collection-fields-button")).toBeDefined();
-    expect(screen.queryByTestId("collection-views-button")).toBeNull();
-    expect(screen.getAllByRole("button", { name: "New record" })).toHaveLength(1);
+    expect(screen.getByTestId("collection-views-button")).toBeDefined();
 
+    fireEvent.click(within(grid).getByRole("button", { name: "New record" }));
     fireEvent.click(screen.getByTestId("collection-new-record"));
-    expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("tasks");
+    expect(onNewRecord.mock.calls).toEqual([["tasks"], ["tasks"]]);
   });
 
   it("names the Collection's files from Customize… and hands them to the agent", async () => {
@@ -1867,7 +1867,7 @@ describe("pagination", () => {
       return result([record("last", "Last record")], null);
     });
     const { container } = renderPage(bridge);
-    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("101"));
+    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("102"));
     const scroller = container.querySelector<HTMLElement>("[role=grid] .overflow-auto")!;
     scroller.scrollTop = 2800;
     fireEvent.scroll(scroller);
@@ -1875,7 +1875,7 @@ describe("pagination", () => {
     bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/changed.md"], pathSetChanged: false });
     await waitFor(() => expect(pages).toBe(2));
     await act(async () => { second.resolve(result([record("stale", "Stale record")], null)); await second.promise; });
-    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("102"));
+    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("103"));
     expect(screen.queryByText("Stale record")).toBeNull();
   });
 
@@ -2489,5 +2489,53 @@ describe("Button fields", () => {
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Archive");
     expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
     expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
+  });
+});
+
+describe("a calendar view without a date field", () => {
+  const schema: CollectionSchema = { ...CALENDAR_SCHEMA, fields: [{ name: "title", type: "text" }],
+    views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: null }] };
+
+  it("asks for one and opens Fields on a new Date field", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("grid")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    expect((within(dialog).getByLabelText("Field type") as HTMLSelectElement).value).toBe("date");
+    expect(document.activeElement).toBe(within(dialog).getByLabelText("Field name"));
+  });
+
+  it("uses the Collection's first date field once it has one", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...schema, fields: CALENDAR_SCHEMA.fields }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+    expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
+  });
+
+  it("treats a date field that is no longer a date as missing", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], { ...schema, views: [{ ...schema.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+  });
+
+  it("uses the first date field when its own is no longer a date", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...CALENDAR_SCHEMA, views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+  });
+
+  it("leaves the button out for someone who cannot change fields", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
   });
 });

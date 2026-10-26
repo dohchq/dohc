@@ -1,4 +1,6 @@
-import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
+import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
@@ -70,6 +72,14 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_save_recovery_copy: ["share.live.document.recovery.save"],
+  dohc_retry_kept_edits: ["share.live.document.retry"],
+  dohc_stop_again: ["share.live.document.stop"],
+  dohc_list_retained_copies: ["file.retained.list"],
+  dohc_delete_retained_copies: ["file.retained.delete"],
+  dohc_chat_file_mentions: ["chat.read"],
+  dohc_chat_links: ["chat.read"],
+  dohc_links_edges: ["links.edges"],
   dohc_links_in: ["links.in"],
   dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
@@ -83,6 +93,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -117,6 +128,10 @@ export interface ToolContext {
   // --share-access flag. Absent means a local workspace at the Owner level.
   // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
+  // The only tools to offer, from repeated --tool flags, within the share
+  // level's. Absent offers all of the level's tools. A dohc agent run offers
+  // only the reply tool.
+  tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
@@ -849,6 +864,13 @@ export async function moveWorkspacePath(
   });
 }
 
+export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: string}, agent?: string) {
+  const source = await safeResolve(ctx, args.path, "entry");
+  if (!source.ok) return {ok: false as const, reason: source.reason};
+  if (isSecretResolvedPath(source)) return {ok: false as const, reason: SECRET_READ_DENIED_REASON};
+  return requestCli(ctx, "fileDuplicate", {path: source.normalized, agent, requestId: randomUUID()});
+}
+
 export async function deleteWorkspacePath(
   ctx: ToolContext,
   args: { path: string; summary?: string },
@@ -1047,12 +1069,13 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
     requestCli(ctx, "collectionsWaiting", {}),
+    ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1074,6 +1097,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
+    ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -1866,6 +1890,7 @@ export const FILE_MOVE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to m
 export const FILE_DELETE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to delete through it, or delete the file yourself. History will record that delete without your name.";
 const FILE_UNAVAILABLE_REASONS: Partial<Record<CliVerb, string>> = {
   fileWrite: FILE_WRITE_UNAVAILABLE_REASON,
+  fileDuplicate: "dohc is not running. Open dohc to duplicate this file.",
   fileMove: FILE_MOVE_UNAVAILABLE_REASON,
   fileDelete: FILE_DELETE_UNAVAILABLE_REASON,
 };
@@ -2197,17 +2222,56 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
+// A live document's edits the server refused, which dohc keeps on this
+// computer. The desktop's Notices row offers these same steps, and
+// dohc_workspace_status lists the documents as keptEdits.
+export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string; incident?: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "saveRecoveryCopy", { path: resolved.normalized, ...(args.incident === undefined ? {} : { incident: args.incident }) });
+}
+
+export async function retryKeptEdits(ctx: ToolContext, args: { path: string; incident: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "retryKeptEdits", { path: resolved.normalized, incident: args.incident });
+}
+
+export async function stopAgain(ctx: ToolContext, args: { path: string; incident: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "stopAgain", { path: resolved.normalized, incident: args.incident });
+}
+
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. The desktop shows their count and size as one Notices
+// row and deletes them after the same warning an agent accepts here.
+export async function listRetainedCopies(ctx: ToolContext) {
+  return requestCli(ctx, "retainedCopies", {});
+}
+
+export async function deleteRetainedCopies(
+  ctx: ToolContext,
+  args: { copies: { id: number; revision: number }[]; acceptLateWriteRisk: true },
+) {
+  return requestCli(ctx, "deleteRetainedCopies", {
+    copies: args.copies,
+    acceptLateWriteRisk: args.acceptLateWriteRisk,
+  });
+}
+
 // An automation's runs, and Try again, through the desktop's Automations
 // panel calls. An automation is named by its Collection's folder and its id
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; page?: string },
+  args: { collectionPath: string; automation: string; page?: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "automationRuns", {
     collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+    ...(args.server ? { server: true } : {}),
   });
 }
 
@@ -2227,11 +2291,12 @@ export async function switchAutomation(ctx: ToolContext, args: {
 
 export async function readAutomationRun(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; run: string },
+  args: { collectionPath: string; automation: string; run: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRun", { ...args, collectionPath: resolved.normalized });
+  const { server, ...read } = args;
+  return requestCli(ctx, "automationRun", { ...read, collectionPath: resolved.normalized, ...(server ? { server: true } : {}) });
 }
 
 export async function retryAutomationRun(
@@ -2329,3 +2394,9 @@ export async function startFileChat(
 }
 
 export { safeResolve };
+
+export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }
+
+export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
+
+export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

@@ -33,6 +33,17 @@ afterEach(() => {
 
 const spend = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
 
+it.each([["Trip"], ["first.md", "second.md"]])("discloses full History beside the edit choice for %j", async (...paths)=>{
+  const user=userEvent.setup();
+  render(<EmailShareForm workspaceId="ws-1" target={{kind:"paths",paths}} visible onDone={()=>{}} />);
+  const line="People who can edit can see the full History.";
+  expect(screen.queryByText(line)).toBeNull();
+  await user.click(screen.getByTestId("share-access-edit"));
+  expect(screen.getByText(line)).toBeTruthy();
+  await user.click(screen.getByTestId("share-access-view"));
+  expect(screen.queryByText(line)).toBeNull();
+});
+
 describe("automation steps a share would stop", () => {
   it("says so in one sentence before an Edit share, and makes the share on the second Create", async () => {
     const user = userEvent.setup();

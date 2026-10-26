@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export interface NativeOwnerActivationSource {
   version: 1;
+  readerSource?: true;
   relayDatabaseNamespace: string;
   workspaceId: string;
   mainVersionId: "main";
@@ -34,6 +35,7 @@ const sourceKeys = ["version", "relayDatabaseNamespace", "workspaceId", "mainVer
   "lineageClaimId", "currentPath", "replicationEpoch", "streamIdentity", "committedCursor", "baseOriginId",
   "baseOriginSeq", "baseRelaySeq", "sourceMomentId", "sourceDigest", "sourceByteLength",
   "nativeHeadSequence", "fullStateDigest", "fullStateByteLength"].sort().join();
+const readerSourceKeys = sourceKeys.split(",").concat("readerSource").sort().join();
 const digest = (value: Buffer): string => createHash("sha256").update(value).digest("hex");
 const isDigest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const isInteger = (value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): value is number =>
@@ -41,8 +43,10 @@ const isInteger = (value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): 
 
 export function parseNativeOwnerActivationSource(value: unknown, path: string, maxBytes: number): NativeOwnerActivationSource {
   const invalid = (): never => { throw new TypeError("Invalid native owner activation source."); };
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== sourceKeys) return invalid();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const source = value as NativeOwnerActivationSource;
+  if ((source.readerSource !== undefined && source.readerSource !== true) ||
+      Object.keys(value).sort().join() !== (source.readerSource === true ? readerSourceKeys : sourceKeys)) return invalid();
   if (source.version !== 1 || source.mainVersionId !== "main" || source.currentPath !== path ||
       !isDigest(source.lineageClaimId) || !isDigest(source.sourceDigest) || !isDigest(source.fullStateDigest) ||
       !isInteger(source.committedCursor, 0) || !isInteger(source.baseOriginSeq, 0) ||
@@ -53,7 +57,8 @@ export function parseNativeOwnerActivationSource(value: unknown, path: string, m
     if (typeof value !== "string" || value.length < 1 || value.length > 4096 || value.includes("\0")) return invalid();
   }
   // Native serializes the source in this field order, and adoption evidence hashes that JSON.
-  return {version: source.version, relayDatabaseNamespace: source.relayDatabaseNamespace, workspaceId: source.workspaceId,
+  return {version: source.version, ...(source.readerSource === true ? {readerSource: true as const} : {}),
+    relayDatabaseNamespace: source.relayDatabaseNamespace, workspaceId: source.workspaceId,
     mainVersionId: source.mainVersionId, objectId: source.objectId, lineageClaimId: source.lineageClaimId,
     currentPath: source.currentPath, replicationEpoch: source.replicationEpoch, streamIdentity: source.streamIdentity,
     committedCursor: source.committedCursor, baseOriginId: source.baseOriginId, baseOriginSeq: source.baseOriginSeq,

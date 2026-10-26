@@ -66,7 +66,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
   const singleton = {ready: vi.fn(async () => undefined), close: vi.fn(),
     sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string, unknown>}> => ({result:
       request.method === "liveApplication.register" ? {registrationId: 9} : request.method === "liveApplication.ownerState"
-        ? {adoptionId: "adoption", expectedLocalSequence: 0, throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: null} : {provisioned: true}})),
+        ? {adoptionId: "adoption", expectedLocalSequence: 0, throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: null, retryDeliveryId: null} : {provisioned: true}})),
     openLiveAppliedSync: vi.fn<EngineClient["openLiveAppliedSync"]>(async () => cut()),
     readNextLiveApplied: vi.fn<EngineClient["readNextLiveApplied"]>(async () => ({position: {eventCount: 1, journalCursor: 30, evidenceDigest: "c".repeat(64)}, ack, updateBytes})),
     readLiveApplicationAck: vi.fn<EngineClient["readLiveApplicationAck"]>(async () => ack),
@@ -243,7 +243,7 @@ it("suppresses a cut whose borrowed registration was fenced while the native rea
     f.singleton.openLiveAppliedSync.mockImplementationOnce(async () => {entered.resolve(); return release.promise;});
     const pending = f.peer.openLiveAppliedSync(f.next(), Buffer.from([0]), {maxInputBytes: 1024, maxOutputBytes: 1_000_000});
     const refused = expect(pending).rejects.toThrow(); await entered.promise;
-    const operation = {operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding, hostId: "host", newFence: 2,
+    const operation = {point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding, hostId: "host", newFence: 2,
       origin: {kind: "owner", id: "adoption"}, terminal: null, appliedSequence: 0};
     const receipt = {operation, localHeadSequence: 7, recordedAtMs: 1};
     f.singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced", receipt}});

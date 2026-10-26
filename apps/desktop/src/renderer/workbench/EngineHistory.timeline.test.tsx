@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
@@ -282,6 +282,15 @@ describe("History timeline sources", () => {
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
     expect(screen.queryByText("No changes yet")).toBeNull();
     fireEvent.click(screen.getByTestId("history-sources-retry"));
+    expect(calls.retry).toHaveBeenCalledOnce();
+  });
+
+  it("says History is paused beside the Collections an empty paused page is missing", () => {
+    const calls = view({ unavailableSources: [{ datasetId: GUESTS }], paused: true });
+    const state = screen.getByTestId("history-collections-unavailable");
+    expect(within(state).getByTestId("history-paused").textContent).toBe("History paused");
+    expect(state.textContent).toContain("dohc could not load changes from Guests.");
+    fireEvent.click(within(state).getByTestId("history-sources-retry"));
     expect(calls.retry).toHaveBeenCalledOnce();
   });
 

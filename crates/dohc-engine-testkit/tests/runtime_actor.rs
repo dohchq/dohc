@@ -140,11 +140,12 @@ async fn lexical_aliases_converge_on_one_actor() {
     assert_eq!(read(&b, "shared.md").await.as_deref(), Some("via-a"));
 }
 
-// oracle: a symlink/junction to the same engine dir converges on the same
-// actor (portability + file-identity). Skips honestly if the platform refuses
-// to create the alias.
+// oracle: a symlink/junction to the engine dir never forks a second writer.
+// On a Mac and Linux the engine refuses a store reached through a linked
+// folder; on Windows the alias converges on the same actor (portability +
+// file-identity). Skips honestly if the platform refuses to create the alias.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn symlink_or_junction_alias_converges_on_one_actor() {
+async fn symlink_or_junction_alias_never_forks_a_writer() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db path"); // creates .dohc/engine
     let real_engine_dir = db.parent().expect("engine dir").to_path_buf();
@@ -162,13 +163,27 @@ async fn symlink_or_junction_alias_converges_on_one_actor() {
 
     let sup = WorkspaceSupervisor::new();
     let real = sup.open(&db, 1).expect("open real").actor;
-    let via_link = sup.open(&aliased_db, 1).expect("open via link").actor;
-
-    assert_eq!(
-        real.identity(),
-        via_link.identity(),
-        "the junction/symlink must canonicalize to the real db identity"
-    );
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    {
+        let Err(refused) = sup.open(&aliased_db, 1) else {
+            panic!("a store reached through a linked folder must be refused");
+        };
+        assert!(
+            matches!(refused, RuntimeError::Identity { .. }),
+            "{refused:?}"
+        );
+        assert_ne!(real.lifecycle(), LifecycleState::Closed);
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    let via_link = {
+        let via_link = sup.open(&aliased_db, 1).expect("open via link").actor;
+        assert_eq!(
+            real.identity(),
+            via_link.identity(),
+            "the junction/symlink must canonicalize to the real db identity"
+        );
+        via_link
+    };
     assert_eq!(
         sup.actor_count(),
         1,
@@ -179,6 +194,7 @@ async fn symlink_or_junction_alias_converges_on_one_actor() {
     write(&real, "k.md", "value", 1, Arc::new(NoFaults))
         .await
         .expect("write real");
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     assert_eq!(read(&via_link, "k.md").await.as_deref(), Some("value"));
 }
 
@@ -330,10 +346,11 @@ fn case_alias_converges_on_one_actor() {
     assert_eq!(sup.actor_count(), 1);
 }
 
-// oracle: a file symlink to the db converges on the same actor. Skips if the
-// platform refuses symlink creation.
+// oracle: a file symlink to the db never forks a second writer. On Unix the
+// engine refuses a store file that is a link; on Windows the link resolves to
+// the target's id. Skips if the platform refuses symlink creation.
 #[test]
-fn file_symlink_converges_on_one_actor() {
+fn file_symlink_never_forks_a_writer() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
@@ -349,12 +366,26 @@ fn file_symlink_converges_on_one_actor() {
         Err(err) => panic!("symlink creation failed: {err}"),
     }
 
-    let b = sup.open(&link, 1).expect("open via symlink").actor;
-    assert_eq!(
-        a.identity(),
-        b.identity(),
-        "symlink resolves to the target's id"
-    );
+    #[cfg(unix)]
+    {
+        let Err(refused) = sup.open(&link, 1) else {
+            panic!("a store file that is a link must be refused");
+        };
+        assert!(
+            matches!(refused, RuntimeError::Identity { .. }),
+            "{refused:?}"
+        );
+        assert_ne!(a.lifecycle(), LifecycleState::Closed);
+    }
+    #[cfg(not(unix))]
+    {
+        let b = sup.open(&link, 1).expect("open via symlink").actor;
+        assert_eq!(
+            a.identity(),
+            b.identity(),
+            "symlink resolves to the target's id"
+        );
+    }
     assert_eq!(sup.actor_count(), 1);
 }
 

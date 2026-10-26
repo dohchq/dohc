@@ -10,7 +10,7 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -39,6 +39,7 @@ import {
 import {
   DaemonRefusalError,
   YdocOwnerDraftPendingError,
+  YdocReleasedWithSettleFailureError,
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -56,9 +57,13 @@ import {
 import * as Y from "yjs";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import { deferred } from "../testing/deferred";
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
 
 import { createTestScratch } from "./testTemp";
+import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -165,6 +170,7 @@ const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 interface CaptureOptions {
   diskWriter?: EngineDiskWriter;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
+  discardUnsentState?: WorkspaceEngineCaptureOptions["discardUnsentState"];
   store?: CaptureVersionedTextStore;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
@@ -209,7 +215,7 @@ function caseInsensitiveDisk(root: string, path: string, text: string) {
   return { writer, operations, read: (path: string) => files.get(key(join(root, path))) };
 }
 
-describe("protected materialization order", () => {
+describe("merge materialization order", () => {
   it("keeps a protected merge's case-variant target on a case-insensitive disk", async () => {
     const root = await createTestScratch("dohc-protected-merge-order-");
     const loopback = new VersionedLoopbackEngine();
@@ -263,6 +269,57 @@ describe("protected materialization order", () => {
       await engine.stop();
     }
   });
+
+  // The engine places each text merge on disk before the next one starts.
+  it.each([
+    ["merges a text file's old spelling before its new one", "notes.md", "Notes.md", ["notes.md", "Notes.md"]],
+    ["keeps path order for a rename to another name", "b.md", "a.md", ["a.md", "b.md"]],
+    ["merges a dotless i's old spelling first", "\u0131.md", "I.md", ["\u0131.md", "I.md"]],
+    ["merges a normalization respelling's old spelling first", "caf\u00e9.md", "cafe\u0301.md", ["caf\u00e9.md", "cafe\u0301.md"]],
+  ])("%s", async (_name, from, to, order) => {
+    const root = await createTestScratch("dohc-text-merge-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const merged: string[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        merged.push((request.params as { path: string }).path);
+      }
+      return await send(request);
+    });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: from, text: "old\n" });
+    await write(root, from, "old\n");
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      await stores.store.deleteTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: draftId,
+        path: from,
+        metadata: { origin: "api" },
+      });
+      loopback.seedTextFile({
+        workspace: WORKSPACE_ID,
+        versionId: draftId,
+        path: to,
+        text: "new\n",
+      });
+      await engine.switchVersion("main");
+
+      await engine.mergeVersionIntoMain(draftId);
+      expect(merged).toEqual(order);
+    } finally {
+      await engine.stop();
+    }
+  });
 });
 
 describe("probeEngineStoreRefusal", () => {
@@ -294,7 +351,7 @@ describe("probeEngineStoreRefusal", () => {
     const sessions = mockLiveSessions(
       new VersionedLoopbackEngine(),
       undefined,
-      () => ({ settled: true, running: true, degraded: false, heldFiles: [] }),
+      () => ({ deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] }),
       async () => {
         throw probeError;
       },
@@ -632,6 +689,11 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(session.doc.getMap("frontmatter").toJSON()).toEqual(status === "ownerPending"
       ? { Name: "Manual", id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : { Name: "Manual" });
     expect(open).toHaveBeenCalledTimes(2);
+    // The note open and the record's adoption both read a seed past the
+    // in-band cap, up to the WYSIWYG editor's limit (#2521).
+    for (const [options] of open.mock.calls) {
+      expect(options).toMatchObject({ largeSeed: { workspaceId: WORKSPACE_ID, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES } });
+    }
     expect(healthyEvict).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
     expect(evict).not.toHaveBeenCalled();
@@ -1702,7 +1764,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let settled = true;
     const sessions = mockLiveSessions(loopback, requests, () => {
       if (!settled) polling.resolve();
-      return { settled, running: true, heldFiles: [], degraded: !settled };
+      return { deferredWrites: [], settled, running: true, heldFiles: [], degraded: !settled };
     });
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, { rustEngineSessions: sessions });
@@ -1727,7 +1789,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
-    const sessions = mockLiveSessions(loopback, undefined, () => ({
+    const sessions = mockLiveSessions(loopback, undefined, () => ({ deferredWrites: [],
       settled,
       running: true,
       heldFiles: [], degraded: !settled,
@@ -1922,6 +1984,231 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  // dohc#2308. A replicated document's release can succeed over a refused
+  // save, and its session is then gone. Its text, set aside when the save
+  // over the deleted file was first refused, stays set aside. A draft the
+  // store refuses tells the person.
+  it.each(["kept", "refused"] as const)("sets a deleted file's text aside before a replicated release (%s)", async (store) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const drafts: string[] = [];
+    const preserveUnsentState = vi.fn(async ({doc}: {doc: Y.Doc}) => {
+      if (store === "refused") throw new Error("Draft storage refused.");
+      drafts.push(doc.getText("plainText").toString());
+      return "a".repeat(64);
+    });
+    const discardUnsentState = vi.fn(async () => undefined);
+    const notices = vi.fn();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
+          settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
+          close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, "typed");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await expect(session.close()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    if (store === "kept") {
+      expect(drafts).toEqual(["typed"]);
+      expect(preserveUnsentState).toHaveBeenCalledWith(expect.objectContaining({path: "notes/a.md", reason: "deleted"}));
+      expect(notices).not.toHaveBeenCalled();
+    } else {
+      expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
+    }
+    engine.beginShutdown();
+    await engine.stop();
+    expect(discardUnsentState).not.toHaveBeenCalled();
+  });
+
+  // #2463 in a synced workspace. A replicated release succeeds over a save
+  // refused because the file changed outside dohc. The close then waits for
+  // capture to record the outside version, as a local-only eviction does, and
+  // the refused save reads as that change, not as a failed save.
+  it("closes a synced note over a change made outside dohc like a local one", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const sessions = mockLiveSessions(loopback);
+    const live = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    let released = false;
+    const statusReads: string[][] = [];
+    const store = new Proxy(live, {
+      get(target, property) {
+        if (property === "watcherStatus") {
+          return async () => {
+            const deferredWrites = released ? [] : ["notes/a.md"];
+            statusReads.push(deferredWrites);
+            return {running: true, degraded: false, terminal: false, deferredWrites, keptFiles: [], heldFiles: []};
+          };
+        }
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const states: string[] = [];
+    const changedOutside: boolean[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: sessions, store, onError: () => undefined,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
+          settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
+          close: async () => { released = true; throw new YdocReleasedWithSettleFailureError(options.path, stale); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state), onChangedOutside: (unsaved) => changedOutside.push(unsaved)});
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, "typed");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
+    engine.start();
+    await vi.waitFor(() => expect(changedOutside).toEqual([true]));
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(states.at(-1)).toBe("changed-on-disk");
+    // The close answered after capture stopped holding the outside version.
+    expect(statusReads.at(-1)).toEqual([]);
+    engine.beginShutdown();
+    await engine.stop();
+  });
+
+  // A save can write the file and still find it gone, deleted again right
+  // after Save it again. The draft goes only once the file holds the text.
+  it("keeps a deleted file's draft when the file is gone again after a save wrote it", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const preserveUnsentState = vi.fn(async () => "d".repeat(64));
+    const discardUnsentState = vi.fn(async () => undefined);
+    const states: string[] = [];
+    let writes = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        let tokens = 0;
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => {
+            const token = ++tokens;
+            options.onSettleStart?.(token);
+            if (!writes) { options.onSettleError?.(stale, token); throw stale; }
+            const result = {sha256: createHash("sha256").update("typed").digest("hex"), content: "typed", materialized: true};
+            await options.onSettled?.(result as never, token);
+            return result as never;
+          },
+          close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state)});
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
+    writes = true;
+    await session.settleNow();
+    expect(states.at(-1)).toBe("changed-on-disk");
+    await session.close();
+    expect(discardUnsentState).not.toHaveBeenCalled();
+    await engine.stop();
+  });
+
+  // Document A's draft X became obsolete, and removing it failed. Document B's
+  // next draft step retries that removal, and while it is under way A's file
+  // is deleted again: A's refused save writes the same draft X, current
+  // again. The retry must not delete it.
+  it("keeps a draft that is current again while another document's retry removes its older write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const draftDirectory = await createTestScratch("dohc-engine-capture-drafts-");
+    const loopback = new VersionedLoopbackEngine();
+    for (const path of ["notes/a.md", "notes/b.md"]) loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path, text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const store = workspaceDraftStore(draftDirectory, WORKSPACE_ID, {all: () => [], workspaceIdOf: () => undefined});
+    const preserveUnsentState = vi.fn(store.preserveUnsentState);
+    let refusals = 1;
+    const retry = {held: deferred<void>(), holding: deferred<void>(), done: deferred<void>(), handle: ""};
+    const discardUnsentState = vi.fn(async (handle: string) => {
+      if (refusals-- > 0) throw new Error("The draft store is busy.");
+      if (handle !== retry.handle) return await store.discardUnsentState(handle);
+      retry.holding.resolve();
+      await retry.held.promise;
+      await store.discardUnsentState(handle);
+      retry.done.resolve();
+    });
+    const writes = new Map<string, boolean>();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: () => undefined, preserveUnsentState, discardUnsentState,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "typed");
+        let tokens = 0;
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: `object-${options.path}`, contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => {
+            const token = ++tokens;
+            options.onSettleStart?.(token);
+            if (!writes.get(options.path)) { options.onSettleError?.(stale, token); throw stale; }
+            const result = {sha256: createHash("sha256").update("typed").digest("hex"), content: "typed", materialized: true};
+            await options.onSettled?.(result as never, token);
+            return result as never;
+          },
+          close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const a = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined});
+    const b = await engine.openYDocSession({path: "notes/b.md", onRemoteUpdate: () => undefined});
+    const handleOf = async (call: number) => await preserveUnsentState.mock.results[call]!.value;
+
+    await expect(a.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
+    retry.handle = await handleOf(0);
+    // A saves, and the removal of X fails.
+    await write(root, "notes/a.md", "typed");
+    writes.set("notes/a.md", true);
+    await a.settleNow();
+    await vi.waitFor(() => expect(discardUnsentState).toHaveBeenCalledOnce());
+
+    // B's draft step retries X's removal, which waits.
+    await expect(b.settleNow()).rejects.toBe(stale);
+    await retry.holding.promise;
+    // A's file is deleted again, and A writes X again.
+    await rm(join(root, "notes/a.md"));
+    writes.set("notes/a.md", false);
+    await expect(a.settleNow()).rejects.toBe(stale);
+    await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledTimes(3));
+    expect((await handleOf(2)).split(":")[0]).toBe(retry.handle.split(":")[0]);
+    retry.held.resolve();
+    await retry.done.promise;
+
+    // Notices lists X, the text A's file never got, and B's draft.
+    expect((await listLiveDraftRecovery(draftDirectory, WORKSPACE_ID)).map(({path, text}) => `${path}: ${text}`).sort())
+      .toEqual(["notes/a.md: typed", "notes/b.md: typed"]);
+    await a.close();
+    await b.close();
+    await engine.stop();
+  });
+
   it("settles and retires every live Y.Doc session before stopping the capture", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
@@ -2023,8 +2310,8 @@ describe("workspaceEngineCapture batch capture", () => {
     };
   }
 
-  // Open a session on note.md, let its close settle, and report the save
-  // states that settle produced.
+  // Open a session on note.md, type the editor text, let the close settle it,
+  // and report the save states that settle produced.
   async function settleOnClose(
     root: string,
     settled: { sha256: string; content: string | null },
@@ -2040,6 +2327,9 @@ describe("workspaceEngineCapture batch capture", () => {
       onRemoteUpdate: () => undefined,
       onSaveState: (state) => states.push(state),
     });
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, EDITOR_TEXT);
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
     await session.close();
     await engine.stop();
     return states;
@@ -2340,6 +2630,7 @@ describe("workspaceEngineCapture batch capture", () => {
               running: true,
               degraded,
               terminal: false,
+              deferredWrites: [],
             });
           }
           if (property === "flushCapture") return async () => undefined;
@@ -2388,7 +2679,7 @@ describe("workspaceEngineCapture batch capture", () => {
         await release.promise;
         if (failFirst) throw new Error("temporary watcher failure");
       }
-      return { running: true, degraded: false, terminal: false, recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
     });
     const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
     const outcomes: WorkspaceEngineCaptureFailure[] = [];
@@ -2433,6 +2724,138 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // An engine still taking in a new workspace's files refuses the poll's
+  // reads. That is busy, not broken: no outcome changes, and a real error
+  // still reports a failure.
+  it("keeps the capture outcome while the engine is still updating, and reports a real failure", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const updating = () => new DaemonRefusalError(
+      { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+    let status: "updating" | "ok" = "ok";
+    let adoptionsAnswer: "updating" | "fail" | "ok" = "updating";
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => {
+          if (status === "updating") throw updating();
+          return { running: true, degraded: false, terminal: false, deferredWrites: [] };
+        };
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (adoptionsAnswer === "updating") throw updating();
+          if (adoptionsAnswer === "fail") throw new Error("store gone");
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    // The flush queues behind the poll, so its settling means the poll ran.
+    // It drains the same adoptions, so it can be refused too.
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      status = "updating";
+      await poll();
+      expect(outcomes).toEqual([]);
+
+      status = "ok";
+      adoptionsAnswer = "fail";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "updating";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "ok";
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+    } finally {
+      status = "ok";
+      adoptionsAnswer = "ok";
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
+  // Busy is bounded by the engine's own status. Its refusal cannot hide a
+  // degraded watcher, and the early-import deadline answers not running and
+  // degraded, which reports a failure whatever the adoptions answer.
+  it("reports a degraded or timed-out import while the engine still refuses reads", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    let watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] as string[] };
+    let refuseAdoptions = true;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (refuseAdoptions) {
+            throw new DaemonRefusalError(
+              { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+          }
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      watcher = { ...watcher, degraded: true };
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+
+      watcher = { ...watcher, degraded: false };
+      refuseAdoptions = false;
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+      // The deadline's status, with a refusal still in flight.
+      watcher = { ...watcher, running: false, degraded: true };
+      refuseAdoptions = true;
+      await poll();
+      expect(outcomes).toEqual(["other", null, "other"]);
+    } finally {
+      watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] };
+      refuseAdoptions = false;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -2442,7 +2865,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const polled = deferred();
     const watcherStatus = vi.fn(async () => {
       polled.resolve();
-      return { running: true, degraded: false, terminal: false, noAtomicPlacement: true };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], noAtomicPlacement: true };
     });
     const daemonStore = new Proxy(liveStore, {
       get(target, property) {
@@ -2506,7 +2929,7 @@ describe("workspaceEngineCapture batch capture", () => {
                   },
                 });
               }
-              return { running: true, degraded: false, terminal: false };
+              return { running: true, degraded: false, terminal: false, deferredWrites: [] };
             };
           }
           if (property === "flushCapture") return async () => undefined;
@@ -2740,7 +3163,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       const requests: Request[] = [];
       let settled = true;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,
@@ -3636,7 +4059,7 @@ describe("workspaceEngineCapture agent attribution", () => {
       const loopback = new VersionedLoopbackEngine();
       let settled = false;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,
@@ -4471,14 +4894,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           initialUpdate: Y.encodeStateAsUpdate(doc),
           contentKind: "plaintext",
           path: options.path,
-          get head() {
+          head: "absent" as const,
+          // Read first just after the session is installed.
+          get lineage() {
             if (!reportedDeath) {
               reportedDeath = true;
               options.onSessionError?.(reconnectFailure);
             }
             return "absent" as const;
           },
-          lineage: "absent" as const,
           unsettled: false,
           evict: async () => {
             evicts += 1;
@@ -4900,4 +5324,110 @@ it("names the run's person as capture's author, whoever is signed in here", asyn
     author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 },
   });
   await engine.stop();
+});
+
+it("checks one root copy name with one bounded identity lookup, including binary History-only files", async () => {
+  const root = await createTestScratch("duplicate-bounded-name-");
+  const loopback = new VersionedLoopbackEngine();
+  loopback.seedBinaryFile({workspace: WORKSPACE_ID, path: "copy.png", bytes: [0, 255], objectId: "binary-copy"});
+  const requests: Request[] = [];
+  const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback, requests)});
+  try {
+    await engine.changePathsAs(["source.png"], {operation: "duplicate", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", author: RESTORER}, async held => {
+      requests.length = 0;
+      expect(await held.hasPath("copy.png")).toBe(true);
+      expect(requests.map(request => [request.method, request.params])).toEqual([
+        ["files.resolve", {versionId: "main", targets: [{path: "copy.png"}]}],
+      ]);
+    }, () => []);
+  } finally {await engine.stop();}
+});
+
+it.each(["pending-placement", "undone", "deleted", "renamed", "superseded", "replaced"] as const)(
+  "checks the real Duplicate receipt guard when the copy is %s", async state => {
+    const root = await createTestScratch("duplicate-receipt-guard-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const sessions = mockLiveSessions(loopback, requests);
+    const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const path = "copy.md";
+    const target = {workspaceId: WORKSPACE_ID, versionId: "main", path};
+    await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+    await store.writeTextFile({...target, text: "copied", metadata: {origin: "api", correlationId: operationId}});
+    // The loopback has no operation ledger. Only its header is supplied here;
+    // identity resolution and moment reads use the loopback's actual state.
+    vi.spyOn(store, "readHistoryOperation").mockResolvedValue({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"});
+    const engine = capture(root, {store, rustEngineSessions: sessions});
+    const readReceipt = () => engine.changePathsAs(["source.md"], {operation: "duplicate", operationId, author: RESTORER}, async held => {
+      requests.length = 0;
+      const result = await held.readDuplicate(operationId, path);
+      expect(requests.every(request => request.method !== VERSIONED_METHOD.historyPage)).toBe(true);
+      const moments = requests.filter(request => request.method === VERSIONED_METHOD.momentsList);
+      expect(moments.length).toBeLessThanOrEqual(1);
+      if (moments.length) expect(moments[0]?.params).toMatchObject({limit: 1});
+      return result;
+    }, () => []);
+    try {
+      // Valid even before any copy exists on disk.
+      expect(await readReceipt()).toEqual({path});
+      if (state === "pending-placement") return;
+      if (state === "undone" || state === "deleted" || state === "replaced") {
+        await store.deleteTextFile({...target, metadata: {origin: state === "undone" ? "restore" : "api"}});
+      }
+      if (state === "renamed") {
+        await store.renameTextFile({workspaceId: WORKSPACE_ID, versionId: "main", fromPath: path, toPath: "renamed.md", metadata: {origin: "api"}});
+      }
+      if (state === "superseded" || state === "replaced") {
+        await store.writeTextFile({...target, text: "later", metadata: {origin: "api", correlationId: "later-operation"}});
+      }
+      expect(await readReceipt()).toBeNull();
+    } finally {await engine.stop();}
+  },
+);
+
+it("drops an undone pending-placement receipt through the real guard before a fresh Duplicate", async () => {
+  const root = await createTestScratch("duplicate-pending-undo-receipt-");
+  await writeFile(join(root, "source.md"), "Original");
+  const loopback = new VersionedLoopbackEngine();
+  const sessions = mockLiveSessions(loopback);
+  const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+  await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+  // Only the operation header is supplied; the receipt guard reads actual heads and moments.
+  vi.spyOn(store, "readHistoryOperation").mockImplementation(async ({operationId}) => ({operationId, versionId: "main", momentCount: 1, kind: "file-duplicate"}));
+  const engine = capture(root, {store, rustEngineSessions: sessions});
+  const commits: string[] = [];
+  const pendingCapture: Pick<WorkspaceEngineCapture, "changePathsAs"> = {
+    changePathsAs: (paths, authored, work, removed) => engine.changePathsAs(paths, authored, held => work({
+      ...held,
+      recordDisk: async (_path, files) => [...files],
+      duplicateFile: async (_from, path) => {
+        commits.push(authored.operationId!);
+        await store.writeTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path, text: "Original", metadata: {origin: "api", correlationId: authored.operationId}});
+        const materialized = commits.length > 1;
+        if (materialized) await writeFile(join(root, path), "Original");
+        return {path, materialized};
+      },
+    }), removed),
+  };
+  const operation = {workspace: {workspaceId: WORKSPACE_ID, rootPath: root}, assertCurrent() {}};
+  await openedLocalState(operation.workspace);
+  const run = () => duplicateWorkspaceFile(operation, "source.md", RESTORER, pendingCapture);
+  const directory = join(root, ".dohc/local/duplicate-pending");
+  try {
+    const pending = await run();
+    expect(pending.materialized).toBe(false);
+    expect(existsSync(join(root, pending.path))).toBe(false);
+    const receipt = join(directory, (await readdir(directory))[0]!);
+    expect(JSON.parse(await readFile(receipt, "utf8"))).toMatchObject({operationId: pending.operationId});
+    // The Rust pending-create proof exercises the Undo transaction and placement.
+    // Apply its resulting head here, without ever writing the cancelled copy.
+    await store.deleteTextFile({workspaceId: WORKSPACE_ID, versionId: "main", path: pending.path, metadata: {origin: "restore"}});
+    const fresh = await run();
+    expect(fresh.operationId).not.toBe(pending.operationId);
+    expect(fresh.path).toBe(pending.path);
+    expect(commits).toEqual([pending.operationId, fresh.operationId]);
+    expect(await readdir(directory)).toEqual([]);
+    expect(await readFile(join(root, fresh.path), "utf8")).toBe("Original");
+  } finally {await engine.stop();}
 });

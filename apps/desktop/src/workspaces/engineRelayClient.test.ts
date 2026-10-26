@@ -1,3 +1,4 @@
+import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -64,6 +65,7 @@ const EDIT_SELECTOR = {
 } as const;
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
@@ -80,8 +82,14 @@ class MockDaemon implements EngineDaemonClient {
     }
     const result = (() => {
       switch (request.method) {
-        case "workspace.open":
-          return { workspace: "ws-mock" };
+        case "workspace.open": {
+          // As the engine's open does, make `.dohc/local` and say so.
+          const { rootDir } = request.params as { rootDir: string };
+          if (existsSync(rootDir)) {
+            mkdirSync(join(rootDir, ".dohc", "local"), { recursive: true, mode: 0o700 });
+          }
+          return { workspace: "ws-mock", localStateReady: true };
+        }
         case "workspace.close":
           return { closed: true };
         case "sync.push":
@@ -216,6 +224,8 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
   const sessions = new EngineWorkspaceSessions(source, {
     transportRebindAttempts: 1,
   });
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const live = new EngineRelayClient({
     sessions,
     routes,
@@ -1204,6 +1214,7 @@ describe("EngineRelayClient", () => {
     const outcome = await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
+      attachmentId,
       relay,
       shareId: "share-view",
       store,
@@ -1270,6 +1281,7 @@ describe("EngineRelayClient", () => {
     await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
+      attachmentId,
       relay,
       shareId: "share-view",
       store,
@@ -1594,6 +1606,7 @@ describe("EngineRelayClient", () => {
       refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
+        attachmentId,
         relay,
         shareId: "share-view",
         store,
@@ -1726,6 +1739,7 @@ describe("EngineRelayClient", () => {
       refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
+        attachmentId,
         relay,
         shareId: "share-revoked",
         store,

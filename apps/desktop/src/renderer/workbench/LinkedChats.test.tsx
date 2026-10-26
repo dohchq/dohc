@@ -8,7 +8,8 @@ import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AboutFile, AccessContext } from "./About";
+import type { AboutFile } from "./About";
+import type { AccessContext } from "./accessReason";
 
 const messageRenderGate = vi.hoisted(() => ({
   current: null as { resume: Promise<void>; onRender: () => void } | null,
@@ -55,7 +56,8 @@ function stubAnimationFrames() {
 }
 
 // History stands in as the file it was given: these tests pin what the panel
-// hands it, not what History then reads.
+// hands it, not what History then reads. Links reads its own query, which
+// About.test.tsx pins.
 vi.mock("./About", async (importOriginal) => {
   const { createElement } = await import("react");
   return {
@@ -66,6 +68,7 @@ vi.mock("./About", async (importOriginal) => {
         { "data-testid": "about-history-file" },
         file.status === "ready" ? `ready:${file.objectId}` : file.status,
       ),
+    AboutLinks: () => null,
   };
 });
 
@@ -79,12 +82,13 @@ const accessContext: AccessContext = {
 };
 
 type PanelProps = ComponentProps<typeof ProductionLinkedChatsPanel>;
+const links: PanelProps["links"] = { revision: 0, onOpenLink: vi.fn() };
 
 // The workspace shell provides the reaction store in production.
-function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext"> & Partial<Pick<PanelProps, "notices">>) {
+function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext" | "links"> & Partial<Pick<PanelProps, "notices">>) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} {...props} />
+      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} links={links} {...props} />
     </ReactionStoreProvider>
   );
 }
@@ -164,7 +168,7 @@ describe("LinkedChatsPanel with no file focused", () => {
         workspaceId="workspace-1"
         filePath={null}
         aboutTabOpen={aboutTabOpen}
-        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, paused: false, onOpenMoment: () => undefined } })}
         onError={() => undefined}
       />,
     );
@@ -749,7 +753,7 @@ describe("LinkedChatsPanel thread and file reads", () => {
         workspaceId="workspace-1"
         filePath="docs/plan.md"
         initialThread={searchThread}
-        history={{ revision: 0, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
         onError={() => undefined}
       />,
     );
@@ -1092,6 +1096,7 @@ describe("LinkedChats reactions through the workspace store", () => {
           onError={onError}
           notices={notices}
           accessContext={accessContext}
+          links={links}
         />
       </div>
     );

@@ -2,7 +2,7 @@ import {afterEach, expect, it} from "vitest";
 import { createHash } from "node:crypto";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
-import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
+import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {asRecord} from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
@@ -22,6 +22,14 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
   moment(12, {operation: "delete", path: "plan.md", payloadBeforePath: "plan.md", payloadBeforeBlobSha256: second}),
 ]};
 servedLog = logPage;
+
+it.each(["view", "comment"] as const)("current-only %s agents cannot enumerate History", async access => {
+  const f = fixture(access), client = await f.connect(await f.exchange());
+  expect((await client.listTools()).tools.map(tool => tool.name)).not.toContain("dohc_list_changes");
+  await expect(client.callTool({name:"dohc_list_changes",arguments:{since:0}})).rejects.toThrow("not found");
+  expect(f.calls.some(call=>new URL(call.url).pathname === "/sync/link/log")).toBe(false);
+  expect((await client.callTool({name:"dohc_share_status",arguments:{}})).structuredContent).toMatchObject({summary:expect.stringContaining("History is unavailable")});
+});
 
 it("returns identical opaque MCP refusals before and after evicting a revoked session", async () => {
   const f = fixture();
@@ -50,6 +58,8 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
   let revoked = false;
   let rateLimited: string | undefined;
   let refusalCode: "link_read_rate_limited" | "link_unavailable" = "link_read_rate_limited";
+  // The relay path whose next answer is lost after the relay made it.
+  let lost: string | undefined;
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
     relayExchangeKey: "exchange-key-at-least-thirty-two-bytes", publicHosts: new Set(["share.example.test"]),
     ...(live ? {publicEditRelease: {version: 1 as const}, linkLive: {publicOrigin: origin,
@@ -61,6 +71,10 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     async fetchRelay(request) {
       calls.push(request);
       const path = new URL(request.url).pathname;
+      if (path === lost) {
+        lost = undefined;
+        throw new TypeError("connection reset");
+      }
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
@@ -77,6 +91,8 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       }
       if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
+      // Not a Group share's link, so it has no channel.
+      if (path === "/sync/link/chat/channels") return new Response(null, {status: 404});
       throw new Error(`Unexpected route: ${path}`);
     }});
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host: "share.example.test", ...init.headers}}));
@@ -101,8 +117,29 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;}};
+  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;},
+    lose(path: string) {lost = path;}};
 }
+
+it("tells an agent to try again when a files, changes, file or discussion answer is lost", async () => {
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const again = {isError: true, content: [{type: "text", text: LINK_REFUSALS.link_unavailable.error}]};
+  for (const [path, name, args] of [
+    ["/sync/link/current", "dohc_list_files", {}],
+    ["/sync/link/log", "dohc_list_changes", {}],
+    [`/sync/link/blobs/${first}`, "dohc_read_file", {blobSha256: first}],
+    ["/sync/link/discussion", "dohc_read_discussion", {}],
+  ] as const) {
+    f.lose(path);
+    expect(await client.callTool({name, arguments: args}), name).toMatchObject(again);
+    expect((await client.callTool({name, arguments: args})).isError, name).toBeFalsy();
+  }
+  // A post whose answer was lost may have landed, so the agent keeps its key.
+  f.lose("/sync/link/discussion");
+  expect(await client.callTool({name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "same-key"}})).toMatchObject({isError: true,
+    structuredContent: {ok: false, code: "link_unavailable",
+      error: "dohc could not confirm this post, so it may have posted. Send it again with the same idempotencyKey and fields; it posts only once."}});
+});
 
 it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
   const f = fixture(); const client = await f.connect(await f.exchange());
@@ -259,7 +296,7 @@ it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-c
 });
 
 it("lists the link log as changes through the browser's log route", async () => {
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {since: 7, limit: 50}})).structuredContent).toEqual({ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, changes: [
     {recordedAtMs: 8000, operation: "write", path: "doc.md", afterBlobSha256: first, contentKind: "text"},
     {recordedAtMs: 9000, operation: "write", path: "doc.md", afterBlobSha256: second, contentKind: "text", beforeBlobSha256: first},
@@ -279,7 +316,7 @@ it("lists the link log as changes through the browser's log route", async () => 
 it("shows a pinned version's fork snapshot as one version change", async () => {
   servedLog = {ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, ops: [{relaySeq: 5, originSeq: 5, opKind: "version.create", recordedAtMs: 5000,
     payload: {versionId: "v1", forkSnapshots: [{path: "doc.md", blobSha256: first}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md"}]}}]};
-  const f = fixture("view", false, "v1"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true, "v1"); const client = await f.connect(await f.exchange());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {}})).structuredContent).toEqual({ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, changes: [
     {recordedAtMs: 5000, operation: "version", versionId: "v1", files: [
       {path: "doc.md", blobSha256: first, contentKind: "text"}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md", contentKind: "text"},
@@ -289,14 +326,14 @@ it("shows a pinned version's fork snapshot as one version change", async () => {
 
 it("returns an error and no changes for a malformed log page", async () => {
   servedLog = {...logPage, ops: [...logPage.ops, moment(13, {operation: "write", payloadAfterPath: "doc.md", payloadAfterBlobSha256: "not-a-hash"})]};
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   const result = await client.callTool({name: "dohc_list_changes", arguments: {}});
   expect(result).toMatchObject({isError: true});
   expect(result.structuredContent).toBeUndefined();
 });
 
 it("refuses the log after the link is revoked", async () => {
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
   f.revoke();
   await expect(client.callTool({name: "dohc_list_changes", arguments: {}})).rejects.toThrow();
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/log")).toBe(false);
@@ -321,8 +358,7 @@ it.each([
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");
   expect(summary).toContain("this share's comments");
-  expect(summary).toContain("retained history of files that remain in this share");
-  expect(summary).toContain("Deleted files and files moved out lose their readable history.");
+  expect(summary).toContain(access === "edit" ? "retained History of files that remain in this share" : "History is unavailable with view or comment access.");
   if (access !== "edit") expect(summary).toContain(access === "view" ? "does not let you comment or edit" : "does not let you edit files");
   if (versionId !== null) {
     expect(summary).toContain("pinned version");
@@ -332,7 +368,7 @@ it.each([
     expect(summary).toContain("You can change a Collection's collection.yaml and automations.yaml here.");
   }
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
-  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
+  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share", "/sync/link/chat/channels"].includes(new URL(call.url).pathname))).toBe(true);
 });
 
 it("describes an unfiltered link without claiming access to private workspace data", async () => {

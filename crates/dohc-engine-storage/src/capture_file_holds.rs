@@ -178,3 +178,11 @@ pub fn rebase_switch_jobs_in(
     }
     Ok(())
 }
+
+/// Connection-local revision, including rolled-back changes, for blocker snapshots.
+pub fn generation_in(conn: &Connection) -> rusqlite::Result<u64> {
+    let generation: i64 = conn.query_row("SELECT dohc_placement_hold_generation()", [], |row| {
+        row.get(0)
+    })?;
+    u64::try_from(generation).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, generation))
+}

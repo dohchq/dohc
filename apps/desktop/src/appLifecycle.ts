@@ -100,6 +100,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     refreshTray(): Promise<boolean>;
     /** dohc stays in the tray: close workspaces nothing uses any more. */
     releaseIdleWorkspaces(): Promise<void>;
+    /** dohc stays running after its last window: say so where no tray does. */
+    noticeRunningInBackground(): Promise<void>;
     reportTrayFailure(error: unknown): void;
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
@@ -138,6 +140,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     disposeDatabase(): Promise<void>;
     closeRelay(): Promise<void>;
     stopEngine(): Promise<void>;
+    // Writes how dohc's own shutdown ended, just before the process exits.
+    reportQuit(line: string): void;
   };
 }) {
   const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
@@ -154,6 +158,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   app.on("will-quit", (event) => {
     if (quitting) return;
     quitting = true;
+    const shutdownStarted = Date.now();
     // Every ordinary quit reaches here, including Update and Restart's.
     launch.finished();
     event.preventDefault();
@@ -206,6 +211,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }),
     ]).finally(() => {
       clearTimeout(shutdownTimer);
+      shutdown.reportQuit(budgetExpired
+        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget`
+        : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`);
       app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
   });
@@ -436,7 +444,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
           .then((enabled) => {
             if (!enabled && !quitting) app.quit();
             // A failed close leaves the workspace open; it never quits dohc.
-            else if (enabled && !quitting) return services.releaseIdleWorkspaces().catch(() => undefined);
+            else if (enabled && !quitting) {
+              void services.noticeRunningInBackground().catch(services.reportTrayFailure);
+              return services.releaseIdleWorkspaces().catch(() => undefined);
+            }
           })
           .catch(() => {
             if (!quitting) app.quit();

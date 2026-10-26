@@ -33,13 +33,14 @@ pub(crate) fn record_request(
     payload_hash: &str,
     result_seq: i64,
     now_ms: i64,
+    kind: &str,
 ) -> Result<(), DomainError> {
     if let Some(request_id) = request_id {
         tx.execute(
             "INSERT INTO engine_requests \
              (request_id, payload_hash, result_seq, committed_at, kind) \
-             VALUES (?1, ?2, ?3, ?4, 'versioned')",
-            params![request_id, payload_hash, result_seq, now_ms],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![request_id, payload_hash, result_seq, now_ms, kind],
         )
         .map_err(DomainError::sql_persist)?;
     }

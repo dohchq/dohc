@@ -144,6 +144,14 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   );
 }
 
+// A degraded initial capture has not read the file a document open names. No
+// capture wake follows, so the open does not wait; it stays read-only until
+// the person opens it again.
+export function isYdocFileNotReadRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") ===
+    "dohc has not read this file yet. Open it again once dohc has read it.";
+}
+
 // The engine refused a request's input as its domain states it. The daemon
 // keeps the domain's reason to itself and sends only this discriminator, so
 // a caller reads it for a request whose only such refusal it knows.
@@ -221,7 +229,7 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
 
 // Native live operations reserve shared slots and bytes before reading state.
 // A competing operation can release this capacity without any user action.
-function isLiveSettlementCapacityRefusal(error: unknown): boolean {
+export function isLiveSettlementCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "live-settlement-capacity";
 }
 

@@ -182,7 +182,9 @@ export async function processDescendants(
   try {
     const table = parseProcessTable(await readProcessTable());
     return processTreePids(table, rootPid).filter((pid) => pid !== rootPid);
-  } catch {
+  } catch (error) {
+    // A slow or failed read counts as finding nothing, so leave a trace.
+    console.warn("[desktop] could not read the process table, so this capture found nothing", error);
     return [];
   }
 }

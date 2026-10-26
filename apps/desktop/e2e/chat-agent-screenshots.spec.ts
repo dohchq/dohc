@@ -8,6 +8,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
+  trustOpenWorkspace,
   seedWorkspaceManifest,
 } from "./helpers/workspace";
 
@@ -53,6 +54,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     const env = await installFakeAgentTools(temp);
     desktop = await launchDesktopApp({ workspace: temp, env });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
 
     await page.getByTestId(activityPin("chats")).click();

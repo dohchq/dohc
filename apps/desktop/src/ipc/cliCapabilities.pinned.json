@@ -1,5 +1,8 @@
 {
   "socket": {
+    "accessRefresh": [
+      "access.refresh"
+    ],
     "accessObject": [
       "access.object.read"
     ],
@@ -80,6 +83,24 @@
     ],
     "saveKeptCopy": [
       "file.kept.save"
+    ],
+    "retainedCopies": [
+      "file.retained.list"
+    ],
+    "deleteRetainedCopies": [
+      "file.retained.delete"
+    ],
+    "liveKeptEdits": [
+      "workspace.status"
+    ],
+    "saveRecoveryCopy": [
+      "share.live.document.recovery.save"
+    ],
+    "retryKeptEdits": [
+      "share.live.document.retry"
+    ],
+    "stopAgain": [
+      "share.live.document.stop"
     ],
     "documentEdit": [
       "document.edit"
@@ -187,9 +208,22 @@
     ],
     "linksResolve": [
       "links.resolve"
+    ],
+    "linksEdges": [
+      "links.edges"
+    ],
+    "chatFileMentions": [
+      "chat.read"
+    ],
+    "fileDuplicate": [
+      "file.duplicate"
+    ],
+    "chatLinks": [
+      "chat.read"
     ]
   },
   "public": {
+    "access refresh": "access.refresh",
     "access object": "access.object.read",
     "access sharing": "access.sharing.read",
     "document read": "document.read",
@@ -197,6 +231,10 @@
     "document create": "document.create",
     "document chats": "file.chats.list",
     "document comment": "file.chat.start",
+    "document kept-edits": "workspace.status",
+    "document save-recovery-copy": "share.live.document.recovery.save",
+    "document retry-kept-edits": "share.live.document.retry",
+    "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
     "chat inbox": "chat.inbox.read",
@@ -269,6 +307,10 @@
     "history operation": "history.operation.read",
     "history undo": "history.operation.undo",
     "links in": "links.in",
-    "links resolve": "links.resolve"
+    "links resolve": "links.resolve",
+    "links edges": "links.edges",
+    "chat file-mentions": "chat.read",
+    "file duplicate": "file.duplicate",
+    "chat links": "chat.read"
   }
 }

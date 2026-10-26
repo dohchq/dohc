@@ -3,6 +3,12 @@ import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ProductDemo } from "../../../../site/src/ProductDemo";
 
+// jsdom has no IndexedDB, so the demo would warn that this browser cannot
+// keep its images. Browsers the site supports have it.
+vi.hoisted(() => {
+  Object.defineProperty(window, "indexedDB", { configurable: true, value: {} });
+});
+
 vi.mock("../editor/MarkdownEditor", () => ({ MarkdownEditor: () => null }));
 
 beforeEach(() => {
@@ -12,11 +18,11 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("offers only the five working demo panels", () => {
+it("offers only the five working demo panels, then Notices", () => {
   const { container } = render(<ProductDemo />);
   const rail = within(within(container).getByRole("navigation", { name: "Activity bar" }));
   expect(rail.getAllByRole("button").map((button) => button.getAttribute("aria-label")))
-    .toEqual(["Explorer", "Chats", "Search", "Graph", "History"]);
+    .toEqual(["Explorer", "Chats", "Search", "Graph", "History", "Notices"]);
   expect(rail.queryByRole("button", { name: "Sharing" })).toBeNull();
 
   for (const name of ["Chats", "Search", "Graph", "History", "Explorer"]) {

@@ -16,7 +16,7 @@ interface SettingsRead {
 }
 
 const USER_FILE = "dohc-settings.json";
-const WORKSPACE_FILE = ".dohc/settings.local.json";
+const WORKSPACE_FILE = ".dohc/local/settings.local.json";
 
 /** What a settings read owes the person, or null when the whole file applies. */
 export function settingsFileNotice(

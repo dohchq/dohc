@@ -103,6 +103,45 @@ describe("Schedules run on", () => {
     expect(screen.queryByTestId("settings-row-schedule-host")).toBeNull();
   });
 
+  it("names the other computer that runs a workspace that never synced, and asks before this computer takes over", async () => {
+    const takeOverScheduleHost = vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "this-computer" }));
+    install({
+      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's laptop", sameName: false, waits: true })),
+      takeOverScheduleHost,
+    });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
+    expect(elsewhere.textContent).toBe("Ice's laptopTake over now");
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(takeOverScheduleHost).not.toHaveBeenCalled();
+    expect(within(elsewhere).getByRole("alert").textContent).toBe("If Ice's laptop is still on, a run can repeat.");
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(takeOverScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", generation: 0 });
+    expect((await screen.findByTestId("schedule-host-note")).textContent).toBe("This computer");
+    expect(screen.queryByTestId("schedule-host-elsewhere")).toBeNull();
+  });
+
+  it("says no computer runs the schedules when dohc cannot read which one should, and offers to take over", async () => {
+    const message = "No computer runs this workspace's schedules, because dohc could not read which one should. dohc does not have permission.";
+    install({ readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "no-computer", message })) });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
+    expect(elsewhere.textContent).toContain(message);
+    await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
+    expect(within(elsewhere).getByRole("alert").textContent).toBe("If another computer is still on, a run can repeat.");
+  });
+
+  it("says when the computer that runs them has this computer's name", async () => {
+    install({
+      readScheduleHost: vi.fn(async (): Promise<ScheduleHostResult> => ({ kind: "another-computer", label: "Ice's desktop", sameName: true, waits: true })),
+    });
+    render(<ScheduleHostRow workspaceId="ws" />);
+    const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
+    expect(elsewhere.textContent).toContain("Ice's desktop");
+    expect(elsewhere.textContent).toContain("Same name as this computer. It may be an earlier installation of dohc here.");
+    expect(within(elsewhere).getByRole("button", { name: "Take over now" })).toBeTruthy();
+  });
+
   it("checks again after a note, as when the connection comes back", async () => {
     const onError = vi.fn();
     const readScheduleHost = vi.fn()

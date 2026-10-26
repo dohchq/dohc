@@ -8,7 +8,8 @@ import {
 
 export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 
-// The on-disk contract for `<workspace>/.dohc/settings.local.json`.
+// The on-disk contract for `<workspace>/.dohc/local/settings.local.json`, the
+// settings one computer keeps for a workspace.
 //
 // It lives here, not in the desktop app, so every reader parses the file
 // through one schema.

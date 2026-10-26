@@ -5,8 +5,8 @@
        mark. scripts/render-icon.mjs renders it to icon.icns; sizes of 32px
        and under use the heavier small-size mark and drop the grid. -->
   <style>
-    .mark { stroke-width: 8; }
-    .dot { r: 9; }
+    .mark { stroke-width: 11; }
+    .dot { r: 12; }
   </style>
   <defs>
     <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
@@ -29,7 +29,7 @@
   <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#paper)" filter="url(#shadow)"/>
   <g class="grid" clip-path="url(#body)"><rect x="100" y="100" width="824" height="824" fill="url(#grid)"/></g>
   <rect x="102" y="102" width="820" height="820" rx="183.4" fill="none" stroke="url(#rim)" stroke-width="4"/>
-  <g transform="translate(291 251) scale(4.75)">
+  <g transform="translate(231.2 182) scale(6)">
     <path class="mark" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
       fill="none" stroke="#2d342e" stroke-linejoin="round"/>
     <circle class="dot" cx="38" cy="58" fill="#2d342e"/>

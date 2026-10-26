@@ -81,7 +81,7 @@ describe("workspaceFiles through an in-workspace alias", () => {
 
   it("deletePath refuses to trash workspace state", async () => {
     await expect(
-      deletePath(root, "meta/settings.json", rejectingTrash),
+      deletePath({ workspaceId: "real-path", rootPath: root }, "meta/settings.json", rejectingTrash),
     ).rejects.toThrow(/Delete path leads to a reserved area/);
     expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
       SETTINGS,

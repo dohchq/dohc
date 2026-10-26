@@ -43,8 +43,9 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
     const metadata = [
       `**${renderAuthorDisplayName(message.author)}**`,
       // An automation's message says so, so an agent it woke knows no
-      // person wrote the request.
+      // person wrote the request. A link holder's says it came through a link.
       ...(message.author.kind === "automation" ? ["automation"] : []),
+      ...(message.author.kind === "link" ? ["link holder"] : []),
       new Date(message.createdAtMs).toISOString(),
       formatMessageHandle(message.id),
     ];

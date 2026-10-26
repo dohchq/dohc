@@ -13,6 +13,7 @@ import { createSitePreviewLifecycle, START_CANCELLED_MESSAGE } from "./sitePrevi
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
+import { WorkspaceRestrictedError } from "./workspaceTrust";
 
 vi.mock("./siteRunner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./siteRunner")>();
@@ -67,15 +68,21 @@ async function harness() {
   const resolveOwner = vi.fn(async (_workspace: { workspaceId: string }, _path: string): Promise<{ target: ShareViewFilesTarget; path: string } | null> => ({ target: ownerTarget, path: "portal/dist" }));
   let files: Pick<ShareViewFiles, "read"> | undefined;
   let resolvePort: typeof resolveOwner | undefined;
+  let trusted = true;
+  const assertMayRunAppCode = vi.fn(async (_workspace: { workspaceId: string; rootPath: string }) => {
+    if (!trusted) throw new WorkspaceRestrictedError();
+    return () => undefined;
+  });
   const execute = createAppPreviewExecution({
     get shareViewFiles() { if (!files) throw new Error("File owner not constructed"); return files; },
     get shareViewFilesTargetForPath() { if (!resolvePort) throw new Error("Path owner not constructed"); return resolvePort; },
+    assertMayRunAppCode,
   });
   files = { read: readOwner };
   resolvePort = resolveOwner;
   const devHandle: SiteProcessHandle = {
     url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: join(workspaceRoot, "portal"),
-    logs: () => [log("Ready")], onExit: () => undefined, stop: vi.fn(async () => undefined),
+    logs: () => [log("Ready")], onExit: () => undefined, stop: vi.fn(async () => undefined), stillRunning: async () => [],
   };
   vi.mocked(startSiteDevServer).mockResolvedValue(devHandle);
   vi.mocked(buildSite).mockResolvedValue({ ok: true, command: "node", args: ["build.js"], outputPath: join(workspaceRoot, "portal", "dist"), logs: [log("Built")], exitCode: 0 });
@@ -86,7 +93,9 @@ async function harness() {
   };
   return {
     workspaceRoot, controller, app, input, readOwner, resolveOwner, ownerTarget, devHandle, execute, run, write,
+    assertMayRunAppCode,
     retire: () => { current = false; },
+    restrict: () => { trusted = false; },
     replaceFiles: (value: Pick<ShareViewFiles, "read">) => { files = value; },
     share: async () => {
       app.root = "shared-with-me/alice/portal";
@@ -100,6 +109,33 @@ async function harness() {
 }
 
 describe("app preview execution", () => {
+  describe("in Restricted Mode", () => {
+    it("checks trust just before it starts a dev server, and starts none", async () => {
+      const h = await harness();
+      h.app.scripts = { dev: "node server.js" };
+      h.restrict();
+      await expect(h.execute({ ...h.input, mode: "dev" })).rejects.toThrow(WorkspaceRestrictedError);
+      expect(h.assertMayRunAppCode).toHaveBeenCalledWith({ workspaceId: "workspace-a", rootPath: h.workspaceRoot });
+      expect(startSiteDevServer).not.toHaveBeenCalled();
+    });
+
+    it("checks trust just before it runs a build, and runs none", async () => {
+      const h = await harness();
+      h.app.scripts = { build: "node build.js" };
+      h.restrict();
+      await expect(h.execute({ ...h.input, mode: "build" })).rejects.toThrow(WorkspaceRestrictedError);
+      expect(buildSite).not.toHaveBeenCalled();
+      expect(startStaticSitePreview).not.toHaveBeenCalled();
+    });
+
+    it("serves the static entry without asking", async () => {
+      const h = await harness();
+      h.restrict();
+      await h.run();
+      expect(h.assertMayRunAppCode).not.toHaveBeenCalled();
+    });
+  });
+
   it("serves the local static entry with the real preparation and static server", async () => {
     const h = await harness();
     const execution = await h.run();
@@ -160,10 +196,21 @@ describe("app preview execution", () => {
     h.app.configuredScripts = configuredScripts;
     h.app.scripts = scripts;
     const execution = await h.run();
-    expect(startSiteDevServer).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command, args, signal: h.controller.signal });
+    expect(startSiteDevServer).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command, args, signal: h.controller.signal, assertMayRun: expect.any(Function) });
     expect(execution.handle).toBe(h.devHandle);
     expect(execution.result).toEqual({ siteRoot: "portal", mode: "dev", logs: [log("Ready")] });
     expect(startStaticSitePreview).not.toHaveBeenCalled();
+  });
+
+  it("passes the environment a recognized dev command needs to the dev server", async () => {
+    const h = await harness();
+    h.input.mode = "dev";
+    h.app.configuredScripts = { dev: "react-scripts start" };
+    await h.run();
+    expect(startSiteDevServer).toHaveBeenCalledWith({
+      workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "react-scripts", args: ["start"],
+      env: { HOST: "127.0.0.1" }, signal: h.controller.signal, assertMayRun: expect.any(Function),
+    });
   });
 
   it("refuses a missing dev/start script before process work", async () => {
@@ -189,7 +236,7 @@ describe("app preview execution", () => {
     h.app.configuredBuildOutput = "dist";
     h.app.buildOutputs = ["other"];
     const execution = await h.run();
-    expect(buildSite).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "node", args: ["configured-build.js"], output: "dist", signal: h.controller.signal });
+    expect(buildSite).toHaveBeenCalledWith({ workspaceRoot: h.workspaceRoot, siteRoot: "portal", command: "node", args: ["configured-build.js"], output: "dist", signal: h.controller.signal, assertMayRun: expect.any(Function) });
     expect(execution.result).toEqual({ siteRoot: "portal", mode: "build", logs: [log("Built")], build: { ok: true, command: "node", args: ["build.js"], outputPath: join(h.workspaceRoot, "portal/dist"), exitCode: 0 } });
     expect(startStaticSitePreview).toHaveBeenCalledWith(h.workspaceRoot, "portal/dist", { authority: h.app.authority });
     await expect(fetch(execution.handle.url).then((response) => response.text())).resolves.toBe("<h1>Built app</h1>");
@@ -339,6 +386,7 @@ describe("app preview execution", () => {
       catalog: { list: async () => [h.app], get: async () => h.app },
       lifecycle,
       isSharedView: () => false,
+      assertMayRunAppCode: h.assertMayRunAppCode,
       execute: h.execute,
     });
     const building = deferred<void>();

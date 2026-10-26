@@ -2,10 +2,11 @@ import type { ReactNode } from "react";
 import type { SyncStatusResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { Titlebar } from "../Titlebar";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
+import { RestrictedModeIndicator } from "../RestrictedMode";
 import { toggleAbout, type WorkbenchState } from "../workbench/workbenchState";
 
 // The shell's titlebar: the workspace switcher, the version picker, the saved
-// dot, and the two side panel toggles.
+// dot, Restricted Mode, and the two side panel toggles.
 export function ShellTitlebar(props: {
   // The version picker, when this workspace records versions.
   version?: ReactNode;
@@ -20,6 +21,8 @@ export function ShellTitlebar(props: {
   failedSaves: number;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
+  // Present while the workspace is in Restricted Mode.
+  restrictedMode?: { asking: boolean; onTrust: () => void };
   wb: WorkbenchState;
   toggleSidePanel: () => void;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;
@@ -45,7 +48,12 @@ export function ShellTitlebar(props: {
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
       version={props.version}
-      workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />}
+      workspaceStatus={
+        <>
+          <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
+          {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
+        </>
+      }
       onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
       agentActive={agentActive}
       primarySidebar={{

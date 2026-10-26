@@ -37,6 +37,9 @@ import {
   type KeptCopy,
   type CaptureMoveFileResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopy,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
@@ -48,7 +51,6 @@ import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
-  type EngineWorkspaceRunOptions,
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
@@ -148,7 +150,10 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  readHistoryOperation: VersionedLiveAdapter["readHistoryOperation"];
+  readHistoryPage: VersionedLiveAdapter["readHistoryPage"];
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
+  linkEdges: VersionedLiveAdapter["linkEdges"];
   incomingLinks: VersionedLiveAdapter["incomingLinks"];
   resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
@@ -176,6 +181,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   // them meanwhile, and the step that moves one to a visible copy.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Old versions of files kept on a drive that cannot tell dohc whether a
+  // program still has one open, and the step that deletes listed ones.
+  listRetainedCopies(): Promise<RetainedCopiesListResult>;
+  deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
   // Capture records nothing from hold to release, or until the hold's lease
   // runs out unrenewed or the workspace closes.
@@ -183,6 +192,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   renewCapture?(holdId: string): Promise<boolean>;
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
+  duplicateFileUnderHold?: VersionedLiveAdapter["duplicateFileUnderHold"];
   moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
 };
 
@@ -659,12 +669,11 @@ export function createCaptureLiveStores(
   // one must not answer for.
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
-    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
     return await sessions.run(
       workspace,
       async (binding) => await operation(adapterFor(binding)),
-      { ...options, retryTransportErrors: true },
+      { retryTransportErrors: true },
     );
   }
 
@@ -704,9 +713,8 @@ export function createCaptureLiveStores(
 
   async function runRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
-    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
-    return await withDomainErrors(async () => await runRawRead(operation, options));
+    return await withDomainErrors(async () => await runRawRead(operation));
   }
 
   async function runMutation<T>(
@@ -933,9 +941,7 @@ export function createCaptureLiveStores(
     getMainVersion: (input: { workspaceId: string }) =>
       runRead(async (adapter) => await adapter.getMainVersion(input)),
     getActiveVersion: (input: { workspaceId: string }) =>
-      runRead(async (adapter) => await adapter.getActiveVersion(input), {
-        retryInitialCapture: true,
-      }),
+      runRead(async (adapter) => await adapter.getActiveVersion(input)),
     setActiveVersion: (input: { workspaceId: string; versionId: string }) =>
       runMutation(async (adapter) => await adapter.setActiveVersion(input)),
     createNamedVersion: (input: {
@@ -958,6 +964,7 @@ export function createCaptureLiveStores(
     checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
+    linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
     incomingLinks: input => runRead(adapter => adapter.incomingLinks(input)),
     resolveLinks: input => runRead(adapter => adapter.resolveLinks(input)),
     async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {
@@ -1528,6 +1535,17 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
+    async listRetainedCopies() {
+      return await runRead(async (adapter) => await adapter.listRetainedCopies());
+    },
+
+    async deleteRetainedCopies(copies: readonly RetainedCopy[]) {
+      return await runMutation(async (adapter) => await adapter.deleteRetainedCopies(copies));
+    },
+
+    readHistoryOperation: input => runRead(adapter => adapter.readHistoryOperation(input)),
+    readHistoryPage: input => runRead(adapter => adapter.readHistoryPage(input)),
+    duplicateFileUnderHold: input => runMutation(adapter => adapter.duplicateFileUnderHold(input)),
     holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
 
     renewCapture: async (holdId: string) =>

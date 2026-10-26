@@ -1,0 +1,64 @@
+/* Excalidraw's chrome in dohc's tokens. A shape's stroke, background and
+ * fill, and the canvas background, are the person's content and are not set
+ * here. Excalidraw portals its dialogs to <body> as their own `.excalidraw`
+ * elements, so these rules are not scoped to the canvas. This file is
+ * imported after Excalidraw's stylesheet, so it wins the tie with
+ * `.excalidraw.theme--dark`. */
+
+/* Registered so the canvas, which reads this value as a string, gets a
+ * plain color instead of the expression below. */
+@property --color-selection {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #6965db;
+}
+
+:root .excalidraw {
+  /* Buttons, sliders, radio groups, and dialog actions. */
+  --color-primary: var(--dohc-accent);
+  --color-primary-darker: var(--dohc-accent);
+  --color-primary-darkest: var(--dohc-accent);
+  /* Only follow mode reads it: the followed avatar's ring, the frame and the
+   * badge, whose text is --color-primary-light. */
+  --color-primary-hover: var(--dohc-accent);
+  /* A selected fill on the islands, and the tick, add icon and count drawn
+   * over --color-primary, so it is opaque. */
+  --color-primary-light: color-mix(in srgb, var(--dohc-accent) 12%, var(--dohc-panel));
+  --color-brand-hover: color-mix(in srgb, var(--dohc-accent) 90%, transparent);
+  --color-brand-active: var(--dohc-accent);
+  /* The selected tool or option: an accent fill with a paper icon, as on
+   * PrimaryButton. */
+  --color-surface-primary-container: var(--dohc-accent);
+  --color-on-primary-container: var(--dohc-bg);
+  /* Islands, menus and dialogs sit on dohc's panel, and the buttons that
+   * float on the canvas one step in. Hover is opaque because Excalidraw also
+   * paints it straight on the canvas. */
+  --island-bg-color: var(--dohc-panel);
+  --color-surface-low: var(--dohc-panel-2);
+  --color-surface-mid: var(--dohc-panel-2);
+  --color-surface-high: color-mix(in srgb, var(--dohc-ink) 7%, var(--dohc-panel));
+  --color-on-surface: var(--dohc-ink);
+  /* Hairlines and the slider track, which Excalidraw tints lavender. */
+  --default-border-color: var(--dohc-line);
+  --sidebar-border-color: var(--dohc-line);
+  --color-slider-track: var(--dohc-subtle);
+  /* Focus rings, and the selection outline and handles on the canvas. */
+  --focus-highlight-color: var(--dohc-accent);
+  --select-highlight-color: var(--dohc-accent);
+  --color-selection: var(--dohc-accent);
+}
+
+/* In dark, Excalidraw draws the canvas light and shows it through
+ * invert(93%) hue-rotate(180deg). The selection takes the color that this
+ * filter turns into the accent, as closely as the filter can show it. */
+:root[data-theme="dark"] .excalidraw {
+  --color-selection: rgb(from var(--dohc-accent)
+    calc((237.15 + 0.574 * r - 1.43 * g - 0.144 * b) / 0.86)
+    calc((237.15 - 0.426 * r - 0.43 * g - 0.144 * b) / 0.86)
+    calc((237.15 - 0.426 * r - 1.43 * g + 0.856 * b) / 0.86));
+}
+
+/* A pressed tool keeps its ink icon on the hover fill until it is selected. */
+.excalidraw .ToolIcon .ToolIcon__icon:active svg {
+  color: var(--dohc-ink);
+}

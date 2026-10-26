@@ -1,6 +1,6 @@
 // Is the entry at this path still the one we started on?
 //
-// Two surfaces move files into <workspace>/.dohc/trash, and both do it as a
+// Two surfaces move files into <workspace>/.dohc/local/trash, and both do it as a
 // ladder of renames: the real name first, then shorter ones, each attempted
 // only because the platform refused the last. Nothing serializes those
 // attempts, so a failed rung leaves a window in which another process can

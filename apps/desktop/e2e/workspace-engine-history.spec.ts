@@ -120,7 +120,7 @@ test("History lists the first document of a new workspace while it is open", asy
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     await page.getByRole("button", { name: "Change location" }).click();
-    await page.getByRole("textbox", { name: "Folder name" }).fill("my-notes");
+    await page.getByRole("textbox", { name: "Workspace name" }).fill("my-notes");
     await page.getByRole("button", { name: "Create workspace", exact: true }).click();
     await waitForWorkspaceReady(page);
     const rootPath = join(temp.rootPath, "my-notes");

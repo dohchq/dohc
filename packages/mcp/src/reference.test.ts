@@ -59,12 +59,14 @@ describe("CLI, MCP, and app channel reference", () => {
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       // dohc_workspace_status reports it as its `collectionsWaiting` field.
       "collectionsWaiting",
+      // dohc document kept-edits prints it; dohc_workspace_status reports it as `keptEdits`.
+      "liveKeptEdits",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);
   });
 
-  it("documents both Access commands with their socket results and observation limits", async () => {
+  it("documents Access commands with their socket results and observation limits", async () => {
     expect(Object.keys(ACCESS_RESULTS).sort()).toEqual(Object.keys(CLI_COMMANDS.access!.verbs).sort());
     const page = await renderReference();
     const section = page.split("### `dohc access`")[1]!.split("\n### ")[0]!;
@@ -74,7 +76,9 @@ describe("CLI, MCP, and app channel reference", () => {
     }
     expect(section).toContain("only the allowlisted AccessAnswer fields");
     expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or link URLs");
-    expect(section).toContain("the CLI never refreshes share inventories");
+    expect(section).toContain("Use `dohc access refresh` to request fresh Sharing inventories");
+    expect(section).toContain("Requested and joined wait for started or existing attempts to settle");
+    expect(section).toContain("`joined`, `paced`, or `unavailable`");
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
     expect(section).toContain("`coverage`");
@@ -100,7 +104,7 @@ describe("CLI, MCP, and app channel reference", () => {
             throw new Error("parsed");
           },
         });
-        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb });
+        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: verb === "links" ? "chatLinks" : verb === "file-mentions" ? "chatFileMentions" : verb });
       }
       for (const flag of spec.flags ?? []) {
         expect(examples.flat(), `${verb} examples`).toContain(flag.name);

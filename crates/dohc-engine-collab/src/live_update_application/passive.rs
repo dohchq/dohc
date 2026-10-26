@@ -381,6 +381,10 @@ fn validate_restore(
     ) || admitted != row.admitted.metadata
         || operation.operation_id != restore.operation_id
         || operation.relay_database_namespace != row.relay_database_namespace
+        || proof["preparation"]["point"]["journalCursor"].as_i64()
+            != Some(operation.point.journal_cursor)
+        || proof["preparation"]["point"]["receiptDigest"].as_str()
+            != Some(operation.point.receipt_digest.as_str())
         || fence.local_head_sequence < operation.applied_sequence
         || intended != *b
         || operation.old_binding.restore_fence_generation != generation

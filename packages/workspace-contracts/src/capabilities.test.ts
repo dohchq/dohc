@@ -39,3 +39,9 @@ describe("capability ids", () => {
     }
   });
 });
+
+it("keeps Access refresh on IPC and CLI without advertising an MCP tool", () => {
+  expect(CAPABILITIES["access.refresh"].ipc.operations).toEqual(["requestAccessRefresh"]);
+  expect(CAPABILITIES["access.refresh"].mcp).toMatchObject({ owner: [], view: [], comment: [], edit: [] });
+  expect(CAPABILITIES["access.refresh"].mcp.reason).toContain("dohc access refresh");
+});

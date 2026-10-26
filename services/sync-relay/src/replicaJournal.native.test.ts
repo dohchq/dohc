@@ -9,10 +9,54 @@ import {registered, cleanupLiveDeliveryFixtures, hash} from "../../../packages/y
 import {yDocToMarkdown,markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createReplicaEngineStarter} from "./replicaEngine";
-import type {ReplicaChild} from "./replicaSupervisor";
+import {createReplicaSupervisor,type ReplicaChild} from "./replicaSupervisor";
+import {DiscussionActivityHub} from "./discussionActivity";
+import {ReplicaWatches} from "./replicaWatches";
+import {hashLinkBearer} from "./linkSecurity";
+import {LINK_KEY,seedLinkGrant,seedLinkSession,testHandler,linkRequest,json,type HandlerOverrides} from "./testing";
 
 const binary=requireEngineBinaryOrSkip();
 afterEach(cleanupLiveDeliveryFixtures);
+it.skipIf(binary.missing || process.platform !== "linux")("R4: a real journal-only revision wakes a link reader through the supervisor",async()=>{
+  const f=await fixture();await f.child.close();
+  const cuts:Array<{delta:boolean;files:number}>=[],errors:unknown[]=[];
+  const start=createReplicaEngineStarter({engineExecutable:binary.require(),allowDevelopment:true});
+  const supervisor=createReplicaSupervisor({storage:f.f.storage,storeRoot:join(f.root,"supervised"),onError:(_w,e)=>errors.push(e),startChild:async input=>{
+    const child=await start(input);let seeded=false;
+    return {...child,pull:async()=>{
+      await child.pull();
+      if(!seeded) {
+        // This journal-only fixture needs an ordinary head for current-view collection.
+        const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text)),db=new DatabaseSync(join(input.storeDir,".dohc/engine/engine.db"));
+        try {db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
+        seeded=true;
+      }
+    },currentView:async(...args)=>{const page=await child.currentView(...args);cuts.push({delta:page.delta,files:page.files.length});return page;}};
+  }});
+  const activity=new DiscussionActivityHub(),watches=new ReplicaWatches(activity),token="c".repeat(43);
+  seedLinkGrant(f.f.storage,{shareId:"share",grantId:"r4-link",secretHash:hashLinkBearer("s".repeat(43),LINK_KEY)});
+  seedLinkSession(f.f.storage,{grantId:"r4-link",capabilityHash:hashLinkBearer(token,LINK_KEY)});
+  const handler=testHandler(f.f.storage,{discussionActivity:activity,replicaWatches:watches,
+    developmentReplicaReads:supervisor} as HandlerOverrides);
+  const send=(path:string)=>handler(linkRequest(token,path));
+  try {
+    await supervisor.activate("workspace");expect(cuts).toEqual([{delta:false,files:1}]);
+    const current=await json(await send("/sync/link/current"));
+    expect(current.files).toHaveLength(1);
+    const abort=new AbortController();
+    const held=handler(linkRequest(token,`/sync/link/log?current=true&since=${current.nextCursor}&hold=30000`,{signal:abort.signal}));
+    await expect.poll(()=>activity.stats().waiters).toBe(1);
+    const cursor=f.commit("second-revision");await supervisor.activate("workspace");
+    const changed=await json(await held),sha=hash(Buffer.from(yDocToMarkdown(f.f.doc)));
+    expect(changed.ops).toContainEqual(expect.objectContaining({opKind:"file.current",payload:expect.objectContaining({file:expect.objectContaining({blobSha256:sha})})}));
+    expect(await (await send(`/sync/link/blobs/${sha}`)).text()).toBe(yDocToMarkdown(f.f.doc));
+    expect(watches.watched("workspace")).toBe(true);
+    expect(cuts.slice(1)).toContainEqual({delta:true,files:1});
+    expect(supervisor.currentReadView("workspace")!.view.journalCursor).toBe(cursor);
+    expect(supervisor.currentView("workspace")!.view.files).toHaveLength(1);
+    expect(errors).toEqual([]);
+  } finally {watches.dispose();await supervisor.close();await f.close();}
+},120_000);
 async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8Array) {
   const f=registered({deployment:true,baselineBytes});
   f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
@@ -124,8 +168,8 @@ it.skipIf(binary.missing || process.platform !== "linux")("current views preserv
   const f=await fixture(false,true,baselineBytes);try{
     await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));
     const db=new DatabaseSync(join(f.root,".dohc/engine/engine.db"));try{db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
-    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(initial.texts[0]!.text).toBe(text);
+    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined);expect(initial.texts[0]!.text).toBe(text);
     f.commit("nested-edit");await f.child.pull();
-    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
+    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined);expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
   }finally{await f.close();}
 },120_000);

@@ -1,6 +1,7 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
 import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
+import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
 import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
@@ -11,6 +12,7 @@ import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeServiceHostFeedIndex } from "./serviceHostFeed";
 import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
+import { initializeServiceKeptEditsSchema } from "./serviceKeptEdits";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
@@ -19,6 +21,7 @@ import {
   initializeAutomationHostPlacementSchema,
   initializeAutomationReachHandoverSchema,
   initializeAutomationServerScheduleSchema,
+  initializeAutomationServerUnsentRunSchema,
 } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
@@ -1265,6 +1268,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceActivationSchema(db);
     initializeServiceHostEnrollmentSchema(db);
     initializeServiceHostUploadSchema(db);
+    initializeServiceKeptEditsSchema(db);
     initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveJournalWorkspaceIndex(db);
@@ -1280,6 +1284,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeReplicaCurrentViewSchema(db);
     initializeReplicaHistorySchema(db);
     initializeReplicaHistoryWorkSchema(db);
+    initializeReplicaCurrentViewIncrementalSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);
@@ -1287,6 +1292,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationHostPlacementSchema(db);
     initializeAutomationReachHandoverSchema(db);
     initializeAutomationServerScheduleSchema(db);
+    initializeAutomationServerUnsentRunSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);

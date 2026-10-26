@@ -254,6 +254,7 @@ enum GateScratchAdvance {
 /// lives and dies with the workspace store's worker thread.
 #[derive(Default)]
 pub struct WriterDocCache {
+    pub reader_resolver: Option<std::sync::Arc<crate::reader_resolver::ReaderResolver>>,
     entries: HashMap<DocKey, CacheEntry>,
     owner_drafts: HashMap<DocKey, crate::owner_outbox::draft::CachedOwnerDraft>,
     /// Keys of currently open live sessions: evicted last. Order-only state —

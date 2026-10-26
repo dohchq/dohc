@@ -7,7 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
 import { LinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AboutNotices, AccessContext } from "./About";
+import type { AboutNotices } from "./About";
+import type { AccessContext } from "./accessReason";
 import {
   ChatsView,
   NOW,
@@ -136,6 +137,21 @@ describe("ChatsView hybrid feed", () => {
       await pickReaction(like, "👍");
     }
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(locked ? 0 : 1);
+  });
+
+  it("shows a link holder's Home post in a share link's ring with the link holder mark", async () => {
+    const item = personalFeedItem("Count me in", "message-link");
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...item, message: { ...item.message, authorKind: "link", authorDisplayName: "Ada" } }],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const feedItem = await screen.findByTestId("chats-feed-item");
+    expect(feedItem.dataset.authorKind).toBe("link");
+    expect(within(feedItem).getByTestId("chats-feed-link-holder").textContent).toBe("Link holder");
+    const avatar = within(feedItem).getByTitle("Ada");
+    expect(avatar.dataset.authorKind).toBe("link");
+    expect(avatar.className).toContain("border-dashed");
   });
 
   it("shows a known viewer's Like before the write and its listing answer", async () => {
@@ -1105,6 +1121,7 @@ describe("Home and a file's chat share one reaction store", () => {
             onError={onError}
             notices={ABOUT_NOTICES}
             accessContext={ACCESS_CONTEXT}
+            links={{ revision: 0, onOpenLink: vi.fn() }}
           />
         </div>
       </ReactionStoreProvider>,
