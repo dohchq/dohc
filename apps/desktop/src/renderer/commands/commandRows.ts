@@ -31,6 +31,7 @@ interface StaticRow {
 
 export const COMMAND_ROWS = {
   "new-file": { label: "New file", availability: "workspaceWritable" },
+  "new-file-at-path": { label: "New file…", availability: "workspaceWritable" },
   "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
   "new-folder": { label: "New folder", availability: "folderCreatable", capabilityId: "folder.create" },
   "new-collection": { label: "New collection", availability: "collectionCreatable" },

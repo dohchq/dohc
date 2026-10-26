@@ -262,6 +262,46 @@ fn a_case_variant_hard_link_is_not_another_spelling() {
             !dohc_engine_files::stored_under_other_spelling(ws.path(), probed),
             "{probed}"
         );
+        assert_eq!(
+            dohc_engine_files::disk_spelling(ws.path(), probed).as_deref(),
+            Some(probed)
+        );
+    }
+}
+
+/// Each name comes back as the disk stores it, also where a lookup finds the
+/// file through another spelling. In a folder that ignores case Linux keeps
+/// the spelling it was given, so the folder's own entry names the file.
+#[test]
+fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
+    let ws = Scratch::new();
+    ws.write("Notes/a.md", b"a");
+    let stored = |path| dohc_engine_files::disk_spelling(ws.path(), path);
+    assert_eq!(stored("Notes/a.md").as_deref(), Some("Notes/a.md"));
+    let ignores_case = ws.path().join("notes/A.md").exists();
+    assert_eq!(
+        stored("notes/A.md").as_deref(),
+        ignores_case.then_some("Notes/a.md")
+    );
+    assert_eq!(stored("missing.md"), None);
+}
+
+/// A folder that can be searched but not listed still has a spelling, so
+/// spellings that resolve to one file still share it. Root lists any folder,
+/// so there the test has nothing to prove.
+#[cfg(unix)]
+#[test]
+fn disk_spelling_passes_through_a_folder_it_cannot_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Scratch::new();
+    ws.write("private/docs/Notes.md", b"a");
+    let private = ws.path().join("private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let unlistable = std::fs::read_dir(&private).is_err();
+    let stored = dohc_engine_files::disk_spelling(ws.path(), "private/docs/Notes.md");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if unlistable {
+        assert_eq!(stored.as_deref(), Some("private/docs/Notes.md"));
     }
 }
 

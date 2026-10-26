@@ -2,8 +2,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { identityHues, palette } from "../tokens";
 import { ownPresentation, neutralPresentation, presentationColor, presentationClasses, relayPresentation, setOwnPresentation, ownAgentPresentation, bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides, subscribePresentation } from "./actorPresentation";
 import { setChosenColors } from "./chosenColors";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-afterEach(() => { clearAgentColorOverrides(); setChosenColors(DEFAULT_USER_SETTINGS.appearance); setOwnPresentation(undefined); });
+afterEach(() => { clearAgentColorOverrides(); setChosenColors(DEFAULT_USER_SETTINGS); setOwnPresentation(undefined); });
 it("maps frozen relay slots and neutral, own and chosen hues in both themes", () => {
   const hues = ["rust", "amber", "teal", "blue", "indigo", "plum", "rose"] as const;
   for (const theme of ["light", "dark"] as const) {
@@ -11,7 +12,7 @@ it("maps frozen relay slots and neutral, own and chosen hues in both themes", ()
     expect(presentationColor(relayPresentation(999), "human", theme).stroke).toBe(palette[theme].muted);
     expect(presentationColor(neutralPresentation, "agent", theme).stroke).toBe(palette[theme].agent);
   }
-  setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "blue", yourAgentColor: "rose" });
+  setChosenColors({ ...settingsWithAgent({ hue: "rose" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "blue" } });
   expect(presentationClasses(ownPresentation)).toContain("text-hue-blue");
   expect(presentationClasses(ownPresentation, "agent")).toContain("text-hue-rose");
   expect(presentationColor(relayPresentation(0)).stroke).toBe(identityHues.light.rust);
@@ -24,7 +25,7 @@ it("applies the main own hue and keeps chosen human and agent colours overriding
   for (const theme of ["light", "dark"] as const) {
     expect(presentationColor(ownPresentation, "human", theme).stroke).toBe(identityHues[theme].rose);
   }
-  setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "teal", yourAgentColor: "rose" });
+  setChosenColors({ ...settingsWithAgent({ hue: "rose" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "teal" } });
   expect(presentationClasses(ownPresentation)).toContain("text-hue-teal");
   expect(presentationClasses(ownAgentPresentation, "agent")).toContain("text-hue-rose");
 });
@@ -59,7 +60,7 @@ it("repaints from a scoped event without a bridge read and keeps overrides until
   const repaint = vi.fn();
   const unsubscribe = subscribePresentation(repaint);
   const token = { group: "agent", hue: "rose", self: true } as const;
-  setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourAgentColor: "teal" });
+  setChosenColors(settingsWithAgent({ hue: "teal" }));
   expect(presentationClasses(token, "agent")).toContain("text-hue-rose");
   repaint.mockClear();
   changed({ workspaceId: "other", group: "agent", hue: "blue" });
@@ -72,7 +73,7 @@ it("repaints from a scoped event without a bridge read and keeps overrides until
   changed({ workspaceId: "w", group: "agent", hue: null });
   expect(presentationClasses(token, "agent")).toContain("text-hue-teal");
   expect(presentationClasses({ ...token, self: false }, "agent")).toContain("text-agent");
-  setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+  setChosenColors(DEFAULT_USER_SETTINGS);
   expect(presentationClasses(token, "agent")).toContain("text-agent");
   workspace = "next";
   changed({ workspaceId: "w", group: "agent", hue: "blue" });

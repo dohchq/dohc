@@ -660,26 +660,29 @@ impl StoreCaptureSink {
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
         let captured_root = self.captured_root()?;
-        let result = self.actor.capture_ingest_with_search_policy_blocking(
-            CaptureIngest {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                text,
-                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-                metadata_summary: self.provenance.summary.clone(),
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_for_write(path, sha256),
-                now_ms: self.now_ms,
-                request_id: None,
-                claim_foreign_head,
-            },
-            captured_root.canonical_path.clone(),
-            Arc::clone(&self.search_policy),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-        );
-        match self.batch_retry.observe(result) {
+        let input = CaptureIngest {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            text,
+            metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+            metadata_summary: self.provenance.summary.clone(),
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            author_json: self.author_for_write(path, sha256),
+            now_ms: self.now_ms,
+            request_id: None,
+            claim_foreign_head,
+        };
+        let result = self.batch_retry.run_single(|| {
+            self.actor.capture_ingest_with_search_policy_blocking(
+                &input,
+                captured_root.canonical_path.clone(),
+                Arc::clone(&self.search_policy),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+            )
+        });
+        match result {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths
@@ -730,24 +733,27 @@ impl StoreCaptureSink {
         sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        let result = self.actor.capture_ingest_binary_blocking(
-            CaptureIngestBinary {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                bytes,
-                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-                metadata_summary: self.provenance.summary.clone(),
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_for_write(path, sha256),
-                now_ms: self.now_ms,
-                request_id: None,
-                claim_foreign_head,
-            },
-            self.leases.clone(),
-            Arc::new(NoFaults),
-        );
-        match self.batch_retry.observe(result) {
+        let input = Arc::new(CaptureIngestBinary {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            bytes,
+            metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+            metadata_summary: self.provenance.summary.clone(),
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            author_json: self.author_for_write(path, sha256),
+            now_ms: self.now_ms,
+            request_id: None,
+            claim_foreign_head,
+        });
+        let result = self.batch_retry.run_single(|| {
+            self.actor.capture_ingest_binary_blocking(
+                Arc::clone(&input),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+            )
+        });
+        match result {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths
@@ -819,21 +825,24 @@ impl StoreCaptureSink {
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 self.require_captured_root()?;
-                let result = self.actor.capture_secret_blocking(
-                    CaptureSecret {
-                        workspace_id: self.workspace_id.clone(),
-                        version_id: self.version_id.clone(),
-                        path: path.to_owned(),
-                        text,
-                        metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
-                        metadata_correlation_id: self.provenance.correlation_id.clone(),
-                        now_ms: self.now_ms,
-                        claim_foreign_head,
-                    },
-                    key,
-                    Arc::new(NoFaults),
-                );
-                match self.batch_retry.observe(result) {
+                let input = Arc::new(CaptureSecret {
+                    workspace_id: self.workspace_id.clone(),
+                    version_id: self.version_id.clone(),
+                    path: path.to_owned(),
+                    text,
+                    metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                    metadata_correlation_id: self.provenance.correlation_id.clone(),
+                    now_ms: self.now_ms,
+                    claim_foreign_head,
+                });
+                let result = self.batch_retry.run_single(|| {
+                    self.actor.capture_secret_blocking(
+                        Arc::clone(&input),
+                        key.clone(),
+                        Arc::new(NoFaults),
+                    )
+                });
+                match result {
                     Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
@@ -916,21 +925,24 @@ impl StoreCaptureSink {
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        let result = self.actor.capture_secret_retire_blocking_guarded(
-            CaptureSecretRetire {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                now_ms: self.now_ms,
-                only_if_own_origin: true,
-            },
-            self.shadow_root.clone(),
-            Arc::new(NoFaults),
-            root_guard,
-        );
-        match self.batch_retry.observe(result) {
+        let input = CaptureSecretRetire {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            now_ms: self.now_ms,
+            only_if_own_origin: true,
+        };
+        let result = self.batch_retry.run_single(|| {
+            self.actor.capture_secret_retire_blocking_guarded(
+                input.clone(),
+                self.shadow_root.clone(),
+                Arc::new(NoFaults),
+                Arc::clone(&root_guard),
+            )
+        });
+        match result {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
             Err(_) => Err(SECRET_RETIRE_FAILED),
@@ -1016,28 +1028,28 @@ impl StoreCaptureSink {
             only_if_capture_origin: true,
             allow_ydoc_origin,
         };
-        let result = match respelled_to {
+        let result = self.batch_retry.run_single(|| match respelled_to {
             Some(to) => self.actor.capture_retire_respelled_blocking_guarded(
-                input,
+                input.clone(),
                 to.path.clone(),
                 to.sha256.clone(),
                 self.shadow_root.clone(),
                 Arc::new(self.self_writes.clone()),
                 self.leases.clone(),
                 Arc::new(NoFaults),
-                root_guard,
+                Arc::clone(&root_guard),
             ),
             None => self.actor.capture_retire_materialized_blocking_guarded(
-                input,
+                input.clone(),
                 self.shadow_root.clone(),
                 confirm_absent,
                 Arc::new(self.self_writes.clone()),
                 self.leases.clone(),
                 Arc::new(NoFaults),
-                root_guard,
+                Arc::clone(&root_guard),
             ),
-        };
-        match self.batch_retry.observe(result) {
+        });
+        match result {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths

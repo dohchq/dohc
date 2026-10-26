@@ -317,26 +317,16 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
 }
 
 pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> {
-    let stored = root.join(relative).canonicalize().ok()?;
-    let stored = stored.strip_prefix(root).ok()?;
+    let spelling = disk_spelling_in(root, &root.join(relative))?;
+    let stored: Vec<&str> = spelling.split('/').collect();
     let tracked: Vec<&str> = relative.split('/').collect();
-    if stored.components().count() != tracked.len() {
+    if stored.len() != tracked.len() {
         return None;
     }
-    // Query the leaf's directory entry on Windows: a file handle's final path
-    // need not name the hard link we looked up. Folders cannot be hard-linked.
-    #[cfg(windows)]
-    let stored = {
-        let mut stored = stored.to_path_buf();
-        stored.set_file_name(dohc_windows_files::stored_leaf_name(&root.join(relative)).ok()?);
-        stored
-    };
     let mut lookup = root.to_path_buf();
-    let mut spelling = Vec::with_capacity(tracked.len());
     let leaf = tracked.len() - 1;
-    for (index, (stored, tracked)) in stored.components().zip(tracked).enumerate() {
+    for (index, (stored, tracked)) in stored.into_iter().zip(tracked).enumerate() {
         lookup.push(tracked);
-        let stored = stored.as_os_str().to_str()?;
         if stored != tracked
             && (index < leaf
                 || crate::floor::fold_segment(stored) != crate::floor::fold_segment(tracked)
@@ -346,10 +336,108 @@ pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> 
         {
             return None;
         }
-        spelling.push(stored);
     }
-    let spelling = spelling.join("/");
     (spelling != relative).then_some(spelling)
+}
+
+/// The path below `root` that `relative` reaches, spelled as the disk stores
+/// each name, with links resolved. `None` when nothing is there, the path
+/// leaves `root`, or the disk can't say which name it stores.
+pub fn disk_spelling(root: &Path, relative: &str) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    disk_spelling_in(&root, &root.join(relative))
+}
+
+/// [`disk_spelling`] for an absolute `path`, below a canonical `root`. Windows
+/// names each folder as the disk stores it. macOS does only on disks that can
+/// tell it, and Linux keeps the spelling it was given, so on a folder that
+/// ignores case, such as a Windows drive under WSL, `Notes.md` reaches `notes.md`
+/// and keeps its own spelling. There each name comes from its folder.
+pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
+    let file = path.canonicalize().ok()?;
+    let below = file.strip_prefix(root).ok()?;
+    #[cfg(unix)]
+    let mut lookup = root.to_path_buf();
+    let mut names = Vec::new();
+    for name in below.components() {
+        #[cfg(unix)]
+        let name = {
+            lookup.push(name);
+            stored_leaf_name(&lookup).ok()?
+        };
+        #[cfg(not(unix))]
+        let name = name.as_os_str().to_owned();
+        names.push(name.into_string().ok()?);
+    }
+    // Query the leaf's directory entry on Windows: a file handle's final path
+    // need not name the hard link we looked up. Folders cannot be hard-linked.
+    #[cfg(windows)]
+    if let Some(leaf) = names.last_mut() {
+        *leaf = dohc_windows_files::stored_leaf_name(path)
+            .ok()?
+            .into_string()
+            .ok()?;
+    }
+    Some(names.join("/"))
+}
+
+/// The name `path`'s folder stores its entry under. A folder that can be
+/// searched but not listed keeps the name `canonicalize` gave, which macOS
+/// already reports as stored.
+#[cfg(unix)]
+fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
+    use std::os::unix::fs::MetadataExt;
+    let (Some(folder), Some(leaf)) = (path.parent(), path.file_name()) else {
+        return Err(ErrorKind::InvalidInput.into());
+    };
+    let file = std::fs::symlink_metadata(path)?;
+    let Ok(names) = std::fs::read_dir(folder).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+    }) else {
+        return Ok(leaf.to_owned());
+    };
+    let folded = leaf.to_str().map(crate::floor::fold_segment);
+    stored_name_among(
+        leaf,
+        names,
+        |name| folded.is_some() && name.to_str().map(crate::floor::fold_segment) == folded,
+        |name| {
+            std::fs::symlink_metadata(folder.join(name))
+                .is_ok_and(|entry| (entry.dev(), entry.ino()) == (file.dev(), file.ino()))
+        },
+    )
+}
+
+/// Of a folder's `names`, the one a lookup of `leaf` reached: `leaf` itself
+/// when the folder lists it, or else the one name that is the same file.
+/// Names that fold like `leaf` come first, so a hard link under an unrelated
+/// name doesn't count. Two names that both could be it are an error, never a
+/// guess.
+#[cfg(any(unix, test))]
+fn stored_name_among(
+    leaf: &std::ffi::OsStr,
+    names: Vec<std::ffi::OsString>,
+    folds_like_leaf: impl Fn(&std::ffi::OsStr) -> bool,
+    same_file: impl Fn(&std::ffi::OsStr) -> bool,
+) -> std::io::Result<std::ffi::OsString> {
+    if names.iter().any(|name| name == leaf) {
+        return Ok(leaf.to_owned());
+    }
+    let (like, other): (Vec<_>, Vec<_>) = names.into_iter().partition(|name| folds_like_leaf(name));
+    for group in [like, other] {
+        let mut same = group.into_iter().filter(|name| same_file(name));
+        if let Some(name) = same.next() {
+            return match same.next() {
+                None => Ok(name),
+                Some(_) => Err(std::io::Error::other(
+                    "two names in one folder reach this file",
+                )),
+            };
+        }
+    }
+    Err(ErrorKind::NotFound.into())
 }
 
 /// Owns the reconcile state: the last committed manifest, the current scan
@@ -1129,5 +1217,65 @@ mod respell_order_tests {
             );
             assert_eq!(!plan.respelled_retires.is_empty(), paired, "{ingested}");
         }
+    }
+}
+
+#[cfg(test)]
+mod stored_name_tests {
+    use super::stored_name_among;
+    use std::ffi::{OsStr, OsString};
+    use std::io::ErrorKind;
+
+    /// Which of `names` a lookup of `leaf` reached, where `same` are the
+    /// names that are the file it found.
+    fn among(leaf: &str, names: &[&str], same: &[&str]) -> std::io::Result<OsString> {
+        let folded = crate::floor::fold_segment(leaf);
+        stored_name_among(
+            OsStr::new(leaf),
+            names.iter().map(OsString::from).collect(),
+            |name| name.to_str().map(crate::floor::fold_segment).as_deref() == Some(&*folded),
+            |name| same.iter().any(|same| OsStr::new(same) == name),
+        )
+    }
+
+    #[test]
+    fn a_listed_name_is_its_own_stored_name() {
+        let found = among("Notes.md", &["notes.md", "Notes.md"], &["notes.md"]);
+        assert_eq!(found.unwrap(), "Notes.md");
+    }
+
+    #[test]
+    fn an_unlisted_name_is_stored_as_the_same_file_spelled_like_it() {
+        let found = among(
+            "Notes.md",
+            &["backup.md", "notes.md"],
+            &["backup.md", "notes.md"],
+        );
+        assert_eq!(
+            found.unwrap(),
+            "notes.md",
+            "a hard link under another name is not this entry"
+        );
+    }
+
+    #[test]
+    fn a_name_the_disk_folds_but_dohc_does_not_still_finds_its_entry() {
+        let found = among(
+            "NOTES~1.MD",
+            &["other.md", "Notes draft.md"],
+            &["Notes draft.md"],
+        );
+        assert_eq!(found.unwrap(), "Notes draft.md");
+    }
+
+    #[test]
+    fn two_names_that_could_be_the_entry_are_an_error_not_a_guess() {
+        among("NOTES~1.MD", &["a.md", "b.md"], &["a.md", "b.md"]).unwrap_err();
+    }
+
+    #[test]
+    fn a_folder_without_the_file_has_no_stored_name() {
+        let missing = among("Notes.md", &["other.md"], &[]).unwrap_err();
+        assert_eq!(missing.kind(), ErrorKind::NotFound);
     }
 }

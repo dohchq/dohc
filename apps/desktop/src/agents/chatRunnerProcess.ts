@@ -4,6 +4,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path"
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
+import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -119,12 +120,22 @@ function runnerNodeAvailable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform):
     }));
 }
 
-// Keep the launch environment's lookup beside its log, so an owed notice can
-// use the same fact after restart. Older runs have no recorded lookup.
-export async function readRunnerNodeAvailable(logPath: string): Promise<boolean | undefined> {
+export interface ReplyRuntimeAvailability {
+  source: "bundled" | "path";
+  available: boolean;
+}
+
+// Older records describe PATH. New records name the selected reply runtime.
+export async function readRunnerNodeAvailable(logPath: string): Promise<ReplyRuntimeAvailability | undefined> {
   try {
     const saved = await readFile(`${logPath}.node`, "utf8");
-    return saved === "true\n" ? true : saved === "false\n" ? false : undefined;
+    if (saved === "true\n" || saved === "false\n") return { source: "path", available: saved === "true\n" };
+    const record: unknown = JSON.parse(saved);
+    if (typeof record === "object" && record !== null && "source" in record && "available" in record &&
+        (record.source === "bundled" || record.source === "path") && typeof record.available === "boolean") {
+      return { source: record.source, available: record.available };
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -153,14 +164,9 @@ function tomlString(value: string): string {
 // any sandbox; Codex's sandbox cannot connect to the desktop app, and Claude
 // Code's Bash needs Git Bash on Windows. The server offers only the reply
 // tool, and that tool runs without approval.
-// Codex waits for a required server before the first turn; it gives others one
-// second, after which the turn starts without their tools. Codex starts the
-// server without NoDefaultCurrentDirectoryInExePath, so the launcher's bare
-// `node` searches the server's working directory first. That directory is
-// dohc's own, never the workspace, where the sandbox can write.
-// Claude Code has no working directory setting and starts the server in the
-// workspace, with NoDefaultCurrentDirectoryInExePath set. Its config is a file
-// because a cmd.exe command line cannot carry JSON's double quotes.
+// Packaged launchers use dohc's own Node. Codex starts the server in cli-bin;
+// Claude Code starts it in the workspace. Keep the workspace executable-search
+// protections for the agent and its other commands.
 function replyServerArguments(input: {
   tool: AgentLaunchProfile["tool"];
   cliBin: string;
@@ -236,6 +242,7 @@ export interface ChatRunnerProcessOptions {
   spawnRunner?: SpawnRunner;
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
   platform?: NodeJS.Platform;
+  arch?: string;
 }
 
 export function createChatRunnerProcess(
@@ -314,6 +321,19 @@ export function createChatRunnerProcess(
     input: Parameters<typeof spawnConfiguredRunner>[0],
     logFd: number,
   ): RunnerProcess {
+    const bundledNode = options.isPackaged() ? resolveDohcNodeExecutable({
+      resourcesPath: options.resourcesPath?.() ?? dirname(process.execPath),
+      platform,
+      arch: options.arch,
+    }) : null;
+    if (bundledNode !== null) {
+      try {
+        if (!statSync(bundledNode).isFile()) throw new Error("Not a regular file");
+        accessSync(bundledNode, platform === "win32" ? constants.F_OK : constants.X_OK);
+      } catch {
+        throw new Error("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+      }
+    }
     const cliBin = resolveDohcCliBinDirectory({
       appRoot: options.appRoot(),
       isPackaged: options.isPackaged(),
@@ -360,7 +380,10 @@ export function createChatRunnerProcess(
       );
     }
     try {
-      writeFileSync(`${input.logPath}.node`, `${runnerNodeAvailable(env, platform)}\n`, { mode: 0o600 });
+      const runtime: ReplyRuntimeAvailability = bundledNode !== null
+        ? { source: "bundled", available: true }
+        : { source: "path", available: runnerNodeAvailable(env, platform) };
+      writeFileSync(`${input.logPath}.node`, `${JSON.stringify(runtime)}\n`, { mode: 0o600 });
     } catch {}
     input.assertMayStart();
     const child = spawnRunner(resolved.command, resolved.args, {

@@ -50,7 +50,9 @@ export type HistoryCollections = ReadonlyMap<string, {
 export function HistoryUpdating(props: { testId: string; className?: string }) {
   return (
     <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
-      <span aria-hidden className="size-2 shrink-0 animate-pulse rounded-full bg-accent" />
+      <span aria-hidden className={MARK_BOX}>
+        <span className="size-2 animate-pulse rounded-full bg-accent" />
+      </span>
       Adding recent changes to History
     </p>
   );
@@ -69,7 +71,7 @@ export function isHistoryPaused(syncStatus: SyncStatusResult | null | undefined)
 export function HistoryPaused(props: { testId: string; className?: string }) {
   return (
     <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
-      <span aria-hidden className="grid size-4 shrink-0 place-items-center">
+      <span aria-hidden className={MARK_BOX}>
         <span className="size-2 rounded-full bg-warning" />
       </span>
       History paused
@@ -389,7 +391,7 @@ export function missingSourcesWords(
 
 // One timeline row: 30px, inset, with no rule between rows. Hover and the
 // open change take the list ladder's fills. A mark takes an avatar's 18px.
-const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
+export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
 const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
 const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
