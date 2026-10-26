@@ -1348,6 +1348,13 @@ function HistorySection(props: {
   );
 }
 
+// What a section shows under its header: the body its toggle controls.
+const sectionBody = (id: string) =>
+  document.getElementById(screen.getByTestId(`about-${id}-toggle`).getAttribute("aria-controls")!)!;
+// The lines of the delayed skeleton, when it is all a section's body shows.
+const loadingLines = (id: string) =>
+  sectionBody(id).querySelectorAll(":scope > .dohc-reveal-if-slow:only-child > span");
+
 describe("About History", () => {
   it("reads the file's newest changes by its object id and opens one", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue(
@@ -1366,9 +1373,15 @@ describe("About History", () => {
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
   });
 
-  it("keeps its place while the file's read runs, and offers that read's Try again when it fails", async () => {
+  it("keeps its place while the file's read runs or waits, and offers that read's Try again when it fails", async () => {
     const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
     expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    expect(loadingLines("history")).toHaveLength(2);
+    expect(screen.queryByTestId("about-history-updating")).toBeNull();
+    // While the engine reads the workspace in, History says it is adding changes.
+    rerender(<HistorySection file={{ status: "updating" }} />);
+    expect(screen.getByTestId("about-history-updating").textContent).toBe("Adding recent changes to History");
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     const retry = vi.fn();
     rerender(<HistorySection file={{ status: "failed", retry }} />);
@@ -1389,6 +1402,7 @@ describe("About History", () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
+    expect(loadingLines("history")).toHaveLength(2);
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
