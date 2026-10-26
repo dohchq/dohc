@@ -233,8 +233,12 @@ export function EngineMomentDiffPage({
   // needs no click. At either end that arrow stays focusable, so the page
   // keeps focus and the other bracket still steps back. Only the answer for
   // the change it steps to returns focus: a late or repeated answer for the
-  // change it left must not spend it.
+  // change it left must not spend it. If the tab opens any other change
+  // first, the step gives up its focus.
   const stepFocus = useRef<{ direction: "newer" | "older"; key: string } | null>(null);
+  useEffect(() => {
+    if (stepFocus.current?.key !== `${workspaceId}\0${momentId}`) stepFocus.current = null;
+  }, [momentId, workspaceId]);
   useEffect(() => {
     const step = stepFocus.current;
     if (state.status === "loading" || step === null || answeredFor.current !== step.key) return;
