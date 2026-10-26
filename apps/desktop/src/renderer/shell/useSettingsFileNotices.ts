@@ -50,7 +50,8 @@ export function settingsFileNotice(
  * effect, as one row per file that opens the file and reads it again. The
  * user settings arrive with every change to them. The workspace settings are
  * read once the workspace opens, again if the engine had not opened it yet,
- * and from every read or save in Settings, which the answered callback takes.
+ * and from every read or save in Settings that reached the file, which the
+ * answered callback takes.
  */
 export function useSettingsFileNotices(input: {
   workspaceId: string;
@@ -146,6 +147,9 @@ export function useSettingsFileNotices(input: {
   );
 
   return useCallback((read: WorkspaceSettingsResult) => {
+    // A read from before the workspace opened says nothing about the file,
+    // and taking it would drop a read of this hook's that may have it.
+    if (read.notOpened) return;
     reads.next();
     setWorkspaceRead(read);
   }, [reads]);
