@@ -104,6 +104,12 @@ interface SessionEntry {
     // Settles when its daemon request starts, after the workspace is prepared.
     requested: Promise<void>;
   } | null;
+  // Runs opening the workspace, from their first attempt to their last,
+  // including the waits between attempts.
+  openingRuns: number;
+  // Woken when an attempt starts, the last opening run ends, or the
+  // workspace starts closing or rebuilding.
+  openWaiters: Set<() => void>;
   closing: Promise<void> | null;
   retiring: boolean;
   activeRuns: number;
@@ -504,27 +510,32 @@ export class EngineWorkspaceSessions {
 
   /**
    * The open of this workspace already under way, or null when none is, or
-   * the session is closing or rebuilding. Settles when the open does, with its
-   * binding published. It also settles if the workspace's preparation outlasts
-   * the open deadline, or if the daemon request outlasts that deadline from
-   * when it started, so at most two deadlines in all. Never opens, and never
-   * counts as a run, so a caller inside a run can wait on it: a close waits
-   * for runs.
+   * the session is closing or rebuilding. An open is under way from a run's
+   * first attempt to its last, including a wait for a busy store and the
+   * pause before a retry. Settles when the open does, with its binding
+   * published, when its last attempt fails, or when the workspace starts
+   * closing or rebuilding. It also settles if an attempt's preparation
+   * outlasts the open deadline, or if its daemon request outlasts that
+   * deadline from when it started. Never opens, and never counts as a run,
+   * so a caller inside a run can wait on it: a close waits for runs.
    */
   openInProgress(workspace: EngineWorkspace): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry?.opening || entry.closing || entry.retiring ||
-      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
-    const { settled, requested } = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
-    return new Promise<void>((resolve) => {
-      let done = false, timer: ReturnType<typeof setTimeout>;
-      const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
-      const wait = () => { timer = setTimeout(finish, deadlineMs); timer.unref?.(); };
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || (!entry.opening && entry.openingRuns === 0) ||
+      entry.closing || entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
+    const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (lookAgain: boolean) => { clearTimeout(timer); entry.openWaiters.delete(again); resolve(lookAgain); };
+      const again = () => finish(true);
+      entry.openWaiters.add(again);
+      const wait = () => { clearTimeout(timer); timer = setTimeout(() => finish(false), deadlineMs); timer.unref?.(); };
       wait();
+      if (!attempt) return;
       // The daemon request's own deadline starts with it, after preparation.
-      void requested.then(() => { if (done) return; clearTimeout(timer); wait(); });
-      void settled.then(finish);
-    });
+      void attempt.requested.then(() => { if (entry.openWaiters.has(again)) wait(); });
+      void attempt.settled.then(again);
+    }).then((lookAgain) => (lookAgain ? this.openInProgress(workspace) ?? undefined : undefined));
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */
@@ -1007,7 +1018,9 @@ export class EngineWorkspaceSessions {
   }
 
   beginRebuild(workspace: AttachedEngineWorkspace): void {
-    this.rebuildingWorkspaces.add(this.sessionKey(workspace));
+    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    this.rebuildingWorkspaces.add(key);
+    if (entry) this.wakeOpenWaiters(entry);
   }
 
   endRebuild(workspace: AttachedEngineWorkspace): void {
@@ -1054,6 +1067,7 @@ export class EngineWorkspaceSessions {
       entry.retiring = retire;
       const closing = this.closeEntry(entry);
       entry.closing = closing;
+      this.wakeOpenWaiters(entry);
       try {
         await closing;
       } finally {
@@ -1110,6 +1124,8 @@ export class EngineWorkspaceSessions {
         binding: null,
         opened: false,
         opening: null,
+        openingRuns: 0,
+        openWaiters: new Set(),
         closing: null,
         retiring: false,
         activeRuns: 0,
@@ -1176,6 +1192,25 @@ export class EngineWorkspaceSessions {
   }
 
   private async openForRun(
+    workspace: EngineWorkspace,
+    entry: SessionEntry,
+    options: EngineWorkspaceRunOptions,
+    rebindStarted: boolean,
+    storeBusy: StoreBusyRetryState,
+  ): Promise<EngineWorkspaceBinding> {
+    entry.openingRuns += 1;
+    try {
+      return await this.openWithRetries(workspace, entry, options, rebindStarted, storeBusy);
+    } finally {
+      if (--entry.openingRuns === 0) this.wakeOpenWaiters(entry);
+    }
+  }
+
+  private wakeOpenWaiters(entry: SessionEntry): void {
+    for (const wake of [...entry.openWaiters]) wake();
+  }
+
+  private async openWithRetries(
     workspace: EngineWorkspace,
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
@@ -1255,6 +1290,7 @@ export class EngineWorkspaceSessions {
       const requested = new Promise<void>((resolve) => { request = resolve; });
       const promise = this.openWithClient(client, workspace, request);
       entry.opening = { client, promise, settled, requested };
+      this.wakeOpenWaiters(entry);
       let binding: EngineWorkspaceBinding;
       try {
         binding = await this.untilFirstOpenAbandoned(entry, promise);

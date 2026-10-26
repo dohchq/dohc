@@ -1,7 +1,7 @@
 import { chmod, link, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Request, Response } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type Request, type Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
@@ -28,10 +28,15 @@ class Daemon implements EngineDaemonClient {
   ready = true;
   hold: Promise<void> | null = null;
   fail = false;
+  busy = 0;
 
   async sendRequest(request: Request): Promise<Response> {
     if (request.method === "workspace.open") {
       await this.hold;
+      if (this.busy > 0) {
+        this.busy -= 1;
+        throw new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+      }
       if (this.fail) throw new Error("open refused");
       const { rootDir } = request.params as { rootDir: string };
       await mkdir(join(rootDir, ".dohc", "local"), { recursive: true });
@@ -50,9 +55,9 @@ afterEach(async () => {
 });
 
 let workspaces = 0;
-async function engine() {
+async function engine(sleep: (ms: number) => Promise<void> = async () => undefined) {
   const daemon = new Daemon();
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep });
   opened.push(sessions);
   readLocalStateFrom(sessions);
   workspaces += 1;
@@ -241,8 +246,8 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
   const runOn = (system: NodeJS.Platform) => Object.defineProperty(process, "platform", { value: system });
   afterEach(() => runOn(platform));
   // The test scratch is made for the system the tests run on.
-  async function windowsEngine() {
-    const made = await engine();
+  async function windowsEngine(sleep?: (ms: number) => Promise<void>) {
+    const made = await engine(sleep);
     runOn("win32");
     return made;
   }
@@ -279,6 +284,23 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     held.resolve();
     await opening;
     expect(await reading).toMatch(/local$/);
+  });
+
+  it("reads the saved layout when it asks while the open waits for a busy store", async () => {
+    const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const { daemon, sessions, workspace, open } = await windowsEngine(async () => { paused.resolve(); await resume.promise; });
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    daemon.busy = 1;
+    const asked = vi.spyOn(sessions, "localStateOpenAt");
+    const opening = open();
+    await paused.promise;
+    const reading = readUiStateFile(workspace.rootPath);
+    await vi.waitFor(() => expect(asked).toHaveBeenCalled());
+    resume.resolve();
+    await opening;
+    expect(await reading).toEqual({ sidebarOpen: true });
   });
 
   // A read is trusted only while one open holds the folder throughout.

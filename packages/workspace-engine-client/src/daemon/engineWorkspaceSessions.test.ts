@@ -126,15 +126,18 @@ it("gives the open under way to wait on, without a run, and nothing while closin
   await sessions.closeAll();
 });
 
-it("gives nothing to wait on while the workspace rebuilds", async () => {
+it("gives nothing to wait on while the workspace rebuilds, and ends a wait when a rebuild starts", async () => {
   const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebuild") };
   const client = new MockClient("rebuild", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 });
   const held = deferred<void>();
   client.holdOpen = held.promise;
   const opening = sessions.run(workspace, async () => undefined);
   await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  const waited = sessions.openInProgress(workspace)!;
   sessions.beginRebuild(workspace);
+  // At once, while the open is still held: the deadline is a minute.
+  await waited;
   expect(sessions.openInProgress(workspace)).toBeNull();
   sessions.endRebuild(workspace);
   held.resolve();
@@ -191,6 +194,101 @@ it("waits out an open whose daemon request starts late but finishes within its o
     await opening;
   } finally { vi.useRealTimers(); }
   await sessions.closeAll();
+});
+
+// Opens whose first attempts are refused: a busy store, then a dropped transport.
+function refuseOpens(client: MockClient, refusals: unknown[]): void {
+  const request = client.sendRequest.bind(client);
+  vi.spyOn(client, "sendRequest").mockImplementation(async (input) => {
+    if (input.method === "workspace.open" && refusals.length > 0) throw refusals.shift();
+    return await request(input);
+  });
+}
+
+it("counts a busy store's wait and a retry's pause as the open under way", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("retried", { localStateReady: true });
+  const pauses: (() => void)[] = [];
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: () => new Promise<void>((resolve) => { pauses.push(resolve); }), workspaceOpenDeadlineMs: 60_000,
+  });
+  refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff"), transportFailure()]);
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(pauses).toHaveLength(1));
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  let over = false;
+  void waited!.then(() => { over = true; });
+  pauses[0]!();
+  await vi.waitFor(() => expect(pauses).toHaveLength(2));
+  expect(over).toBe(false);
+  pauses[1]!();
+  await waited;
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+  await opening;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
+it("ends the wait for an open under way at once when its last attempt fails", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("refused");
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 });
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  client.failOpen = true;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  const waited = sessions.openInProgress(workspace)!;
+  held.resolve();
+  await expect(opening).rejects.toThrow("open refused");
+  await waited;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
+it("ends the wait for an open under way at once when the workspace starts closing between attempts", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("closed");
+  const paused = deferred<void>(), resume = deferred<void>();
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => { paused.resolve(); await resume.promise; }, workspaceOpenDeadlineMs: 60_000,
+  });
+  refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
+  const opening = sessions.run(workspace, async () => undefined).catch(() => undefined);
+  await paused.promise;
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  const closing = sessions.closeWorkspace(workspace);
+  await waited;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  resume.resolve();
+  await opening;
+  await closing;
+  await sessions.closeAll();
+});
+
+it("ends the wait for an open under way when a pause between attempts outlasts the open deadline", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("paused");
+  const paused = deferred<void>();
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: () => { paused.resolve(); return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 50,
+  });
+  refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
+  void sessions.run(workspace, async () => undefined).catch(() => undefined);
+  await paused.promise;
+  vi.useFakeTimers();
+  try {
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(over).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+  } finally { vi.useRealTimers(); }
 });
 
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
