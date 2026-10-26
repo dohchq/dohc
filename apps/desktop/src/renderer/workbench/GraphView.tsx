@@ -918,6 +918,9 @@ export function GraphView(props: {
     [graph, rows, variant],
   );
   const notice = graphStatus(graph, rows.length, shownEdgeCount);
+  const docCount = `${graph.nodes.length} doc${graph.nodes.length === 1 ? "" : "s"}`;
+  const linkCount = `${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"}`;
+  const counts = `${docCount} · ${linkCount}`;
 
   return (
     <div
@@ -936,15 +939,13 @@ export function GraphView(props: {
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
-        <output data-testid="graph-doc-count" className="whitespace-nowrap text-[11px] text-muted">
-          {graph.nodes.length} doc{graph.nodes.length === 1 ? "" : "s"}
-        </output>
-        <span aria-hidden className="text-subtle">
-          ·
+        <span title={counts} className="min-w-0 truncate text-[11px] text-muted">
+          <output data-testid="graph-doc-count">{docCount}</output>
+          <span aria-hidden className="mx-2 text-[13px] text-subtle">
+            ·
+          </span>
+          <output data-testid="graph-link-count">{linkCount}</output>
         </span>
-        <output data-testid="graph-link-count" className="whitespace-nowrap text-[11px] text-muted">
-          {graph.edges.length} link{graph.edges.length === 1 ? "" : "s"}
-        </output>
         {notice && variant === "page" ? (
           <span
             data-testid="graph-unresolved-count"

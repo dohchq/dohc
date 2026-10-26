@@ -630,6 +630,8 @@ describe("GraphView", () => {
     ] }));
     await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 docs"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
+    // The counts truncate together in a narrow panel, so their tooltip holds both.
+    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 docs · 1 link");
     const row=screen.getAllByTestId("graph-file-row").find(row=>row.dataset.path==="a.md")!;
     expect(row.textContent).toContain("0/1");
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();
