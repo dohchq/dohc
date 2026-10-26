@@ -2305,8 +2305,11 @@ export function DesktopWorkspaceShell(props: {
   // absent = root) — the drop target, or the folder whose context menu ran
   // "Import Files…". Every import shows what landed, where, and how many
   // sources were skipped — never a silent shrink.
+  // Where the import began. An Explorer import selects what landed in the
+  // Explorer. The palette and the start surface may show no Explorer, so a
+  // notice says what landed.
   const importFiles = useCallback(
-    async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+    async (from: "explorer" | "palette" | "start-surface", droppedPaths?: string[], targetDir?: string) => {
       const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
@@ -4273,6 +4276,22 @@ export function DesktopWorkspaceShell(props: {
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
     [commandContext, commandHandlers],
   );
+  // The start surface's tiles: each kind's existing create action, where the
+  // workspace allows it. An app is a folder, so it needs folder creation.
+  const startActions = useMemo(
+    () => ({
+      ...(isCommandAvailable("new-file", commandContext) ? { markdown: commandHandlers["new-file"] } : {}),
+      ...(isCommandAvailable("new-collection", commandContext) ? { collection: commandHandlers["new-collection"] } : {}),
+      ...(isCommandAvailable("new-drawing", commandContext) ? { drawing: createUntitledDrawing } : {}),
+      ...(isCommandAvailable("new-folder", commandContext) ? { app: createFirstApp } : {}),
+    }),
+    [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
+  );
+  // Files dropped on the start surface land at the workspace root.
+  const importDroppedFiles = useCallback((dropped: File[]) => {
+    const paths = bridge().getDroppedFilePaths(dropped);
+    if (paths.length > 0) void importFiles("start-surface", paths);
+  }, [importFiles]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -6115,9 +6134,11 @@ export function DesktopWorkspaceShell(props: {
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}
-                onNewFile={isCommandAvailable("new-file", commandContext) ? commandHandlers["new-file"] : undefined}
-                onOpenPalette={() => setPaletteOpen(true)}
-                onOpenQuickOpen={() => setQuickOpenOpen(true)}
+                create={startActions}
+                recent={wb.recentFiles}
+                files={fileListingCommit ? files : null}
+                onOpen={openFile}
+                onDropFiles={isCommandAvailable("import-files", commandContext) ? importDroppedFiles : undefined}
               />
             );
               }
