@@ -14,7 +14,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::{
-    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState,
+    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState, disk_spelling,
     remove_empty_directory_target,
 };
 use dohc_engine_storage::{
@@ -534,10 +534,10 @@ pub(super) fn projection_target_alias<'a>(
 }
 
 fn projection_paths_share_entry(root: &std::path::Path, path: &str, target: &str) -> bool {
-    let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
+    let Some(previous) = disk_spelling(root, path) else {
         return false;
     };
-    std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+    disk_spelling(root, target).is_some_and(|target| target == previous)
 }
 
 /// The heads of one version, with their content kinds, grouped by how a disk
@@ -649,21 +649,13 @@ fn reaches_other_spelling(root: &std::path::Path, path: &str) -> bool {
 /// its last segment.
 fn stored_spelling_differs(root: &std::path::Path, path: &str) -> bool {
     let leaf = path.rsplit('/').next().unwrap_or(path);
-    std::fs::canonicalize(root.join(path)).is_ok_and(|file| {
-        file.file_name()
-            .is_some_and(|name| name != std::ffi::OsStr::new(leaf))
-    })
+    disk_spelling(root, path).is_some_and(|file| file.rsplit('/').next() != Some(leaf))
 }
 
 /// Whether the disk stores the file `path` reaches under exactly that path,
 /// folders included.
 fn stored_as(root: &std::path::Path, path: &str) -> bool {
-    let mut prefix = root.to_path_buf();
-    path.split('/').all(|segment| {
-        prefix.push(segment);
-        std::fs::canonicalize(&prefix)
-            .is_ok_and(|stored| stored.file_name() == Some(std::ffi::OsStr::new(segment)))
-    })
+    disk_spelling(root, path).is_some_and(|stored| stored == path)
 }
 
 fn case_alias_targets<'a>(
@@ -2135,7 +2127,6 @@ pub(super) mod tests {
 
     /// Two owners hold the file's bytes. The one the disk already spells the
     /// file as keeps it, though the other comes first in path order.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_keeps_the_owner_spelled_as_the_file() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2158,7 +2149,6 @@ pub(super) mod tests {
 
     /// The disk spells the file as an owner the files policy no longer tracks,
     /// so the file and its local edits are that owner's to keep.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_keeps_the_file_of_an_untracked_owner() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2185,7 +2175,6 @@ pub(super) mod tests {
 
     /// The disk spells the file's folder as the deleted path does, not as the
     /// untracked owner does, so the file isn't that owner's and the delete runs.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_removes_a_file_only_its_folder_spells_as_an_untracked_owner() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
