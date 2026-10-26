@@ -10,12 +10,14 @@ const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finis
 const WORKSPACE = "workspace";
 const ANA = { target: { kind: "person", userId: "user_ana" }, label: "ana@example.com (Edit)" } as const;
 const LINK = { target: { kind: "link", grantId: "grant-link" }, label: "Edit link" } as const;
+const onCollectionAutomationsChanged = () => () => undefined;
 
 it("dismisses unfinished progress through the workspace operation and keeps the files-step wording", async () => {
   const dismissStopAndRestore = vi.fn(async () => {});
   const result = {status: "restored" as const, restored: [], review: [], runsUndone: 0, runsLeft: 0,
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files" as const, message: "Interrupted"}};
-  window.dohcDesktop = {dismissStopAndRestore, pendingStopAndRestores: async () => [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: true}]} as unknown as typeof window.dohcDesktop;
+  window.dohcDesktop = {dismissStopAndRestore, onCollectionAutomationsChanged,
+    pendingStopAndRestores: async () => [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: true}]} as unknown as typeof window.dohcDesktop;
   const onError = vi.fn();
   const h = renderHook(() => useStopAndRestore(WORKSPACE, {ready: true, onError}));
   await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
@@ -29,7 +31,7 @@ it("recovers saved totals once and preserves a newer in-memory outcome across wo
   const result: Extract<StopAndRestoreResult, {status: "restored"}> = {status: "restored", restored: [], review: [], runsUndone: 2, runsLeft: 0,
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: {step: "runs", message: "Conflict"}};
   const pending = vi.fn(async () => [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: false}]);
-  window.dohcDesktop = {pendingStopAndRestores: pending} as unknown as typeof window.dohcDesktop;
+  window.dohcDesktop = {pendingStopAndRestores: pending, onCollectionAutomationsChanged} as unknown as typeof window.dohcDesktop;
   const onError = vi.fn();
   const h = renderHook(({workspaceId, ready}) => useStopAndRestore(workspaceId, {ready, onError}), {initialProps: {workspaceId: WORKSPACE, ready: true}});
   await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
@@ -40,6 +42,31 @@ it("recovers saved totals once and preserves a newer in-memory outcome across wo
   await act(async () => {});
   expect(h.result.current.receipts.runs(WORKSPACE, ANA.target).runsUndone).toBe(2);
   expect(h.result.current.receipts.shown(WORKSPACE, ANA.target)?.result.runsUndone).toBe(3);
+});
+
+it("reads unfinished progress again once the workspace's automations open", async () => {
+  const result = {status: "restored" as const, restored: [], review: [], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files" as const, message: "Interrupted"}};
+  // Main answers nothing until the automation store opens.
+  let opened = false;
+  let changed: ((event: {workspaceId: string}) => void) | undefined;
+  const pending = vi.fn(async () => opened ? [{target: ANA.target, label: ANA.label, result, receipts: [], filesUndone: false}] : []);
+  window.dohcDesktop = {pendingStopAndRestores: pending, onCollectionAutomationsChanged: (listener: typeof changed) => {
+    changed = listener;
+    return () => {changed = undefined;};
+  }} as unknown as typeof window.dohcDesktop;
+  const onError = vi.fn();
+  const h = renderHook(() => useStopAndRestore(WORKSPACE, {ready: true, onError}));
+  await waitFor(() => expect(pending).toHaveBeenCalledTimes(1));
+  await act(async () => {});
+  opened = true;
+  act(() => changed?.({workspaceId: "other"}));
+  expect(pending).toHaveBeenCalledTimes(1);
+  act(() => changed?.({workspaceId: WORKSPACE}));
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toBe("dohc stopped before restoring every file.");
+  h.unmount();
+  expect(changed).toBeUndefined();
 });
 
 it.each(["pending", "not-accepted"] as const)("reports %s shared reversals with the matching run count", async state => {
@@ -103,6 +130,7 @@ function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA
     }),
     stopAndRestore,
     pendingStopAndRestores: async () => recovered ?? [],
+    onCollectionAutomationsChanged,
     undoStopAndRestore,
   } as unknown as typeof window.dohcDesktop;
   const release = vi.fn();
