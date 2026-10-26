@@ -35,9 +35,10 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
+import { accessReasonForLane, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryPaused, HistoryUpdating, MARK_BOX, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -57,24 +58,8 @@ export type AboutNotices = {
   clear(identity: string): void;
 };
 
-// What explains an Access answer that covers nothing. `checking` waits for
-// the workspace's server connection to be read; it claims nothing.
-export type AccessReason = "checking" | "not-synced" | "signed-out" | "other-account" | "unexplained";
 export type AccessSetup = {
   reason: AccessReason;
-  openSyncSettings: () => void;
-  connect: () => void;
-};
-
-// What this computer knows about the workspace's server connection, from the
-// shell's cloud status: "checking" while it is read, and "unreadable" once
-// reading it failed, which the shell reports on its own.
-export type AccessFacts = {
-  cloud: { connected: boolean; workspaceSynced: boolean; workspaceSyncConnected: boolean } | "checking" | "unreadable";
-  shareView: boolean;
-};
-export type AccessContext = {
-  facts: AccessFacts;
   openSyncSettings: () => void;
   connect: () => void;
 };
@@ -88,19 +73,6 @@ export type AccessContext = {
 // or the list has not arrived. The renderer cannot tell those apart.
 export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
   return accessReasonForLane(facts, facts.shareView || isSharedWithMePath(path) ? "received" : "granted");
-}
-
-// The same cause for a whole list: the workspace's own shares, or the
-// account's received ones.
-export function accessReasonForLane(facts: AccessFacts, lane: "granted" | "received"): AccessReason {
-  const { cloud } = facts;
-  if (cloud === "checking") return "checking";
-  if (cloud === "unreadable") return "unexplained";
-  if (lane === "received") return cloud.connected ? "unexplained" : "signed-out";
-  if (!cloud.workspaceSynced) return "not-synced";
-  if (!cloud.connected) return "signed-out";
-  if (!cloud.workspaceSyncConnected) return "other-account";
-  return "unexplained";
 }
 
 // A row in a section, inset from the panel's edges like the drawing's rows.
@@ -205,11 +177,14 @@ export function AboutNote(props: {
   );
 }
 
-// Said while a link index builds: the rows shown may grow.
+// Said while a link index builds: the rows shown may grow. Its words start
+// where a row's name does.
 export function AboutGathering(props: { testId: string }) {
   return (
-    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted">
-      <LoaderCircle size={12} aria-hidden className="shrink-0 text-subtle motion-safe:animate-spin" />
+    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-2 px-2 py-1 text-[12px] text-muted">
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+        <LoaderCircle size={12} className="motion-safe:animate-spin" />
+      </span>
       Gathering links
     </p>
   );
@@ -267,7 +242,9 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       onClick={props.onOpen}
       className={`${ABOUT_ROW_BUTTON} h-10`}
     >
-      <MessageSquare size={14} aria-hidden className="shrink-0 text-subtle" />
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+        <MessageSquare size={14} />
+      </span>
       <span className="flex min-w-0 flex-col">
         <span className="truncate">{props.thread.title}</span>
         <time dateTime={when.iso} className="truncate text-[11px] text-subtle">
@@ -709,7 +686,9 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       onClick={props.onOpen}
       className={`${ABOUT_ROW_BUTTON} py-1`}
     >
-      <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} className="mt-px self-start text-subtle" />
+      <span className={`${MARK_BOX} self-start text-subtle`}>
+        <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} />
+      </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-2">
           <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
@@ -850,28 +829,35 @@ export function AboutLinksView(props: {
 // ---- History ----
 
 // The file History asks about. Its object id comes from the file's chats
-// read: loading until that answers, null for a file the engine does not
-// track, and a failed read offers that read's Try again.
+// read: loading until that answers, updating while the engine still reads the
+// workspace's files in, null for a file the engine does not track, and a
+// failed read offers that read's Try again.
 export type AboutFile =
   | typeof LOADING
+  | { status: "updating" }
   | { status: "failed"; retry: () => void }
   | { status: "ready"; objectId: string | null };
 
-// `held` is History holding the file's changes back, a state of the surface
-// drawn in place (HistoryPolicyStates.tsx): its rules can't be read, or the
-// workspace is still updating. Nothing failed, so it files no row.
+// `held` is History holding the file's changes back because its rules can't
+// be read, a state of the surface drawn in place (HistoryPolicyStates.tsx).
+// `updating` is History still taking in recent changes, read again soon at
+// first. Nothing failed in either, so neither files a row.
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
   | { status: "untracked" }
+  | { status: "updating" }
   | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
 const HISTORY_ROWS = 5;
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 
 // A change with no one author, or several, keeps the file mark here.
-const FILE_MARK = <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
+const FILE_MARK = (
+  <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+    <FileText size={14} />
+  </span>
+);
 
 export function AboutHistory(props: {
   workspaceId: string;
@@ -879,6 +865,8 @@ export function AboutHistory(props: {
   file: AboutFile;
   // Changes when the workspace's history grows, so the rows follow edits.
   revision: number;
+  // History stopped recording, so its answers may be missing changes.
+  paused: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -892,8 +880,13 @@ export function AboutHistory(props: {
     props.notices,
   );
   const { begin, cancel } = read;
-  const load = useCallback(async () => {
+  // History can finish taking in changes without adding one, so no newer
+  // revision is sure to come: an updating answer schedules the next read.
+  // Any read that starts first replaces it.
+  const nextRead = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const load = useCallback(async (updatingReads = 0) => {
     if (objectId === null) return;
+    clearTimeout(nextRead.current);
     const request = begin();
     const failed = { status: "failed", retry: () => void load() } as const;
     try {
@@ -902,11 +895,13 @@ export function AboutHistory(props: {
         request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
       }
-      request.settle({
-        status: "held",
-        words: response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable),
-        retry: failed.retry,
-      });
+      if (response.status === "updating") {
+        if (!request.current()) return;
+        request.settle({ status: "updating" });
+        nextRead.current = setTimeout(() => void load(updatingReads + 1), gatherDelay(updatingReads + 1));
+        return;
+      }
+      request.settle({ status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
     } catch (error) {
       request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
@@ -914,25 +909,35 @@ export function AboutHistory(props: {
   useEffect(() => {
     if (!props.expanded || objectId === null) return;
     void load();
-    return cancel;
+    return () => {
+      cancel();
+      clearTimeout(nextRead.current);
+    };
   }, [cancel, load, objectId, props.expanded, props.revision]);
 
   const view: HistoryView =
-    file.status === "loading" ? LOADING
+    file.status === "loading" || file.status === "updating" ? file
     : file.status === "failed" ? { status: "failed", retry: file.retry }
     : file.objectId === null ? { status: "untracked" }
     : read.view;
-  return <AboutHistoryView view={view} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />;
+  return (
+    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />
+  );
 }
 
 // The History section for an answer already in hand. The states page draws it.
 export function AboutHistoryView(props: {
   view: HistoryView;
+  // History stopped recording: the line replaces taking in changes and heads
+  // any rows, which may be missing changes.
+  paused?: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
+  // Its words start where a row's name does.
+  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
   return (
     <AboutSection
       id="history"
@@ -948,15 +953,18 @@ export function AboutHistoryView(props: {
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
+      ) : view.status === "updating" ? (
+        paused ?? <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
       ) : view.status === "held" ? (
         // The words end in "try again", so the control they name is here.
         <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>
           {view.words}
         </AboutNote>
       ) : view.moments.length === 0 ? (
-        <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
+        paused ?? <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
       ) : (
         <ul className="m-0 list-none p-0">
+          {paused ? <li>{paused}</li> : null}
           {view.moments.map((moment) => {
             const when = formatChatTime(moment.recordedAtMs);
             const source = engineMomentSourceLabel(moment);
@@ -1037,7 +1045,9 @@ function AccessRowView(props: { row: AccessRow }) {
         {row.appId === null ? (
           <ChatAvatar presentation={neutralPresentation} name={row.principal} kind="human" size="strip" />
         ) : (
-          <ObjectGlyph kind="app" size={14} className="text-subtle" />
+          <span className={`${MARK_BOX} text-subtle`}>
+            <ObjectGlyph kind="app" size={14} />
+          </span>
         )}
         <span className="min-w-0 flex-1 truncate">{row.principal}</span>
       </div>

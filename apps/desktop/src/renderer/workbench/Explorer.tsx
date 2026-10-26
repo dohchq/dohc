@@ -38,7 +38,7 @@ import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
-import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
+import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
   pendingTreeMoveSettled,
@@ -94,9 +94,11 @@ export interface ExplorerProps {
   // handle previews locally and commits the final clamped height on release.
   openEditorsHeight: number;
   onOpenEditorsHeightChange: (height: number) => void;
-  // Incrementing request to begin an inline create at the root (palette /
-  // application-menu "New Folder" route).
-  createRequest: { kind: "file" | "folder"; id: number } | null;
+  // Incrementing request to begin an inline folder create at the root
+  // (palette / application-menu "New Folder" route).
+  newFolderRequest: number | null;
+  // New file opens a new page whose file will go in this folder ("" = root).
+  onNewPage: (folder: string) => void;
   // Paths to select once their rows render ("Show in Explorer", or what an
   // import added). The first in the tree takes focus. The shell expands their
   // folders first; onRevealed clears the request.
@@ -166,7 +168,7 @@ export interface ExplorerProps {
 }
 
 type EditingState =
-  | { mode: "create"; kind: "file" | "folder"; parentPath: string }
+  | { mode: "create"; parentPath: string }
   | { mode: "rename"; path: string; isFolder: boolean };
 
 export type VisibleRow = FlatRow & {
@@ -183,15 +185,13 @@ type TreeRenderItem =
 
 type VirtualRange = { start: number; end: number };
 
-// The kind a create or rename draft will have once committed, so the glyph
-// follows the name as it is typed. `renameFrom` is the renamed file's path,
-// or null for a create. An empty draft shows the Markdown default.
-function draftFileKind(value: string, renameFrom: string | null): FileKindRecord {
+// The kind a rename draft will have once committed, so the glyph follows the
+// name as it is typed. `renameFrom` is the renamed file's path. An empty
+// draft shows the Markdown default.
+function draftFileKind(value: string, renameFrom: string): FileKindRecord {
   const name = value.trim();
   if (!name) return FILE_KIND_RECORDS.markdown;
-  return fileKindForPath(
-    renameFrom === null ? withMarkdownDefault(name) : withRenameDefault(renameFrom, name),
-  );
+  return fileKindForPath(withRenameDefault(renameFrom, name));
 }
 
 // Every Explorer row draws its glyph at the drawing's 15px.
@@ -782,8 +782,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     element.focus();
   }, [focusedPath, virtualRange]);
 
-  const beginCreate = useCallback(
-    (kind: "file" | "folder", parentPath: string) => {
+  const beginCreateFolder = useCallback(
+    (parentPath: string) => {
       // beginPending auto-expands the target dir (old FileTree behavior) so
       // the editbox is actually visible.
       setFilesExpanded(true);
@@ -796,7 +796,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       setEditError(null);
       editDone.current = false;
       setEditPending(false);
-      setEditing({ mode: "create", kind, parentPath });
+      setEditing({ mode: "create", parentPath });
     },
     [onSetFolderExpanded],
   );
@@ -811,12 +811,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
 
-  const beginCreateAtFocus = useCallback(
-    (kind: "file" | "folder") => {
-      beginCreate(kind, creationParentPath());
-    },
-    [beginCreate, creationParentPath],
-  );
 
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
@@ -830,9 +824,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   useEffect(() => {
-    if (props.createRequest) beginCreate(props.createRequest.kind, "");
+    if (props.newFolderRequest !== null) beginCreateFolder("");
     // Re-arm on each request id; the id is the dependency on purpose.
-  }, [props.createRequest, beginCreate]);
+  }, [props.newFolderRequest, beginCreateFolder]);
 
   useEffect(() => {
     if (editing) {
@@ -884,7 +878,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         }
         const changedExistingPath = succeeded.some(
-          (change) => change.kind !== "create-file" && change.kind !== "create-folder",
+          (change) => change.kind !== "create-folder",
         );
         try {
           await operation?.settle(
@@ -968,34 +962,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [runChanges, workspaceId],
   );
 
-  const commitCreate = useCallback(
-    (kind: "file" | "folder", parentPath: string, value: string) => {
-      const typed = resolveTypedPath(value, parentPath);
-      // New files are markdown unless an extension is typed.
-      const path = kind === "file" && typed ? withMarkdownDefault(typed) : typed;
+  const commitCreateFolder = useCallback(
+    (parentPath: string, value: string) => {
+      const path = resolveTypedPath(value, parentPath);
       setEditing(null);
       if (!path) return;
-      const change: PendingTreeChange = {
-        id: nextChangeId(),
-        kind: kind === "file" ? "create-file" : "create-folder",
-        path,
-      };
+      const change: PendingTreeChange = { id: nextChangeId(), kind: "create-folder", path };
       for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
-      if (kind === "folder") onSetFolderExpanded(path, true);
+      onSetFolderExpanded(path, true);
       void runChanges([change], async () => {
-        if (kind === "file") {
-          const result = await bridge().createWorkspaceFile({
-            workspaceId,
-            relativePath: path,
-            initialText: "",
-          });
-          onOpenFile(result.path);
-        } else {
-          await bridge().createWorkspaceFolder({ workspaceId, relativePath: path });
-        }
+        await bridge().createWorkspaceFolder({ workspaceId, relativePath: path });
       });
     },
-    [runChanges, workspaceId, onOpenFile, onSetFolderExpanded],
+    [runChanges, workspaceId, onSetFolderExpanded],
   );
 
   const performDeletes = useCallback(
@@ -1126,10 +1105,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
         case "new-file":
-          beginCreate("file", targetDir);
+          props.onNewPage(targetDir);
           break;
         case "new-folder":
-          beginCreate("folder", targetDir);
+          beginCreateFolder(targetDir);
           break;
         case "new-collection":
           props.onNewCollection(targetDir);
@@ -1169,7 +1148,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     },
     [
       workspaceId,
-      beginCreate,
+      beginCreateFolder,
       beginRename,
       onTogglePin,
       exportZip,
@@ -1178,6 +1157,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       props.onRefreshShareMounts,
       props.onUnmountShare,
       props.onNewCollection,
+      props.onNewPage,
     ],
   );
 
@@ -1440,9 +1420,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // The edit target keeps its species: a folder rename shows the folder icon
   // and its chevron (current expansion state) — the row must not morph into
-  // a file for the duration of the edit.
-  const isFolderEdit =
-    editing?.mode === "create" ? editing.kind === "folder" : (editing?.isFolder ?? false);
+  // a file for the duration of the edit. A create is always a folder.
+  const fileRename = editing?.mode === "rename" && !editing.isFolder ? editing : null;
   const folderEditExpanded =
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
@@ -1460,37 +1439,29 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         ) : (
           <span aria-hidden className="w-3 shrink-0" />
         )}
-        {isFolderEdit ? (
-          folderEditExpanded ? (
-            <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
-          ) : (
-            <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
-          )
-        ) : (
+        {fileRename ? (
           <KindGlyph
             kind={
               // An untouched rename is still the listed file, so the listing
               // keeps deciding whether it is a database.
-              editing?.mode === "rename" && editValue.trim() === basenameOf(editing.path)
-                ? listedFileKind(editing.path, fileByPath.get(editing.path)?.kind)
-                : draftFileKind(editValue, editing?.mode === "rename" ? editing.path : null)
+              editValue.trim() === basenameOf(fileRename.path)
+                ? listedFileKind(fileRename.path, fileByPath.get(fileRename.path)?.kind)
+                : draftFileKind(editValue, fileRename.path)
             }
             size={GLYPH_SIZE}
             className={glyphTone(false)}
           />
+        ) : folderEditExpanded ? (
+          <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
+        ) : (
+          <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
         )}
         <input
           spellCheck={false}
           ref={editInputRef}
           type="text"
           data-testid="tree-edit-input"
-          aria-label={
-            editing?.mode === "rename"
-              ? "New name"
-              : editing?.kind === "folder"
-                ? "New folder name"
-                : "New file name"
-          }
+          aria-label={editing?.mode === "rename" ? "New name" : "New folder name"}
           value={editValue}
           aria-invalid={editError ? true : undefined}
           aria-describedby={editError ? "tree-name-error" : undefined}
@@ -1528,9 +1499,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     if (commit && editValue.trim()) {
       const platform = window.dohcDesktop?.platform ?? "";
       const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
-      const destination = editing.mode === "rename"
-        ? editing.isFolder ? typed : withRenameDefault(editing.path, typed)
-        : editing.kind === "folder" ? typed : withMarkdownDefault(typed);
+      const destination = editing.mode === "rename" && !editing.isFolder ? withRenameDefault(editing.path, typed) : typed;
       const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
       if (error) {
         setEditError(error);
@@ -1552,7 +1521,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       return;
     }
     if (editing.mode === "create") {
-      commitCreate(editing.kind, editing.parentPath, editValue);
+      commitCreateFolder(editing.parentPath, editValue);
     } else {
       commitRename(editing, editValue);
     }
@@ -1917,12 +1886,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <span className="min-w-0 flex-1 truncate">Files</span>
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
-              <SectionActionButton label="New file" onClick={() => beginCreateAtFocus("file")}>
+              <SectionActionButton label="New file" onClick={() => props.onNewPage(creationParentPath())}>
                 <FilePlus2 size={13} aria-hidden />
               </SectionActionButton>
               <SectionActionButton
                 label="New folder"
-                onClick={() => beginCreateAtFocus("folder")}
+                onClick={() => beginCreateFolder(creationParentPath())}
               >
                 <FolderPlus size={13} aria-hidden />
               </SectionActionButton>
@@ -1991,7 +1960,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               {empty ? (
                 <button
                   type="button"
-                  onClick={() => beginCreate("file", "")}
+                  onClick={() => props.onNewPage("")}
                   className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
                 >
                   <FilePlus2 size={13} aria-hidden />

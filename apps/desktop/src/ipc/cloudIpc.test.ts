@@ -414,7 +414,8 @@ describe("registered cloud handlers", () => {
       ownPresentation: ownActorPresentation("device", credentials),
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
-      workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
+      workspaceSyncOwned: true, workspaceSynced: true, workspaceServerUrl: credentials.serverUrl,
+      workspaceSyncConnected: true, workspaceSecretState: "none",
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
@@ -739,7 +740,8 @@ it("exposes owned sync and pause state while signed out", async () => {
   h.login.status.mockResolvedValue({ connected: false });
   h.login.credentials.mockResolvedValue(null); h.cache.clear();
   expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
-    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: false,
+    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceServerUrl: credentials.serverUrl,
+    workspaceSyncConnected: false,
   });
   const stopped = await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
   expect(stopped).toMatchObject({ syncPause: { author: { kind: "person", personId: "local", self: true } } });

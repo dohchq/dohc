@@ -41,6 +41,7 @@ import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/priv
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerWorkspaceFolderNameIpc } from "./ipc/workspaceFolderNameIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -342,7 +343,6 @@ import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/aut
 import { wakeAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
-import { configuredRunnerCommand } from "./agents/agentToolCatalog";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
@@ -378,7 +378,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
-import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -541,7 +541,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import type { ThemeMode } from "./settings/userSettings";
+import { firstAgent, firstAgentWithLaunch, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -903,12 +903,12 @@ function cloudLogin(): CloudLogin {
       allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
-        cipher: {
+        cipher: mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env }) ? {
           isAvailable: () => safeStorage.isEncryptionAvailable(),
           encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
           decrypt: (cipherText) =>
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-        },
+        } : undefined,
       }),
     });
   }
@@ -3572,8 +3572,8 @@ const chatDispatchService = createChatDispatchService({
   }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
-  readRunnerSettings: async () =>
-    (await readCachedUserSettingsFile(stateDir())).settings.runner,
+  readDispatchAgent: async () =>
+    firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings),
   identityFor: (workspace, target) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       await warmCredentialCache();
@@ -3591,7 +3591,7 @@ const chatDispatchService = createChatDispatchService({
       const settings = (await readCachedUserSettingsFile(stateDir())).settings;
       lease.assertCurrent();
       return {
-        displayName: settings.profile.agentName ?? "Agent",
+        displayName: firstAgent(settings)?.name ?? "Agent",
         ownerDisplayName: localUserDisplayName(),
         ...(verifiedUserId ? { verifiedUserId } : {}),
       };
@@ -3884,8 +3884,7 @@ const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
 async function agentRunnerReady(): Promise<boolean> {
-  const runner = (await readCachedUserSettingsFile(stateDir())).settings.runner;
-  return runner.enabled && configuredRunnerCommand(runner) !== "";
+  return firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
 }
 
 async function wakeAutomationAgent(
@@ -4905,7 +4904,7 @@ const chatWrites = createChatWrites({
   currentCredentialGeneration: () => credentialCacheGeneration,
   localUserDisplayName,
   agentDisplayName: async () =>
-    (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
+    firstAgent((await readCachedUserSettingsFile(stateDir())).settings)?.name ?? "Agent",
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5231,8 +5230,14 @@ const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
+    // A window's reads that came before this open, such as its settings, read again.
+    notifyRenderer({workspaceId});
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
+      reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+      automationHosts.open(workspaceId);
+      void lease.state.collectionAutomations.workspaceOpened();
+    });
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -5893,7 +5898,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
-      cachedAgentName = settings.profile.agentName;
+      cachedAgentName = firstAgent(settings)?.name;
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
       applyThemeMode(settings.appearance.themeMode);
       session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -6349,6 +6354,7 @@ const workspaceChatLinks = createChatLinksReader({
 });
 
 function registerIpcHandlers(): void {
+  registerWorkspaceFolderNameIpc(operationBoundary, workspaceRootApproval.usableRoot);
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
@@ -7072,7 +7078,7 @@ function registerIpcHandlers(): void {
   });
 
   const buttonsIpc = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
     // A file is a record of the nearest Collection folder above it, when
@@ -7196,7 +7202,7 @@ function registerIpcHandlers(): void {
     CloudSessionCredentials
   >({
     hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),

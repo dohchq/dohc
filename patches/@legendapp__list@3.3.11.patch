@@ -1,5 +1,5 @@
 diff --git a/react.js b/react.js
-index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a03c72d3d 100644
+index 874465090398bbfb1b079e82dd175490020eaabf..b8b70e9e6e2b7f97e20c35fae4ba3863f82db5e4 100644
 --- a/react.js
 +++ b/react.js
 @@ -721,7 +721,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
@@ -11,7 +11,15 @@ index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a
      );
      const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
      if (!shouldSkipThresholdChecks) {
-@@ -5926,6 +5926,29 @@ function useDOMOrder(ref) {
+@@ -1903,6 +1903,7 @@ function doMaintainScrollAtEnd(ctx) {
+         if (isReplayingPendingMaintain || isStillWithinThreshold || !didScrollSinceRequest) {
+           if (state.scrollingTo || state.pendingScrollResolve) {
+             state.pendingMaintainScrollAtEnd = true;
++            state.maintainingScrollAtEnd = void 0;
+             return;
+           }
+           state.maintainingScrollAtEnd = activeState;
+@@ -5926,6 +5927,29 @@ function useDOMOrder(ref) {
      let timeoutId;
      let lastUpdateTime = 0;
      let delay = 500;
@@ -41,7 +49,7 @@ index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a
      const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
        const container = ref.current;
        const now = Date.now();
-@@ -5934,21 +5957,11 @@ function useDOMOrder(ref) {
+@@ -5934,21 +5958,11 @@ function useDOMOrder(ref) {
        clearTimeout(timeoutId);
        timeoutId = setTimeout(() => {
          timeoutId = void 0;
@@ -65,7 +73,7 @@ index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a
        unsubscribe();
        clearTimeout(timeoutId);
      };
-@@ -7670,6 +7683,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+@@ -7670,6 +7684,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
      scrollToIndex: (params) => {
        return runScrollWithPromise(
          () => {
@@ -74,7 +82,7 @@ index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a
            return true;
          },
 diff --git a/react.mjs b/react.mjs
-index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace02d2557f 100644
+index d9a4414a9295c694f9c2b71cf75268a422f897e4..067a799d344a932ec4dd9dfe363b67c564df91c2 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -700,7 +700,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
@@ -86,7 +94,15 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace
      );
      const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
      if (!shouldSkipThresholdChecks) {
-@@ -5905,6 +5905,29 @@ function useDOMOrder(ref) {
+@@ -1882,6 +1882,7 @@ function doMaintainScrollAtEnd(ctx) {
+         if (isReplayingPendingMaintain || isStillWithinThreshold || !didScrollSinceRequest) {
+           if (state.scrollingTo || state.pendingScrollResolve) {
+             state.pendingMaintainScrollAtEnd = true;
++            state.maintainingScrollAtEnd = void 0;
+             return;
+           }
+           state.maintainingScrollAtEnd = activeState;
+@@ -5905,6 +5906,29 @@ function useDOMOrder(ref) {
      let timeoutId;
      let lastUpdateTime = 0;
      let delay = 500;
@@ -116,7 +132,7 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace
      const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
        const container = ref.current;
        const now = Date.now();
-@@ -5913,21 +5936,11 @@ function useDOMOrder(ref) {
+@@ -5913,21 +5937,11 @@ function useDOMOrder(ref) {
        clearTimeout(timeoutId);
        timeoutId = setTimeout(() => {
          timeoutId = void 0;
@@ -140,7 +156,7 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace
        unsubscribe();
        clearTimeout(timeoutId);
      };
-@@ -7649,6 +7662,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+@@ -7649,6 +7663,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
      scrollToIndex: (params) => {
        return runScrollWithPromise(
          () => {

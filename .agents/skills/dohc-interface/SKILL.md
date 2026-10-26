@@ -148,6 +148,8 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
+- If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
@@ -159,7 +161,7 @@ The look in one line: warm paper, quiet graphite, one sans for every word of the
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
@@ -199,6 +201,9 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
 Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
 Never uppercase a label.
+
+Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
+`PathLine` in `ui/PathLine.tsx` draws it.
 
 ### Radius and elevation
 
@@ -279,6 +284,7 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+   Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
 5. Does each string do one job, and does every error and empty state give a Next?
 6. Does every noun match the surrounding UI?

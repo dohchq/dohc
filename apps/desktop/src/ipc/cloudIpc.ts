@@ -175,6 +175,7 @@ export function registerCloudIpcHandlers<
         ? {
             workspaceSyncOwned: !!workspace && !shareViewIsPresent(workspace.shareView),
             workspaceSynced: !!workspace?.remote,
+            ...(workspace?.remote ? { workspaceServerUrl: workspace.remote.serverUrl } : {}),
             ...(!shareViewIsPresent(workspace?.shareView) && workspace?.syncPause ? { syncPause: syncPauseFor(workspace) } : {}),
             workspaceSyncConnected:
               !!workspace?.remote &&

@@ -1070,6 +1070,49 @@ async fn abort_mid_turn_resumes_and_rename_is_placed_before_the_next_inverse() {
     assert_eq!(replay.moments, result.moments);
     close(supervisor).await;
 }
+#[tokio::test]
+async fn running_checkpoint_does_not_exhaust_the_pinned_wal_budget() {
+    use dohc_engine_storage::CheckpointWait;
+
+    let token = crate::CancellationToken::new();
+    let mut since = Some(Instant::now() - Duration::from_secs(2));
+    ActorHandle::wait_undo_checkpoint(&token, &mut since, Arc::new(|| CheckpointWait::Running))
+        .await
+        .unwrap();
+    assert!(since.is_none(), "checkpoint I/O is not a pinned WAL");
+
+    since = Some(Instant::now() - Duration::from_secs(2));
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(
+            &token,
+            &mut since,
+            Arc::new(|| CheckpointWait::Finished)
+        )
+        .await,
+        Err(RuntimeError::Storage(StorageError::FileLocked))
+    ));
+    // A cancel during the wait wins over a spent budget.
+    since = Some(Instant::now() - Duration::from_secs(2));
+    let cancel = token.clone();
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(
+            &token,
+            &mut since,
+            Arc::new(move || {
+                cancel.cancel();
+                CheckpointWait::Finished
+            })
+        )
+        .await,
+        Err(RuntimeError::Cancelled)
+    ));
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(&token, &mut since, Arc::new(|| CheckpointWait::Running))
+            .await,
+        Err(RuntimeError::Cancelled)
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
     let (root, supervisor, actor) = setup(3);
@@ -1815,7 +1858,6 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
 pub(in crate::actor) fn enable_work_probe(store: &EngineStore) {
     store
         .read_with(|conn| {
-            dohc_engine_storage::capture_phase::enable_for_current_thread();
             conn.execute_batch(INVERSE_PROBE).unwrap();
             conn.trace_v2(
                 rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT

@@ -2103,36 +2103,79 @@ describe("file transfers", () => {
   });
 
   // Every file was skipped for its name or kind, so the same files would be
-  // skipped again: the notice names the count and offers no Try again.
+  // skipped again: the notice names each one and offers no Try again.
   it("offers no Try again when an import brings nothing", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 2 });
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 2,
+      skippedSources: [{ path: "CON.md", reason: "windows-name" }, { path: "key.txt", reason: "link" }],
+    });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("2 files weren't imported.");
+    expect(toast.textContent).toBe(
+      "2 files weren't imported" +
+      "CON.md has a name Windows can't use. Rename it, then import it.\n" +
+      "key.txt is a link. Drop the file it leads to.",
+    );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
-    expect(notices.textContent).toContain("2 files weren't imported.");
+    expect(notices.textContent).toContain("2 files weren't imported");
+    expect(notices.textContent).toContain("key.txt is a link.");
     expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
   it("says what a palette import landed and what it skipped", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: ["a.md", "b.md", "c.md"], skipped: 2 });
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["a.md", "b.md", "c.md"],
+      skipped: 2,
+      skippedSources: [{ path: ".DS_Store", reason: "system-file" }, { path: "notes.md", reason: "unreadable" }],
+    });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Imported 3 files. 2 weren't imported.");
+    expect(toast.textContent).toBe(
+      "Imported 3 files. 2 weren't imported." +
+      ".DS_Store is a file the system makes.\n" +
+      "notes.md couldn't be read. Check that you can open it, then import it again.",
+    );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+  });
+
+  // A notice holds 500 characters, so the lines stop there and count the
+  // rest. Copy names every skipped file the result lists.
+  it("counts the skipped files a notice has no room for, and copies them all", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const skippedSources = Array.from({ length: 100 }, (_, i) => ({ path: `Trip/photos/key-${i}.txt`, reason: "link" as const }));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 250, skippedSources });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await user.click(within(toast).getByTestId("workspace-shell-toast-more"));
+    const body = toast.querySelector("p")!.textContent!;
+    const lines = body.split("\n");
+    expect(lines[0]).toBe("Trip/photos/key-0.txt is a link. Drop the file it leads to.");
+    expect(body.length).toBeLessThanOrEqual(500);
+    // The count sits after the whole list.
+    within(toast).getByText(`${250 - lines.length} more weren't imported.`);
+
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const text = await navigator.clipboard.readText();
+    expect(text).toContain("Skipped: Trip/photos/key-99.txt is a link. Drop the file it leads to.");
+    expect(text).toContain("Skipped: 150 more");
   });
 
   async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
@@ -2144,15 +2187,20 @@ describe("file transfers", () => {
   // The Explorer shows what landed, so the only message is about the skip.
   it("says only what a drop skipped", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: ["a.md"], skipped: 2 });
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["a.md"],
+      skipped: 2,
+      skippedSources: [{ path: "b.md", reason: "link" }, { path: "c.md", reason: "link" }],
+    });
     renderShell(bridge);
 
-    await dropFromOs(bridge, ["/outside/a.md", "/outside/b.lnk", "/outside/c.lnk"]);
+    await dropFromOs(bridge, ["/outside/a.md", "/outside/b.md", "/outside/c.md"]);
     await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test", droppedPaths: ["/outside/a.md", "/outside/b.lnk", "/outside/c.lnk"],
+      workspaceId: "ws-shell-test", droppedPaths: ["/outside/a.md", "/outside/b.md", "/outside/c.md"],
     }));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("2 files weren't imported.");
+    expect(toast.textContent).toContain("2 files weren't imported");
+    expect(toast.textContent).toContain("c.md is a link. Drop the file it leads to.");
     expect(toast.textContent).not.toContain("Imported");
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
   });
@@ -2165,7 +2213,7 @@ describe("file transfers", () => {
       imported: [],
       skipped: 0,
       interrupted: true,
-      folders: 2,
+      folders: ["Trip"],
       stop: { file: "Trip/sub/a.md", refusal: "changed" },
     });
     renderShell(bridge);
@@ -2174,7 +2222,7 @@ describe("file transfers", () => {
 
     await dropFromOs(bridge, ["/outside/Trip"]);
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "Created 2 folders before the import stopped. dohc did not import a.md, because a file or folder changed while dohc copied it. Delete the empty folders before you import again.",
+      "Created 1 folder before the import stopped. dohc did not import a.md, because a file or folder changed while dohc copied it. Delete the empty folders before you import again.",
     );
     await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
   });
@@ -2253,6 +2301,26 @@ describe("file transfers", () => {
     expect(selected).toEqual(["notes/b.md", "notes/c.md"]);
     expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("selects a dropped empty folder, which lands no file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (folders: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "notes/a.md", kind: "file" as const }],
+      folders,
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
+      bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes", "notes/Empty"]));
+      return { imported: [], skipped: 0, folders: ["notes/Empty"] };
+    });
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/Empty"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
   });
 
   it("keeps the newer import's selection when an older import finishes later", async () => {
@@ -2424,11 +2492,12 @@ describe("file transfers", () => {
     expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
   });
 
-  it("keeps the skipped count when the first copy fails", async () => {
+  it("keeps the skipped count when the first copy fails, and copies the skipped files", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: [],
       skipped: 2,
+      skippedSources: [{ path: "key.txt", reason: "link" }, { path: ".DS_Store", reason: "system-file" }],
       stop: { file: "three.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'three.md'" },
     });
     const user = userEvent.setup();
@@ -2436,9 +2505,12 @@ describe("file transfers", () => {
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "Could not import files (2 skipped). The disk is full.",
-    );
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not import files (2 skipped). The disk is full.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Skipped: key.txt is a link. Drop the file it leads to.");
+    expect(copied).toContain("Skipped: .DS_Store is a file the system makes.");
   });
 
   // Try again removes the row before it runs. When the shared view cannot

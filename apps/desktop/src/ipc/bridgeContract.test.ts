@@ -3,6 +3,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+import { ImportWorkspaceFilesResult } from "./bridgeContract";
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
@@ -3521,7 +3522,7 @@ describe("engine history and linked Chats IPC contract", () => {
           recordedAtMs: 100,
           operation: "write",
           origin: "local-file",
-          summary: "Reconciled offline edits",
+          summary: "Changed while dohc was closed",
           correlationId: "reconcile-1",
           momentOrder: 7,
         },
@@ -3531,7 +3532,7 @@ describe("engine history and linked Chats IPC contract", () => {
       activeVersionId: "main",
       ...historyPageFields,
     });
-    expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.moments[0].summary).toBe("Changed while dohc was closed");
     expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
@@ -4541,4 +4542,17 @@ describe("poll send payloads", () => {
       expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
     });
   }
+});
+
+describe("ImportWorkspaceFilesResult", () => {
+  // On Windows, a skip deep in a dropped folder can pass the 4,096 characters
+  // a landed path keeps to.
+  it("takes a skipped path longer than a landed one", () => {
+    const path = `${"deep/".repeat(1000)}key.txt`;
+    expect(ImportWorkspaceFilesResult.safeParse({
+      imported: ["ok.md"],
+      skipped: 1,
+      skippedSources: [{ path, reason: "link" }],
+    }).success).toBe(true);
+  });
 });

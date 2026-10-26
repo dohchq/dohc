@@ -154,8 +154,13 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
           () => void recover(), `stop-and-restore:recovery:${workspaceId}`);
       }
     };
+    // Main answers nothing while the workspace is still opening, so read
+    // again once its Collection automations open.
+    const stop = bridge().onCollectionAutomationsChanged((event) => {
+      if (event.workspaceId === workspaceId) void recover();
+    });
     void recover();
-    return () => {current = false;};
+    return () => {current = false; stop();};
   }, [workspaceId, recovery?.ready, store, retry]);
   return {
     session: session?.workspaceId === workspaceId ? session : null,

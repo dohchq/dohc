@@ -467,10 +467,20 @@ export function isWorkspaceRestricted(error: unknown): boolean {
   return parse(error).name === "WorkspaceRestrictedError";
 }
 
+/** An exclusive create found the path taken. */
+export function isPathTaken(error: unknown): boolean {
+  return parse(error).code === "EEXIST";
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
   return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
+}
+
+/** History's current rules refused a restore. Its words say why and what to do next. */
+export function isRestorePolicyRefusal(error: unknown): boolean {
+  return parse(error).name === "RestorePolicyRefusalError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */

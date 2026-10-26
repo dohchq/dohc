@@ -195,7 +195,7 @@ describe("Overlay", () => {
     expect(document.activeElement).toBe(last);
   });
 
-  it("includes editable regions and skips hidden or inherited-disabled controls", () => {
+  it("includes editable regions and skips hidden, inert, or inherited-disabled controls", () => {
     render(
       <Overlay onClose={() => undefined}>
         <fieldset disabled>
@@ -206,6 +206,9 @@ describe("Overlay", () => {
         </button>
         <div contentEditable data-testid="editable-region" />
         <button type="button">Last</button>
+        <div inert>
+          <button type="button">Held action</button>
+        </div>
       </Overlay>,
     );
     const editor = screen.getByTestId("editable-region");

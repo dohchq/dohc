@@ -17,9 +17,9 @@ import {
   gatherDelay,
   useFocusAddedRow,
   type AboutNotices,
-  type AccessContext,
 } from "./About";
 import type { AboutConversation } from "./aboutConversation";
+import type { AccessContext } from "./accessReason";
 import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { useChatLinks } from "./useChatLinks";
 

@@ -5,6 +5,7 @@ import {
   type DesktopUserSettings,
   type DesktopUserSettingsResult,
 } from "../settings/userSettings";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { readableAccent } from "./accentColor";
 import { applyLookSettings, differsOnlyInLook, initTheme } from "./theme";
@@ -52,7 +53,7 @@ describe("applying the settings file's look", () => {
   });
 
   it("hands your colors to the avatars", () => {
-    applyLookSettings(settings({ appearance: { yourColor: "teal", yourAgentColor: "plum" } }));
+    applyLookSettings({ ...settingsWithAgent({ hue: "plum" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "teal" } });
     expect(chosenHue("human")).toBe("teal");
     expect(chosenHue("agent")).toBe("plum");
     applyLookSettings(DEFAULT_USER_SETTINGS);

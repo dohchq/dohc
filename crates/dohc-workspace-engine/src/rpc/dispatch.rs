@@ -1239,7 +1239,7 @@ impl EngineService {
         let open = self.open(Some(handle))?;
         let phase = lock(&open.capture)
             .as_ref()
-            .map(|driver| driver.status().snapshot().phase)
+            .map(|driver| driver.status_snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
         if !initial_capture_phase_requires_fence(phase) {
             return Ok(());

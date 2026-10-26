@@ -11,6 +11,7 @@ import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyPathAdmission } from "./workspaceEnginePolicyFile";
 import { admitPath } from "./workspaceFileMoves";
+import { StoredEntryIdentityUnavailable } from "./storedEntryPath";
 import { refuseMoveAcrossShareMount } from "./shareMounts";
 import { storedShareMounts, shareMountRegistryIsPresent } from "./shareViewFilesTarget";
 
@@ -109,5 +110,10 @@ export async function duplicateWorkspaceFile(
     }, () => []);
     if (result.materialized) await rm(pendingPath, {force: true});
     return result;
-  }, {markOnSuccess: false});
+  }, {markOnSuccess: false}).catch((error: unknown) => {
+    if (error instanceof StoredEntryIdentityUnavailable) throw new Error(
+      `dohc did not duplicate ${path}. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again.`,
+    );
+    throw error;
+  });
 }

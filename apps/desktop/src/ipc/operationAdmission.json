@@ -124,6 +124,7 @@
   "desktop:update-share-direct-write-delivery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch" } },
   "desktop:typing-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:suggest-workspace-folder-name": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:open-system-privacy-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:cloud-stop-sync": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },

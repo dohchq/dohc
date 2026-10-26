@@ -16,7 +16,9 @@ import {
 } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 
-function fileName(path: string, label?: string): string {
+// A tab's name in the strip. The start surface's Recent uses it too, so the
+// two always agree.
+export function fileName(path: string, label?: string): string {
   const tab = parseTab(path);
   return TAB_KINDS[tab.kind].title(tab, label);
 }

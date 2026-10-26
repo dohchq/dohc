@@ -38,6 +38,8 @@ asar: true
 # A direct electron-builder invocation must not be able to silently omit the
 # engine sidecar. The hook throws before packaging if staging did not happen.
 beforePack: scripts/require-workspace-engine.mjs
+afterPack: scripts/prepare-engine-reader-macos.mjs
+afterSign: scripts/require-macos-signature.mjs
 extraResources:
   - from: scripts/compiler-node-LICENSE.txt
     to: engine-reader/node-LICENSE.txt
@@ -81,6 +83,7 @@ extraResources:
     filter:
       - "dohc"
       - "dohc.cmd"
+      - "dohc.mjs"
       # The dohc-mcp stdio server chat session configs point the user's AI
       # tool at (resolveDohcMcpCommand); staged by build-cli-bin.mjs.
       - "dohc-mcp"
@@ -133,6 +136,8 @@ mac:
   # zip is required alongside dmg for macOS auto-updates (electron-updater).
   target: [dmg, zip]
   hardenedRuntime: true
+  # Sign Node, then pin its final bytes before the outer app is sealed.
+  sign: scripts/sign-engine-reader-macos.mjs
   # Document types are set here, not in fileAssociations, which give each
   # document the full app icon. With CFBundleTypeIconSystemGenerated, macOS
   # draws a page with dohc's icon on it. dohc edits Markdown as its own

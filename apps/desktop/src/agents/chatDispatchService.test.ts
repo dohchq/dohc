@@ -22,7 +22,11 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RunnerSettings } from "../settings/userSettings";
+import { launchFrom, type AgentLaunchProfile } from "./agentToolCatalog";
+import { testAgent } from "../testing/agentSettings";
+
+// The first agent's launch, switch and timeout, which a test changes in place.
+type RunnerSettings = { command: string; profile?: AgentLaunchProfile; enabled: boolean; timeoutMinutes: number };
 import type { PostNoticeInput } from "../notices/noticeStore";
 import { createOwedRunNotices, type OwedRunNotices } from "./owedRunNotices";
 import {
@@ -56,6 +60,10 @@ import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/works
 import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
 import { createWorkspaceTrust, type WorkspaceTrust } from "../workspaces/workspaceTrust";
+
+const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
+  ? ["win32", "x64", "node.exe"] as const
+  : ["darwin", "arm64", "node"] as const;
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -113,8 +121,10 @@ class FakeRunnerProcess implements RunnerProcess {
 }
 
 interface FixtureOptions {
+  packaged?: boolean;
   workspaceAttachmentId?: symbol;
   platform?: NodeJS.Platform;
+  arch?: string;
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   dispatchNoticeFailures?: Error[];
@@ -598,7 +608,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       storeResolves.dispatch += 1;
       return serviceDispatch;
     },
-    readRunnerSettings: async () => ({ ...runner }),
+    readDispatchAgent: async () => {
+      const launch = launchFrom(runner.profile, runner.command);
+      return launch ? { id: "default", ...testAgent({ enabled: runner.enabled, timeoutMinutes: runner.timeoutMinutes }), launch } : null;
+    },
     identityFor: async () =>
       options.identity ?? {
         displayName: "Nova",
@@ -607,7 +620,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
-    isPackaged: () => false,
+    isPackaged: () => options.packaged ?? false,
+    resourcesPath: () => join(appRoot, "resources"),
     queueSync: async (dispatchWorkspace) => {
       syncWorkspaces.push(dispatchWorkspace);
       syncRequests.push(dispatchWorkspace.workspaceId);
@@ -659,6 +673,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     spawnRunner,
     killProcessGroup,
     platform: options.platform ?? "linux",
+    arch: options.arch,
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -824,6 +839,37 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 }
 
 describe("chatDispatchService", () => {
+  it("the connection test exposes the missing packaged runtime repair instruction", async () => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    const result = await fixture.service.runnerSelfTest(WORKSPACE_ID);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+    expect(result.detail).not.toContain("runner failed to start: runner failed to start:");
+    expect(fixture.spawnCalls).toHaveLength(0);
+  });
+  it.each([0, 7])("a packaged run with its own Node does not recommend installing Node, exit %s", async (exitCode) => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    const compiler = join(fixture.appRoot, "resources", "app-compiler");
+    await mkdir(compiler, { recursive: true });
+    await writeFile(join(compiler, nodeName), "runtime", { mode: 0o755 });
+    vi.stubEnv("PATH", "");
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.notices).toHaveLength(1);
+    expect(fixture.notices[0]!.body).toBe("");
+  });
+
+  it("shows the missing packaged runtime repair instruction in Notices", async () => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      body: "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+    })]);
+  });
   it.each([
     { nodePresent: false, exitCode: 7, replied: false },
     { nodePresent: false, exitCode: 0, replied: false },
@@ -3374,7 +3420,7 @@ describe("chatDispatchService", () => {
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
     if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
-    const instructionsFile = "If the workspace has a CLAUDE.md file at its root, read it first and follow it.";
+    const instructionsFile = "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them.";
     if (tool === "claude") expect(prompt).toContain(instructionsFile);
     else expect(prompt).not.toContain("CLAUDE.md");
   });

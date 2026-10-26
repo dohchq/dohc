@@ -21,17 +21,18 @@ afterEach(cleanup);
 const context: CommandContext = {
   shareView: null,
   activeDocumentKind: null,
+  activeDocumentShareable: false,
   pinnedApps: [],
 };
 const viewShare: ShareViewWriteScope = { access: "view", ended: false };
 const editShare: ShareViewWriteScope = { access: "edit", ended: false };
 // In palette order.
-const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-drawing", "new-folder", "new-collection", "import-files"];
+const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-file-at-path", "new-drawing", "new-folder", "new-collection", "import-files"];
 
 describe("command availability", () => {
   it.each<[string, ShareViewWriteScope | null, readonly CommandId[]]>([
     ["an ordinary workspace", null, CREATE_COMMANDS],
-    ["an Edit share view", editShare, ["new-file", "new-drawing", "new-collection", "import-files"]],
+    ["an Edit share view", editShare, ["new-file", "new-file-at-path", "new-drawing", "new-collection", "import-files"]],
     ["a Comment share view", { access: "comment", ended: false }, []],
     ["a View share view", viewShare, []],
     ["an ended Edit share view", { access: "edit", ended: true }, []],
@@ -46,6 +47,17 @@ describe("command availability", () => {
     const current = { ...context, activeDocumentKind };
     expect(isCommandAvailable("toggle-markdown-source", current)).toBe(activeDocumentKind === "markdown");
     expect(paletteCommandRows(current).some((row) => row.id === "toggle-markdown-source")).toBe(activeDocumentKind === "markdown");
+  });
+
+  // Like the source toggle, Share… is hidden, not disabled, when the active
+  // editor shows no file its Share button could share.
+  it.each([false, true])("Share… when the active file is shareable: %s", (activeDocumentShareable) => {
+    const current = { ...context, activeDocumentShareable };
+    expect(isCommandAvailable("share-file", current)).toBe(activeDocumentShareable);
+    const rows = paletteCommandRows(current).filter((row) => row.label.toLowerCase().includes("share"));
+    expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(
+      activeDocumentShareable ? [{ id: "share-file", label: "Share…" }] : [],
+    );
   });
 
   it.each([null, viewShare, editShare])("Chats with share view %j", (shareView) => {

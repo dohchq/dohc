@@ -13,7 +13,7 @@ This skill provides instructions, not credentials or repository permissions.
 
 Confirm the requested channel, source commit, platforms, and publication intent from the conversation.
 Default releases to the nightly channel and `platforms=windows-linux`.
-A published nightly must select `platforms=windows-linux`, and only one nightly publishes per UTC day.
+A published nightly must select `platforms=windows-linux`, and only one nightly publishes per nightly day, which starts at 18:00 UTC.
 For a dry run, select fewer platforms when the request names them: `platforms=windows` or `platforms=linux`.
 The workflow builds no macOS files. The Mac release command adds them after the workflow publishes.
 For a stable release, check previous releases on its channel before selecting platforms.

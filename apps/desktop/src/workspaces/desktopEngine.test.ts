@@ -41,7 +41,7 @@ vi.mock("./nativeOwnerDelivery", async () => ({runNativeOwnerDeliveryPass: owner
 const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn(), queue: vi.fn()}));
 vi.mock("./ownerLiveQuarantine", async importOriginal => ({...await importOriginal<typeof import("./ownerLiveQuarantine")>(),
   readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry, readOwnerLiveQueue: quarantineMock.queue}));
-// Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
+// Use the Linux x64 installation layout on every test host.
 vi.mock("./installedReaderConfig", async importOriginal => {
   const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
   return { installedReaderConfig: (resources: string | undefined) => installedReaderConfig(resources, "linux", "x64") };

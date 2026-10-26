@@ -28,6 +28,7 @@ import {
   versionCompareTabPath,
   GRAPH_TAB_PATH,
   moveTab,
+  newPageTabPath,
   openMomentDiff,
   openTab,
   parseUiState,
@@ -55,6 +56,7 @@ import {
   recordRecentFile,
   setCollectionActiveView,
   remapWorkbenchPaths,
+  replaceTab,
   resizeEditorGroups,
   setFolderExpanded,
   siteTabPath,
@@ -606,6 +608,14 @@ describe("tabs", () => {
     expect(parseTab(path).kind).toBe("collection");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
     expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(TAB_KINDS.collection.title(parseTab(path))).toBe("road trips");
+    expect(TAB_KINDS.collection.tooltip(parseTab(path))).toBe("projects/road trips");
+    expect(TAB_KINDS.collection.explorerTitle(parseTab(path))).toBe("road trips");
+    for (const name of ["100% done", "a%zz"]) {
+      const literal = parseTab(collectionTabPath(`projects/${name}`));
+      expect(TAB_KINDS.collection.title(literal)).toBe(name);
+      expect(TAB_KINDS.collection.tooltip(literal)).toBe(`projects/${name}`);
+    }
     expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
     expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
@@ -652,6 +662,42 @@ describe("tabs", () => {
 
     const reservedRoot = "clients/site/nested?view=main#summary";
     expect(parseTab(siteTabPath(reservedRoot))).toEqual({ kind: "site", path: siteTabPath(reservedRoot), siteRoot: reservedRoot });
+  });
+
+  it("recognizes new pages as virtual tabs with the folder they were made in", () => {
+    const path = newPageTabPath("page-1", "Trip/day 2");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "newPage", path, id: "page-1", folder: "Trip/day 2" });
+    expect(parseTab(newPageTabPath("page-2", ""))).toEqual({ kind: "newPage", path: newPageTabPath("page-2", ""), id: "page-2", folder: "" });
+    expect(parseTab("tab://new-page/page-3").kind).toBe("removed");
+  });
+
+  it("turns a new page's tab into its file's tab where it stands", () => {
+    const page = newPageTabPath("page-1", "");
+    const state = withTabs("notes/a.md", page, "notes/b.md");
+    const opened = replaceTab(activateTab(state, DEFAULT_EDITOR_GROUP_ID, page), page, "Untitled.md");
+    expect(allTabs(opened).map((tab) => tab.path)).toEqual(["notes/a.md", "Untitled.md", "notes/b.md"]);
+    expect(activeTabPath(opened)).toBe("Untitled.md");
+
+    const shown = replaceTab(withTabs(page, "Untitled.md"), page, "Untitled.md");
+    expect(allTabs(shown).map((tab) => tab.path)).toEqual(["Untitled.md"]);
+    expect(replaceTab(state, "tab://new-page/gone/", "Untitled.md")).toBe(state);
+  });
+
+  // The shell does not load the Apps view's list, so the tab names an app by
+  // its folder, as typed, never by its encoded tab address.
+  it.each([
+    ["apps/trip", "trip"],
+    ["clients/acme/portal", "portal"],
+    ["apps/100% done", "100% done"],
+  ])("names the app at %s by its folder", (root, name) => {
+    const tab = parseTab(siteTabPath(root)), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([name, root, name]);
+  });
+
+  it("keeps the tab address for an app folder that cannot be decoded", () => {
+    const tab = parseTab("tab://app/%ZZ"), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual(["%ZZ", "tab://app/%ZZ", "%ZZ"]);
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
@@ -846,6 +892,12 @@ describe("ui-state persistence round-trip", () => {
     expect(parseTab(GRAPH_TAB_PATH).kind).toBe("graph");
     expect(parseTab("notes/tab://app/a.md").kind).toBe("file");
     expect(parseTab("notes/a.md").kind).toBe("file");
+  });
+
+  it("does not restore a new page, which has no file yet", () => {
+    const page = newPageTabPath("page-1", "");
+    const restored = parseUiState(serializeUiState(withTabs("notes/a.md", page)));
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual(["notes/a.md"]);
   });
 
   it("restores the built-in Apps view", () => {

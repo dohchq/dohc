@@ -640,9 +640,10 @@ describe("history page", () => {
     await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain(
-      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
-    );
+    // What failed is the title and what to fix is the body, so the title's
+    // two-line clamp never hides the fix.
+    expect(within(toast).getByText("dohc could not restore notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("It can't read .dohc/visibility.toml. Fix the file, then try again.")).toBeTruthy();
     expect(toast.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
 
@@ -778,8 +779,9 @@ describe("history page", () => {
   });
 
   // The ladder itself is the hook's (useHistoryPage.test.tsx). This pins the
-  // surface it leaves behind: the inline retry, and no global error.
-  it("stops retrying an updating history and leaves the retry inline", async () => {
+  // surface it leaves behind: a line with no control and no global error,
+  // kept through the next activity's read until its page replaces it.
+  it("stops retrying an updating history and keeps its line until a page arrives", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const bridge = makeBridge(Promise.resolve(null));
@@ -795,12 +797,128 @@ describe("history page", () => {
       });
 
       expect(bridge.listHistory).toHaveBeenCalledTimes(5);
-      expect(await screen.findByTestId("history-updating")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+      const line = await screen.findByTestId("history-updating");
+      expect(line.textContent).toBe("Adding recent changes to History");
+      expect(line.getAttribute("role")).toBe("status");
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+      const next = deferred<ListHistoryResult>();
+      bridge.listHistory.mockImplementation(() => next.promise);
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(6));
+      expect(screen.getByTestId("history-updating")).toBe(line);
+
+      await act(async () => {
+        next.resolve(historyPage([historyMoment("m-1", "Wrote the plan")]));
+        await next.promise;
+      });
+      expect(await screen.findByTestId("engine-moment-open")).toBeTruthy();
+      expect(screen.queryByTestId("history-updating")).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // While main's status says History is paused, the panel says so: in place
+  // of taking in changes, and above the rows a read still answers, which may
+  // be missing changes. The line goes with the pause.
+  it("says History is paused in place of updating and above a paused page's rows", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeBridge(Promise.resolve(null));
+      const paused = { ...SYNC_STATUS, historyCaptureFailed: true as const, engineStoreRefused: null };
+      bridge.openWorkspace = vi.fn(async () => paused);
+      bridge.getSyncStatus = vi.fn(async () => paused);
+      bridge.listHistory = vi.fn(
+        async (): Promise<ListHistoryResult> => ({ status: "updating" }),
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      const line = await screen.findByTestId("history-paused");
+      expect(line.textContent).toBe("History paused");
+      expect(screen.queryByTestId("history-updating")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+      bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+      act(() => bridge.emitWorkspaceActivity());
+      const row = await screen.findByTestId("engine-moment-open");
+      const heading = screen.getByTestId("history-paused");
+      expect(heading.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(screen.queryByTestId("history-paused")).toBeNull());
+      expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A pause can end before History answers a page: the panel goes back to
+  // taking in changes with no click, then the page replaces the line.
+  it("goes back to taking in changes when the pause ends before a page", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeBridge(Promise.resolve(null));
+      const paused = { ...SYNC_STATUS, historyCaptureFailed: true as const, engineStoreRefused: null };
+      bridge.openWorkspace = vi.fn(async () => paused);
+      bridge.getSyncStatus = vi.fn(async () => paused);
+      bridge.listHistory = vi.fn(
+        async (): Promise<ListHistoryResult> => ({ status: "updating" }),
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      await screen.findByTestId("history-paused");
+
+      bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+      act(() => bridge.emitWorkspaceActivity());
+      const line = await screen.findByTestId("history-updating");
+      expect(line.textContent).toBe("Adding recent changes to History");
+      expect(screen.queryByTestId("history-paused")).toBeNull();
+
+      bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+      act(() => bridge.emitWorkspaceActivity());
+      expect(await screen.findByTestId("engine-moment-open")).toBeTruthy();
+      expect(screen.queryByTestId("history-updating")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A pause does not hide a read that really failed: it keeps its words and
+  // Try again, and the page Try again reads still starts with the line.
+  it("keeps a real failure's words and Try again while History is paused", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const paused = { ...SYNC_STATUS, historyCaptureFailed: true as const, engineStoreRefused: null };
+    bridge.openWorkspace = vi.fn(async () => paused);
+    bridge.getSyncStatus = vi.fn(async () => paused);
+    bridge.listHistory = vi.fn(async (): Promise<ListHistoryResult> => {
+      throw new Error("history failed");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const failed = await screen.findByTestId("history-load-failed");
+    expect(failed.textContent).toContain("dohc could not load this workspace's history.");
+    expect(screen.queryByTestId("history-paused")).toBeNull();
+
+    bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    const row = await screen.findByTestId("engine-moment-open");
+    const heading = screen.getByTestId("history-paused");
+    expect(heading.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows complete protected paging without a truncation banner", async () => {
