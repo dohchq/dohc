@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync, accessSync, constants } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, accessSync, constants } from "node:fs";
 import { cp, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -122,7 +122,7 @@ export async function probeAgentLaunchers(resources) {
             }
             assert.equal(result.status, 37, result.stderr || String(result.error));
             const recorded = JSON.parse(result.stdout);
-            assert.equal(resolve(recorded.execPath), bundled ? resolve(selected, "app-compiler", nodeName) : resolve(competing, nodeName));
+            assert.equal(realpathSync(recorded.execPath), realpathSync(bundled ? join(selected, "app-compiler", nodeName) : join(competing, nodeName)));
             assert.deepEqual(recorded.args, args);
             assert.deepEqual(recorded.stdin, [...input]);
             assert.equal(result.stderr.trim(), "probe-stderr");
