@@ -96,6 +96,8 @@ describe("stripMarkdown", () => {
     unclosedDestinations: rep("[a](b", 50_000),
     unclosedDestinationLines: rep("[a](b\n", 50_000),
     definitionLines: rep("[a\n", 50_000),
+    definedBrackets: "[a]: b\n" + rep("[".repeat(500) + "]".repeat(500), 65_536),
+    definedImages: "[a]: b\n" + rep("![".repeat(300) + "]".repeat(300), 65_536),
     emphasisOpeners: rep("*a ", 50_000),
     emphasisClosers: rep("a* ", 50_000),
     nestedEmphasis: rep("*a **a ", 25_000) + rep(" a** a*", 25_000),

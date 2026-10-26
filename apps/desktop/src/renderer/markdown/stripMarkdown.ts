@@ -1,15 +1,17 @@
 // The words of a Markdown body without its syntax, for anywhere that shows a
 // message without rendering it: emphasis marks, backticks, heading and quote
-// markers, link targets and fences go; bullets become "•" and line breaks
-// stay. Blocks are read a line at a time. Inside a paragraph, emphasis and
-// links follow micromark, the parser the chat uses: the same flanking rules,
-// the same pairing of runs, and the same link destinations and titles. Every
-// lookahead is bounded or jumps through tables built once per line, so its
-// time grows linearly with the body whatever the body holds. It uses no
-// regular expression on the body.
+// markers, link targets and fences go; bullets become "•", line breaks stay,
+// and an image without alt text shows its address. Blocks are read a line at
+// a time. Inside a paragraph, emphasis and links follow micromark, the parser
+// the chat uses: the same flanking rules, the same pairing of runs, and the
+// same link destinations and titles. Every lookahead is bounded or jumps
+// through tables built once per line, so its time grows linearly with the
+// body whatever the body holds. No regular expression reads more than one
+// character of the body.
 //
 // A link's destination or title that continues on the next line, a code span
-// across lines and inline HTML are read as text.
+// across lines and inline HTML are read as text. An image without alt text
+// whose address comes from a definition shows nothing.
 //
 // `atoms` are source ranges to keep exactly as written, such as mention
 // chips, sorted by start. The result gives where each kept atom landed in the
@@ -17,6 +19,7 @@
 // dropped.
 
 import { decodeNamedCharacterReference } from "decode-named-character-reference";
+import { normalizeUri } from "micromark-util-sanitize-uri";
 
 export interface SourceRange {
   start: number;
@@ -155,6 +158,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   const brackets: Bracket[] = [];
   // Links can't hold links: a link's "[" below this depth no longer opens one.
   let inactiveBelow = 0;
+  // The last "[" or "]" read. A label with one inside can't name a definition.
+  let lastBracket = -1;
   let pendingBreak = -1;
   let paragraph = false;
   // How many quotes hold the open paragraph. A line in more starts a new one;
@@ -521,7 +526,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       let depth = 0;
       for (let next = at; next < end; next++) {
         const code = source.charCodeAt(next);
-        if (depth === 0 && (code === CLOSE_PAREN || isBlank(code))) return next === at ? -1 : next;
+        // A blank inside parentheses ends no destination: the link fails.
+        if (isBlank(code) || (depth === 0 && code === CLOSE_PAREN)) return depth === 0 && next > at ? next : -1;
         if (code === OPEN_PAREN) {
           if (depth >= DESTINATION_DEPTH) return -1;
           depth++;
@@ -554,7 +560,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     // Where the link that "]" at `close` ends, or -1.
     const linkEnd = (bracket: Bracket, close: number): number => {
       const next = close + 1 < end ? source.charCodeAt(close + 1) : -1;
-      const text = isDefined(bracket.textStart, close);
+      const text = lastBracket === bracket.textStart - 1 && isDefined(bracket.textStart, close);
       if (next === OPEN_PAREN) {
         const after = resource(close + 1);
         return after >= 0 ? after : text ? close + 1 : -1;
@@ -670,6 +676,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           const size = code === BANG ? 2 : 1;
           brackets.push({ piece: pieces.length, link: code === OPEN_BRACKET, runs: runs.length, textStart: at + size });
           pieces.push(source.slice(at, at + size));
+          lastBracket = at + size - 1;
           at = plain = at + size;
           continue;
         }
@@ -684,6 +691,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
             inactiveBelow = Math.min(inactiveBelow, index);
             if (!inactive) after = linkEnd(bracket, at);
           }
+          lastBracket = at;
           if (after < 0) {
             pieces.push("]");
             at = plain = at + 1;
@@ -692,6 +700,15 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           pairRuns(bracket!.runs);
           pieces[bracket!.piece] = "";
           if (bracket!.link) inactiveBelow = brackets.length;
+          // An image without alt text shows its address, as the chat draws it.
+          else if (bracket!.textStart === at && source.charCodeAt(at + 1) === OPEN_PAREN) {
+            const from = blanksEnd(at + 2, end);
+            if (source.charCodeAt(from) !== CLOSE_PAREN) {
+              const angled = source.charCodeAt(from) === LT;
+              const to = destinationEnd(from);
+              pieces.push(normalizeUri(decodeText(source.slice(angled ? from + 1 : from, angled ? to - 1 : to))));
+            }
+          }
           at = plain = after;
           continue;
         }
@@ -715,14 +732,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           break;
         }
         case AMP: {
-          let close = at + 1;
-          while (close < end && close - at <= ENTITY_MAX && source.charCodeAt(close) !== SEMICOLON) {
-            const inner = source.charCodeAt(close);
-            if (!(isWordCode(inner) || inner === HASH)) break;
-            close++;
-          }
-          if (close >= end || source.charCodeAt(close) !== SEMICOLON) break;
-          const decoded = decodeEntity(source.slice(at + 1, close));
+          const close = referenceEnd(source, at, end);
+          const decoded = close < 0 ? undefined : decodeEntity(source.slice(at + 1, close));
           if (decoded === undefined) break;
           flush();
           pieces.push(decoded);
@@ -741,6 +752,41 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     }
     flush();
   }
+}
+
+// The ";" that ends a character reference at "&", or -1.
+function referenceEnd(source: string, at: number, end: number): number {
+  let close = at + 1;
+  while (close < end && close - at <= ENTITY_MAX && source.charCodeAt(close) !== SEMICOLON) {
+    const inner = source.charCodeAt(close);
+    if (!(isWordCode(inner) || inner === HASH)) return -1;
+    close++;
+  }
+  return close < end && source.charCodeAt(close) === SEMICOLON ? close : -1;
+}
+
+// Text with its backslash escapes and character references read.
+function decodeText(text: string): string {
+  let value = "";
+  let plain = 0;
+  for (let at = 0; at < text.length; at++) {
+    const code = text.charCodeAt(at);
+    let decoded: string | undefined;
+    let after = at + 1;
+    if (code === BACKSLASH && at + 1 < text.length && isAsciiPunctuation(text.charCodeAt(at + 1))) {
+      decoded = text[at + 1];
+      after = at + 2;
+    } else if (code === AMP) {
+      const close = referenceEnd(text, at, text.length);
+      decoded = close < 0 ? undefined : decodeEntity(text.slice(at + 1, close));
+      after = close + 1;
+    }
+    if (decoded === undefined) continue;
+    value += text.slice(plain, at) + decoded;
+    plain = after;
+    at = after - 1;
+  }
+  return value + text.slice(plain);
 }
 
 function decodeEntity(name: string): string | undefined {

@@ -78,6 +78,7 @@
     "lucide-react": "^1.30.0",
     "marked": "17.0.6",
     "mermaid": "^11.16.1",
+    "micromark-util-sanitize-uri": "^2.0.1",
     "playwright": "^1.62.1",
     "pngjs": "^7.0.0",
     "pnpm": "11.20.0",

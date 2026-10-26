@@ -613,6 +613,9 @@ describe("the waiting text", () => {
     "**hello*",
     "[a [b](c) d](e) and ![x [y](z)](w)",
     "[a](<b c>) [d](<e) [f](g 'h') [i](j (k)) [l]( m ) [n](o\"p\")",
+    "[plan](docs/(my draft).md) after",
+    "See ![](https://example.com/plot.png).",
+    "[![](https://example.com/plot.png)](https://example.com) and ![](<a b&amp;c\\_d.png>) and ![]( é.png )",
   ]) {
     it(`matches the tree for ${JSON.stringify(body)}`, () => {
       const chips = chatChips(body, CANDIDATES, []);
