@@ -61,6 +61,7 @@ describe("Read-only copy beside Open externally", () => {
     expect(button.getAttribute("aria-describedby")).toBe(words.id);
     expect(button.contains(words)).toBe(false);
     expect(words.hasAttribute("title")).toBe(false);
+    expect(words.previousElementSibling?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it.each([

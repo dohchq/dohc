@@ -196,9 +196,9 @@ export function EngineMayHoldDocumentNotice(props: {
   );
 }
 
-// An Open externally control, then "Read-only copy" when the file is from
-// someone else. Main answers by the open's own rule. Until it answers for
-// this file, or when it can't, no words show, and the open decides alone.
+// An Open externally control, then a lock and "Read-only copy" when the file
+// is from someone else. Main answers by the open's own rule. Until it answers
+// for this file, or when it can't, no words show, and the open decides alone.
 export function OpenExternallyControl(props: {
   workspaceId: string;
   path: string;
@@ -223,7 +223,12 @@ export function OpenExternallyControl(props: {
   return (
     <span className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}>
       {props.children(readOnlyCopy ? id : undefined)}
-      {readOnlyCopy ? <span id={id} className="text-subtle">Read-only copy</span> : null}
+      {readOnlyCopy ? (
+        <span className="inline-flex items-center gap-1 text-subtle">
+          <Lock aria-hidden size={12} className="shrink-0" />
+          <span id={id}>Read-only copy</span>
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -298,7 +303,7 @@ export function LossyNoteNotice(props: {
       role="status"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
-      <span className="flex min-w-0 items-center gap-1.5">
+      <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0" />
         dohc can't edit this document yet without changing parts it can't show.
       </span>
