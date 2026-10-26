@@ -84,7 +84,7 @@ export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, real
 }
 
 // Only a basic string holds an apostrophe. cmd.exe can't carry its double
-// quotes, so an npm-installed Codex refuses such a folder before it starts.
+// quotes, so dohc doesn't start an npm-installed Codex in such a folder.
 function tomlKey(value: string): string {
   return /\p{Cc}|'/u.test(value) ? JSON.stringify(value) : `'${value}'`;
 }
@@ -94,9 +94,8 @@ function tomlKey(value: string): string {
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
 //   name is new for each run, because Codex merges a profile of the same name
 //   from the person's config into it.
-// - Codex trusts a folder by itself on its first writable run, then loads the
-//   folder's .codex config and writes that trust to the person's config. An
-//   untrusted entry stops both.
+// - Mark the folder untrusted so Codex doesn't trust it on its own or load
+//   its .codex config.
 // - Codex runs Windows commands only in a sandbox the person chose. Without
 //   a choice it gets the unelevated one, which needs no setup.
 export function codexRunConfig(input: {

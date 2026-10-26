@@ -288,18 +288,18 @@ describe("chat runner process", () => {
     },
   );
 
-  it.runIf(process.platform === "win32")("starts an npm-installed Codex in a folder with an apostrophe", async () => {
+  it.runIf(process.platform === "win32")("says why an npm-installed Codex can't start in a folder with an apostrophe", async () => {
     const root = join(await createTestScratch("dohc-chat-runner-"), "O'Brien");
     mkdirSync(root);
     // Stands in for npm's codex.cmd and records the arguments cmd.exe passes on.
     const codex = join(root, "codex.cmd");
     writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
     const runner = createChatRunnerProcess(
-      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false },
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => [] },
       () => undefined,
     );
-    const child = runner.spawnConfiguredRunner({
-      rootPath: root,
+    const start = (rootPath: string) => runner.spawnConfiguredRunner({
+      rootPath,
       runId: "run-1",
       logPath: join(root, "run.log"),
       command: "",
@@ -307,7 +307,14 @@ describe("chat runner process", () => {
       prompt: "",
       assertMayStart: () => undefined,
     });
-    expect(await new Promise<number | null>((resolveExit) => child.onExit(resolveExit))).toBe(0);
+    expect(() => start(root)).toThrow(
+      "Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
+    );
+    expect(existsSync(join(root, "args.json"))).toBe(false);
+    // Without one in the workspace's path, the same Codex starts, and dohc's
+    // own paths may still hold one.
+    const workspace = await createTestScratch("dohc-chat-runner-");
+    expect(await new Promise<number | null>((resolveExit) => start(workspace).onExit(resolveExit))).toBe(0);
     expect(JSON.parse(readFileSync(join(root, "args.json"), "utf8"))).toContain(
       `mcp_servers.dohc.cwd='''${join(root, "node_modules", ".bin")}'''`,
     );

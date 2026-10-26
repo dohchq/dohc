@@ -376,6 +376,12 @@ export function createChatRunnerProcess(
       runId: input.runId,
       profile: input.profile,
     });
+    // An apostrophe in the folder's path puts double quotes in a Codex run's
+    // trust entry (codexRunConfig.ts), which cmd.exe can't carry.
+    if (input.profile?.tool === "codex" && args.some((arg) => arg.includes('"'))
+      && resolveSpawnCommand(executable, [], { env, platform, cwd: input.rootPath }).windowsVerbatimArguments) {
+      throw new Error("Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.");
+    }
     const resolved = resolveSpawnCommand(executable, args, {
       env,
       platform,
