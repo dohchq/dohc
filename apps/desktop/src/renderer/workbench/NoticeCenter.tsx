@@ -1,5 +1,6 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
+import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
@@ -1094,7 +1095,12 @@ export function NoticeCenter(props: {
     };
 
     document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+    // Opening a dialog closes Notices: the person chose the dialog.
+    const stopOnOverlayOpen = onOverlayOpen(() => setOpen(false));
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      stopOnOverlayOpen();
+    };
   }, [open]);
 
   const notices = useMemo<Notice[]>(() => {

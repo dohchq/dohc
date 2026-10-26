@@ -705,35 +705,38 @@ describe("notice center", () => {
     await waitFor(() => expect(document.activeElement).toBe(restore));
   });
 
-  // Notices opens above every dialog, as the toasts do. Over a dialog, Escape
-  // closes Notices, not the dialog, and focus goes back to the dialog, not to
-  // the Notices button behind it. Tab stays in Notices meanwhile.
+  // Notices opens above every dialog, as the toasts do, when a toast's Open
+  // fails and shows the reason there. Over a dialog, Tab stays in Notices,
+  // and Escape closes Notices, not the dialog, and gives focus back to the
+  // dialog, not to the Notices button behind it. Opening a dialog closes
+  // Notices.
   describe("over a dialog", () => {
-    const error = {
-      id: "shell-error-1",
-      message: "Could not refresh history. The engine did not answer.",
-      details: "Error: Could not refresh history.",
-      atMs: 1_000,
-      canRetry: true,
-      seen: false,
+    const failedOpen = (onClose: () => void = () => undefined) => (
+      <>
+        {noticeElement({
+          sentNotices: [sentRow("a")],
+          sentNoticeToast: sentRow("a"),
+          onHideSentNoticeToast: vi.fn(),
+          onOpenSentNotice: async () => "The automation's file is gone.",
+        })}
+        <Overlay onClose={onClose}>
+          <button type="button">Close</button>
+        </Overlay>
+      </>
+    );
+    const openFromToast = async () => {
+      fireEvent.click(screen.getByTestId("sent-notice-toast-open"));
+      const panel = await screen.findByTestId("notice-center");
+      await waitFor(() => expect(document.activeElement).toBe(panel));
+      return panel;
     };
-    const props = { workspaceErrors: [error], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() };
 
     it("opens on the toasts' layer and closes on Escape without closing the dialog", async () => {
       const onClose = vi.fn();
-      render(
-        <>
-          {noticeElement(props)}
-          <Overlay onClose={onClose}>
-            <button type="button">Close</button>
-          </Overlay>
-        </>,
-      );
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      const panel = screen.getByTestId("notice-center");
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
       expect(panel.className).toContain("z-60");
       expect(panel.className).not.toContain("z-20");
-      await waitFor(() => expect(document.activeElement).toBe(panel));
 
       fireEvent.keyDown(panel, { key: "Escape" });
       expect(screen.queryByTestId("notice-center")).toBeNull();
@@ -742,26 +745,36 @@ describe("notice center", () => {
     });
 
     it("keeps Tab in Notices", async () => {
-      render(
-        <>
-          {noticeElement(props)}
-          <Overlay onClose={() => undefined}>
-            <button type="button">Close</button>
-          </Overlay>
-        </>,
-      );
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      const panel = screen.getByTestId("notice-center");
+      render(failedOpen());
+      const panel = await openFromToast();
       const controls = [...panel.querySelectorAll<HTMLElement>("button:not([disabled])")];
       const last = controls[controls.length - 1]!;
       last.focus();
       fireEvent.keyDown(last, { key: "Tab" });
       expect(document.activeElement).toBe(controls[0]);
-      expect(panel.contains(document.activeElement)).toBe(true);
+    });
+
+    it("closes when a dialog opens", async () => {
+      const view = (dialog: boolean) => (
+        <>
+          {noticeElement({ sentNotices: [sentRow("a")] })}
+          {dialog ? (
+            <Overlay onClose={() => undefined}>
+              <button type="button">Close</button>
+            </Overlay>
+          ) : null}
+        </>
+      );
+      const { rerender } = render(view(false));
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      rerender(view(true));
+      await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
     });
 
     it("lifts a corner-hosted panel out of its host, as its toasts are", async () => {
-      const { container } = render(noticeElement({ ...props, host: "corner" }));
+      const { container } = render(noticeElement({ sentNotices: [sentRow("a")], host: "corner" }));
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       const panel = screen.getByTestId("notice-center");
       expect(panel.parentElement).toBe(document.body);

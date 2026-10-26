@@ -4,9 +4,17 @@
 // Escape or Tab.
 
 const escapeStack: symbol[] = [];
+const openListeners = new Set<() => void>();
 
 export function pushOverlay(id: symbol): void {
   escapeStack.push(id);
+  for (const listener of [...openListeners]) listener();
+}
+
+/** Calls `listener` each time an overlay opens, until the returned stop. */
+export function onOverlayOpen(listener: () => void): () => void {
+  openListeners.add(listener);
+  return () => openListeners.delete(listener);
 }
 
 export function removeOverlay(id: symbol): void {

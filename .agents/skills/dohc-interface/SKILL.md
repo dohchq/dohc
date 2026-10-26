@@ -142,6 +142,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Use these places. Do not add a new one for a new message.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
+- Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
