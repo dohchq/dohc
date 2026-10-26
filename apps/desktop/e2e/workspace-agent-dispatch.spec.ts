@@ -3,7 +3,7 @@ import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
@@ -60,13 +60,11 @@ async function seedRunnerSettings(
   mode: "report" | "silent-fail" | "ask",
 ): Promise<string> {
   const command = runnerCommand(mode);
-  const settings = {
+  const settings: DesktopUserSettings = {
     ...DEFAULT_USER_SETTINGS,
-    profile: { agentName: "Nova", preferredName: "Sam" },
-    runner: {
-      command,
-      enabled: true,
-      timeoutMinutes: 1,
+    profile: { preferredName: "Sam" },
+    agents: {
+      default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
     },
   };
   await writeFile(

@@ -66,6 +66,7 @@ describe("a save while the settings file changes", () => {
     }
 
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      version: 2,
       appearance: { themeMode: "dark", zoomLevel: 2 },
       profile: { preferredName: "Ada" },
       wallpaper: "teal",

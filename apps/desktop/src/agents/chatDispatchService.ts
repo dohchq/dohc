@@ -1,5 +1,5 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
-import { AGENTS_RESTRICTED_MESSAGE, configuredRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
+import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
@@ -17,7 +17,7 @@ import type {
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { RunnerSettings } from "../settings/userSettings";
+import type { AgentWithLaunch } from "../settings/userSettings";
 import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -165,7 +165,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   dispatchStoreFor(
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
-  readRunnerSettings(): Promise<RunnerSettings>;
+  // The agent that answers chats, or null when none is set up.
+  readDispatchAgent(): Promise<AgentWithLaunch | null>;
   identityFor(
     workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
@@ -885,7 +886,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function startClaim(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    runner: RunnerSettings,
+    agent: AgentWithLaunch,
     releaseWorkspace: (() => Promise<void>) | null,
     assertMayStart: () => void,
   ): Promise<void> {
@@ -914,20 +915,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId: claim.run.threadId,
         runId: claim.run.runId,
         logPath,
-        command: configuredRunnerCommand(runner),
-        profile: runner.profile,
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, runner.profile?.tool),
+        command: launchCommand(agent.launch),
+        profile: launchProfile(agent.launch),
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, launchProfile(agent.launch)?.tool),
         assertMayStart,
       });
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
-      }, runner.timeoutMinutes * 60_000);
+      }, agent.timeoutMinutes * 60_000);
       const live: LiveRun = {
         workspace,
         claim,
         child,
         logPath,
-        timeoutMinutes: runner.timeoutMinutes,
+        timeoutMinutes: agent.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
         killEscalation: null,
@@ -1007,10 +1008,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ) {
       return;
     }
-    const runner = await options.readRunnerSettings();
-    const command = configuredRunnerCommand(runner);
+    const agent = await options.readDispatchAgent();
     const dispatch = options.dispatchStoreFor(workspace);
-    if (!runner.enabled || !command) {
+    if (!agent?.enabled) {
       const threadIds = new Set(
         (await dispatch.listPending(workspace.workspaceId))
           .map((pending) => pending.threadId),
@@ -1026,7 +1026,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         try {
           options.onDispatchNotice?.(workspace, {
             reason: "no-runner", threadId,
-            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
+            message: `No agent could take this request. ${agent ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
           });
         } catch (error) {
           reportError(error);
@@ -1034,6 +1034,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       return;
     }
+    const command = launchCommand(agent.launch);
     const assertMayStart = await agentStartCheck(workspace);
     if (!assertMayStart) {
       await holdForTrust(workspace, dispatch);
@@ -1072,7 +1073,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           if (bypassBudget) budgetBypassThreads.add(bypassKey);
           throw error;
         }
-        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace, assertMayStart);
+        await startClaim(workspace, uncertainClaim, agent, releaseWorkspace, assertMayStart);
         return;
       }
       runReservations.delete(workspace.workspaceId);
@@ -1160,19 +1161,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
-      await startClaim(workspace, claim, runner, releaseWorkspace, assertMayStart);
+      await startClaim(workspace, claim, agent, releaseWorkspace, assertMayStart);
       return;
     }
   }
 
   async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
-    const [identity, runner] = await Promise.all([
+    const [identity, agent] = await Promise.all([
       options.identityFor(workspace),
-      options.readRunnerSettings(),
+      options.readDispatchAgent(),
     ]);
     // The agent channel is part of opting into local dispatch. A background
     // scan must not create an agent conversation in every new workspace.
-    if (runner.enabled && configuredRunnerCommand(runner)) {
+    if (agent?.enabled) {
       await options.chatStoreFor(workspace).ensureAgentChannel({
         workspaceId: workspace.workspaceId,
       });
@@ -1629,9 +1630,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let reservationHeldByProcess = false;
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
-      const runner = await options.readRunnerSettings();
-      const command = configuredRunnerCommand(runner);
-      if (!command) return { ok: false, detail: "Configure a runner command first." };
+      const agent = await options.readDispatchAgent();
+      if (!agent) return { ok: false, detail: "Configure a runner command first." };
+      const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
 
@@ -1701,7 +1702,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return { ok: false, detail: "A runner became active before the self-test could start." };
         }
         // The same reply form as a real run, so passing proves replies work.
-        const prompt = replyFormFor(runner.profile?.tool) === "mcp"
+        const prompt = replyFormFor(launchProfile(agent.launch)?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
         await options.setRunAttribution(workspace, {
@@ -1716,7 +1717,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           runId,
           logPath,
           command,
-          profile: runner.profile,
+          profile: launchProfile(agent.launch),
           prompt,
           assertMayStart,
         });

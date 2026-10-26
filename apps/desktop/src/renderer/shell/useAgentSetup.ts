@@ -1,4 +1,4 @@
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { firstAgent, firstAgentWithLaunch } from "../../settings/userSettings";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
@@ -21,13 +21,14 @@ export function useAgentSetup(
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
     if (!workspaceIsReady || !userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
+    const agent = firstAgent(userSettings.settings);
+    const runner = firstAgentWithLaunch(userSettings.settings);
     return {
       workspaceId,
       preferredName: userSettings.settings.profile.preferredName,
-      agentName: userSettings.settings.profile.agentName,
-      runnerConfigured:
-        configuredRunnerCommand(userSettings.settings.runner).length > 0,
-      runnerEnabled: userSettings.settings.runner.enabled,
+      agentName: agent?.name,
+      runnerConfigured: runner !== null,
+      runnerEnabled: runner?.enabled === true,
       agentRunActive: agentRunStatus.run.activeRun !== null,
     };
   }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
