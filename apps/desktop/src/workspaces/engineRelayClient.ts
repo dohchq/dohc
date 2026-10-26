@@ -716,7 +716,7 @@ export class EngineRelayClient {
                 throw error;
               }
             },
-            { retryTransportErrors: true },
+            { retryTransportErrors: true, abandonAtQuit: true },
           );
         } catch (error) {
           translateRelayError(method, error);

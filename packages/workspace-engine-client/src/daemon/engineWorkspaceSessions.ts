@@ -123,6 +123,12 @@ export interface EngineWorkspaceRunOptions {
    * for a read whose initial-capture refusal occurs before any side effect.
    */
   retryInitialCapture?: boolean;
+  /**
+   * Stop waiting for the operation at quit, so the session can close. Enable
+   * only for work the daemon may finish or drop after the app exits, such as
+   * a relay request.
+   */
+  abandonAtQuit?: boolean;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -238,13 +244,13 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
 }
 
 // Work that quit abandons: a bounded region asked to start after
-// `beginShutdown`, or a run that would wait on a workspace's first open.
-// Either is refused before it reaches the daemon or stops waiting, because the
-// app is quitting and the work is abandonable by construction.
+// `beginShutdown`, a run that would wait on a workspace's first open, or a run
+// marked `abandonAtQuit`. Each is refused before it reaches the daemon or
+// stops waiting, because the app is quitting and the work is abandonable.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
     super(
-      "Rust engine refused work that waits on an open: the app is quitting. " +
+      "Rust engine stopped waiting for abandonable work: the app is quitting. " +
         "Nothing new starts during teardown; retry after the next launch.",
     );
     this.name = "EngineWorkspaceShuttingDownError";
@@ -596,7 +602,8 @@ export class EngineWorkspaceSessions {
           });
         }
         try {
-          return await operation(binding);
+          const running = operation(binding);
+          return await (options.abandonAtQuit ? this.untilQuit(running) : running);
         } catch (error) {
           const retryAfterReconnect = requiresReconnect(error);
           const retryAfterTransport =
@@ -1314,15 +1321,20 @@ export class EngineWorkspaceSessions {
     open: Promise<EngineWorkspaceBinding>,
   ): Promise<EngineWorkspaceBinding> {
     if (entry.opened) return await open;
+    return await this.untilQuit(open);
+  }
+
+  // Quit ends the wait, not the work.
+  private async untilQuit<T>(work: Promise<T>): Promise<T> {
     const quit = this.shutdownController.signal;
-    if (quit.aborted) throw new EngineWorkspaceShuttingDownError();
     let abandon!: () => void;
     const abandoned = new Promise<never>((_resolve, reject) => {
       abandon = () => reject(new EngineWorkspaceShuttingDownError());
     });
-    quit.addEventListener("abort", abandon, { once: true });
+    if (quit.aborted) abandon();
+    else quit.addEventListener("abort", abandon, { once: true });
     try {
-      return await Promise.race([open, abandoned]);
+      return await Promise.race([abandoned, work]);
     } finally {
       quit.removeEventListener("abort", abandon);
     }
