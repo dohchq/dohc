@@ -312,9 +312,10 @@ fn disk_spelling_is_unknown_in_an_unlistable_folder_except_on_macos() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn may_share_entry_distinguishes_unknown_hard_links_from_different_files() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let ws = Scratch::new();
     ws.write("private/a.md", b"a");
@@ -330,17 +331,45 @@ fn may_share_entry_distinguishes_unknown_hard_links_from_different_files() {
         "private/b.md"
     ));
     let private = ws.path().join("private");
+    #[cfg(unix)]
+    let permissions = std::fs::metadata(&private).unwrap().permissions();
+    #[cfg(unix)]
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    #[cfg(windows)]
+    let icacls = |args: &[&str]| {
+        std::process::Command::new("icacls")
+            .arg(&private)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    #[cfg(windows)]
+    let denied = icacls(&["/deny", "*S-1-1-0:(RD)", "/q"]);
     let unlistable = std::fs::read_dir(&private).is_err();
+    #[cfg(windows)]
+    let unknown = ["private/a.md", "private/b.md", "private/c.md"]
+        .map(|path| dohc_engine_files::disk_spelling(ws.path(), path).is_err());
     let linked = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/b.md");
     let separate = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/c.md");
     let missing =
         dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/missing.md");
-    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&private, permissions).unwrap();
+    #[cfg(windows)]
+    {
+        let restored = icacls(&["/remove:d", "*S-1-1-0", "/q"]);
+        assert!(restored.status.success(), "{restored:?}");
+        assert!(denied.status.success(), "{denied:?}");
+    }
     if !unlistable {
         eprintln!("SKIP: this user can list the private folder");
         return;
     }
+    #[cfg(windows)]
+    assert_eq!(
+        unknown, [true; 3],
+        "stored names must be unknown while listing is denied"
+    );
     assert_eq!(linked, !cfg!(target_os = "macos"));
     assert!(!separate);
     assert!(!missing);

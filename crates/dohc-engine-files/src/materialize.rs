@@ -7824,6 +7824,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(&root).unwrap().permissions();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
+            let unlistable = std::fs::read_dir(&root).is_err();
+            let pending = pending_respelled_delete(&store, &root, &target, &write, &sha);
+            std::fs::set_permissions(&root, permissions).unwrap();
+            if !unlistable {
+                eprintln!("SKIP: this user can list the folder");
+                return;
+            }
+            assert_eq!(
+                pending.unwrap().is_some(),
+                ignores_case || !cfg!(target_os = "macos")
+            );
+        }
     }
 
     /// A merge's pending delete through a link reaches the file a create

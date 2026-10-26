@@ -341,9 +341,9 @@ pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> 
 }
 
 /// The path below `root` that `relative` reaches, spelled as the disk stores
-/// each name, with links resolved. `None` when nothing is there or the path
-/// leaves `root`. An error when the entry is there but the disk can't say
-/// which name it stores.
+/// each name, with links resolved. `None` when nothing can be reached there or
+/// the path leaves `root`. An error when the entry is there but the disk can't
+/// say which name it stores.
 pub fn disk_spelling(root: &Path, relative: &str) -> std::io::Result<Option<String>> {
     let Ok(root) = root.canonicalize() else {
         return Ok(None);
@@ -413,18 +413,10 @@ pub(crate) fn may_share_entry_in(root: &Path, a: &Path, b: &Path) -> bool {
     match (disk_spelling_in(root, a), disk_spelling_in(root, b)) {
         (Ok(None), _) | (_, Ok(None)) => false,
         (Ok(Some(a)), Ok(Some(b))) => a == b,
-        _ => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                match (std::fs::metadata(a), std::fs::metadata(b)) {
-                    (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
-                    _ => true,
-                }
-            }
-            #[cfg(not(unix))]
-            true
-        }
+        _ => match (file_id::get_file_id(a), file_id::get_file_id(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => true,
+        },
     }
 }
 
@@ -443,13 +435,11 @@ fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<std::io::Result<Vec<_>>>()
     });
-    #[cfg(target_os = "macos")]
     let names = match names {
         Ok(names) => names,
-        Err(_) => return Ok(leaf.to_owned()),
+        Err(_) if cfg!(target_os = "macos") => return Ok(leaf.to_owned()),
+        Err(error) => return Err(error),
     };
-    #[cfg(not(target_os = "macos"))]
-    let names = names?;
     let folded = leaf.to_str().map(crate::floor::fold_segment);
     stored_name_among(
         leaf,
