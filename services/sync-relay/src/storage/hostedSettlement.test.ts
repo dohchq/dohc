@@ -111,6 +111,7 @@ function publication(
   automation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration,
   update?: Uint8Array,
   agentId = "trip",
+  owner = false,
 ) {
   f.doc.gc = false;
   const baselineBytes = new TextEncoder().encode(
@@ -122,19 +123,20 @@ function publication(
     content: baselineBytes,
     createdAtMs: 1,
   });
-  const captured = f.capture(update ?? f.update("title", id), id, automation ? {kind: "owner", userId: "owner", shareId: "share"} : {
+  const accountId = owner ? "owner" : "reader";
+  const captured = f.capture(update ?? f.update("title", id), id, automation || owner ? {kind: "owner", userId: "owner", shareId: "share"} : {
     kind: "named",
     userId: "reader",
     grantId: "grant",
   });
   const accepted = f.storage.commitLiveUpdateJournal({
     ...captured,
-    ...(automation ? {trustedAutomation: automation} : {trustedAccount: { accountId: "reader", name: "Reader" }}),
+    ...(automation ? {trustedAutomation: automation} : {trustedAccount: { accountId, name: owner ? "Owner" : "Reader" }}),
     metadata: automation ? captured.metadata : {
       ...captured.metadata,
       authorContext: {
         kind: "account",
-        accountId: "reader",
+        accountId,
         agent: {
           agentId,
           agentName: "Trip",
@@ -144,7 +146,7 @@ function publication(
       },
     },
   });
-  expect(accepted.result.kind).toBe("accepted");
+  expect(accepted.result).toMatchObject({kind: "accepted"});
   const receipt = accepted.admitted!.metadata.accepted.receipt;
   const bytes = encodeStateAsUpdate(f.doc),
     stateSha = hash(bytes);
@@ -275,7 +277,7 @@ it("keeps one unattributed marker beside named settlement contributors", async (
       const accepted = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", id), id, {
         kind: "named", userId: "reader", grantId: "grant",
       }));
-      expect(accepted.result.kind).toBe("accepted");
+      expect(accepted.result).toMatchObject({kind: "accepted"});
       expect(accepted.admitted!.metadata.authorSnapshot).toEqual([]);
     }
     const last = publication(f, "mixed-coverage");
@@ -382,9 +384,10 @@ it("starts a later proof at the Markdown its predecessor verified, not at the ba
 // owner_publication exports these states and the outgoing preimage. The relay
 // assigns its own journal coordinates and authorship to the same updates.
 const handoverEvidence = process.env.DOHC_HANDOVER_PUBLICATION_EVIDENCE;
-it.skipIf(!handoverEvidence).each(["changed", "unchanged"])("accepts the engine's %s handover preimage after a reload", async variant => {
+it.skipIf(!handoverEvidence).each(["changed", "unchanged", "changed-preserved", "unchanged-preserved",
+  "changed-refused", "unchanged-refused", "changed-preserved-refused", "unchanged-preserved-refused"])("accepts the engine's %s handover preimage after a reload", async variant => {
   const evidence = JSON.parse(readFileSync(join(handoverEvidence!, `${variant}.json`), "utf8")) as {
-    baselineBytes: number[]; handoverBytes: number[]; nextBytes: number[];
+    baselineBytes: number[]; handoverBytes: number[]; nextBytes: number[]; intermediateBytes?: number[];
     payload: {payloadBeforeBlobSha256: string; payloadAfterBlobSha256: string};
   };
   const f = registered({deployment: true, baselineBytes: Uint8Array.from(evidence.baselineBytes)});
@@ -395,16 +398,28 @@ it.skipIf(!handoverEvidence).each(["changed", "unchanged"])("accepts the engine'
     f.doc.gc = false;
     const handover = Uint8Array.from(evidence.handoverBytes);
     applyUpdate(f.doc, handover);
-    const first = publication(f, "handover", 0, undefined, 0, undefined, handover);
+    const first = publication(f, "handover", 0, undefined, 0, undefined, handover, "trip", true);
     await prepare(f, [first.op]);
     expect(append(f, [first.op])).toMatchObject({inserted: 1});
     expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
     expect(first.receipt.journalCursor).toBe(7);
     expect(first.markdownSha).toBe(evidence.payload.payloadBeforeBlobSha256);
+    if (evidence.intermediateBytes) {
+      const intermediate = Uint8Array.from(evidence.intermediateBytes);
+      applyUpdate(f.doc, intermediate);
+      const refused = publication(f, "refused", 7, first.markdownSha, 1, undefined, intermediate, "trip", true);
+      expect(refused.receipt.journalCursor).toBe(8);
+      refused.payload.settlementReference.recordDigest = "0".repeat(64);
+      refused.op.payloadJson = stableJsonStringify(refused.payload);
+      await prepare(f, [refused.op]);
+      expect(append(f, [refused.op]).settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual(["prepare record-digest"]);
+      logged.mockClear();
+    }
     const nextState = Uint8Array.from(evidence.nextBytes);
     applyUpdate(f.doc, nextState);
-    const next = publication(f, "next", first.receipt.journalCursor, evidence.payload.payloadBeforeBlobSha256, 1, undefined, nextState);
-    expect(next.receipt.journalCursor).toBe(8);
+    const next = publication(f, "next", first.receipt.journalCursor, evidence.payload.payloadBeforeBlobSha256, evidence.intermediateBytes ? 2 : 1, undefined, nextState, "trip", true);
+    expect(next.receipt.journalCursor).toBe(evidence.intermediateBytes ? 9 : 8);
     expect(next.markdownSha).toBe(evidence.payload.payloadAfterBlobSha256);
     await prepare(f, [next.op]);
     expect(append(f, [next.op])).toMatchObject({inserted: 1});

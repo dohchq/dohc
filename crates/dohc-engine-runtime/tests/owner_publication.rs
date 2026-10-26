@@ -198,6 +198,15 @@ impl Fixture {
         cursor: i64,
         changes_content: bool,
     ) -> OwnerAdoptionCut {
+        self.edit_accepted_before_handover_with_source(cursor, changes_content, false)
+    }
+
+    fn edit_accepted_before_handover_with_source(
+        &mut self,
+        cursor: i64,
+        changes_content: bool,
+        preserved_source: bool,
+    ) -> OwnerAdoptionCut {
         let key = DocKey::new("workspace", "main", "object").unwrap();
         let limits = dohc_engine_collab::OwnerOutboxLimits {
             max_pending_bytes: 1_000_000,
@@ -209,6 +218,16 @@ impl Fixture {
         if !changes_content {
             self.doc
                 .rewrite_content_to_markdown(ContentKind::Richdoc, &self.text)
+                .unwrap();
+        }
+        if preserved_source {
+            let source = if changes_content {
+                "# Shared\n\nChanged together.\n"
+            } else {
+                &self.text
+            };
+            self.doc
+                .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
                 .unwrap();
         }
         let update = self.doc.encode_full_state();
@@ -2503,6 +2522,190 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
 }
 
 #[tokio::test]
+async fn refused_publications_after_a_handover_keep_the_cut_across_a_restart() {
+    for changes_content in [false, true] {
+        for canonical in [false, true] {
+            unavailable_publication_after_handover(changes_content, canonical, false).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_owner_source_after_a_handover_keeps_the_cut_across_a_restart() {
+    for changes_content in [false, true] {
+        unavailable_publication_after_handover(changes_content, false, true).await;
+    }
+}
+
+async fn unavailable_publication_after_handover(
+    changes_content: bool,
+    canonical: bool,
+    terminal_source: bool,
+) {
+    use dohc_engine_sync::{
+        NoLiveLeases, SettlementAdmission, apply_replication_envelope, owner_publication_prefix,
+    };
+    let mut f = Fixture::with_source(0, canonical);
+    let cut = f.edit_accepted_before_handover_with_source(7, changes_content, !canonical);
+    let handover_bytes = f.doc.encode_full_state();
+    let receipt = cut.terminal_receipt.clone();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let empty = f.settle(&handle, receipt).await;
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted first content"),
+        "first",
+        40,
+    )
+    .await;
+    let first_receipt = f.accept_pending(&actor, &handle, 8).await;
+    let intermediate_bytes = f.doc.encode_full_state();
+    if terminal_source {
+        f.record(
+            &actor,
+            f.doc.richdoc_append_paragraph("Private refused content"),
+            "private",
+            41,
+        )
+        .await;
+        let input = f.store.read_with(|conn| conn.query_row(
+            "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1", [],
+            |r| Ok(dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+                outbox_id:r.get(0)?, delivery_id:r.get(1)?, update_digest:r.get(2)?, reason:"terminal-source-refused".into()
+            }))).unwrap();
+        actor
+            .owner_ydoc_refuse_entry(
+                "workspace".into(),
+                input,
+                42,
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let first = f.settle(&handle, Some(first_receipt)).await;
+    if !terminal_source {
+        let mut echoes =
+            dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500)
+                .unwrap();
+        let last = echoes
+            .iter()
+            .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == first.moment_id)
+            .unwrap()
+            .origin_seq;
+        for echoed in &mut echoes {
+            if echoed.origin_seq > last {
+                break;
+            }
+            echoed.relay_seq = Some(echoed.origin_seq + 1);
+            if echoed.op_kind == "moment.append" && echoed.payload["momentId"] == first.moment_id {
+                echoed.settlement_admission = Some(SettlementAdmission::Refused {
+                    settlement_id: first.settlement_id.clone().unwrap(),
+                    reason: "authorship-mismatch".into(),
+                });
+            }
+            apply_replication_envelope(
+                &mut f.store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                echoed,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_attribution_unavailable")
+            .unwrap(),
+        1
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.register(&owner, "reloaded").await;
+    // Continue from the accepted state, leaving the refused native tail private.
+    let next_doc = Ydoc::wire();
+    next_doc.apply(&intermediate_bytes).unwrap();
+    let next_update = next_doc.richdoc_append_paragraph("Accepted next content");
+    let next_receipt = if terminal_source {
+        let (receipt, result) = deliver_declared(
+            &handle,
+            &f.binding,
+            9,
+            &next_doc.encode_full_state(),
+            AgentDeclaration {
+                agent_id: "next-agent".into(),
+                on_behalf_of: Some("owner".into()),
+                depth: 1,
+            },
+        )
+        .await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        receipt
+    } else {
+        f.record(&actor, next_update, "next", 50).await;
+        f.accept_pending(&actor, &handle, 9).await
+    };
+    let next = f.settle(&handle, Some(next_receipt)).await;
+    assert_eq!((next.previous_cursor, next.terminal_cursor), (7, 9));
+    let op = dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == next.moment_id)
+        .unwrap();
+    assert_eq!(op.payload["payloadBeforeBlobSha256"], empty.markdown_digest);
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    assert!(f.file().contains("Accepted first content"));
+    assert!(f.file().contains("Accepted next content"));
+    assert!(!f.file().contains("Private refused content"));
+    if !terminal_source
+        && let Some(directory) = std::env::var_os("DOHC_HANDOVER_PUBLICATION_EVIDENCE")
+    {
+        let name = format!(
+            "{}-{}refused.json",
+            if changes_content {
+                "changed"
+            } else {
+                "unchanged"
+            },
+            if canonical { "" } else { "preserved-" }
+        );
+        let evidence = serde_json::json!({
+            "baselineBytes":f.bytes, "handoverBytes":handover_bytes,
+            "intermediateBytes":intermediate_bytes, "nextBytes":next_doc.encode_full_state(), "payload":op.payload,
+        });
+        std::fs::write(
+            PathBuf::from(directory).join(name),
+            serde_json::to_vec(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
 async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     let mut f = Fixture::new();
     let key = DocKey::new("workspace", "main", "object").unwrap();
@@ -2597,21 +2800,32 @@ async fn settling_straight_after_a_handover_records_and_publishes_nothing() {
 
 #[tokio::test]
 async fn the_settlement_after_an_empty_one_starts_at_a_changed_handover_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, true).await;
 }
 
 #[tokio::test]
 async fn the_settlement_after_an_empty_one_starts_at_an_unchanged_handover_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, true).await;
+}
+
+#[tokio::test]
+async fn a_changed_handover_preserves_its_markdown_source_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false).await;
+}
+
+#[tokio::test]
+async fn an_unchanged_handover_preserves_its_markdown_source_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, false).await;
 }
 
 async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(
     changes_content: bool,
+    canonical: bool,
 ) {
     use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
-    let mut f = Fixture::with_source(0, true);
+    let mut f = Fixture::with_source(0, canonical);
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    let cut = f.edit_accepted_before_handover(7, changes_content);
+    let cut = f.edit_accepted_before_handover_with_source(7, changes_content, !canonical);
     let handover_bytes = f.doc.encode_full_state();
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
@@ -2635,6 +2849,11 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
         empty.markdown_digest == hex_sha256(f.text.as_bytes()),
         !changes_content
     );
+    if !canonical {
+        let projected = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        assert_ne!(empty.markdown_digest, hex_sha256(projected.as_bytes()));
+        assert_eq!(f.doc.preserved_markdown_source(&projected), Some(f.file()));
+    }
     assert_eq!(recorded_settlements(&f.store), (0, 0));
     assert_eq!(
         owner
@@ -2703,6 +2922,32 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
             .allowed_ops,
         1
     );
+    if changes_content && !canonical {
+        let handover = Ydoc::wire();
+        handover.apply(&handover_bytes).unwrap();
+        let projected = handover.project(ContentKind::Richdoc).unwrap().content;
+        let mut canonical_before = op.clone();
+        canonical_before.payload["payloadBeforeBlobSha256"] =
+            serde_json::json!(hex_sha256(projected.as_bytes()));
+        canonical_before.payload["beforeBlobSha256"] =
+            canonical_before.payload["payloadBeforeBlobSha256"].clone();
+        assert_eq!(
+            owner_publication_prefix(&f.store, "workspace", &[canonical_before], 1_000_000)
+                .unwrap()
+                .allowed_ops,
+            0
+        );
+    }
+    let mut unaccepted = op.clone();
+    unaccepted.payload["payloadBeforeBlobSha256"] =
+        serde_json::json!(hex_sha256(b"Unaccepted predecessor"));
+    unaccepted.payload["beforeBlobSha256"] = unaccepted.payload["payloadBeforeBlobSha256"].clone();
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        0
+    );
     if let Some(directory) = std::env::var_os("DOHC_HANDOVER_PUBLICATION_EVIDENCE") {
         let evidence = serde_json::json!({
             "baselineBytes": f.bytes,
@@ -2710,10 +2955,11 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
             "nextBytes": f.doc.encode_full_state(),
             "payload": op.payload,
         });
-        let name = if changes_content {
-            "changed.json"
-        } else {
-            "unchanged.json"
+        let name = match (changes_content, canonical) {
+            (true, true) => "changed.json",
+            (false, true) => "unchanged.json",
+            (true, false) => "changed-preserved.json",
+            (false, false) => "unchanged-preserved.json",
         };
         std::fs::write(
             PathBuf::from(directory).join(name),

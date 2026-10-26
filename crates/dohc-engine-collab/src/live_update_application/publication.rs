@@ -121,13 +121,12 @@ pub(crate) fn read_adoption_predecessor_in(
             accepted_history::CHECKPOINT_EVENTS as usize,
             accepted_history::HistoryPurpose::Native,
         )?;
-        Ok(Some(hex_sha256(
-            history
-                .doc
-                .project(crate::ContentKind::Richdoc)?
-                .content
-                .as_bytes(),
-        )))
+        let projection = history.doc.project(crate::ContentKind::Richdoc)?.content;
+        let markdown = history
+            .doc
+            .preserved_markdown_source(&projection)
+            .unwrap_or(projection);
+        Ok(Some(hex_sha256(markdown.as_bytes())))
     })();
     *remaining = budget.remaining;
     result
@@ -222,7 +221,9 @@ pub(crate) fn require_restore_registration_in(
 
 /// The text restore_fence::require_registration reads from the document's newest fence.
 fn fence_registration(document: &str) -> String {
-    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
+    format!(
+        "coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)"
+    )
 }
 
 fn charge_sql(
@@ -261,8 +262,12 @@ fn registration_in(
     key: &DocKey,
     budget: &mut Budget,
 ) -> Result<Option<Registration>, ApplicationError> {
-    charge_sql(conn, budget, "SELECT coalesce(sum(n),0) FROM (SELECT length(CAST(relay_database_namespace AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) AS n FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2)",
-        params![key.workspace_id, key.version_id, key.object_id])?;
+    charge_sql(
+        conn,
+        budget,
+        "SELECT coalesce(sum(n),0) FROM (SELECT length(CAST(relay_database_namespace AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) AS n FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2)",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )?;
     let mut query = conn.prepare("SELECT relay_database_namespace,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
     let records = query
         .query_map(

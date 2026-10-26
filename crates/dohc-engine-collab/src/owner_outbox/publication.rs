@@ -153,18 +153,6 @@ fn prove(
                 if hex_sha256(projection.content.as_bytes()) == digest {
                     return Ok(true);
                 }
-                // A handover with no new edits has no settlement row. Its accepted
-                // projection still proves the next publication's predecessor.
-                match crate::live_update_application::read_adoption_predecessor_in(
-                    conn, key, namespace, binding, remaining,
-                ) {
-                    Ok(Some(predecessor)) if predecessor == digest => return Ok(true),
-                    Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
-                        budget_exhausted = true;
-                        return Err(OwnerOutboxError::Frozen);
-                    }
-                    _ => {}
-                }
                 // A resumed restore's settlement replaced exactly one accepted head of the
                 // generation it fenced. Its verified resume evidence proves that head only.
                 match crate::live_update_application::read_restore_predecessor_in(
@@ -197,10 +185,26 @@ fn prove(
                     .project(crate::ContentKind::Richdoc)
                     .map_err(collab)?
                     .content;
-                Ok(hex_sha256(projection.as_bytes()) == digest
+                if hex_sha256(projection.as_bytes()) == digest
                     || original
                         .preserved_markdown_source(&projection)
-                        .is_some_and(|source| hex_sha256(source.as_bytes()) == digest))
+                        .is_some_and(|source| hex_sha256(source.as_bytes()) == digest)
+                {
+                    return Ok(true);
+                }
+                // A handover with no new edits has no settlement row. Its accepted
+                // projection still proves the next publication's predecessor.
+                match crate::live_update_application::read_adoption_predecessor_in(
+                    conn, key, namespace, binding, remaining,
+                ) {
+                    Ok(Some(predecessor)) if predecessor == digest => return Ok(true),
+                    Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
+                        budget_exhausted = true;
+                        return Err(OwnerOutboxError::Frozen);
+                    }
+                    _ => {}
+                }
+                Ok(false)
             }
         }
     })();
