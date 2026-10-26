@@ -1729,6 +1729,19 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
   });
 
+  // A retry that turns active before its 15 s cancels the wait: no toast or
+  // row ever appears, however long live editing then stays active.
+  it("never announces a live retry that turns active before 15 s", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(14_999));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
   // A named reason stays until someone acts, so it does not wait.
   it("shows a live retry at once when it gains a reason", () => {
     vi.useFakeTimers();
