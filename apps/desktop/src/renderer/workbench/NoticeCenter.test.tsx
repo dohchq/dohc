@@ -1402,6 +1402,10 @@ describe("notice center", () => {
 
   // A retry with no reason raises its toast and row only once it has lasted 15 s.
   const outlastQuietRetry = () => act(() => vi.advanceTimersByTime(15_000));
+  const serverUnreachable = {
+    state: "sync-failed" as const,
+    syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+  };
 
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
   // what it offers depends on whether anything can be dialled again.
@@ -1634,13 +1638,7 @@ describe("notice center", () => {
   // Live editing needs the server. While the title bar names the server, the
   // server's own toast and row report the outage, and live editing adds none.
   it.each([
-    {
-      label: "Server unreachable",
-      server: {
-        state: "sync-failed" as const,
-        syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
-      },
-    },
+    { label: "Server unreachable", server: serverUnreachable },
     { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
   ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -1661,30 +1659,36 @@ describe("notice center", () => {
   });
 
   // Sync can come back before live editing tries again. The server's report
-  // already announced that retry, so it keeps its row but gets no toast. The
-  // retry's 15 s count the time the server was named.
-  it("does not announce a live retry the server's report covered", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const { rerender } = renderNotices({
-      syncStatus: {
-        ...liveDeliveryStatus("retrying"),
-        state: "sync-failed",
-        syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
-      },
-    });
-    outlastQuietRetry();
+  // already announced that retry, so it never toasts, and its row waits 15 s
+  // from when the server is back.
+  it("does not announce a live retry the server's report covered", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
-    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    act(() => vi.advanceTimersByTime(14_999));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
     expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
 
     // Live editing tries again and recovers; a later failure is news.
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
-    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
     outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // The server's report does not explain a named reason, so once the server
+  // is back it shows at once, with its toast.
+  it("announces a named live reason once the server is back", () => {
+    const paused = liveDeliveryStatus("retrying", "document-unavailable");
+    const { rerender } = renderNotices({ syncStatus: { ...paused, ...serverUnreachable } });
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    rerender(noticeElement({ syncStatus: paused }));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
   });
 
   // A retry dohc is still fixing by itself shows in the title bar at once,

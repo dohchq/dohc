@@ -972,22 +972,26 @@ export function NoticeCenter(props: {
   // failure, so the same failure in another workspace is still news. While
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
-  // A retry with no reason waits QUIET_RETRY_MS first; a named reason
-  // stays until someone acts, so it shows at once.
+  // A retry with no reason waits QUIET_RETRY_MS, counted from when the server
+  // is back; a named reason stays until someone acts, so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
-  const liveRetryLasted = useLasted(liveRetryKey, liveDeliveryReason ? 0 : QUIET_RETRY_MS);
   const serverNamed = syncNamesServer(props.syncStatus);
-  const liveDeliveryKey = serverNamed || !liveRetryLasted ? null : liveRetryKey;
+  const liveDeliveryKey = useLasted(
+    serverNamed ? null : liveRetryKey,
+    liveDeliveryReason ? 0 : QUIET_RETRY_MS,
+  )
+    ? liveRetryKey
+    : null;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);
-  // The server's report announced this retry, so when the server is back
-  // and live editing has not tried again yet, the retry is not news.
-  if (serverNamed && liveRetryKey !== null && dismissedLiveDeliveryKey !== liveRetryKey) {
+  // The server's report announced this retry, so once the server is back
+  // it keeps its row but gets no toast.
+  if (serverNamed && liveRetryKey !== null && !liveDeliveryReason && dismissedLiveDeliveryKey !== liveRetryKey) {
     setDismissedLiveDeliveryKey(liveRetryKey);
   }
   // Recovery forgets the dismissal, so the next failure is announced again
