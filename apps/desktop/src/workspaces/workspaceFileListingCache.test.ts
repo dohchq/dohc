@@ -73,20 +73,26 @@ describe("WorkspaceFileListingCache", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  const answers = (walk: Deferred<WorkspacePathListing>, both: WorkspacePathListing) => walk.resolve(both);
+  const fails = (walk: Deferred<WorkspacePathListing>) => walk.reject(new Error("walk failed"));
   it.each([
-    ["answers", (walk: Deferred<WorkspacePathListing>, both: WorkspacePathListing) => walk.resolve(both)],
-    ["fails", (walk: Deferred<WorkspacePathListing>) => walk.reject(new Error("walk failed"))],
-  ])("does not answer with a replaced walk that lacks a file changed during it, when the newer walk %s", async (outcome, settle) => {
+    ["before", "answers", answers],
+    ["before", "fails", fails],
+    ["after", "answers", answers],
+    ["after", "fails", fails],
+  ] as const)("does not answer with a replaced walk that lacks a file changed during it, %s the newer walk starts, when the newer walk %s", async (when, outcome, settle) => {
     const cache = new WorkspaceFileListingCache("win32");
     const replaced = deferred<WorkspacePathListing>();
     const newer = deferred<WorkspacePathListing>();
     const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
     const load = vi.fn().mockReturnValueOnce(replaced.promise).mockReturnValueOnce(newer.promise).mockResolvedValue(both);
     const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
+    const putBack = () => cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
     // Started after a delete answered; packing.md is put back behind it.
     const walking = cache.list({ ...options, allowCached: true });
-    cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    if (when === "before") putBack();
     const replacing = cache.list({ ...options, allowCached: false });
+    if (when === "after") putBack();
     replaced.resolve(listing("plan.md"));
     await expect(walking).resolves.toEqual(both);
     settle(newer, both);

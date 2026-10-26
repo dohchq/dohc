@@ -22,6 +22,9 @@ interface ListingEntry {
 // workspace lister. Content facts retain the path set and update its identity.
 export class WorkspaceFileListingCache {
   readonly #listings = new Map<string, ListingEntry>();
+  // Walks still in flight, with their workspace. A walk a newer one replaced
+  // in #listings still answers its own callers.
+  readonly #walking = new Map<ListingEntry, string>();
 
   constructor(private readonly platform: NodeJS.Platform = process.platform,
     private readonly refreshContent?: (workspaceId: string, attachmentId: symbol, paths: readonly string[]) => Promise<readonly WorkspaceFileListingEntry[]>) {}
@@ -55,11 +58,13 @@ export class WorkspaceFileListingCache {
       files: new Map<string, WorkspaceFileListingEntry>(),
       changed: new Set<string>(),
     };
+    this.#walking.set(entry, options.workspaceId);
     const listing = Promise.resolve().then(options.load).then(async result => {
         for (let offset = 0; offset < result.files.length; offset += 128) {
           for (const file of result.files.slice(offset, offset + 128)) entry.files.set(file.path, file);
           if (offset + 128 < result.files.length) await new Promise<void>(resolve => setImmediate(resolve));
         }
+        this.#walking.delete(entry);
         // A file removed and written again behind the walk reads as changed,
         // and the walk lacks it, even if a newer walk replaced it. Its callers,
         // who may have asked after that change, get one walk that started after
@@ -75,6 +80,7 @@ export class WorkspaceFileListingCache {
         entry.settled = true;
         return result;
       }).catch(error => {
+        this.#walking.delete(entry);
         if (this.#listings.get(options.workspaceId) === entry) {
           this.#listings.delete(options.workspaceId);
         }
@@ -117,11 +123,15 @@ export class WorkspaceFileListingCache {
   }
 
   observe(workspaceId: string, attachmentId: symbol, facts: readonly FileObservationFact[]): void {
+    // Rules are read separately on every IPC response; they cannot change this path cache.
+    const visible = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, this.platform));
+    for (const [walk, id] of this.#walking) {
+      if (id !== workspaceId || walk.attachmentId !== attachmentId) continue;
+      for (const fact of visible) if (fact.kind === "changed") walk.changed.add(fact.path);
+    }
     const entry = this.#listings.get(workspaceId);
     if (!entry || entry.attachmentId !== attachmentId) return;
-    for (const fact of facts) {
-      // Rules are read separately on every IPC response; they cannot change this path cache.
-      if (isWorkspaceVisibilityPolicyPath(fact.path, this.platform)) continue;
+    for (const fact of visible) {
       // A file removed and written again between two engine scans reads as
       // changed. A listing walked between them lacks it, so its paths are stale.
       if (fact.kind !== "changed" || (entry.settled && !entry.files.has(fact.path))) {
