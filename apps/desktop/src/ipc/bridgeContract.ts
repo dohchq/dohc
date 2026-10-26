@@ -106,6 +106,9 @@ import {
 import {
   DROP_IMPORT_LIMITS,
   EXPLORER_MENU_COMMANDS,
+  IMPORT_SKIP_REASONS,
+  IMPORT_SKIPPED_PATH_MAX_CHARS,
+  IMPORT_SKIPS_LISTED,
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -1012,21 +1015,32 @@ export type ImportWorkspaceFilesPayload = z.infer<
   typeof ImportWorkspaceFilesPayload
 >;
 
+export const SkippedImportSource = z.object({
+  // The path from what the person handed over, such as Trip/photos/key.txt
+  // for a file inside a dropped folder.
+  path: z.string().min(1).max(IMPORT_SKIPPED_PATH_MAX_CHARS),
+  reason: z.enum(IMPORT_SKIP_REASONS),
+});
+export type SkippedImportSource = z.infer<typeof SkippedImportSource>;
+
 export const ImportWorkspaceFilesResult = z.object({
   imported: z.array(PATH_STRING),
-  // Sources that did not land (invalid basename, screened-out drop source,
-  // collision budget exhausted) — surfaced so the import summary can say
-  // "2 skipped" instead of the batch silently shrinking.
+  // Sources that did not land, such as a link or a name that cannot be
+  // saved, so the import is never silently smaller than what was handed over.
   skipped: z.number().int().min(0),
+  // The first skipped sources and why each did not land, present only when
+  // the import skipped any.
+  skippedSources: z.array(SkippedImportSource).min(1).max(IMPORT_SKIPS_LISTED).optional(),
   // Some files landed before the import stopped: a copy failed, or the owner
   // lost a trustworthy completion result. This is not an ordinary skip: the
   // Explorer must refresh before the user decides what, if anything, to
   // retry, and importing the same sources again would copy the landed files
   // a second time.
   interrupted: z.literal(true).optional(),
-  // Folders the import created, present only when it created any. A drop of
-  // empty folders lands folders and no file, and the summary says so.
-  folders: z.number().int().min(1).optional(),
+  // Dropped folders that landed, by workspace path, present only when any
+  // did. A dropped empty folder lands no file, so the Explorer selects it
+  // from here.
+  folders: z.array(PATH_STRING).min(1).optional(),
   // An ordinary import stopped at a failed copy: the source file's name, and
   // either the filesystem's error code or a refusal dohc makes itself
   // (`refusal`), with raw text that only goes into copied details.
