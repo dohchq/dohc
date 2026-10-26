@@ -203,6 +203,9 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         const failureRow = page.locator("[data-notice-row]").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
         await expect(failureRow).toBeVisible();
         await expect(failureRow).toContainText(failureBody);
+        const listFailureRow = page.locator("[data-notice-row]").filter({ hasText: "dohc could not list every kept copy" });
+        await expect(listFailureRow).toBeVisible();
+        await expect(listFailureRow).toContainText("To find a copy that isn't listed, look beside its file for (kept copy) in the name.");
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
           await page.screenshot({ path: testInfo.outputPath(`copy-failure-${theme}.png`) });
@@ -212,6 +215,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
         await failureRow.getByRole("button", { name: "Try again", exact: true }).click();
         await expect(failureRow).toHaveCount(0, { timeout: 120_000 });
+        await expect(listFailureRow).toHaveCount(0, { timeout: 120_000 });
         if (await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
       }
       await expect.poll(() => {
