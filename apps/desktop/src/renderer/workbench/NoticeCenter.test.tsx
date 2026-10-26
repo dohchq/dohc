@@ -1664,27 +1664,38 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
-  // Sync can come back before live editing tries again. The server's report
-  // already announced that retry, so it never toasts, and its row waits 15 s
-  // from when the server is back.
-  it("does not announce a live retry the server's report covered", () => {
+  // Sync can come back before live editing tries again. Its ring shows once
+  // the server is back, and a retry that keeps failing toasts and adds its
+  // row 15 s after the ring returns.
+  it("announces a live retry that keeps failing 15 s after the server is back", () => {
     vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
     act(() => vi.advanceTimersByTime(20_000));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
     act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
-    act(() => vi.advanceTimersByTime(1));
-    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing retrying");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
 
-    // Live editing tries again and recovers; a later failure is news.
-    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+  // A healthy recovery tries again within about 10 s of the server coming
+  // back, so it never toasts or adds a row.
+  it("never announces a live retry that recovers within 15 s of the server coming back", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
-    outlastQuietRetry();
-    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(10_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
   // A failed save or a required update takes the title bar's words from the

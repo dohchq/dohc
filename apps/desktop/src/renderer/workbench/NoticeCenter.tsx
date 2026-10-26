@@ -428,14 +428,14 @@ function liveDeliveryCopy(
   }
   return {
     title: "Live editing retrying",
-    body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
+    body: "Your edits are saved on this device.",
     recovery: "retry",
     Icon: RefreshCw,
   };
 }
 
-// A retry dohc is still fixing by itself toasts and adds a row only once it
-// has lasted this long. The title bar shows it at once.
+// A retry dohc is still fixing by itself toasts and adds a row only once its
+// ring has shown in the title bar this long.
 const QUIET_RETRY_MS = 15_000;
 
 // Whether `key` has stayed the same, and not null, for `ms`. A key that
@@ -975,8 +975,8 @@ export function NoticeCenter(props: {
   // failure, so the same failure in another workspace is still news. While
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
-  // A retry with no reason waits QUIET_RETRY_MS, counted from when the server
-  // is back; a named reason stays until someone acts, so it shows at once.
+  // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
+  // shows; a named reason stays until someone acts, so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
@@ -992,11 +992,6 @@ export function NoticeCenter(props: {
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);
-  // The server's report announced this retry, so once the server is back
-  // it keeps its row but gets no toast.
-  if (serverNamed && liveRetryKey !== null && !liveDeliveryReason && dismissedLiveDeliveryKey !== liveRetryKey) {
-    setDismissedLiveDeliveryKey(liveRetryKey);
-  }
   // Recovery forgets the dismissal, so the next failure is announced again
   // instead of staying silent behind an answer about an older one.
   if (liveRetryKey === null && dismissedLiveDeliveryKey !== null) {
