@@ -91,6 +91,7 @@ describe("a dohc Codex run", () => {
       { [SYSTEM]: "[windows]\nsandbox = 'unelevated'\n" },
       { [REQUIREMENTS]: "[features]\nelevated_windows_sandbox = true\n" },
       { [REQUIREMENTS]: "[feature_requirements]\nexperimental_windows_sandbox = true\n" },
+      { [REQUIREMENTS]: "[windows]\nallowed_sandbox_implementations = ['elevated', 'unelevated']\n" },
       // Files dohc can't read or parse.
       { [USER]: "[windows\n" },
       { [REQUIREMENTS]: "[features\n" },

@@ -53,14 +53,15 @@ function readConfigTables(files: readonly string[], read: (path: string) => stri
 
 const WINDOWS_SANDBOX_FEATURES = ["elevated_windows_sandbox", "experimental_windows_sandbox", "enable_experimental_windows_sandbox", "prefer_mxc"];
 
-// Whether the person picked a Windows sandbox anywhere, profiles included.
-// Requirements also spell [features] as [feature_requirements].
+// Whether the person or their organization picked a Windows sandbox
+// anywhere, profiles included. Requirements can also list the sandboxes they
+// allow, and spell [features] as [feature_requirements].
 function choosesWindowsSandbox(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(choosesWindowsSandbox);
   if (!isTable(value)) return false;
   const { windows } = value;
   const features = value.features ?? value.feature_requirements;
-  if (isTable(windows) && "sandbox" in windows) return true;
+  if (isTable(windows) && ("sandbox" in windows || "allowed_sandbox_implementations" in windows)) return true;
   if (isTable(features) && WINDOWS_SANDBOX_FEATURES.some((key) => key in features)) return true;
   return Object.values(value).some(choosesWindowsSandbox);
 }
