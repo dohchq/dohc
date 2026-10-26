@@ -317,7 +317,7 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
 }
 
 pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> {
-    let spelling = disk_spelling_in(root, &root.join(relative))?;
+    let spelling = disk_spelling_in(root, &root.join(relative)).ok()??;
     let stored: Vec<&str> = spelling.split('/').collect();
     let tracked: Vec<&str> = relative.split('/').collect();
     if stored.len() != tracked.len() {
@@ -341,10 +341,13 @@ pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> 
 }
 
 /// The path below `root` that `relative` reaches, spelled as the disk stores
-/// each name, with links resolved. `None` when nothing is there, the path
-/// leaves `root`, or the disk can't say which name it stores.
-pub fn disk_spelling(root: &Path, relative: &str) -> Option<String> {
-    let root = root.canonicalize().ok()?;
+/// each name, with links resolved. `None` when nothing is there or the path
+/// leaves `root`. An error when the entry is there but the disk can't say
+/// which name it stores.
+pub fn disk_spelling(root: &Path, relative: &str) -> std::io::Result<Option<String>> {
+    let Ok(root) = root.canonicalize() else {
+        return Ok(None);
+    };
     disk_spelling_in(&root, &root.join(relative))
 }
 
@@ -353,9 +356,13 @@ pub fn disk_spelling(root: &Path, relative: &str) -> Option<String> {
 /// tell it, and Linux keeps the spelling it was given, so on a folder that
 /// ignores case, such as a Windows drive under WSL, `Notes.md` reaches `notes.md`
 /// and keeps its own spelling. There each name comes from its folder.
-pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
-    let file = path.canonicalize().ok()?;
-    let below = file.strip_prefix(root).ok()?;
+pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> std::io::Result<Option<String>> {
+    let Ok(file) = path.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(below) = file.strip_prefix(root) else {
+        return Ok(None);
+    };
     #[cfg(unix)]
     let mut lookup = root.to_path_buf();
     let mut names = Vec::new();
@@ -363,27 +370,67 @@ pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
         #[cfg(unix)]
         let name = {
             lookup.push(name);
-            stored_leaf_name(&lookup).ok()?
+            match stored_leaf_name(&lookup) {
+                Ok(name) => name,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
         };
         #[cfg(not(unix))]
         let name = name.as_os_str().to_owned();
-        names.push(name.into_string().ok()?);
+        names.push(name.into_string().map_err(|_| {
+            std::io::Error::new(ErrorKind::InvalidData, "stored name is not UTF-8")
+        })?);
     }
     // Query the leaf's directory entry on Windows: a file handle's final path
     // need not name the hard link we looked up. Folders cannot be hard-linked.
     #[cfg(windows)]
     if let Some(leaf) = names.last_mut() {
-        *leaf = dohc_windows_files::stored_leaf_name(path)
-            .ok()?
+        let name = match dohc_windows_files::stored_leaf_name(path) {
+            Ok(name) => name,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        *leaf = name
             .into_string()
-            .ok()?;
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "stored name is not UTF-8"))?;
     }
-    Some(names.join("/"))
+    Ok(Some(names.join("/")))
+}
+
+/// Whether `a` and `b` below `root` may reach one directory entry, as two
+/// spellings do on a disk that ignores case. When the disk can't say which
+/// name one of them is stored under, they may, unless they reach different
+/// files.
+pub fn may_share_entry(root: &Path, a: &str, b: &str) -> bool {
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    may_share_entry_in(&root, &root.join(a), &root.join(b))
+}
+
+pub(crate) fn may_share_entry_in(root: &Path, a: &Path, b: &Path) -> bool {
+    match (disk_spelling_in(root, a), disk_spelling_in(root, b)) {
+        (Ok(None), _) | (_, Ok(None)) => false,
+        (Ok(Some(a)), Ok(Some(b))) => a == b,
+        _ => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                match (std::fs::metadata(a), std::fs::metadata(b)) {
+                    (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+                    _ => true,
+                }
+            }
+            #[cfg(not(unix))]
+            true
+        }
+    }
 }
 
 /// The name `path`'s folder stores its entry under. A folder that can be
-/// searched but not listed keeps the name `canonicalize` gave, which macOS
-/// already reports as stored.
+/// searched but not listed gives an error, except on macOS, where
+/// `canonicalize` already gave the stored name.
 #[cfg(unix)]
 fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
     use std::os::unix::fs::MetadataExt;
@@ -391,13 +438,18 @@ fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
         return Err(ErrorKind::InvalidInput.into());
     };
     let file = std::fs::symlink_metadata(path)?;
-    let Ok(names) = std::fs::read_dir(folder).and_then(|entries| {
+    let names = std::fs::read_dir(folder).and_then(|entries| {
         entries
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<std::io::Result<Vec<_>>>()
-    }) else {
-        return Ok(leaf.to_owned());
+    });
+    #[cfg(target_os = "macos")]
+    let names = match names {
+        Ok(names) => names,
+        Err(_) => return Ok(leaf.to_owned()),
     };
+    #[cfg(not(target_os = "macos"))]
+    let names = names?;
     let folded = leaf.to_str().map(crate::floor::fold_segment);
     stored_name_among(
         leaf,
