@@ -9,6 +9,7 @@ import {
   thread,
   message,
   bridgeMock,
+  emitWorkspaceActivity,
   mentionRoster,
   renderView,
 } from "./ChatsView.testHarness";
@@ -521,6 +522,22 @@ describe("ChatsView runs dohc's restart or quit stopped", () => {
     expect(tryAgain.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply-2");
   });
 
+  it("puts Try again under the later of two posts made at once", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), agentPost("reply-a", NOW + 1_000), agentPost("reply-b", NOW + 1_000)],
+    });
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: { "reply-a": run, "reply-b": run } });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...STOPPED, stoppedRun: { runId: "run-1", triggerMessageId: "message-1", ending: "quit", retryable: true },
+    });
+    renderView();
+    await openThread();
+
+    const tryAgain = await screen.findByTestId("chats-run-try-again");
+    expect(tryAgain.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply-b");
+  });
+
   it("keeps the words without Try again once the request has had its second attempt", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
@@ -552,5 +569,25 @@ describe("ChatsView runs dohc's restart or quit stopped", () => {
     (retry as () => void)();
     await waitFor(() => expect(bridgeMock.retryStoppedRun).toHaveBeenCalledTimes(2));
     expect(bridgeMock.retryStoppedRun).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", runId: "run-1" });
+  });
+
+  it("reports a failed Try again that the conversation refreshed under", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...STOPPED, stoppedRun: { runId: "run-1", triggerMessageId: "message-1", ending: "quit", retryable: true },
+    });
+    let fail!: (error: Error) => void;
+    bridgeMock.retryStoppedRun.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const { onError } = renderView();
+    const user = await openThread();
+
+    await user.click(await screen.findByTestId("chats-run-try-again"));
+    const reads = bridgeMock.listChatMessages.mock.calls.length;
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => fail(new Error("This workspace is not open. Open it again.")));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0]![0]).toContain("dohc could not start your agent's run in \"Should we ship on Friday?\" again.");
   });
 });

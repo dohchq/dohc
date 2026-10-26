@@ -3669,7 +3669,8 @@ export function ChatsView(props: {
       const next = await bridge().chatDispatchStateForThread({ workspaceId, threadId });
       if (current()) setDispatchState(next);
     } catch (error) {
-      if (!current()) return;
+      // A refresh of the conversation meanwhile doesn't answer the failure.
+      if (token !== liveToken.current) return;
       // The failure's Try again can come from another conversation, so it
       // only asks again. The run's update refreshes whichever one is open.
       const again = () => void bridge().retryStoppedRun({ workspaceId, threadId, runId })

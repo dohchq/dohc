@@ -123,16 +123,16 @@ function StoppedRunLine(props: {
   );
 }
 
-// The run's last post in the conversation, by when it was posted.
+// The run's last post in the conversation, by when it was posted. Of two
+// posted at once, the later in the conversation wins.
 function lastPostOfRun(
   runId: string,
   runRecords: Record<string, ChatRunRecord>,
-  messagesById: ReadonlyMap<string, ChatMessageRecord>,
+  messages: readonly ChatMessageRecord[],
 ): string | undefined {
   let last: ChatMessageRecord | undefined;
-  for (const [messageId, run] of Object.entries(runRecords)) {
-    const message = messagesById.get(messageId);
-    if (run.runId === runId && message && (!last || message.createdAtMs > last.createdAtMs)) last = message;
+  for (const message of messages) {
+    if (runRecords[message.id]?.runId === runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
   }
   return last?.id;
 }
@@ -527,7 +527,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   // A stopped run ends under its last post, or under its request when it
   // posted nothing.
   const stoppedRunEnd = stoppedRun
-    ? lastPostOfRun(stoppedRun.runId, runRecords, messagesById) ?? stoppedRun.triggerMessageId
+    ? lastPostOfRun(stoppedRun.runId, runRecords, messages) ?? stoppedRun.triggerMessageId
     : null;
   const ofStoppedRun = (messageId: string) =>
     stoppedRun !== null && runRecords[messageId]?.runId === stoppedRun.runId;

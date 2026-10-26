@@ -2746,6 +2746,23 @@ describe("chatDispatchService", () => {
       expect(fixture.requeues).toHaveLength(1);
     });
 
+    it.each(["restarted", "quit"] as const)("posts the notice of a run stopped when dohc %s on one launch only", async (ending) => {
+      const fixture = await createFixture();
+      await stoppedRun(fixture, ending);
+      await activate(fixture);
+      expect(fixture.notices).toHaveLength(1);
+      await fixture.service.stop();
+      const posted: typeof fixture.notices = [];
+      fixture.service = createChatDispatchService({
+        ...fixture.serviceOptions,
+        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices },
+      });
+
+      await activate(fixture);
+      expect(posted).toEqual([]);
+      expect(await owedRuns(fixture)).toEqual([]);
+    });
+
     it("offers it only on the conversation's latest run", async () => {
       const fixture = await createFixture({ restricted: true });
       const run = await stoppedRun(fixture, "restarted");
@@ -2788,6 +2805,9 @@ describe("chatDispatchService", () => {
       expect((await fixture.dispatch.listPending(WORKSPACE_ID)).map((record) => record.triggerMessageId))
         .toEqual([run.messageId]);
       expect(await stateOf(fixture, run.threadId)).toBeUndefined();
+      // A second press while the request waits in line puts nothing else there.
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(false);
+      expect(fixture.requeues).toHaveLength(1);
 
       await fixture.trust.trust(fixture.workspace);
       await fixture.service.scanWorkspace(WORKSPACE_ID);

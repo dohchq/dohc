@@ -1201,6 +1201,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const recoveries =
       (await options.listAppQuitRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
+      // A handled run's notice is already owed, by this sweep or an earlier
+      // one. A stopped run stays in this list until someone tries it again.
+      if (recovery.run.failureHandled) continue;
       await oweRunNotice(workspace, recovery.run.runId);
       await settleRunNotice(workspace, recovery.run.runId);
       const linked = await dispatch.listRunMessages(
@@ -1209,15 +1212,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         durableDispatchRequest,
       );
       if (linked.length > 0) {
-        if (!recovery.run.failureHandled) {
-          await dispatch.markFailureHandled(
-            recovery.run.runId,
-            durableDispatchRequest,
-          );
-        }
-        continue;
-      }
-      if (!recovery.run.failureHandled) {
+        await dispatch.markFailureHandled(recovery.run.runId, durableDispatchRequest);
+      } else {
         await markRunFailureHandled(workspace, recovery.run).catch(reportError);
       }
     }
