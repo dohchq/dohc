@@ -55,7 +55,8 @@ interface WatchedWorkspace {
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
   recoveryUnavailable: boolean;
-  outsideWriteCopies: readonly (readonly [string, string, string])[];
+  // Null until this capture first reports.
+  outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
   outsideWriteCopyReadError: string | null;
   keptFiles: readonly (readonly [string, string])[];
   // Old file copies the engine keeps on a drive that cannot tell it whether
@@ -294,8 +295,10 @@ export function createWorkspaceActivity(
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
-      outsideWriteCopies: (w?.outsideWriteCopies ?? []).map(([original, copy, id]): [string, string, string] => [original, copy, id]),
-      outsideWriteCopyReadError: w?.outsideWriteCopyReadError ?? null,
+      ...(w && w.outsideWriteCopies !== null ? {
+        outsideWriteCopies: w.outsideWriteCopies.map(([original, copy, id]): [string, string, string] => [original, copy, id]),
+        outsideWriteCopyReadError: w.outsideWriteCopyReadError,
+      } : {}),
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
@@ -394,7 +397,7 @@ export function createWorkspaceActivity(
         atomicPlacementUnavailable: false,
         onNetworkShare: false,
         recoveryUnavailable: false,
-        outsideWriteCopies: [],
+        outsideWriteCopies: null,
         outsideWriteCopyReadError: null,
         keptFiles: [],
         retainedCopies: null,

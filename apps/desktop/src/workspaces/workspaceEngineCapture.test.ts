@@ -2735,6 +2735,7 @@ describe("workspaceEngineCapture batch capture", () => {
   it.each([false, true])("coalesces blocked capture health polls and resumes after failure=%s", async (failFirst) => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-engine-capture-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID });
     const entered = deferred();
     const release = deferred();
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -2742,6 +2743,7 @@ describe("workspaceEngineCapture batch capture", () => {
       workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
     }, sessions).store;
     const recovery = vi.fn();
+    const outside = vi.fn();
     const watcherStatus = vi.fn(async () => {
       if (watcherStatus.mock.calls.length === 1) {
         entered.resolve();
@@ -2763,12 +2765,13 @@ describe("workspaceEngineCapture batch capture", () => {
     });
     const engine = capture(root, {
       store: daemonStore, rustEngineSessions: sessions,
-      onRecoveryUnavailable: recovery,
+      onRecoveryUnavailable: recovery, onOutsideWriteCopies: outside,
       onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
     });
     try {
       engine.start();
       await entered.promise;
+      expect(outside).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(12 * DAEMON_CAPTURE_HEALTH_POLL_MS);
       expect(watcherStatus).toHaveBeenCalledTimes(1);
       release.resolve();
@@ -2777,11 +2780,13 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(watcherStatus).toHaveBeenCalledTimes(1);
       expect(adoptions).toHaveBeenCalledTimes(failFirst ? 2 : 3);
       expect(outcomes).toHaveLength(1);
+      expect(outside.mock.calls).toEqual(failFirst ? [] : [[[], null]]);
       await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
       await engine.flush();
       expect(watcherStatus).toHaveBeenCalledTimes(2);
       expect(outcomes.at(-1)).toBeNull();
       expect(recovery.mock.calls).toEqual(failFirst ? [[false]] : [[true], [false]]);
+      expect(outside).toHaveBeenCalledExactlyOnceWith([], null);
       await engine.stop();
       await vi.advanceTimersByTimeAsync(2 * DAEMON_CAPTURE_HEALTH_POLL_MS);
       expect(watcherStatus).toHaveBeenCalledTimes(2);

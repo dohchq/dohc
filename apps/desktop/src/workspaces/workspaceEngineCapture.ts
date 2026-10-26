@@ -1829,7 +1829,7 @@ export function createWorkspaceEngineCapture(
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
   const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
   let lastOutsideCopies: [string, string, string][] = [];
-  let reportedOutsideCopies = JSON.stringify([[], null]);
+  let reportedOutsideCopies: string | null = null;
   const reportOutsideWriteCopies = async () => {
     let readError: string | null = null;
     const failed = (error: unknown) => {

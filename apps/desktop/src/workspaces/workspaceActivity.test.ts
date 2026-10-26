@@ -58,6 +58,25 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("omits copy status until each newly opened capture first reports", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const activity = createWorkspaceActivity(vi.fn(), {
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    for (let opening = 0; opening < 2; opening++) {
+      const initial = await activity.open(workspace());
+      expect(initial).not.toHaveProperty("outsideWriteCopies");
+      expect(initial).not.toHaveProperty("outsideWriteCopyReadError");
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopies");
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopyReadError");
+      hooks.onOutsideWriteCopies?.([], null);
+      expect(activity.getStatus("activity-test")).toMatchObject({ outsideWriteCopies: [], outsideWriteCopyReadError: null });
+      await activity.stopAll();
+    }
+  });
   it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
     let hooks!: WorkspaceCaptureHooks;
     const notify = vi.fn();

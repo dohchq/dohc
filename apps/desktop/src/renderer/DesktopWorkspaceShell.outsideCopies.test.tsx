@@ -9,7 +9,7 @@ import { makeBridge, renderShell, SYNC_STATUS, WORKSPACE } from "./DesktopWorksp
 
 afterEach(() => localStorage.clear());
 
-it.each([false, true])("preserves shown copy state while a remount awaits sync status, dismissed=%s", async dismissed => {
+it.each([false, true])("preserves shown copy state through unreported status on remount, dismissed=%s", async dismissed => {
   const user = userEvent.setup();
   const status: SyncStatusResult = { ...SYNC_STATUS, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
   const firstBridge = makeBridge(Promise.resolve(null));
@@ -32,7 +32,13 @@ it.each([false, true])("preserves shown copy state while a remount awaits sync s
   renderShell(nextBridge);
   await waitFor(() => expect(nextBridge.getSyncStatus).toHaveBeenCalled());
   expect(localStorage.getItem(key)).toBe(saved);
-  await act(async () => answer.resolve(status));
+  await act(async () => answer.resolve(SYNC_STATUS));
+  expect(localStorage.getItem(key)).toBe(saved);
+  expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+  nextBridge.getSyncStatus.mockResolvedValue(status);
+  const refreshed = nextBridge.getSyncStatus.mock.calls.length;
+  act(() => nextBridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+  await waitFor(() => expect(nextBridge.getSyncStatus.mock.calls.length).toBeGreaterThan(refreshed));
   await user.click(screen.getByTestId("notice-center-toggle"));
   const row = within(screen.getByTestId("notice-center")).queryByText("Kept a copy of n.md");
   expect(row !== null).toBe(!dismissed);
@@ -63,6 +69,9 @@ it("shows one kept-copy list failure with its cause, retries, and clears it on r
   const listed = bridge.listKeptCopies.mock.calls.length;
   await user.click(within(rows()[0]!.closest("li")!).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(bridge.listKeptCopies.mock.calls.length).toBeGreaterThan(listed));
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  expect(rows()).toHaveLength(1);
+  expect(within(rows()[0]!.closest("li")!).getByText(message)).toBeTruthy();
   readError = null;
   const beforeRecovery = bridge.getSyncStatus.mock.calls.length;
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));

@@ -98,6 +98,89 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(await outsideWriteCopies(workspace).list()).toEqual([]);
   });
 
+  it("prunes a cached receipt already removed outside dohc without poisoning later lists", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    const folder = join(rootPath, ".dohc/local/outside-write-copies");
+    const [receipt] = await readdir(folder);
+    await rm(join(rootPath, "n (kept copy).md"));
+    await rm(join(folder, receipt!));
+    const prune = vi.spyOn(files, "unlink");
+    const errors = vi.fn();
+    expect(await copies.list(errors)).toEqual([]);
+    expect(prune).toHaveBeenCalledExactlyOnceWith(join(folder, receipt!));
+    expect(await copies.list(errors)).toEqual([]);
+    expect(prune).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    expect(await copies.list(errors)).toEqual([["n.md", "n (kept copy).md", expect.any(String)]]);
+  });
+
+  it("retains a stale cached receipt when pruning fails with EACCES and retries later", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    await rm(join(rootPath, "n (kept copy).md"));
+    const failure = Object.assign(new Error("receipt access denied"), { code: "EACCES" });
+    const prune = vi.spyOn(files, "unlink").mockRejectedValueOnce(failure);
+    await expect(copies.list()).rejects.toBe(failure);
+    expect(await readdir(join(rootPath, ".dohc/local/outside-write-copies"))).toHaveLength(1);
+    expect(await copies.list()).toEqual([]);
+    expect(prune).toHaveBeenCalledTimes(2);
+    expect(await readdir(join(rootPath, ".dohc/local/outside-write-copies"))).toEqual([]);
+  });
+
+  it("reports malformed receipts in path order regardless of read completion order", async () => {
+    const { rootPath, copies } = await setup();
+    await copies.list();
+    const folder = join(rootPath, ".dohc/local/outside-write-copies");
+    const paths = [join(folder, "a.json"), join(folder, "z.json")];
+    for (const path of paths) await writeFile(path, "invalid");
+    const fresh = outsideWriteCopies({ rootPath, workspaceId: "outside-copy" });
+    const { readFile } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const reported: string[][] = [];
+    for (const order of [[1, 0], [0, 1]]) {
+      const entered = paths.map(() => deferred<void>());
+      const release = paths.map(() => deferred<void>());
+      const finished = paths.map(() => deferred<void>());
+      const completed: string[] = [];
+      const reads = vi.spyOn(files, "readFile").mockImplementation((async (...args: Parameters<typeof readFile>) => {
+        const index = paths.indexOf(String(args[0]));
+        if (index !== -1) {
+          entered[index]!.resolve();
+          await release[index]!.promise;
+        }
+        const text = await readFile(...args);
+        if (index !== -1) {
+          completed.push(paths[index]!);
+          finished[index]!.resolve();
+        }
+        return text;
+      }) as typeof readFile);
+      const errors: string[] = [];
+      const listing = fresh.list(error => errors.push(String(error)));
+      try {
+        await Promise.all(entered.map(signal => signal.promise));
+        for (const index of order) {
+          release[index]!.resolve();
+          await finished[index]!.promise;
+        }
+        expect(await listing).toEqual([]);
+      } finally {
+        release.forEach(signal => signal.resolve());
+        await listing;
+        reads.mockRestore();
+      }
+      expect(completed).toEqual(order.map(index => paths[index]));
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain(paths[0]);
+      expect(errors[1]).toContain(paths[1]);
+      reported.push(errors);
+    }
+    expect(reported[0]).toEqual(reported[1]);
+  });
+
   it("leaves the original when preserving the copy fails", async () => {
     const { rootPath, copies, recorded, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "AGENT-1");

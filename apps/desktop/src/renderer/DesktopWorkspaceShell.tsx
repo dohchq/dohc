@@ -5521,7 +5521,7 @@ export function DesktopWorkspaceShell(props: {
     const identity = "outside-copy-records";
     if (error === null) { clearIdentity(identity); return; }
     reportShellFailure({
-      identity, title: "dohc could not list every kept copy",
+      identity, kind: "outside-copy-read", title: "dohc could not list every kept copy",
       message: "To find a copy that isn't listed, look beside its file for (kept copy) in the name.",
       details: [["Cause", error]], retry: () => void refreshKeptCopies(),
     });

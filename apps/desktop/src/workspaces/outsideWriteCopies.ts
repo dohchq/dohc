@@ -82,6 +82,7 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
           errors.push(error);
           return null;
         })));
+      errors.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
       return { rows: rows.filter(row => row !== null), errors };
     }).catch(error => { loaded = null; throw error; });
     const result = await loaded;
@@ -109,7 +110,9 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
       });
       if (exists) rows.push([record.path, record.copy, record.id]);
       else {
-        await unlink(join(await directory(), createHash("sha256").update(record.path).update(record.sha256).digest("hex") + ".json"));
+        await unlink(join(await directory(), createHash("sha256").update(record.path).update(record.sha256).digest("hex") + ".json")).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
         const index = savedRecords.indexOf(record);
         if (index !== -1) savedRecords.splice(index, 1);
       }

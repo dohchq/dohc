@@ -39,6 +39,7 @@ export type ShellErrorKind =
   | "typing-import"
   | "capture-recovery"
   | "capture-held"
+  | "outside-copy-read"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -858,7 +859,7 @@ export function useShellError(workspaceId: string) {
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
-    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held"
+    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read"
       ? current
       : current.filter(error => error !== target));
   }, []);
