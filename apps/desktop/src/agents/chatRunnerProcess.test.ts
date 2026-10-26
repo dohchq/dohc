@@ -295,7 +295,7 @@ describe("chat runner process", () => {
     const codex = join(root, "codex.cmd");
     writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
     const runner = createChatRunnerProcess(
-      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => [] },
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [] }) },
       () => undefined,
     );
     const start = (rootPath: string) => runner.spawnConfiguredRunner({

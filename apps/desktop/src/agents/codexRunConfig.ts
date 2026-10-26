@@ -9,23 +9,30 @@ type Table = Record<string, unknown>;
 const isTable = (value: unknown): value is Table =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-// The person's own Codex config: the system file, then the user file, which
-// wins. Null when CODEX_HOME is relative, because Codex resolves it against
-// the workspace, and dohc never reads a workspace's config.
-export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home = homedir()): string[] | null {
+export interface CodexConfigFiles {
+  // The system requirements, which can choose a Windows sandbox.
+  requirements: readonly string[];
+  // The system config, then the user config, which wins.
+  config: readonly string[];
+}
+
+// The person's own Codex files. Null when CODEX_HOME is relative, because
+// Codex resolves it against the workspace, and dohc never reads a
+// workspace's config.
+export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home = homedir()): CodexConfigFiles | null {
   const path = platform === "win32" ? win32 : posix;
   if (env.CODEX_HOME && !path.isAbsolute(env.CODEX_HOME)) return null;
   const codexHome = env.CODEX_HOME || path.join(home, ".codex");
-  const system = platform === "win32"
-    ? path.join(env.ProgramData || "C:\\ProgramData", "OpenAI", "Codex", "config.toml")
-    : "/etc/codex/config.toml";
-  return [system, path.join(codexHome, "config.toml")];
+  const system = platform === "win32" ? path.join(env.ProgramData || "C:\\ProgramData", "OpenAI", "Codex") : "/etc/codex";
+  return {
+    requirements: [path.join(system, "requirements.toml")],
+    config: [path.join(system, "config.toml"), path.join(codexHome, "config.toml")],
+  };
 }
 
 // Null when a file exists that dohc can't read or parse. Then dohc adds
 // nothing it would have taken from the person's config.
-function readConfigTables(files: readonly string[] | null, read: (path: string) => string): Table[] | null {
-  if (!files) return null;
+function readConfigTables(files: readonly string[], read: (path: string) => string): Table[] | null {
   const tables: Table[] = [];
   for (const file of files) {
     let text: string;
@@ -47,10 +54,12 @@ function readConfigTables(files: readonly string[] | null, read: (path: string) 
 const WINDOWS_SANDBOX_FEATURES = ["elevated_windows_sandbox", "experimental_windows_sandbox", "enable_experimental_windows_sandbox", "prefer_mxc"];
 
 // Whether the person picked a Windows sandbox anywhere, profiles included.
+// Requirements also spell [features] as [feature_requirements].
 function choosesWindowsSandbox(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(choosesWindowsSandbox);
   if (!isTable(value)) return false;
-  const { windows, features } = value;
+  const { windows } = value;
+  const features = value.features ?? value.feature_requirements;
   if (isTable(windows) && "sandbox" in windows) return true;
   if (isTable(features) && WINDOWS_SANDBOX_FEATURES.some((key) => key in features)) return true;
   return Object.values(value).some(choosesWindowsSandbox);
@@ -68,9 +77,12 @@ function workspaceWrite(tables: readonly Table[], key: "network_access" | "exclu
   return value;
 }
 
+const lowerAscii = (key: string) => key.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+
 // Every spelling Codex looks a folder's trust up under: its canonical path,
 // then the path it was given. On Windows Codex lowercases ASCII letters only,
-// and one of its lookups keeps the \\?\ prefix of the canonical path.
+// and one of its lookups keeps the \\?\ prefix of the canonical path. Under
+// WSL it lowercases the canonical path of a folder on a Windows drive.
 export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, realPath: (path: string) => string = realpathSync.native): string[] {
   const path = platform === "win32" ? win32 : posix;
   const given = path.resolve(rootPath);
@@ -78,15 +90,19 @@ export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, real
   try {
     real = realPath(given);
   } catch {}
-  if (platform !== "win32") return [...new Set([real, given])];
+  if (platform !== "win32") {
+    const wsl = platform === "linux" && /^\/mnt\/[a-z](\/|$)/iu.test(real) ? [lowerAscii(real)] : [];
+    return [...new Set([...wsl, real, given])];
+  }
   const extended = real.startsWith("\\\\") ? `\\\\?\\UNC\\${real.slice(2)}` : `\\\\?\\${real}`;
-  return [...new Set([real, given, extended].map((key) => key.replace(/[A-Z]/gu, (letter) => letter.toLowerCase())))];
+  return [...new Set([real, given, extended].map(lowerAscii))];
 }
 
-// Only a basic string holds an apostrophe. cmd.exe can't carry its double
-// quotes, so dohc doesn't start an npm-installed Codex in such a folder.
+// Only a basic string holds an apostrophe or a control character, and JSON
+// leaves DEL unescaped. cmd.exe can't carry the double quotes, so dohc doesn't
+// start an npm-installed Codex in such a folder.
 function tomlKey(value: string): string {
-  return /\p{Cc}|'/u.test(value) ? JSON.stringify(value) : `'${value}'`;
+  return /\p{Cc}|'/u.test(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
 }
 
 // The --config entries a dohc Codex run adds over the person's config, which
@@ -96,17 +112,20 @@ function tomlKey(value: string): string {
 //   from the person's config into it.
 // - Mark the folder untrusted so Codex doesn't trust it on its own or load
 //   its .codex config.
-// - Codex runs Windows commands only in a sandbox the person chose. Without
-//   a choice it gets the unelevated one, which needs no setup.
+// - Codex runs Windows commands only in a sandbox the person or their
+//   organization chose. Without a choice it gets the unelevated one, which
+//   needs no setup.
 export function codexRunConfig(input: {
   rootPath: string;
   runId: string;
   platform: NodeJS.Platform;
-  configFiles: readonly string[] | null;
+  files: CodexConfigFiles | null;
   readConfig?: (path: string) => string;
   realPath?: (path: string) => string;
 }): string[] {
-  const tables = readConfigTables(input.configFiles, input.readConfig ?? ((path) => readFileSync(path, "utf8")));
+  const read = input.readConfig ?? ((path: string) => readFileSync(path, "utf8"));
+  const tables = input.files && readConfigTables(input.files.config, read);
+  const requirements = input.platform === "win32" && input.files && tables ? readConfigTables(input.files.requirements, read) : null;
   const filesystem = [
     "':workspace_roots'={'.dohc'='read'}",
     ...(tables && workspaceWrite(tables, "exclude_tmpdir_env_var") ? ["':tmpdir'='read'"] : []),
@@ -120,6 +139,6 @@ export function codexRunConfig(input: {
     `permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`,
     `default_permissions='${profile}'`,
     `projects={${projects.join(",")}}`,
-    ...(input.platform === "win32" && tables && !tables.some(choosesWindowsSandbox) ? ["windows.sandbox='unelevated'"] : []),
+    ...(tables && requirements && ![...tables, ...requirements].some(choosesWindowsSandbox) ? ["windows.sandbox='unelevated'"] : []),
   ].flatMap((entry) => ["--config", entry]);
 }

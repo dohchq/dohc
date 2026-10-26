@@ -1,23 +1,26 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { codexConfigFiles, codexRunConfig, codexTrustKeys } from "./codexRunConfig";
+import { parse } from "smol-toml";
+import { type CodexConfigFiles, codexConfigFiles, codexRunConfig, codexTrustKeys } from "./codexRunConfig";
 import { createTestScratch } from "../workspaces/testTemp";
 
 const SYSTEM = "C:\\ProgramData\\OpenAI\\Codex\\config.toml";
 const USER = "C:\\Users\\Sam\\.codex\\config.toml";
+const REQUIREMENTS = "C:\\ProgramData\\OpenAI\\Codex\\requirements.toml";
+const NONE: CodexConfigFiles = { requirements: [], config: [] };
 
 function missing(path: string): never {
   throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
 }
 
 // The run's entries on Windows, with the person's config files as given.
-function windowsRun(files: Record<string, string> = {}, configFiles: readonly string[] | null = [SYSTEM, USER]): string[] {
+function windowsRun(files: Record<string, string> = {}, paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] }): string[] {
   return codexRunConfig({
     rootPath: "C:\\Users\\Sam\\dohc\\personal",
     runId: "run_1",
     platform: "win32",
-    configFiles,
+    files: paths,
     readConfig: (path) => files[path] ?? missing(path),
     realPath: (path) => path,
   });
@@ -38,7 +41,7 @@ describe("a dohc Codex run", () => {
       "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
       "--config", "windows.sandbox='unelevated'",
     ]);
-    const other = codexRunConfig({ rootPath: "C:\\w", runId: "run_2", platform: "win32", configFiles: [] });
+    const other = codexRunConfig({ rootPath: "C:\\w", runId: "run_2", platform: "win32", files: NONE });
     expect(entry(other, "default_permissions=")).not.toBe(`default_permissions=${profile}`);
   });
 
@@ -62,11 +65,19 @@ describe("a dohc Codex run", () => {
     ]);
     expect(codexTrustKeys("/home/Sam/ws", "linux", (path) => path)).toEqual(["/home/Sam/ws"]);
     expect(codexTrustKeys("/gone", "linux", () => missing("/gone"))).toEqual(["/gone"]);
-    expect(entry(codexRunConfig({ rootPath: "/home/o'brien/ws", runId: "run_1", platform: "linux", configFiles: [], realPath: (path) => path }), "projects="))
-      .toBe(`projects={"/home/o'brien/ws"={trust_level='untrusted'}}`);
+    // Under WSL, a folder on a Windows drive.
+    expect(codexTrustKeys("/mnt/C/Users/Sam/ws", "linux", (path) => path)).toEqual(["/mnt/c/users/sam/ws", "/mnt/C/Users/Sam/ws"]);
+    expect(codexTrustKeys("/mnt/Data/ws", "linux", (path) => path)).toEqual(["/mnt/Data/ws"]);
   });
 
-  it("picks the unelevated Windows sandbox only when the person's config chooses none", () => {
+  it("writes a trust entry Codex can parse for any folder name", () => {
+    for (const rootPath of ["/home/o'brien/ws", "/home/sam/a\u007fb", "/home/sam/tab\there", "/home/sam/back\\slash"]) {
+      const projects = entry(codexRunConfig({ rootPath, runId: "run_1", platform: "linux", files: NONE, realPath: (path) => path }), "projects=")!;
+      expect(parse(projects)).toEqual({ projects: { [rootPath]: { trust_level: "untrusted" } } });
+    }
+  });
+
+  it("picks the unelevated Windows sandbox only when neither the person's config nor the system requirements choose one", () => {
     expect(entry(windowsRun(), "windows.sandbox=")).toBe("windows.sandbox='unelevated'");
     expect(entry(windowsRun({ [USER]: "model = 'gpt-5'\n[features]\nshell_tool = true\n" }), "windows.sandbox=")).toBe("windows.sandbox='unelevated'");
     const choices: Record<string, string>[] = [
@@ -78,19 +89,22 @@ describe("a dohc Codex run", () => {
       { [USER]: "[profiles.work.features]\nenable_experimental_windows_sandbox = true\n" },
       { [USER]: "[features]\nprefer_mxc = false\n" },
       { [SYSTEM]: "[windows]\nsandbox = 'unelevated'\n" },
+      { [REQUIREMENTS]: "[features]\nelevated_windows_sandbox = true\n" },
+      { [REQUIREMENTS]: "[feature_requirements]\nexperimental_windows_sandbox = true\n" },
       // Files dohc can't read or parse.
       { [USER]: "[windows\n" },
+      { [REQUIREMENTS]: "[features\n" },
     ];
     for (const files of choices) {
       expect(entry(windowsRun(files), "windows.sandbox=")).toBeUndefined();
     }
     const denied = codexRunConfig({
-      rootPath: "C:\\w", runId: "run_1", platform: "win32", configFiles: [USER],
+      rootPath: "C:\\w", runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
       readConfig: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
     });
     expect(entry(denied, "windows.sandbox=")).toBeUndefined();
     expect(entry(windowsRun({}, null), "windows.sandbox=")).toBeUndefined();
-    expect(entry(codexRunConfig({ rootPath: "/w", runId: "run_1", platform: "darwin", configFiles: [] }), "windows.sandbox=")).toBeUndefined();
+    expect(entry(codexRunConfig({ rootPath: "/w", runId: "run_1", platform: "darwin", files: NONE }), "windows.sandbox=")).toBeUndefined();
   });
 
   it("carries the person's network access into the run's profile", () => {
@@ -101,6 +115,7 @@ describe("a dohc Codex run", () => {
     // The user file wins over the system file.
     expect(profile({ [SYSTEM]: network, [USER]: "[sandbox_workspace_write]\nnetwork_access = false\n" })).not.toContain("network");
     expect(profile({ [SYSTEM]: network, [USER]: "[sandbox_workspace_write\n" })).not.toContain("network");
+    expect(profile({ [REQUIREMENTS]: network })).not.toContain("network");
   });
 
   it("carries the person's temp folder exclusions into the run's profile", () => {
@@ -122,9 +137,9 @@ describe("a dohc Codex run", () => {
     await writeFile(join(workspace, ".codex", "config.toml"), "[sandbox_workspace_write]\nnetwork_access = true\nexclude_slash_tmp = true\n[windows]\nsandbox = 'elevated'\n");
     const { platform } = process;
     const run = () => codexRunConfig({
-      rootPath: workspace, runId: "run_1", platform, configFiles: codexConfigFiles({ ProgramData: join(root, "programdata") }, platform, home),
+      rootPath: workspace, runId: "run_1", platform, files: codexConfigFiles({ ProgramData: join(root, "programdata") }, platform, home),
     });
-    expect(run()).toEqual(codexRunConfig({ rootPath: workspace, runId: "run_1", platform, configFiles: [] }));
+    expect(run()).toEqual(codexRunConfig({ rootPath: workspace, runId: "run_1", platform, files: NONE }));
     // Codex resolves a relative CODEX_HOME against the workspace.
     expect(codexConfigFiles({ CODEX_HOME: ".codex" }, platform, home)).toBeNull();
     await writeFile(join(home, ".codex", "config.toml"), "[sandbox_workspace_write]\nnetwork_access = true\n");
@@ -132,14 +147,17 @@ describe("a dohc Codex run", () => {
   });
 
   it("finds the person's config where Codex does", () => {
-    expect(codexConfigFiles({ ProgramData: "D:\\ProgramData" }, "win32", "C:\\Users\\Sam")).toEqual([
-      "D:\\ProgramData\\OpenAI\\Codex\\config.toml",
-      "C:\\Users\\Sam\\.codex\\config.toml",
-    ]);
-    expect(codexConfigFiles({ CODEX_HOME: "E:\\codex" }, "win32", "C:\\Users\\Sam")).toEqual([
-      "C:\\ProgramData\\OpenAI\\Codex\\config.toml",
-      "E:\\codex\\config.toml",
-    ]);
-    expect(codexConfigFiles({}, "darwin", "/Users/sam")).toEqual(["/etc/codex/config.toml", "/Users/sam/.codex/config.toml"]);
+    expect(codexConfigFiles({ ProgramData: "D:\\ProgramData" }, "win32", "C:\\Users\\Sam")).toEqual({
+      requirements: ["D:\\ProgramData\\OpenAI\\Codex\\requirements.toml"],
+      config: ["D:\\ProgramData\\OpenAI\\Codex\\config.toml", "C:\\Users\\Sam\\.codex\\config.toml"],
+    });
+    expect(codexConfigFiles({ CODEX_HOME: "E:\\codex" }, "win32", "C:\\Users\\Sam")).toEqual({
+      requirements: [REQUIREMENTS],
+      config: [SYSTEM, "E:\\codex\\config.toml"],
+    });
+    expect(codexConfigFiles({}, "darwin", "/Users/sam")).toEqual({
+      requirements: ["/etc/codex/requirements.toml"],
+      config: ["/etc/codex/config.toml", "/Users/sam/.codex/config.toml"],
+    });
   });
 });

@@ -5,7 +5,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
-import { codexConfigFiles, codexRunConfig } from "./codexRunConfig";
+import { type CodexConfigFiles, codexConfigFiles, codexRunConfig } from "./codexRunConfig";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -245,7 +245,7 @@ export interface ChatRunnerProcessOptions {
   platform?: NodeJS.Platform;
   arch?: string;
   // The person's Codex config files, which a Codex run reads (codexRunConfig.ts).
-  codexConfigFiles?: () => readonly string[] | null;
+  codexConfigFiles?: () => CodexConfigFiles | null;
 }
 
 export function createChatRunnerProcess(
@@ -352,7 +352,7 @@ export function createChatRunnerProcess(
             rootPath: input.rootPath,
             runId: input.runId,
             platform,
-            configFiles: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
+            files: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
           })
           : []),
       ])]
