@@ -1,5 +1,10 @@
 import { LegendList } from "@legendapp/list/react";
-import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
+
+// While the list shows `empty`, it drops its padding and its content is a
+// column as tall as the list. `empty` takes the height the header leaves, so
+// it centers there.
+const EMPTY_CONTENT: CSSProperties = { display: "flex", flexDirection: "column", minHeight: "100%" };
 
 // Posts and Home share a top-down list of rows. Keep focused rows and their
 // neighbors mounted so scrolling cannot discard a control's keyboard focus.
@@ -57,6 +62,7 @@ export function PostFeedList<T>({
   const column = (node: ReactNode) => (
     <div className={`px-3 sm:px-4 ${columnClassName}`}>{node}</div>
   );
+  const showsEmpty = items.length === 0 && empty !== undefined;
   return (
     <LegendList
       refScrollView={(value) => {
@@ -66,7 +72,8 @@ export function PostFeedList<T>({
       data-testid={testId}
       role="list"
       className="min-h-0 flex-1"
-      style={{ paddingTop: topPadding, paddingBottom: bottomPadding }}
+      style={showsEmpty ? undefined : { paddingTop: topPadding, paddingBottom: bottomPadding }}
+      contentContainerStyle={showsEmpty ? EMPTY_CONTENT : undefined}
       data={items}
       keyExtractor={itemKey}
       estimatedItemSize={100}
@@ -77,7 +84,9 @@ export function PostFeedList<T>({
       extraData={renderItem}
       ListHeaderComponent={header ? column(header) : undefined}
       ListFooterComponent={footer ? column(footer) : undefined}
-      ListEmptyComponent={empty ? column(empty) : undefined}
+      ListEmptyComponent={empty ? (
+        <div className={`flex flex-1 flex-col px-3 sm:px-4 ${columnClassName}`}>{empty}</div>
+      ) : undefined}
       onFocusCapture={(event) => {
         const row = (event.target as HTMLElement).closest<HTMLElement>("[data-post-feed-key]");
         setFocusedKey(row?.dataset.postFeedKey ?? null);

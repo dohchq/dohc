@@ -74,6 +74,11 @@ describe("ChatsView channels", () => {
     // The composer sits above the list, so the line names no action.
     expect(empty.textContent).toBe("No posts in #general yet.");
     expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    // Every box up to the list grows, so it centers below the composer.
+    const list = screen.getByTestId("chats-feed-column");
+    for (let box = empty.parentElement!; box !== list; box = box.parentElement!) {
+      expect(box.className.split(" ")).toContain("flex-1");
+    }
   });
 
   it("creates a channel inline and opens it", async () => {

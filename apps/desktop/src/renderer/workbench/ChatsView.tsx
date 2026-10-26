@@ -3721,21 +3721,19 @@ export function ChatsView(props: {
           items={personalFeed}
           itemKey={(item) => item.message.id}
           columnClassName={pageColumn}
-          header={<>
-            {personalFeed.length === 0 && !personalFeedLoading ? (
-              <div className="flex py-12">
-                <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
-                  <SecondaryButton
-                    data-testid="chats-feed-empty-groups"
-                    size="compact"
-                    onClick={variant === "page" ? props.onOpenNavigator : goBack}
-                  >
-                    Open Groups
-                  </SecondaryButton>
-                </EmptyState>
-              </div>
-            ) : null}
-          </>}
+          empty={personalFeedLoading ? undefined : (
+            <div className="flex flex-1 py-12">
+              <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <SecondaryButton
+                  data-testid="chats-feed-empty-groups"
+                  size="compact"
+                  onClick={variant === "page" ? props.onOpenNavigator : goBack}
+                >
+                  Open Groups
+                </SecondaryButton>
+              </EmptyState>
+            </div>
+          )}
           footer={<>
             {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
@@ -4725,7 +4723,7 @@ export function ChatsView(props: {
           empty={threadsLoading ? (
               <SkeletonRows label="Loading..." className="pt-4" />
             ) : (
-              <div className="flex py-12">
+              <div className="flex flex-1 py-12">
                 <EmptyState
                   data-testid="chats-channel-empty"
                   picture={EMPTY_ART.posts}
