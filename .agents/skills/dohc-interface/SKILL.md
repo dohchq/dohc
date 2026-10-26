@@ -224,6 +224,12 @@ Use the classes in `styles.css` instead of writing shadows:
 
 Flat panels get borders, not shadows.
 
+### Spacing
+
+| Part | Spacing |
+| --- | --- |
+| Empty state | `EmptyState`: the picture, 12 px, one line, 16 px, at most one action. Do not build your own. |
+
 ### Recipes
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
@@ -252,7 +258,7 @@ Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, 
 
 Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
-Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
+Empty state: when a panel or page has nothing yet, `EmptyState` shows a picture of what it holds once it has items, one `text-[13px] text-muted` line, and at most one compact action. Use `PrimaryButton` only when making the thing is the surface's job. A failure keeps its warning glyph and Try again, never a picture. An empty section inside a surface with other content stays one muted line.
 
 `Pill` changes meaning through its `tone`, which swaps the text color and keeps the fill.
 

@@ -177,8 +177,8 @@ describe("the Sharing view's two lists", () => {
   it("says an empty list holds no shares within its coverage, not that nothing is shared", async () => {
     answerWith({});
     render(<View />);
-    expect((await screen.findByTestId("sharing-granted-empty")).textContent).toContain("No shares from this workspace.");
-    expect((await screen.findByTestId("sharing-received-empty")).textContent).toBe("No shares to your account.");
+    expect((await screen.findByTestId("sharing-granted-empty")).textContent).toBe("Nothing shared from this workspace yet.");
+    expect((await screen.findByTestId("sharing-received-empty")).textContent).toBe("Nothing shared with you yet.");
     expect(screen.getByTestId("sharing-granted-count").textContent).toBe("0");
   });
 

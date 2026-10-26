@@ -741,10 +741,7 @@ export function LiveDocumentsDialog({
           </ul>
         ) : (
           <div className="flex py-10">
-            <EmptyState
-              title="No live documents in this workspace."
-              hint="Reload after a document starts live editing."
-            />
+            <EmptyState title="No live documents in this workspace. Reload after a document starts live editing." />
           </div>
         )
       ) : null}

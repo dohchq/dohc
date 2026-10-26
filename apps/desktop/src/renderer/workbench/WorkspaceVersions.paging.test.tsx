@@ -598,6 +598,16 @@ describe("VersionComparePage paging", () => {
     );
   });
 
+  it("says a version with no differences matches Main, under the versions picture", async () => {
+    bridgeMock.compareWorkspaceVersions.mockResolvedValue({ files: [], nextAfterPath: null });
+    render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
+    await settle();
+
+    const empty = screen.getByTestId("version-compare-empty");
+    expect(empty.textContent).toBe("Everything in Feature matches Main.");
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("appends the next page with the continuation and updates the count copy", async () => {
     bridgeMock.compareWorkspaceVersions.mockImplementation(
       async (payload: { afterPath?: string }) =>

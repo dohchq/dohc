@@ -183,6 +183,14 @@ describe("DatabaseStudioView", () => {
     measureSince.mockRestore();
   });
 
+  it("says a database with no tables has none, under the table picture", async () => {
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce({ ...cloneSnapshot(), tables: [] });
+    renderStudio();
+    const line = await screen.findByText("No tables in this database.");
+    expect(line.parentElement!.textContent).toBe("No tables in this database.");
+    expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("lists each table's rows and columns, draws only the search above the grid, and filters loaded rows", async () => {
     const user = userEvent.setup();
     renderStudio();

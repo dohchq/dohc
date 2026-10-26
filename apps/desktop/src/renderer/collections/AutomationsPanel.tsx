@@ -14,7 +14,7 @@ import { relativeTime } from "../relativeTime";
 import { computerInSentence, shownScheduleHost } from "../scheduleHost";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { IconButton, SecondaryButton } from "../ui/controls";
+import { EmptyState, IconButton, SecondaryButton } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
@@ -33,6 +33,7 @@ import {
 import { useAutomationRetry } from "./useAutomationRetry";
 import { SharedAutomationsPanel } from "./SharedAutomationsPanel";
 import { AUTOMATION_HOLDS_UNREADABLE } from "../workbench/NoticeCenter";
+import { EMPTY_ART } from "../workbench/EmptyArt";
 
 // The ⚡ panel: a Collection's automations in plain words, each with an on
 // and off switch and its runs on this computer. Main reads and writes
@@ -1029,14 +1030,15 @@ function OwnerAutomationsPanel(props: {
             <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
           </div>
         ) : file.status === "missing" || shown.length === 0 ? (
-          <div className="flex flex-col items-start gap-2 px-3 py-4">
-            <p className="m-0 text-[12px] text-muted">No automations in this Collection yet.</p>
-            {count < MAX_AUTOMATIONS ? (
-              <SecondaryButton size="compact" className="flex items-center gap-1" onClick={startNew}>
-                <Plus size={12} aria-hidden />
-                New automation
-              </SecondaryButton>
-            ) : null}
+          <div className="flex h-full py-4">
+            <EmptyState picture={EMPTY_ART.automations} title="No automations in this Collection yet.">
+              {count < MAX_AUTOMATIONS ? (
+                <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" onClick={startNew}>
+                  <Plus size={12} aria-hidden />
+                  New automation
+                </SecondaryButton>
+              ) : null}
+            </EmptyState>
           </div>
         ) : (
           <>

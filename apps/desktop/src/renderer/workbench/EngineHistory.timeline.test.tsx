@@ -296,7 +296,10 @@ describe("History timeline sources", () => {
 
   it("says No changes yet only for a complete page", () => {
     view();
-    expect(screen.getByText("No changes yet")).toBeTruthy();
+    const line = screen.getByText("No changes yet");
+    // The picture is decorative and there is no second line or action.
+    expect(line.parentElement!.textContent).toBe("No changes yet");
+    expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();
   });
 });

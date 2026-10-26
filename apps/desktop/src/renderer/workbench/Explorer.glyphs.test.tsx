@@ -327,3 +327,15 @@ describe("Explorer kind glyphs", () => {
     fireEvent.keyDown(rename, { key: "Escape" });
   });
 });
+
+describe("Explorer with no files", () => {
+  it("shows the files picture, its line and New file, which starts a file at the root", async () => {
+    render(<Explorer {...explorerProps()} />);
+    const empty = screen.getByText("This workspace has no files yet.").parentElement!;
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    expect(empty.textContent).toBe("This workspace has no files yet.New file");
+    fireEvent.click(within(empty).getByRole("button", { name: "New file" }));
+    expect(await screen.findByTestId("tree-edit-input")).toBeTruthy();
+    expect(screen.queryByText("This workspace has no files yet.")).toBeNull();
+  });
+});

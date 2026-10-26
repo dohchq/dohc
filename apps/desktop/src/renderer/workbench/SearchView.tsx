@@ -6,9 +6,9 @@ import {
   MessageSquare,
   Regex,
   Search,
-  SearchX,
   SlidersHorizontal,
   WholeWord,
+  X,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
@@ -16,6 +16,7 @@ import { rendererMarks } from "../../performance/rendererMarks";
 import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Ref } from "../ui/Ref";
+import { EMPTY_ART } from "./EmptyArt";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -497,12 +498,13 @@ export function SearchView(props: {
       ) : model.status === "complete" && model.totalMatches === 0 ? (
         <EmptyState
           data-testid="search-empty-state"
-          icon={SearchX}
+          picture={EMPTY_ART.search}
           title={`No files or chats match "${model.query}".`}
-          hint={narrowed ? undefined : "Try a shorter search."}
         >
           {narrowed ? (
             <SecondaryButton
+              size="compact"
+              className="inline-flex items-center gap-1.5"
               onClick={() => {
                 // The search runs again at once and this state unmounts with
                 // the button, so focus goes where the person keeps searching.
@@ -516,6 +518,7 @@ export function SearchView(props: {
                 });
               }}
             >
+              <X size={12} aria-hidden />
               Clear filters
             </SecondaryButton>
           ) : null}

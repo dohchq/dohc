@@ -65,6 +65,17 @@ describe("ChatsView channels", () => {
     expect(rows.map((row) => row.dataset.threadCount)).toEqual(["0", "3"]);
   });
 
+  it("says a group with no posts has none, under the posts picture", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel()], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    const empty = await screen.findByTestId("chats-channel-empty");
+    // The composer sits above the list, so the line names no action.
+    expect(empty.textContent).toBe("No posts in #general yet.");
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("creates a channel inline and opens it", async () => {
     const user = userEvent.setup();
     // Production shape: main mints the new channel's wire id from its own

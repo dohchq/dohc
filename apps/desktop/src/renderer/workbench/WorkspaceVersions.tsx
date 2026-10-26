@@ -1,4 +1,5 @@
-import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
+import { EmptyState, Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
+import { EMPTY_ART } from "./EmptyArt";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
@@ -1724,14 +1725,12 @@ export function VersionComparePage(props: {
             {state.message}
           </p>
         ) : state.files.length === 0 ? (
-          <div
-            data-testid="version-compare-empty"
-            className="flex flex-col items-center gap-1 pt-16 text-center"
-          >
-            <span className="text-sm text-muted">No differences with Main</span>
-            <span className="text-xs text-subtle">
-              Everything in {state.versionName} matches Main right now.
-            </span>
+          <div className="flex pt-16">
+            <EmptyState
+              data-testid="version-compare-empty"
+              picture={EMPTY_ART.versions}
+              title={`Everything in ${state.versionName} matches Main.`}
+            />
           </div>
         ) : (
           <div className="flex flex-col gap-4">
