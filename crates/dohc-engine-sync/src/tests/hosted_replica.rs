@@ -4165,6 +4165,270 @@ fn a_rename_freed_later_in_its_pass_leaves_the_document_ready() {
     assert_eq!(retained(&store), 0);
 }
 
+/// #2421: two documents that trade spellings of their paths each waited for
+/// the other to leave the path it wants, so neither ever moved. Each one's
+/// rename meets the other's head, so a pass holds both, each naming the
+/// other. The next pass moves both, and both are ready at their new paths.
+#[test]
+fn documents_that_trade_spellings_of_their_paths_both_move() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.rename(
+        "owner",
+        4,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-a", "B.md");
+    feed.share("doc-b", "A.md");
+    sync(&client, &mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    assert!(ready(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "B.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-b", "hosted b")])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
+/// #2421 when one side of the trade is ready: `doc-b` already waits on
+/// `doc-a`, and the ready `doc-a` then moves to another spelling of
+/// `doc-b`'s path. A ready document writes its head as it moves, so it never
+/// moves first: the pass holds it, and writes neither `B.md` nor anything
+/// else of the trade. Then both move as in a trade between held documents.
+#[test]
+fn a_ready_document_never_moves_first_in_a_trade_of_spellings() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-b", "A.md");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+    assert!(ready(&store, "doc-a"));
+
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.share("doc-a", "B.md");
+    let first = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(
+        !first
+            .changed_paths
+            .iter()
+            .any(|change| change.path == "B.md"),
+        "the ready document doesn't write its head over doc-b's file"
+    );
+    commit(&client, &mut store, &first);
+    assert!(!ready(&store, "doc-a"), "the ready document is held first");
+
+    sync(&client, &mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    assert!(ready(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "B.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
+/// #2421 with three documents: each moves to another spelling of the path
+/// the next one leaves. All three move and are ready.
+#[test]
+fn documents_that_rotate_spellings_of_their_paths_all_move() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.create("owner", 3, "doc-c", "c.md", "hosted c");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    feed.share("doc-c", "c.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.rename(
+        "owner",
+        5,
+        "doc-b",
+        "b.md",
+        "C.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.rename(
+        "owner",
+        6,
+        "doc-c",
+        "c.md",
+        "A.md",
+        "hosted c",
+        "moment-owner-3",
+    );
+    feed.share("doc-a", "B.md");
+    feed.share("doc-b", "C.md");
+    feed.share("doc-c", "A.md");
+    sync(&client, &mut store);
+    sync(&client, &mut store);
+    for object_id in ["doc-a", "doc-b", "doc-c"] {
+        assert!(ready(&store, object_id), "{object_id} is ready");
+    }
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![
+            pair("doc-a", "B.md"),
+            pair("doc-b", "C.md"),
+            pair("doc-c", "A.md")
+        ]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
+/// #2421's guard: in a trade of spellings, the first document moves while
+/// the other still waits, and the other's own move can then fail for
+/// another reason. Here `doc-c` takes `a.md` as soon as `doc-a` leaves it,
+/// so `doc-b` can't move to `A.md`. `doc-a` now sits at another spelling of
+/// `doc-b`'s path, so it is held naming `doc-b`, and no pass writes `B.md`
+/// over `doc-b`'s file. Once `doc-c` moves away, `doc-b` moves, and both
+/// are ready.
+#[test]
+fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.rename(
+        "owner",
+        4,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-a", "B.md");
+    feed.share("doc-b", "A.md");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+
+    feed.create("owner", 5, "doc-c", "a.md", "hosted c");
+    feed.share("doc-c", "a.md");
+    let changes = sync_changes(&client, &mut store);
+    assert!(
+        !changes
+            .iter()
+            .any(|(path, operation)| path == "B.md" && *operation == "write"),
+        "no pass writes doc-a's head over doc-b's file: {changes:?}"
+    );
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("B.md", "doc-b")));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-c")));
+
+    feed.rename(
+        "owner",
+        6,
+        "doc-c",
+        "a.md",
+        "z.md",
+        "hosted c",
+        "moment-owner-5",
+    );
+    feed.share("doc-c", "z.md");
+    sync(&client, &mut store);
+    sync(&client, &mut store);
+    for object_id in ["doc-a", "doc-b", "doc-c"] {
+        assert!(ready(&store, object_id), "{object_id} is ready");
+    }
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![
+            pair("doc-a", "B.md"),
+            pair("doc-b", "A.md"),
+            pair("doc-c", "z.md")
+        ]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
 /// Reports one document's live session.
 struct LiveSession(&'static str);
 
