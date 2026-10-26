@@ -5837,6 +5837,8 @@ export type ChatDispatchStateForThreadResult = z.infer<
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
   detail: z.string().min(1).max(2_000),
+  // The run's log, when the check started a runner.
+  logPath: z.string().min(1).max(4_096).optional(),
 }).strict();
 export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
 

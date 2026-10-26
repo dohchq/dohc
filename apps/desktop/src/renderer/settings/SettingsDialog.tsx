@@ -60,6 +60,7 @@ import {
   ThemeControl,
 } from "./SettingRow";
 import { SettingsNav } from "./SettingsNav";
+import type { ErrorDetailField } from "../shell/copyDetails";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -109,7 +110,8 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+  // `details` are facts for Copy details, one line each.
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;

@@ -7,12 +7,13 @@ import type {
 import type { AgentProblem, DesktopUserSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import type { ErrorDetailField } from "../shell/copyDetails";
 import { AgentList } from "./AgentList";
 import { SettingRow } from "./SettingRow";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;

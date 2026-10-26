@@ -1,4 +1,4 @@
-import type { ChatDispatchNotice } from "../ipc/bridgeContract";
+import type { ChatDispatchNotice, RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
@@ -258,7 +258,7 @@ interface SelfTestState {
   poll: ReturnType<typeof setTimeout> | null;
   timeout: ReturnType<typeof setTimeout>;
   killEscalation: ReturnType<typeof setTimeout> | null;
-  resolve(result: { ok: boolean; detail: string }): void;
+  resolve(result: RunnerSelfTestResult): void;
   // Ends the self-test with this answer and stops its runner.
   cancel(detail: string): Promise<void>;
 }
@@ -1626,7 +1626,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function runnerSelfTest(
     workspaceId: string,
     agentId: string,
-  ): Promise<{ ok: boolean; detail: string }> {
+  ): Promise<RunnerSelfTestResult> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
@@ -1730,8 +1730,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           prompt,
           assertMayStart,
         });
-        return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
-          const complete = async (result: { ok: boolean; detail: string }) => {
+        return await new Promise<RunnerSelfTestResult>((resolveResult) => {
+          const complete = async (result: RunnerSelfTestResult) => {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             test.settled = true;
@@ -1814,7 +1814,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             void complete({
               ok: false,
-              detail: `Runner self-test timed out after 120 seconds. Log: ${logPath}`,
+              detail: "Runner self-test timed out after 120 seconds.",
+              logPath,
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
@@ -1833,7 +1834,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             reportError(error);
             void complete({
               ok: false,
-              detail: `Runner self-test failed to start. Log: ${logPath}`,
+              detail: "Runner self-test failed to start.",
+              logPath,
             });
           });
           child.onExit(() => {
@@ -1843,7 +1845,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               if (current && !current.settled) {
                 await complete({
                   ok: false,
-                  detail: `Runner exited before reporting self-test success. Log: ${logPath}`,
+                  detail: "Runner exited before reporting self-test success.",
+                  logPath,
                 });
               }
             })();
@@ -1861,9 +1864,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
-          detail: `Runner self-test could not start. ${
-            error instanceof Error && error.message ? `${error.message} ` : ""
-          }Log: ${logPath}`,
+          detail: `Runner self-test could not start.${
+            error instanceof Error && error.message ? ` ${error.message}` : ""
+          }`,
+          logPath,
         };
       }
     } finally {

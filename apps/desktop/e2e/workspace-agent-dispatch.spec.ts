@@ -300,9 +300,11 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
     await page.getByTestId(settingsNavPin("agents")).click();
     await page.getByTestId("agent-check").click();
     await expect(page.getByTestId("agent-row")).toContainText("Didn't reply.");
+    // The toast names the agent; Copy details carries why.
+    const message = "Nova didn't reply to the check.";
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");
-    await expect(toast).toContainText(reason);
+    await expect(toast).toContainText(message);
     const settings = page.getByTestId(desktopPins.settingsDialog);
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -330,7 +332,7 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(settings).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
-    await expect(page.getByTestId("notice-center")).toContainText(reason);
+    await expect(page.getByTestId("notice-center")).toContainText(message);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

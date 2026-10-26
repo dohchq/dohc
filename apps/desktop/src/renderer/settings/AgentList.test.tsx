@@ -3,7 +3,7 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentToolsResult } from "../../agents/agentToolCatalog";
-import type { ChatDispatchPausedEvent } from "../../ipc/bridgeContract";
+import type { ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
@@ -17,7 +17,7 @@ const bridgeMock = {
     return () => { pausedListener = null; };
   }),
   setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
-  runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }) => ({ ok: true, detail: "Runner self-test passed." })),
+  runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }): Promise<RunnerSelfTestResult> => ({ ok: true, detail: "Runner self-test passed." })),
   detectAgentTools: vi.fn(async (_payload: { workspaceId: string }): Promise<AgentToolsResult> => ({
     workingDirectory: "C:\\Work",
     tools: [{ tool: "codex", executable: "C:\\Tools\\codex.exe", version: "0.98", auth: "signed-in", probe: "detected" }],
@@ -98,7 +98,7 @@ it("keeps an entry dohc could not use in its place, with its problem and a way t
 });
 
 it("checks one agent, then says how long its reply took", async () => {
-  const answer = deferred<{ ok: boolean; detail: string }>();
+  const answer = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
   renderList();
   await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
@@ -110,18 +110,23 @@ it("checks one agent, then says how long its reply took", async () => {
   expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
 });
 
-it("says an agent didn't reply, sends why to Notices, and offers Try again", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner self-test timed out after 120 seconds." });
+it("says an agent didn't reply, names it in Notices with why and its log, and offers Try again", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({
+    ok: false, detail: "Runner self-test timed out after 120 seconds.", logPath: "C:\\Logs\\check.log",
+  });
   const { onError } = renderList();
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
   expect(await within(row("Claude Code")).findByText("Didn't reply.")).toBeTruthy();
-  expect(onError).toHaveBeenCalledWith("Runner self-test timed out after 120 seconds.");
+  expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, undefined, [
+    ["Cause", "Runner self-test timed out after 120 seconds."],
+    ["Log", "C:\\Logs\\check.log"],
+  ]);
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Try again" }));
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
 });
 
-it("pauses every agent dohc starts, and leaves an agent you run as it is", async () => {
-  renderList();
+it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {
+  renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents, off: testAgent({ name: "Codex off", enabled: false }) } } });
   await userEvent.click(screen.getByRole("button", { name: "Pause all" }));
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: true });
   act(() => pausedListener?.({ paused: true }));
@@ -131,6 +136,8 @@ it("pauses every agent dohc starts, and leaves an agent you run as it is", async
     expect(within(row(name)).getByText("Paused")).toBeTruthy();
     expect((within(row(name)).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
   }
+  // An agent that is off has nothing to pause.
+  expect(within(row("Codex off")).queryByText("Paused")).toBeNull();
   expect(within(row("Claude in Terminal")).getByText("Through MCP")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Resume" }));
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenLastCalledWith({ paused: false });

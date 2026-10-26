@@ -19,6 +19,7 @@ import {
 import type { AgentHue } from "../tokens";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import type { ErrorDetailField } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
@@ -75,7 +76,7 @@ const ROW = "border-b border-line last:border-b-0";
 const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
 const TILE_LINE = "mt-0.5 flex items-center gap-1 text-[12px]";
-const ROW_BUTTON = "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-default disabled:text-subtle disabled:hover:bg-bg";
+const ROW_BUTTON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
 const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
 const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
@@ -177,13 +178,16 @@ function AgentRow(props: {
     <p className={`${STATE} text-muted`}><Plug size={12} aria-hidden />Through MCP</p>
   ) : props.checking ? (
     <p className={`${STATE} text-muted`}><LoaderCircle size={12} aria-hidden className="animate-spin" />Checking</p>
-  ) : props.paused ? (
+  ) : props.paused && agent.enabled ? (
     <p className={`${STATE} text-muted`}><Pause size={12} aria-hidden />Paused</p>
   ) : props.check?.status === "replied" ? (
     <p className={`${STATE} text-success`}><Check size={12} aria-hidden />Replied in {props.check.seconds} s</p>
   ) : props.check?.status === "failed" ? (
     <p className={`${STATE} text-danger`}><CircleAlert size={12} aria-hidden />Didn't reply.</p>
-  ) : null;
+  ) : (
+    // Every row keeps its second line, so a state showing up moves nothing.
+    <p aria-hidden className={`${STATE} invisible`}>{"\u00a0"}</p>
+  );
   return (
     <div data-testid="agent-row" data-agent-id={agent.id} className={ROW}>
       <div className={ROW_LINE}>
@@ -208,8 +212,7 @@ function AgentRow(props: {
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {launched ? (
-            <button
-              type="button"
+            <SecondaryButton
               data-testid="agent-check"
               disabled={!props.canCheck}
               title={props.checkNote ?? undefined}
@@ -217,7 +220,7 @@ function AgentRow(props: {
               className={ROW_BUTTON}
             >
               {props.check?.status === "failed" && !props.checking ? "Try again" : "Check"}
-            </button>
+            </SecondaryButton>
           ) : null}
           {launched ? (
             <SwitchControl label={`Turn on ${agent.name}`} checked={agent.enabled}
@@ -296,9 +299,9 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
         </p>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <button type="button" onClick={props.onOpenSettingsFile} className={ROW_BUTTON}>
+        <SecondaryButton onClick={props.onOpenSettingsFile} className={ROW_BUTTON}>
           <FilePenLine size={14} aria-hidden />Open settings file
-        </button>
+        </SecondaryButton>
         <SwitchControl label={`Turn on ${name}`} checked={false} disabled onChange={() => undefined} />
         {menuSpace}
       </div>
@@ -321,7 +324,7 @@ export function AgentList(props: {
   // Answers whether the settings saved; a failed save says why in Notices.
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;
   onOpenSettingsFile: () => void;
-  onError?: (message: string, cause?: unknown) => void;
+  onError?: (message: string, cause?: unknown, retry?: undefined, details?: ReadonlyArray<ErrorDetailField>) => void;
 }) {
   const { workspaceId, settings, onSave, onError } = props;
   const paused = useChatDispatchPaused((cause) =>
@@ -367,7 +370,13 @@ export function AgentList(props: {
     try {
       const result = await bridge().runnerSelfTest({ workspaceId, agentId: agent.id });
       if (!requests.isCurrent(token)) return;
-      if (!result.ok) onError?.(result.detail);
+      // The toast names the agent; why, and its log, go in the details.
+      if (!result.ok) {
+        onError?.(`${agent.name} didn't reply to the check.`, undefined, undefined, [
+          ["Cause", result.detail],
+          ...(result.logPath ? [["Log", result.logPath] as const] : []),
+        ]);
+      }
       next = result.ok
         ? { status: "replied", seconds: Math.max(1, Math.round((performance.now() - started) / 1000)) }
         : { status: "failed" };
@@ -406,19 +415,18 @@ export function AgentList(props: {
         <CopyButton
           key={workspaceId}
           label="Copy MCP config"
-          size="header"
+          size="button"
           testId="mcp-config-copy"
           disabled={!config || "unavailable" in config}
           getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
         />
         {anyLaunch ? (
           <SecondaryButton
-            size="compact"
             data-testid="agents-pause"
             onClick={() => setPaused(!paused)}
-            className="inline-flex items-center gap-1"
+            className={ROW_BUTTON}
           >
-            {paused ? <Play size={12} aria-hidden /> : <Pause size={12} aria-hidden />}
+            {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}
             {paused ? "Resume" : "Pause all"}
           </SecondaryButton>
         ) : null}

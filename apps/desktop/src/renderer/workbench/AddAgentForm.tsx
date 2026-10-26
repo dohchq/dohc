@@ -104,7 +104,7 @@ export function AddAgentForm(props: {
       // The save above made the first agent when there was none.
       const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: firstAgent(settings)?.id ?? DEFAULT_AGENT_ID });
       if (!requests.isCurrent(token)) return;
-      if (!result.ok) props.onError(result.detail);
+      if (!result.ok) props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;

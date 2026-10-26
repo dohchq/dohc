@@ -1478,7 +1478,8 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toEqual([]);
     await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
       ok: false,
-      detail: expect.stringContaining(`Runner self-test could not start. ${reason} Log: `),
+      detail: `Runner self-test could not start. ${reason}`,
+      logPath: expect.any(String),
     });
   });
 
