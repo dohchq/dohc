@@ -1020,10 +1020,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (failedCount === 0) continue;
       notifyRunUpdated(workspace);
       const agent = agents.find(({ id }) => id === agentId);
+      const why = !agent
+        ? "That agent is not set up on this computer."
+        : agent.launch ? `${agent.name} is off.` : "No agent runner is configured.";
       try {
         options.onDispatchNotice?.(workspace, {
           reason: "no-runner", threadId,
-          message: `No agent could take this request. ${agent ? `${agent.name} is off.` : "That agent is not set up on this computer."} Set up agent dispatch in Settings → Agents.`,
+          message: `No agent could take this request. ${why} Set up agent dispatch in Settings → Agents.`,
         });
       } catch (error) {
         reportError(error);

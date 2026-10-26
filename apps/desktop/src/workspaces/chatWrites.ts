@@ -482,7 +482,7 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentName }
+          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,
