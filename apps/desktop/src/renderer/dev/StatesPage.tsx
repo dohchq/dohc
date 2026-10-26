@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Diff, Folder, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -48,7 +48,7 @@ import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
-import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { FileGlyph, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { Ref } from "../ui/Ref";
@@ -75,8 +75,10 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, TreeRow, explorerMenuItems, type VisibleRow } from "../workbench/Explorer";
+import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { undoRefusedNotice } from "../workbench/explorerOperationNotices";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -1205,6 +1207,70 @@ function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width
   );
 }
 
+// The Explorer's menu for one row, from the entries main returns on Windows.
+// It opens as the Menu key opens it, under the row with focus on its first
+// row. The row is the specimen's trigger, and Escape on it closes the menu.
+function ExplorerMenuSpecimen(props: { name: string; glyph: ReactNode; scope: ExplorerMenuScope; testId: string }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const row = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <button
+        ref={row}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={at !== null}
+        data-testid={props.testId}
+        onClick={() => {
+          const box = row.current?.getBoundingClientRect();
+          if (box) setAt({ x: box.left, y: box.bottom });
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setAt(null);
+        }}
+        className="flex h-7 w-56 items-center gap-1.5 rounded-md bg-selected px-2 text-left text-[13px] text-ink"
+      >
+        {props.glyph}
+        <span className="min-w-0 flex-1 truncate">{props.name}</span>
+      </button>
+      {at ? (
+        <Menu
+          label={props.name}
+          at={at}
+          fromKeyboard
+          open
+          onOpenChange={(open) => {
+            if (!open) setAt(null);
+          }}
+          items={explorerMenuItems(explorerMenuEntries(props.scope, "win32"), noop)}
+          width={EXPLORER_MENU_WIDTH}
+          closeOnPick={false}
+        />
+      ) : null}
+    </>
+  );
+}
+
+const EXPLORER_SCOPE: ExplorerMenuScope = {
+  kind: "file", pinned: false, isMountPath: false, hasMountRecord: false, canShare: false, shareView: null,
+};
+
+// A finished delete offers Undo; a refused Undo says what is in the way, with
+// Try again, and Copy keeps the engine's text.
+const UNDO_TOAST = {
+  id: "undo", tone: "success" as const, message: "Deleted budget.md", details: "Deleted budget.md",
+  atMs: 0, canRetry: false, actionLabel: "Undo", seen: false,
+};
+const REFUSED_UNDO_TOAST = {
+  id: "refused-undo",
+  message: undoRefusedNotice(
+    { id: "budget", kind: "file", fromPath: "docs/budget.md", toPath: "docs/costs.md" },
+    { code: "old-path-occupied", path: "docs/budget.md" },
+  ),
+  details: "Cause: UndoRefusedError: domain error: Undo refused: old path occupied: docs/budget.md",
+  atMs: 0, canRetry: true, seen: false,
+};
+
 const versionRows: MenuEntry[] = [
   { id: "main", label: "Main", checked: true, onSelect: noop },
   { id: "draft", label: "Draft two", checked: false, onSelect: noop },
@@ -1651,6 +1717,49 @@ function Pane(props: { theme: "light" | "dark" }) {
         </div>
       </Section>
 
+      {/* The Explorer's menu, one part per kind of row: a file in a synced
+          workspace, a folder, and a received share's mount. */}
+      <Section part="explorer-menu-file" title="Explorer menu, file">
+        <Specimen label="rows main returns; first row keyboard-active; shortcuts">
+          <div className="flex h-60 w-72 items-start" data-force-state="focus focus-visible" data-force-target="[role=menuitem]:nth-child(1)">
+            <ExplorerMenuSpecimen
+              name="budget.md"
+              glyph={<FileGlyph kind={FILE_KIND_RECORDS.markdown} icon={undefined} size={15} className="text-ink" />}
+              scope={{ ...EXPLORER_SCOPE, canShare: true }}
+              testId={`states-explorer-menu-file-${theme}`}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="explorer-menu-folder" title="Explorer menu, folder">
+        <Specimen label="create rows, then the row's own; destructive row hovered">
+          <div className="flex h-[340px] w-72 items-start" data-force-state="focus focus-visible" data-force-target="[role=menuitem]:nth-child(1)">
+            <div className="contents" data-force-state="hover" data-force-target="[data-testid=explorer-menu-item-delete]">
+              <ExplorerMenuSpecimen
+                name="Research"
+                glyph={<Folder size={15} aria-hidden className="shrink-0 text-ink" />}
+                scope={{ ...EXPLORER_SCOPE, kind: "folder" }}
+                testId={`states-explorer-menu-folder-${theme}`}
+              />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="explorer-menu-mount" title="Explorer menu, shared with me">
+        <Specimen label="a mount root: refresh and remove, no file changes">
+          <div className="flex h-60 w-72 items-start" data-force-state="focus focus-visible" data-force-target="[role=menuitem]:nth-child(1)">
+            <ExplorerMenuSpecimen
+              name="Trip plan"
+              glyph={<Folder size={15} aria-hidden className="shrink-0 text-ink" />}
+              scope={{ ...EXPLORER_SCOPE, kind: "folder", isMountPath: true, hasMountRecord: true }}
+              testId={`states-explorer-menu-mount-${theme}`}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="empty" title="Empty">
         <Specimen label="glyph, line, action in focus">
           <EmptyPanel>
@@ -1715,6 +1824,13 @@ function Pane(props: { theme: "light" | "dark" }) {
             <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
           </div>
           <WorkspaceErrorToast error={toast("success")} onHide={noop} />
+        </div>
+      </Section>
+
+      <Section part="undo-toasts" title="Toasts with Undo">
+        <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
+          <WorkspaceErrorToast error={UNDO_TOAST} onAction={noop} onHide={noop} />
+          <WorkspaceErrorToast error={REFUSED_UNDO_TOAST} onRetry={noop} onHide={noop} />
         </div>
       </Section>
 

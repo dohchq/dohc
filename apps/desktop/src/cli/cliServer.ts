@@ -2875,16 +2875,19 @@ async function dispatchWorkspace(
 
     case "historyOperation":
     case "historyUndo": {
-      if (request.verb === "historyUndo" && request.args.actor !== "agent") return { ok: false, reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` };
+      // Every refused Undo carries a refusal, and main can name none of these.
+      const refused = ({ reason }: { reason: string }) =>
+        ({ ok: false as const, reason, ...(request.verb === "historyUndo" ? { refusal: { code: "unexplained" as const } } : {}) });
+      if (request.verb === "historyUndo" && request.args.actor !== "agent") return refused({ reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` });
       const paths = await callerPaths(context, request.args.cwd);
-      if (paths.shared) return { ok: false, reason: "History operations require the owning workspace. Open it to continue." };
-      if (!context.historyOperation || !context.historyUndo) return { ok: false, reason: "The workspace engine is not running." };
+      if (paths.shared) return refused({ reason: "History operations require the owning workspace. Open it to continue." });
+      if (!context.historyOperation || !context.historyUndo) return refused({ reason: "The workspace engine is not running." });
       try {
         if (request.verb === "historyOperation") return await context.historyOperation(request.args);
         const result = await context.historyUndo(request.args, documentEditOrigin(request.args.agent, context, options));
         if (result.ok) await notifyWrite(options, context);
         return result;
-      } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
+      } catch (error) { return refused(pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`)); }
     }
 
     case "fileDuplicate": {

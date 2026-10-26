@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
@@ -45,8 +45,10 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -210,18 +212,23 @@ describe("the active row inside a multi-selection", () => {
 describe("macOS file tree keys", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  // A delete goes to the trash with Undo on its notice, so the key deletes
+  // without asking.
   it.each([
-    ["darwin", "⌘⌫ asks", { key: "Backspace", metaKey: true }, true],
-    ["darwin", "⌫ alone does not ask", { key: "Backspace" }, false],
-    ["darwin", "Delete asks", { key: "Delete" }, true],
-    ["win32", "Meta+Backspace does not ask", { key: "Backspace", metaKey: true }, false],
-    ["win32", "Delete asks", { key: "Delete" }, true],
-  ] as const)("on %s, %s to delete the selection", (platform, _name, init, asks) => {
-    vi.stubGlobal("dohcDesktop", { platform });
+    ["darwin", "⌘⌫ deletes", { key: "Backspace", metaKey: true }, true],
+    ["darwin", "⌫ alone does not delete", { key: "Backspace" }, false],
+    ["darwin", "Delete deletes", { key: "Delete" }, true],
+    ["win32", "Meta+Backspace does not delete", { key: "Backspace", metaKey: true }, false],
+    ["win32", "Delete deletes", { key: "Delete" }, true],
+  ] as const)("on %s, %s the selection", async (platform, _name, init, deletes) => {
+    const deleteWorkspacePath = vi.fn(async () => ({ trashed: true }));
+    vi.stubGlobal("dohcDesktop", { platform, deleteWorkspacePath });
     render(<Fixture {...explorerProps()} />);
     fireEvent.click(row("notes.md"));
     fireEvent.keyDown(row("notes.md"), init);
-    expect(screen.queryByTestId("delete-confirm") !== null).toBe(asks);
+    await act(async () => {});
+    expect(deleteWorkspacePath.mock.calls.length > 0).toBe(deletes);
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
   });
 
   it("adds a row to the selection with ⌘-click on macOS", () => {

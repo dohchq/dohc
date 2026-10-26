@@ -6,15 +6,15 @@ import { deferred } from "../../testing/deferred";
 import { Explorer, type ExplorerProps } from "./Explorer";
 
 const moveWorkspacePath = vi.fn();
-const showExplorerMenu = vi.fn();
+const readExplorerMenu = vi.fn();
 const createWorkspaceFile = vi.fn();
 const createWorkspaceFolder = vi.fn();
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   moveWorkspacePath.mockResolvedValue({ path: "" });
-  showExplorerMenu.mockResolvedValue(null);
-  window.dohcDesktop = { moveWorkspacePath, showExplorerMenu, createWorkspaceFile, createWorkspaceFolder } as unknown as DohcDesktopBridge;
+  readExplorerMenu.mockResolvedValue([]);
+  window.dohcDesktop = { moveWorkspacePath, readExplorerMenu, createWorkspaceFile, createWorkspaceFolder } as unknown as DohcDesktopBridge;
 });
 
 afterEach(() => {
@@ -60,8 +60,10 @@ function explorerProps(): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
   };
 }
@@ -158,11 +160,11 @@ describe("Explorer rename", () => {
     // An uncancelled event is what lets Electron open main's text menu.
     expect(fireEvent.contextMenu(input)).toBe(true);
     await act(async () => {});
-    expect(showExplorerMenu).not.toHaveBeenCalled();
+    expect(readExplorerMenu).not.toHaveBeenCalled();
     expect(screen.getByTestId("tree-edit-input")).toBe(input);
     // The tree around the field keeps its own menu.
     fireEvent.contextMenu(screen.getByTestId("file-tree"));
-    await waitFor(() => expect(showExplorerMenu).toHaveBeenCalledOnce());
+    await waitFor(() => expect(readExplorerMenu).toHaveBeenCalledOnce());
   });
 
   it("gives a new name without an extension the file's own extension", async () => {

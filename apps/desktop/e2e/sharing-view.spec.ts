@@ -53,7 +53,6 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
       env: {
         DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
         DOHC_TEST_SYNC_BACKOFF_MS: "250",
-        DOHC_TEST_EXPLORER_MENU_CHOICE: "share",
       },
     });
     const page = desktop.page;
@@ -61,6 +60,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
 
     await revealExplorerPath(page, "docs/plan.md");
     await explorerRow(page, "docs/plan.md").click({ button: "right" });
+    await page.getByTestId("explorer-menu-item-share").click();
     const dialog = page.getByTestId("share-dialog");
     await dialog.getByTestId("share-email").fill(RECIPIENT_EMAIL);
     await dialog.getByTestId("share-create").click();

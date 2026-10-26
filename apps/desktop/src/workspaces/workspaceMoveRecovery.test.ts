@@ -14,6 +14,7 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
@@ -24,6 +25,8 @@ afterEach(() => vi.restoreAllMocks());
 const person = { kind: "human", humanId: "local:move-owner" } as const;
 const agent = { kind: "agent", agentId: "move-agent", onBehalfOf: "local:move-owner" } as const;
 const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
+// A refused Undo whose cause main cannot name.
+const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
 async function fixture() {
   const rootPath = await createTestScratch("move-undo-");
   const write = async (path: string, text = path) => { await mkdir(dirname(join(rootPath, path)), { recursive: true }); await writeFile(join(rootPath, path), text); };
@@ -245,7 +248,7 @@ it.each([false, true])("records only an agent folder kind and refuses both autho
   await f.write(`${to}/.env`); f.history.readHistoryPage.mockClear();
   const saving = vi.spyOn(recovery, "saveRecoveryRecord");
   for (const byAgent of [false, true]) {
-    expect(await queuedUndo(f, byAgent)).toEqual({ result: { ok: false, reason }, follower: "current" });
+    expect(await queuedUndo(f, byAgent)).toEqual({ result: refused(reason), follower: "current" });
   }
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   expect(saving).not.toHaveBeenCalled(); expect(await readFile(f.recordPath(), "utf8")).toBe(before);
@@ -261,14 +264,14 @@ it("saves an empty agent folder kind inside the lock before queued Undo enters",
   const moving = f.moveAsAgent("empty", "archive/empty"); await entered.promise;
   const undoing = f.undo(undefined, true); release.resolve();
   expect(await moving).toMatchObject({ undo: { available: false } });
-  expect(await undoing).toEqual({ ok: false, reason: "Undo for a folder move isn't available yet. Move it back yourself." });
+  expect(await undoing).toEqual(refused("Undo for a folder move isn't available yet. Move it back yourself."));
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it("rejects a corrupt folder-kind record without consulting History", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder", "renamed");
   const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
   await writeFile(f.recordPath(), JSON.stringify({ ...record, noUndo: "wrong reason" }));
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is invalid. Rename it back yourself." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the rename. Its recovery record is invalid. Rename it back yourself."));
   f.history.readHistoryPage.mockClear();
   await writeFile(f.recordPath(), JSON.stringify({ ...record, entries: ["folder/tracked.txt"] }));
   expect(await f.undo()).toMatchObject({ ok: false, reason: expect.stringContaining("recovery record is invalid") });
@@ -281,14 +284,15 @@ it.each(["failed", "missing", "expired"])("uses folder words for the result and 
     reason: "Undo for a folder move isn't available yet. Move it back yourself.", paths: [] } });
   if (state === "missing") await rm(f.recordPath());
   if (state === "expired") { const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000); await filesystem.utimes(f.recordPath(), old, old); }
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. Its recovery record is missing or expired. Move it back yourself." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the move. Its recovery record is missing or expired. Move it back yourself."));
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
 it("refuses an occupied old file path without changing disk, the record or History", async () => {
   const f = await fixture(); await f.write("a.txt"); const moved = await f.move("a.txt", "b.txt"); await recovery.waitForRecovery(moved.operationId!);
   await f.write("a.txt", "occupant"); const before = await readFile(f.recordPath(), "utf8");
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. a.txt now occupies the old path. Move it first." });
+  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. a.txt now occupies the old path. Move it first.",
+    refusal: { code: "old-path-occupied", path: "a.txt" } });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled(); expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
 
@@ -296,7 +300,7 @@ it.each([false, true])("refuses a file destination replaced with a folder, agent
   const f = await fixture(); await f.write("a.txt"); await f.moveAsAgent("a.txt", "b.txt");
   await rm(join(f.rootPath, "b.txt")); await f.write("b.txt/added.txt", "new content");
   const before = await readFile(f.recordPath(), "utf8");
-  expect(await f.undo(undefined, byAgent)).toEqual({ ok: false, reason: "Cannot undo the rename. b.txt is now a folder. Move it first." });
+  expect(await f.undo(undefined, byAgent)).toEqual(refused("Cannot undo the rename. b.txt is now a folder. Move it first."));
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled(); expect(await readFile(f.recordPath(), "utf8")).toBe(before);
   expect(await readFile(join(f.rootPath, "b.txt/added.txt"), "utf8")).toBe("new content");
 });
@@ -304,7 +308,7 @@ it("refuses a case-only file Undo before reading History or calling the engine",
   const f = await fixture(); await f.write("a.txt"); const moved = await f.moveAsAgent("a.txt", "A.txt");
   expect(moved.operationId).toBeDefined(); const before = await readFile(f.recordPath(), "utf8");
   f.history.readHistoryPage.mockClear();
-  expect(await f.undo(undefined, true)).toEqual({ ok: false, reason: "Cannot undo the rename. It changed only the letter case. Rename it back yourself." });
+  expect(await f.undo(undefined, true)).toEqual(refused("Cannot undo the rename. It changed only the letter case. Rename it back yourself."));
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
@@ -333,8 +337,8 @@ it("checks readiness before a retried move Undo asks History to finish restoring
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
   f.restoring(false);
   readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) });
-  expect(await f.undo()).toEqual({ ok: false,
-    reason: "dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
+  expect(await f.undo()).toEqual(
+    refused("dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again."));
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
   await openedLocalState(f.operation.workspace);
   expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } });
@@ -345,7 +349,7 @@ it("resumes a rowless file after the engine receipt was saved before a crash", a
   const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
   const actual = recovery.saveRecoveryRecord;
   vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { await actual(...args); throw new Error("crash after receipt"); });
-  expect(await f.undo()).toEqual({ ok: false, reason: "crash after receipt" });
+  expect(await f.undo()).toEqual(refused("crash after receipt"));
   expect(await f.undo(undefined, true)).toMatchObject({ ok: true, restored: ["oversized.bin"], remaining: [] });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
@@ -377,22 +381,34 @@ it("retries a rowless file occupied after the receipt without engine work", asyn
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
-it("passes the engine's deleted-member refusal through with only the requested marker", async () => {
+const engineRefusal = (reason: string) => new DaemonRefusalError({ code: "CONFLICT", message: `domain error: Undo refused: ${reason}`, retry: "no" }, undefined);
+it("passes the engine's deleted-member refusal through, unexplained, with only the requested marker", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
   await f.write("archive/tracked.txt", "replacement"); const before = await readFile(f.recordPath(), "utf8");
-  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("Undo refused: object moved or removed: archive/tracked.txt"));
-  expect(await f.undo()).toEqual({ ok: false, reason: "Undo refused: object moved or removed: archive/tracked.txt" });
+  f.history.undoHistoryOperation.mockRejectedValueOnce(engineRefusal("object moved or removed: archive/tracked.txt"));
+  expect(await f.undo()).toEqual(refused("domain error: Undo refused: object moved or removed: archive/tracked.txt"));
   expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toEqual({ ...JSON.parse(before), engine: { requested: true } });
+});
+it.each(["old path occupied", "old path occupied on disk"])("names the old path the engine finds occupied: %s", async reason => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.history.undoHistoryOperation.mockRejectedValueOnce(engineRefusal(`${reason}: folder/tracked.txt`));
+  expect(await f.undo()).toEqual({ ok: false, reason: `domain error: Undo refused: ${reason}: folder/tracked.txt`,
+    refusal: { code: "old-path-occupied", path: "folder/tracked.txt" } });
+});
+it("codes only the engine's refusal, not other text in its words", async () => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("domain error: Undo refused: old path occupied: folder/tracked.txt"));
+  expect(await f.undo()).toEqual(refused("domain error: Undo refused: old path occupied: folder/tracked.txt"));
 });
 it("distinguishes a missing move record from an unknown operation and refuses corrupt records", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
   const record = await readFile(f.recordPath(), "utf8"); await rm(f.recordPath());
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. Its recovery record is missing or expired. Move it back yourself." });
-  expect(await f.undo(id)).toEqual({ ok: false, reason: "This operation is not in History." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the move. Its recovery record is missing or expired. Move it back yourself."));
+  expect(await f.undo(id)).toEqual(refused("This operation is not in History."));
   await writeFile(f.recordPath(), "{");
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. Its recovery record is invalid. Move it back yourself." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the move. Its recovery record is invalid. Move it back yourself."));
   await writeFile(f.recordPath(), JSON.stringify({ ...JSON.parse(record), entries: ["../outside"] }));
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. Its recovery paths are invalid." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the move. Its recovery paths are invalid."));
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it("keeps a completed move when the record save fails and returns no Undo information", async () => {
@@ -406,7 +422,7 @@ it("keeps a completed move when the record save fails and returns no Undo inform
 it("passes a different author's lost engine reply refusal through", async () => {
   const f = await fixture(); await f.write("a.txt"); await f.move("a.txt", "b.txt");
   f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("The idempotency key belongs to another author."));
-  expect(await f.undo(undefined, true)).toEqual({ ok: false, reason: "The idempotency key belongs to another author." });
+  expect(await f.undo(undefined, true)).toEqual(refused("The idempotency key belongs to another author."));
   expect(f.history.undoHistoryOperation).toHaveBeenCalledWith(expect.objectContaining({ author: agent, requestId: expect.stringMatching(/^move-undo:dohc-operation:/) }));
 });
 
@@ -479,7 +495,7 @@ it("keeps the committed file and History after a stop loses the pending recovery
   release.resolve(); await recovery.waitForRecovery(moved.operationId!);
   expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("kept");
   await expect(readFile(f.recordPath())).rejects.toMatchObject({ code: "ENOENT" });
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself."));
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
@@ -500,7 +516,7 @@ it("does not publish a person rename before the engine and capture finish", asyn
   const f = await fixture(); await f.write("a.txt"); const moved = await f.move("a.txt", "b.txt"); await recovery.waitForRecovery(moved.operationId!);
   const engine = f.history.undoHistoryOperation.getMockImplementation()!;
   f.history.undoHistoryOperation.mockImplementationOnce(async input => { await engine(input); throw new Error("reply lost after placement"); });
-  expect(await f.undo()).toEqual({ ok: false, reason: "reply lost after placement" });
+  expect(await f.undo()).toEqual(refused("reply lost after placement"));
   expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("a.txt");
   if (otherAuthor) f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("The idempotency key belongs to another author."));
   expect(await f.undo(undefined, otherAuthor)).toMatchObject(otherAuthor
@@ -609,7 +625,7 @@ it("refuses a rowless person's Undo through a replaced parent link", async () =>
   const moved = await f.move("docs/oversized.bin", "archive/oversized.bin"); await recovery.waitForRecovery(moved.operationId!);
   await rename(join(f.rootPath, "archive"), join(f.rootPath, "saved")); await f.write("other/oversized.bin", "unrelated");
   await filesystem.symlink(join(f.rootPath, "other"), join(f.rootPath, "archive"), "junction");
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. archive/oversized.bin now leads somewhere else." });
+  expect(await f.undo()).toEqual(refused("Cannot undo the move. archive/oversized.bin now leads somewhere else."));
   expect(await readFile(join(f.rootPath, "other/oversized.bin"), "utf8")).toBe("unrelated");
   await expect(filesystem.lstat(join(f.rootPath, "docs/oversized.bin"))).rejects.toMatchObject({ code: "ENOENT" });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -655,7 +671,7 @@ it("does not save an engine intent for rowless Undo before placement", async () 
   const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
   const save = recovery.saveRecoveryRecord;
   vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { await save(...args); throw new Error("crash after save"); });
-  expect(await f.undo()).toEqual({ ok: false, reason: "crash after save" });
+  expect(await f.undo()).toEqual(refused("crash after save"));
   const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
   expect(record.engine).not.toHaveProperty("requested");
   expect(record.engine).toEqual({ materialized: true, momentCount: 0, notRestored: [] });

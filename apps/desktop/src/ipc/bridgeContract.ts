@@ -16,7 +16,7 @@ import { PublicationAgent } from "@dohc/cli/app-publication";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
-import { OperationRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { OperationRecovery, HistoryOperationId, HistoryOperationUndoResult, type UndoRefusal } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { datasetOperations } from "./datasetOperations";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -123,6 +123,7 @@ import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
 import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
+import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -905,6 +906,7 @@ export type DeleteWorkspacePathPayload = z.infer<
 export const DeleteWorkspacePathResult = z.object({ trashed: z.boolean() }).extend(OperationRecovery.partial().shape);
 export const UndoHistoryOperationPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: HistoryOperationId }).strict();
 export { HistoryOperationUndoResult as UndoHistoryOperationResult };
+export type UndoHistoryOperationRefusal = z.infer<typeof UndoRefusal>;
 export type DeleteWorkspacePathResult = z.infer<typeof DeleteWorkspacePathResult>;
 
 // relativePath absent = export the whole workspace. The output path comes
@@ -959,23 +961,34 @@ export const ExportDocumentFileResult = z.object({
 export type ExportDocumentFileResult = z.infer<typeof ExportDocumentFileResult>;
 
 // Explorer context menu: the renderer names what was right-clicked, main
-// builds the native Menu from main-owned labels over the closed
-// EXPLORER_MENU_COMMANDS tuple and resolves the same invoke
-// with the chosen id (null = dismissed). No event channel needed.
-export const ShowExplorerMenuPayload = z.object({
+// answers with the entries it offers there, labels included, and the renderer
+// draws exactly those. Each entry's handler still checks its own authority.
+export const ReadExplorerMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
   // Absent for the root (container background) menu.
   path: PATH_STRING.optional(),
   kind: z.enum(["file", "folder", "root"]),
   pinned: z.boolean(),
 });
-export type ShowExplorerMenuPayload = z.infer<typeof ShowExplorerMenuPayload>;
+export type ReadExplorerMenuPayload = z.infer<typeof ReadExplorerMenuPayload>;
 
 export const ExplorerMenuCommand = z.enum(EXPLORER_MENU_COMMANDS);
 export type ExplorerMenuCommand = z.infer<typeof ExplorerMenuCommand>;
 
-export const ShowExplorerMenuResult = ExplorerMenuCommand.nullable();
-export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
+export const ExplorerMenuEntry = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("item"), label: z.string().min(1).max(80), id: ExplorerMenuCommand }).strict(),
+  z.object({ kind: z.literal("separator") }).strict(),
+]);
+export type ExplorerMenuEntry = z.infer<typeof ExplorerMenuEntry>;
+export const ExplorerMenuEntries = z.array(ExplorerMenuEntry).max(32);
+
+// The menu's Show in Finder row, and its Windows and Linux twins. main checks
+// the path is inside the workspace before the OS sees it.
+export const RevealExplorerPathPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type RevealExplorerPathPayload = z.infer<typeof RevealExplorerPathPayload>;
 
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -7195,6 +7208,7 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof databaseImportOperations>,
     OperationBridge<typeof workspaceSyncOperations>,
     OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof explorerMenuOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof datasetOperations>,
@@ -7275,11 +7289,6 @@ export interface DohcDesktopBridge
   openWorkspaceManager(): Promise<void>;
   closeThisWindow(): Promise<void>;
   createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown>; delivery?: "pending" | "accepted" | "refused"; reason?: string } | import("@dohc/cli/creation").CreationPartial>;
-  // Native explorer context menu; resolves with the chosen closed-tuple
-  // command (validated in the preload against ExplorerMenuCommand) or null.
-  showExplorerMenu(
-    payload: ShowExplorerMenuPayload,
-  ): Promise<ShowExplorerMenuResult>;
   showWorkbenchMenu(
     payload: ShowWorkbenchMenuPayload,
   ): Promise<ShowWorkbenchMenuResult>;

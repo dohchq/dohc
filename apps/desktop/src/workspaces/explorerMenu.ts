@@ -1,21 +1,18 @@
-import type { ExplorerMenuCommand } from "../ipc/bridgeContract";
+import type { ExplorerMenuCommand, ExplorerMenuEntry } from "../ipc/bridgeContract";
 import { workspaceCreateOffers, type ShareViewWriteScope } from "./shareWriteGate";
 
 // WHAT THE EXPLORER'S CONTEXT MENU OFFERS — one decision, in one place.
 //
-// main owns this menu, so the renderer cannot add an item back; that is why
-// the reduction below is a security surface and not a convenience. It lives
-// here rather than inside main's IPC closure because a menu built inline in a
-// 9,000-line closure can only be pinned by reading the source, and a source
-// pin proves position, never behaviour.
+// main decides this menu and the renderer draws exactly the entries main
+// returns, so the renderer cannot add an item back; that is why the reduction
+// below is a security surface and not a convenience. It lives here rather than
+// inside main's IPC closure because a menu built inline in a 9,000-line
+// closure can only be pinned by reading the source, and a source pin proves
+// position, never behaviour.
 //
 // The menu mirrors the write gates behind it. It must offer exactly what those
 // handlers accept, because an item that is refused when clicked is the surface
 // lying about what it can do.
-
-export type ExplorerMenuEntry =
-  | { kind: "item"; label: string; id: ExplorerMenuCommand }
-  | { kind: "separator" };
 
 export interface ExplorerMenuScope {
   // What was right-clicked.
@@ -62,14 +59,14 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     return [
       ...(scope.hasMountRecord
         ? [
-            item("Refresh Share", "refresh-share-mount"),
-            item("Remove Share from Workspace", "unmount-share"),
+            item("Refresh share", "refresh-share-mount"),
+            item("Remove share from workspace", "unmount-share"),
             separator,
           ]
-        : [item("Refresh Shares", "refresh-share-mount"), separator]),
+        : [item("Refresh shares", "refresh-share-mount"), separator]),
       scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
       separator,
-      item("Export as Zip…", "export-zip"),
+      item("Export as zip…", "export-zip"),
       reveal,
     ];
   }
@@ -78,14 +75,14 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     return [
       ...(canWrite
         ? [
-            item("New File", "new-file"),
-            ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
-            ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+            item("New file", "new-file"),
+            ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
+            ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
             separator,
-            item("Import Files…", "import-files"),
+            item("Import files…", "import-files"),
           ]
         : []),
-      item("Export Workspace as Zip…", "export-zip"),
+      item("Export workspace as zip…", "export-zip"),
     ];
   }
 
@@ -96,20 +93,20 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
     ...(canWrite && scope.kind === "folder"
       ? [
-          item("New File", "new-file"),
-          ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
-          ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+          item("New file", "new-file"),
+          ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
+          ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer
           // passes the folder as importWorkspaceFiles' targetDir, re-validated
           // main-side before any copy).
-          item("Import Files…", "import-files"),
+          item("Import files…", "import-files"),
           separator,
         ]
       : []),
     ...(canWrite ? [item("Rename", "rename"), item("Delete", "delete")] : []),
     scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
     separator,
-    item("Export as Zip…", "export-zip"),
+    item("Export as zip…", "export-zip"),
     reveal,
   ];
 }

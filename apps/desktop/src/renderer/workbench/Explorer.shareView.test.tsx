@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
 
@@ -8,16 +8,15 @@ afterEach(cleanup);
 
 // What A DELETE PROMISES (#802, sweep blocker 3 and delta findings 5 and 8).
 //
-// An ordinary workspace's delete goes to a trash and can be restored from
-// there — from the system trash, or from `.dohc/local/trash` whenever the system
-// trash refuses, which is any rejection and not only a drive that lacks one.
+// An ordinary workspace's delete goes to a trash with a recovery record, and
+// its notice offers Undo, so it runs without asking.
 //
 // A share view's delete removes the projection of a moment. There is no trash
 // on that path, so the local copy goes IRREVERSIBLY — and `AGENTS.md` requires
 // telling the user that before an irreversible change runs, not after. What
 // can still be taken back is the change, because the granter's copy is
-// untouched until they accept it. Each dialog has to say the one that is true,
-// or it is a durability promise dohc cannot keep.
+// untouched until they accept it. The dialog has to say that, or it is a
+// durability promise dohc cannot keep.
 
 const GRANTER = "granter@dohc.test";
 
@@ -58,8 +57,10 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -74,20 +75,19 @@ function confirmText(select: "one" | "two"): string {
 }
 
 describe("the delete confirmation states where the file goes", () => {
-  it("names both recovery locations in an ordinary workspace", () => {
-    render(<Explorer {...explorerProps()} />);
-    const text = confirmText("one");
-    expect(text).toContain("system trash");
-    expect(text).toContain(".dohc/local/trash");
-    expect(text).toContain("restored from there");
-    // The fallback fires on any trash rejection, not only a drive without one
-    // — `deletePath` catches every `trashItem` error, and copy.md names this
-    // dialog as the place the narrower claim shipped.
-    expect(
-      text,
-      "the stated condition is narrower than the one deletePath actually falls back on",
-    ).not.toContain("drives without one");
-    expect(text).toContain("whenever the system trash refuses");
+  it("asks nothing in an ordinary workspace, where the delete can be undone", async () => {
+    const deleteWorkspacePath = vi.fn(async () => ({ trashed: true }));
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
+    try {
+      render(<Explorer {...explorerProps()} />);
+      const rows = within(screen.getByTestId("file-tree")).getAllByTestId("tree-row");
+      fireEvent.click(rows[0]!);
+      fireEvent.keyDown(rows[0]!, { key: "Delete" });
+      expect(screen.queryByTestId("delete-confirm")).toBeNull();
+      await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "note.md" }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("states the local delete is irreversible, and names who still has the file", () => {

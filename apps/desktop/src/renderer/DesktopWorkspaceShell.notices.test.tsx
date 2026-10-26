@@ -8,7 +8,7 @@ import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -2239,10 +2239,12 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
   });
 
+  const IMPORT_FILES_ENTRY = { kind: "item" as const, label: "Import files…", id: "import-files" as const };
+
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
         ? {
@@ -2273,6 +2275,7 @@ describe("file transfers", () => {
     const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
     if (!folder) throw new Error("notes folder row missing");
     fireEvent.contextMenu(folder);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-import-files"));
     await waitFor(() =>
       expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
     );
@@ -2286,7 +2289,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
       bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md", "notes/c.md"]));
       return { imported: ["notes/b.md", "notes/c.md"], skipped: 0 };
@@ -2311,7 +2314,7 @@ describe("file transfers", () => {
       folders,
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
       bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes", "notes/Empty"]));
       return { imported: [], skipped: 0, folders: ["notes/Empty"] };
@@ -2331,7 +2334,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     let finishOlder!: (result: { imported: string[]; skipped: number }) => void;
     bridge.importWorkspaceFiles
       .mockImplementationOnce(() => new Promise((resolve) => { finishOlder = resolve; }))
@@ -2365,7 +2368,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     let finishExplorer!: (result: { imported: string[]; skipped: number }) => void;
     bridge.importWorkspaceFiles
       .mockImplementationOnce(() => new Promise((resolve) => { finishExplorer = resolve; }))
@@ -2413,7 +2416,7 @@ describe("file transfers", () => {
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],
       skipped: 0,
@@ -3639,5 +3642,83 @@ describe("documents too large for live editing", () => {
     await user.click(within(screen.getByTestId("notice-sharing-declined-main:object-1"))
       .getByRole("button", { name: "Open document" }));
     expect(await screen.findByTestId("tab-notes/large.md")).toBeTruthy();
+  });
+});
+
+// The notice is the shell's, so its Undo outlives the Explorer, which the
+// side panel unmounts when it hides or shows another view.
+describe("Undo on an Explorer notice", () => {
+  const DELETED = "dohc-operation:22222222-2222-4222-8222-222222222222";
+  type UndoAnswer = Awaited<ReturnType<DohcDesktopBridge["undoHistoryOperation"]>>;
+
+  function undoBridge() {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async () => ({ trashed: true, operationId: DELETED, undo: { available: true as const } })),
+      undoHistoryOperation: vi.fn(async (): Promise<UndoAnswer> => ({
+        ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [],
+      })),
+    });
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Delete", id: "delete" }]);
+    return bridge;
+  }
+
+  async function deleteFromMenu(path: string) {
+    fireEvent.contextMenu((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-delete"));
+  }
+
+  async function undoFromNotices(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
+  }
+
+  const shell = (bridge: ReturnType<typeof undoBridge>, workspace: Workspace) => (
+    <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+  );
+
+  it("undoes a delete after the side panel hid the Explorer", async () => {
+    const bridge = undoBridge();
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await deleteFromMenu("a.md");
+    await screen.findAllByText("Deleted a.md");
+    await user.click(screen.getByTestId("titlebar-primary-sidebar"));
+    expect(screen.queryByTestId("file-tree")).toBeNull();
+
+    await undoFromNotices(user);
+    await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, operationId: DELETED }));
+    expect(await screen.findAllByText("Restored a.md")).not.toHaveLength(0);
+  });
+
+  // DesktopRoot remounts the shell on a switch; these rerender the same
+  // instance, the stricter case.
+  it("never shows workspace A's late delete in workspace B", async () => {
+    const bridge = undoBridge();
+    const deleted = deferred<{ trashed: boolean; operationId: string; undo: { available: true } }>();
+    bridge.deleteWorkspacePath.mockReturnValueOnce(deleted.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, WORKSPACE));
+    await deleteFromMenu("a.md");
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => deleted.resolve({ trashed: true, operationId: DELETED, undo: { available: true } }));
+    expect(screen.queryByText("Deleted a.md")).toBeNull();
+  });
+
+  it("never reports the answer to workspace A's Undo in workspace B", async () => {
+    const bridge = undoBridge();
+    const undone = deferred<UndoAnswer>();
+    bridge.undoHistoryOperation.mockReturnValueOnce(undone.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(bridge, WORKSPACE));
+    await deleteFromMenu("a.md");
+    await screen.findAllByText("Deleted a.md");
+    await undoFromNotices(user);
+    await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete.", refusal: { code: "unexplained" } }));
+    expect(screen.queryByText("Cannot restore a.md.")).toBeNull();
   });
 });

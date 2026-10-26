@@ -151,6 +151,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
+- Write a refusal to fit two lines: what failed, then the one thing to do. The cause goes in its details.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
@@ -236,6 +237,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
 - Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
+- A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill and the accent outline. Until a row is marked, Enter and Space mark the first row and run nothing. A menu opened from the keyboard marks its first row that way at once.
 - In a panel, give the parent `px-1`.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.

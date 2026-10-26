@@ -24,6 +24,9 @@ import type { DemoPanelId } from "./demoPanels";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
+// The demo bridge changes the documents before it answers, so the one listing
+// the Explorer sees is always current and settles each answered change.
+const DEMO_LISTING = 0;
 export const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
 
 export type DemoWorkspaceDocument = {
@@ -164,6 +167,7 @@ export function DemoSidebar(props: {
           shareView={null}
           files={files}
           folders={folders}
+          listingRequest={DEMO_LISTING}
           collectionFolders={emptyCollectionFolders}
           onOpenCollection={noopOpenCollection}
           onNewCollection={noopOpenCollection}
@@ -219,8 +223,10 @@ export function DemoSidebar(props: {
           onRefreshShareMounts={() => undefined}
           onUnmountShare={() => undefined}
           onShare={() => undefined}
-          onRefresh={() => undefined}
+          onRefresh={() => DEMO_LISTING}
           onError={props.onError}
+          // The demo records no History operations, so it has nothing to undo.
+          onNotice={() => undefined}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

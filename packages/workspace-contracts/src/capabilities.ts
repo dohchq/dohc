@@ -55,6 +55,8 @@ export const CAPABILITIES = {
   "file.asset.write": capability("Write an image attachment inside a writable workspace.", {ipc: ["writeWorkspaceAsset"]}),
   "file.image.pick": capability("Read user-selected images for insertion into a writable workspace.", {ipc: ["pickImageFiles"]}),
   "file.external.open": capability("Open a contained workspace file with its system application.", {ipc: ["openFileExternally"]}),
+  "file.reveal": capability("Show a contained workspace path in the system file manager.", {ipc: ["revealExplorerPath"]}),
+  "explorer.menu.read": capability("Read the actions the Explorer offers for a path.", {ipc: ["readExplorerMenu"]}),
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"]}),
   "access.refresh": capability("Request paced Sharing observations through the desktop or CLI.", {ipc: ["requestAccessRefresh"], mcpReason: "Available through dohc access refresh; no desktop MCP tool."}),

@@ -298,7 +298,7 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   const root = workspace.rootPath;
   assertCurrent();
-  if (record.noUndo) return { ok: false, reason: record.noUndo };
+  if (record.noUndo) return { ok: false, reason: record.noUndo, refusal: { code: "unexplained" } };
   const expose = (result: z.infer<typeof UndoResult>): DeleteUndoResult => ({ ...result,
     remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
@@ -320,10 +320,12 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
     for (const path of [...record.paths, ...record.emptyFolders]) {
       const target = await checkedTarget(root, path, record.base);
       const occupant = await info(target);
-      if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
+      if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.`,
+        refusal: { code: "old-path-occupied", path } };
       if (record.paths.includes(path)) {
         const source = await sourcePath(trash, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in ${WORKSPACE_TRASH}, and History has no copy of it. Check the ${systemTrash}.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in ${WORKSPACE_TRASH}, and History has no copy of it. Check the ${systemTrash}.`,
+          refusal: { code: "unexplained" } };
       }
     }
     assertCurrent();

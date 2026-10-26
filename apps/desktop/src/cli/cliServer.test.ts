@@ -935,12 +935,16 @@ describe("CLI socket server", () => {
     expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe("move body");
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
     context.historyUndo = vi.fn(context.historyUndo);
-    expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".' });
+    const unexplained = { refusal: { code: "unexplained" } };
+    expect(await invoke("historyUndo", { ...args, actor: "human" }))
+      .toEqual({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".', ...unexplained });
     expect(context.historyUndo).not.toHaveBeenCalled();
     for (const verb of ["historyOperation", "historyUndo"] as const) {
       expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...args, operationId: operationId.slice(15) } })).toMatchObject({ ok: false });
       context.readOnly = true;
-      expect(await invoke(verb, args)).toMatchObject({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+      // Only an Undo's refusal names its cause.
+      expect(await invoke(verb, args)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue.",
+        ...(verb === "historyUndo" ? unexplained : {}) });
       context.readOnly = false; operation.workspace.shareView = {};
       expect(await invoke(verb, args)).toMatchObject({ ok: false });
       operation.workspace.shareView = undefined;
@@ -955,7 +959,8 @@ describe("CLI socket server", () => {
     const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
-    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." };
+    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash.",
+      refusal: { code: "unexplained" } };
     expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
     const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
     expect(await undoOperation({ root: workspaceRoot, home: stateDir, request }, { operationId })).toEqual(refusal);

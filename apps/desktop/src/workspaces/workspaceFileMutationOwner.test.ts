@@ -1676,15 +1676,16 @@ it("admits operation Undo through the mutation owner and refuses missing recover
   await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, workspaceId: "other" })).rejects.toThrow();
   await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, operationId: "11111111-1111-4111-8111-111111111111" })).rejects.toThrow();
   expect(h.history.readHistoryPage).not.toHaveBeenCalled();
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself." });
+  const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual(refused("Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself."));
   h.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null } as never);
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual(refused("Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash."));
   expect(h.history.undoHistoryOperation).not.toHaveBeenCalled();
   h.workspace.readOnly = true;
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual(refused("History operations require the owning workspace. Open it to continue."));
   h.workspace.readOnly = false;
   h.workspace.shareView = { access: "read-only" };
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual(refused("History operations require the owning workspace. Open it to continue."));
 });
 
 it("returns a person's move operation and successfully undoes it without capture", async () => {

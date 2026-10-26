@@ -1,7 +1,9 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
-import { isComposingKey, isDeleteKey } from "../ui/keys";
+import { isComposingKey, isContextMenuKey, isDeleteKey } from "../ui/keys";
+import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
+import { useRequestSequence } from "../useRequestSequence";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
@@ -32,7 +34,13 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
-import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type {
+  DeleteWorkspacePathResult,
+  ExplorerMenuCommand,
+  ExplorerMenuEntry,
+  MoveWorkspacePathResult,
+  WorkspaceFileEntry,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
@@ -41,9 +49,17 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  pendingTreeMoveSettled,
+  pendingTreeChangeSettled,
+  type AnsweredTreeChange,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
+import {
+  doneNotice,
+  operationWord,
+  undoneNotice,
+  undoRefusedNotice,
+  type RecordedTreeChange,
+} from "./explorerOperationNotices";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
   parseTab,
@@ -71,14 +87,17 @@ export type TreeChangeOperation = {
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
 // multi-select, drag-move, pins, keyboard nav (ported file-tree-nav), and the
-// native context menu via the closed showExplorerMenu invoke. The explorer is
+// context menu, drawn here from the entries main returns. The explorer is
 // never a privileged writer: every mutation is an IPC the watcher observes,
-// so each op lands in history as an ordinary change set.
+// so each op lands in history as an ordinary change set, and a rename, move
+// or delete main recorded offers Undo on its notice.
 
 export interface ExplorerProps {
   workspaceId: string;
   files: WorkspaceFileEntry[];
   folders: string[];
+  // The request of the listing `files` and `folders` came from.
+  listingRequest: number;
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   dirtyPaths: ReadonlySet<string>;
@@ -144,7 +163,7 @@ export interface ExplorerProps {
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   // Import into targetDir ("" = root): the folder that was dropped on, or the
-  // folder whose context menu ran "Import Files…". Main re-validates it.
+  // folder whose context menu ran "Import files…". Main re-validates it.
   onImportFiles: (droppedPaths?: string[], targetDir?: string) => void;
   // Share mounts: refresh every mount in this workspace / remove the mount
   // that owns the given path (shared-with-me/<label>/…).
@@ -158,10 +177,15 @@ export interface ExplorerProps {
   // "Share…": offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
-  onRefresh: () => void;
-  // Failed tree operations go to the shell's error toast and Notices row.
-  onError: (message: string, cause?: unknown) => void;
-  // "New Collection…" from the main-owned context menu: opens the shell's
+  // Asks for a listing and answers its request.
+  onRefresh: () => number;
+  // Failed tree operations go to the shell's error toast and Notices row,
+  // with Try again when asking again can succeed.
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // A finished rename, move or delete: a toast and a Notices row, with Undo
+  // while main can still reverse it.
+  onNotice: (message: string, undo?: () => void) => void;
+  // "New collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
   onNewCollection: (targetDir: string) => void;
@@ -446,6 +470,91 @@ function nextChangeId(): string {
   return `pending-${editIdCounter}`;
 }
 
+// The context menu that is open: what was right-clicked, where, whether a
+// key opened it, and the entries main returned for it.
+type OpenMenu = {
+  id: number;
+  workspaceId: string;
+  kind: "file" | "folder" | "root";
+  path?: string;
+  at: { x: number; y: number };
+  keyboard: boolean;
+  entries: ExplorerMenuEntry[];
+};
+
+// The keys the tree itself answers, shown beside the rows that run the same action.
+function explorerMenuShortcut(id: ExplorerMenuCommand): { label: string; keys: string } | undefined {
+  if (id === "rename") return { label: "F2", keys: "F2" };
+  if (id !== "delete") return undefined;
+  return window.dohcDesktop?.platform === "darwin"
+    ? { label: "⌘⌫", keys: "Meta+Backspace" }
+    : { label: "Del", keys: "Delete" };
+}
+
+// The Menu rows for the entries main returned, in main's order and words. A
+// row that removes something reads in the danger color. Exported for the
+// states page, which draws the same rows.
+export function explorerMenuItems(
+  entries: readonly ExplorerMenuEntry[],
+  pick: (id: ExplorerMenuCommand) => void,
+): MenuEntry[] {
+  return entries.map((entry) => {
+    if (entry.kind === "separator") return MENU_SEPARATOR;
+    const shortcut = explorerMenuShortcut(entry.id);
+    return {
+      id: entry.id,
+      label: entry.label,
+      testId: `explorer-menu-item-${entry.id}`,
+      ...(entry.id === "delete" || entry.id === "unmount-share" ? { danger: true } : {}),
+      ...(shortcut ? { shortcut } : {}),
+      onSelect: () => pick(entry.id),
+    };
+  });
+}
+
+// Room for the longest label main returns, "Remove share from workspace".
+export const EXPLORER_MENU_WIDTH = 232;
+
+// Renames, moves and deletes are History operations; creates are not.
+function undoableKind(change: PendingTreeChange): change is RecordedTreeChange["change"] {
+  return change.kind !== "create-file" && change.kind !== "create-folder";
+}
+
+// What a rename, move or delete answers about its History operation.
+type OperationAnswer = Pick<MoveWorkspacePathResult & DeleteWorkspacePathResult, "operationId" | "undo">;
+
+// A change main recorded as a History operation, which its notice can undo.
+function recordedChange(
+  change: RecordedTreeChange["change"],
+  result: OperationAnswer | undefined,
+): RecordedTreeChange | null {
+  if (!result?.operationId) return null;
+  const undo = result.undo;
+  return {
+    change,
+    operationId: result.operationId,
+    undoable: undo?.available === true,
+    ...(undo?.available === false ? { noUndo: undo.reason } : {}),
+  };
+}
+
+// Whether a contextmenu event is the browser's own for the Menu key or
+// Shift+F10, which already opened the menu. Answers true once.
+function fromMenuKey(keyboardMenu: { current: boolean }): boolean {
+  const keyed = keyboardMenu.current;
+  keyboardMenu.current = false;
+  return keyed;
+}
+
+// An Undo main refused, or finished only in part. A person reads `words`.
+// The message is main's own text, which Copy keeps when the words differ.
+class UndoRefusedError extends Error {
+  constructor(reason: string, readonly retry: boolean, readonly words = reason) {
+    super(reason);
+    this.name = "UndoRefusedError";
+  }
+}
+
 // Memoized like TreeRow and for the same reason: the workspace shell re-renders
 // on every lane commit, and with a stabilized prop set (the shell's side of the
 // contract) the whole tree bails instead of reconciling per row.
@@ -454,6 +563,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     workspaceId,
     onRefresh,
     onError,
+    onNotice,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -471,7 +581,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (count, group) => count + group.tabs.length,
     0,
   );
-  const [pending, setPending] = useState<PendingTreeChange[]>([]);
+  const [pending, setPending] = useState<AnsweredTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
   const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
   const [filesExpanded, setFilesExpanded] = useState(true);
@@ -495,6 +605,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   collectionFoldersRef.current = props.collectionFolders;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
+  const [menu, setMenu] = useState<OpenMenu | null>(null);
+  // The newest menu request is the only one that may open; closing the menu
+  // or leaving the workspace retires it.
+  const menuRequests = useRequestSequence([workspaceId]);
+  // Closed while rendering, not in an effect: a menu opened in one workspace
+  // must never draw, or run a pick, in the next.
+  if (menu && menu.workspaceId !== workspaceId) setMenu(null);
+  // Set when the Menu key or Shift+F10 opened the menu. The browser may
+  // follow those keys with its own contextmenu event, which must not open a
+  // second menu at the pointer.
+  const keyboardMenu = useRef(false);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
@@ -550,15 +671,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // Prune pending changes the authoritative refresh has confirmed.
+  // Prune pending changes a listing has settled. `unsettled` below leaves
+  // them out from the render that shows that listing.
+  const { listingRequest } = props;
   useEffect(() => {
     setPending((current) => {
-      const next = current.filter(
-        (change) => !pendingTreeMoveSettled(change, props.files, props.folders),
-      );
+      const next = current.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
       return next.length === current.length ? current : next;
     });
-  }, [props.files, props.folders]);
+  }, [listingRequest]);
 
   // The open-editors list caps its height and scrolls internally, so the
   // active row must be brought back into view whenever it changes — or moves:
@@ -597,9 +718,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [],
   );
 
+  // The same array while no change settles, so a listing that changes
+  // nothing keeps the tree.
+  const unsettled = useMemo(() => {
+    const next = pending.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
+    return next.length === pending.length ? pending : next;
+  }, [pending, listingRequest]);
   const projected = useMemo(
-    () => applyPendingTreeMoves(props.files, props.folders, pending),
-    [props.files, props.folders, pending],
+    () => applyPendingTreeMoves(props.files, props.folders, unsettled),
+    [props.files, props.folders, unsettled],
   );
 
   const fileByPath = useMemo(() => {
@@ -845,14 +972,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Optimistic op runner: stage pending changes, run the IPCs, roll back the
   // failures (with a visible error), re-project shell paths for successes,
-  // and refresh — the watcher refresh then confirms and prunes.
+  // and ask for a listing, which settles the successes. Answers each
+  // success with what its IPC returned. `failed` reports a failure in the
+  // caller's own words instead.
   const runChanges = useCallback(
-    async (
+    async <Result,>(
       changes: PendingTreeChange[],
-      run: (change: PendingTreeChange) => Promise<unknown>,
-      afterBegin?: () => void,
-    ) => {
-      if (changes.length === 0) return;
+      run: (change: PendingTreeChange) => Promise<Result>,
+      options: { afterBegin?: () => void; failed?: (change: PendingTreeChange, cause: unknown) => void } = {},
+    ): Promise<{ change: PendingTreeChange; result: Result }[]> => {
+      if (changes.length === 0) return [];
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
       // text or values this begin rejected.
@@ -861,24 +990,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
         onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
-        return;
+        return [];
       } finally {
-        afterBegin?.();
+        options.afterBegin?.();
       }
       try {
         setPending((current) => [...current, ...changes]);
-        const succeeded: PendingTreeChange[] = [];
+        const succeeded: { change: PendingTreeChange; result: Result }[] = [];
         for (const change of changes) {
           try {
-            await run(change);
-            succeeded.push(change);
+            succeeded.push({ change, result: await run(change) });
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
+            if (options.failed) options.failed(change, cause);
+            else onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
           }
         }
         const changedExistingPath = succeeded.some(
-          (change) => change.kind !== "create-folder",
+          ({ change }) => change.kind !== "create-file" && change.kind !== "create-folder",
         );
         try {
           await operation?.settle(
@@ -889,8 +1018,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // then project the successful paths so the shell matches storage.
           onError(ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."), cause);
         }
-        if (succeeded.length > 0) onPathsChanged(succeeded);
-        onRefresh();
+        if (succeeded.length > 0) onPathsChanged(succeeded.map(({ change }) => change));
+        const listing = onRefresh();
+        const answered = new Set(succeeded.map(({ change }) => change.id));
+        setPending((current) => current.map((change) => (answered.has(change.id) ? { ...change, listing } : change)));
+        return succeeded;
       } finally {
         // Cell edits resume only after the successful paths are projected,
         // so nothing can enqueue against a path this operation just changed.
@@ -898,6 +1030,78 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
     },
     [onBeginChanges, onError, onPathsChanged, onRefresh],
+  );
+
+  // Undo runs as a tree change of its own: drafts settle first, the row
+  // moves back at once, and tabs follow it back. A refusal keeps its row in
+  // Notices with Try again. The shell runs it only while its workspace is
+  // open, so it still works after the side panel unmounts the Explorer.
+  const undoChanges = useCallback(
+    (recorded: readonly RecordedTreeChange[]): void => {
+      const byChange = new Map<string, RecordedTreeChange>();
+      const inverse = recorded.map((entry): PendingTreeChange => {
+        const id = nextChangeId();
+        byChange.set(id, entry);
+        const { change } = entry;
+        if ("path" in change) {
+          return { id, kind: change.kind === "delete-folder" ? "create-folder" : "create-file", path: change.path };
+        }
+        return { id, kind: change.kind, fromPath: change.toPath, toPath: change.fromPath };
+      });
+      void runChanges(
+        inverse,
+        async (change) => {
+          const entry = byChange.get(change.id)!;
+          const result = await bridge().undoHistoryOperation({
+            workspaceId,
+            operationId: entry.operationId,
+          });
+          if (!result.ok) {
+            throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal));
+          }
+          if (result.remaining.length > 0) {
+            throw new UndoRefusedError(
+              result.remaining.map((left) => left.reason).join(" "),
+              result.remaining.some((left) => left.retry),
+            );
+          }
+          // The change is undone, so it no longer waits for a listing.
+          setPending((current) => current.filter((pending) => pending.id !== entry.change.id));
+          return entry;
+        },
+        {
+          failed: (change, cause) => {
+            const entry = byChange.get(change.id)!;
+            const refused = cause instanceof UndoRefusedError;
+            onError(
+              refused ? cause.words : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
+              refused && cause.words === cause.message ? undefined : cause,
+              !refused || cause.retry ? () => undoChanges([entry]) : undefined,
+            );
+          },
+        },
+      ).then((succeeded) => {
+        if (succeeded.length > 0) onNotice(undoneNotice(succeeded.map(({ result }) => result)));
+      });
+    },
+    [onError, onNotice, runChanges, workspaceId],
+  );
+
+  // A finished rename, move or delete says so, with Undo while main can
+  // reverse every change in it. Results that are not History operations,
+  // such as a share view's, say nothing new.
+  const announce = useCallback(
+    (done: { change: PendingTreeChange; result: OperationAnswer | undefined }[]) => {
+      const recorded = done.flatMap(({ change, result }) => {
+        if (!undoableKind(change)) return [];
+        const entry = recordedChange(change, result);
+        return entry ? [entry] : [];
+      });
+      if (recorded.length === 0) return;
+      const notice = doneNotice(recorded);
+      onNotice(notice.message, notice.undoable ? () => undoChanges(recorded) : undefined);
+    },
+    [onNotice, undoChanges],
   );
 
   const performMoves = useCallback(
@@ -921,10 +1125,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               fromPath: change.fromPath,
               toPath: change.toPath,
             })
-          : Promise.resolve(),
-      );
+          : Promise.resolve(undefined),
+      ).then(announce);
     },
-    [runChanges, workspaceId],
+    [announce, runChanges, workspaceId],
   );
 
   const commitRename = useCallback(
@@ -956,10 +1160,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         },
         // Remove this input in the same commit that stages the renamed row.
-        () => setEditing(current => current === edit ? null : current),
-      );
+        { afterBegin: () => setEditing(current => current === edit ? null : current) },
+      ).then(announce);
     },
-    [runChanges, workspaceId],
+    [announce, runChanges, workspaceId],
   );
 
   const commitCreateFolder = useCallback(
@@ -992,10 +1196,21 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       void runChanges(changes, (change) =>
         "path" in change
           ? bridge().deleteWorkspacePath({ workspaceId, relativePath: change.path })
-          : Promise.resolve(),
-      );
+          : Promise.resolve(undefined),
+      ).then(announce);
     },
-    [runChanges, workspaceId, isFolderPath],
+    [announce, runChanges, workspaceId, isFolderPath],
+  );
+
+  // A delete goes to the trash with a recovery record, so it runs at once
+  // and its notice offers Undo. A share view's delete has no trash and no
+  // Undo; it still asks first and names how the change can be taken back.
+  const requestDelete = useCallback(
+    (paths: string[]) => {
+      if (props.shareView) setConfirmDelete(paths);
+      else performDeletes(paths);
+    },
+    [performDeletes, props.shareView],
   );
 
   const exportZip = useCallback(
@@ -1086,21 +1301,63 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [onToggleFolder],
   );
 
-  // ---- context menu (native, main-owned over the closed tuple) ----
+  // ---- context menu (main decides the entries, the Menu part draws them) ----
 
-  const dispatchMenu = useCallback(
-    async (
-      kind: "file" | "folder" | "root",
+  // Asks main what it offers here, then opens at `at`. Nothing is drawn
+  // until main answers, and a menu main leaves empty does not open.
+  const openMenu = useCallback(
+    (
+      kind: OpenMenu["kind"],
       path: string | undefined,
       pinnedRow: boolean,
+      at: OpenMenu["at"],
+      keyboard: boolean,
     ) => {
-      const command = await bridge().showExplorerMenu({
-        workspaceId,
-        ...(path !== undefined ? { path } : {}),
-        kind,
-        pinned: pinnedRow,
-      });
-      if (command === null) return;
+      const request = menuRequests.next();
+      // Escape or a press anywhere before main answers retires this open, as
+      // either would close the menu once drawn.
+      const waiting = new AbortController();
+      const retire = () => {
+        if (menuRequests.isCurrent(request)) menuRequests.next();
+      };
+      window.addEventListener("pointerdown", retire, { capture: true, signal: waiting.signal });
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") retire();
+      }, { capture: true, signal: waiting.signal });
+      void bridge()
+        .readExplorerMenu({
+          workspaceId,
+          ...(path !== undefined ? { path } : {}),
+          kind,
+          pinned: pinnedRow,
+        })
+        .finally(() => waiting.abort())
+        .then(
+          (entries) => {
+            if (!menuRequests.isCurrent(request) || entries.length === 0) return;
+            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), at, keyboard, entries });
+          },
+          (cause) => {
+            if (menuRequests.isCurrent(request)) {
+              onError(ipcErrorMessage(cause, "dohc could not open this menu."), cause);
+            }
+          },
+        );
+    },
+    [menuRequests, onError, workspaceId],
+  );
+
+  const closeMenu = useCallback(() => {
+    menuRequests.next();
+    setMenu(null);
+  }, [menuRequests]);
+
+  const runMenuCommand = useCallback(
+    (
+      kind: OpenMenu["kind"],
+      path: string | undefined,
+      command: ExplorerMenuCommand,
+    ) => {
       const targetDir =
         kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
@@ -1119,7 +1376,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         case "delete":
           if (path) {
             const selected = selectionRef.current;
-            setConfirmDelete(selected.has(path) ? [...selected] : [path]);
+            requestDelete(selected.has(path) ? [...selected] : [path]);
           }
           break;
         case "pin":
@@ -1142,7 +1399,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           if (path) props.onUnmountShare(path);
           break;
         case "open-externally":
-          // Main performed the containment-checked reveal already.
+          // main checks the path is inside the workspace before the OS sees it.
+          if (path) {
+            void bridge()
+              .revealExplorerPath({ workspaceId, path })
+              .catch((cause) =>
+                onError(ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in its folder.`), cause),
+              );
+          }
           break;
       }
     },
@@ -1150,7 +1414,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       workspaceId,
       beginCreateFolder,
       beginRename,
+      requestDelete,
       onTogglePin,
+      onError,
       exportZip,
       props.onImportFiles,
       props.onShare,
@@ -1161,23 +1427,71 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     ],
   );
 
+  // A right-click focuses its row first, so the menu gives focus back to it.
   const onRowContextMenu = useCallback(
     (path: string, event: MouseEvent) => {
       event.preventDefault();
       event.stopPropagation();
+      if (fromMenuKey(keyboardMenu)) return;
       if (!selectionRef.current.has(path)) selectSingle(path);
-      const isFolder = isFolderPath(path);
-      void dispatchMenu(isFolder ? "folder" : "file", path, props.pinned.includes(path));
+      rowRefs.current.get(path)?.focus({ preventScroll: true });
+      openMenu(isFolderPath(path) ? "folder" : "file", path, props.pinned.includes(path), {
+        x: event.clientX,
+        y: event.clientY,
+      }, false);
     },
-    [selectSingle, isFolderPath, dispatchMenu, props.pinned],
+    [selectSingle, isFolderPath, openMenu, props.pinned],
+  );
+
+  const onPinnedContextMenu = useCallback(
+    (path: string, event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (fromMenuKey(keyboardMenu)) return;
+      event.currentTarget.focus({ preventScroll: true });
+      openMenu(isFolderPath(path) ? "folder" : "file", path, true, { x: event.clientX, y: event.clientY }, false);
+    },
+    [isFolderPath, openMenu],
   );
 
   const onContainerContextMenu = useCallback(
     (event: MouseEvent) => {
       event.preventDefault();
-      void dispatchMenu("root", undefined, false);
+      if (fromMenuKey(keyboardMenu)) return;
+      openMenu("root", undefined, false, { x: event.clientX, y: event.clientY }, false);
     },
-    [dispatchMenu],
+    [openMenu],
+  );
+
+  // The Menu key and Shift+F10 open the focused row's menu under the row, or
+  // the workspace's menu when no row has focus.
+  const openMenuFromKeyboard = useCallback(
+    (target: EventTarget) => {
+      // A right-click presses a pointer before its contextmenu event; the
+      // browser's event for these keys comes without one.
+      if (!keyboardMenu.current) {
+        keyboardMenu.current = true;
+        window.addEventListener("pointerdown", () => { keyboardMenu.current = false; }, { capture: true, once: true });
+      }
+      const row =
+        target instanceof HTMLElement
+          ? target.closest<HTMLElement>('[data-testid="tree-row"], [data-testid="pinned-row"]')
+          : null;
+      const path = row?.dataset.path;
+      if (row && path !== undefined) {
+        const box = row.getBoundingClientRect();
+        const pinnedRow = row.dataset.testid === "pinned-row";
+        if (!pinnedRow && !selectionRef.current.has(path)) selectSingle(path);
+        openMenu(isFolderPath(path) ? "folder" : "file", path, pinnedRow || props.pinned.includes(path), {
+          x: box.left,
+          y: box.bottom,
+        }, true);
+        return;
+      }
+      const box = fileTreeRef.current?.getBoundingClientRect();
+      openMenu("root", undefined, false, { x: box?.left ?? 0, y: box?.top ?? 0 }, true);
+    },
+    [selectSingle, isFolderPath, openMenu, props.pinned],
   );
 
   // ---- drag and drop ----
@@ -1362,6 +1676,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onTreeKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (editing) return;
+      if (isContextMenuKey(event)) {
+        event.preventDefault();
+        openMenuFromKeyboard(event.target);
+        return;
+      }
       if (event.key === "F2") {
         event.preventDefault();
         const target = focusedPath ?? [...selection][0];
@@ -1371,7 +1690,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (isDeleteKey(event)) {
         event.preventDefault();
         const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
-        if (targets.length > 0) setConfirmDelete(targets);
+        if (targets.length > 0) requestDelete(targets);
         return;
       }
       const action = navigateTree(rows, focusedPath, event.key);
@@ -1406,6 +1725,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       focusedPath,
       selection,
       beginRename,
+      openMenuFromKeyboard,
+      requestDelete,
       isFolderPath,
       focusRow,
       onSetFolderExpanded,
@@ -1931,15 +2252,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               ? onSetFolderExpanded(path, true)
                               : onOpenFile(path)
                           }
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void dispatchMenu(
-                              isFolderPath(path) ? "folder" : "file",
-                              path,
-                              true,
-                            );
-                          }}
+                          onContextMenu={(event) => onPinnedContextMenu(path, event)}
                           className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
                           {props.appFolders?.has(path) ? (
@@ -1981,6 +2294,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         </section>
       </nav>
 
+      {/* Outside the tree, so a right-click on the menu never reaches the
+          tree's own menu. Each open is its own Menu, which takes focus back
+          to what had it when it opened. */}
+      {menu ? (
+        <Menu
+          key={menu.id}
+          label={menu.path === undefined ? "Files" : basenameOf(menu.path)}
+          at={menu.at}
+          fromKeyboard={menu.keyboard}
+          open
+          onOpenChange={(open) => {
+            if (!open) closeMenu();
+          }}
+          items={explorerMenuItems(menu.entries, (id) => runMenuCommand(menu.kind, menu.path, id))}
+          width={EXPLORER_MENU_WIDTH}
+          menuTestId="explorer-menu"
+        />
+      ) : null}
+
       {confirmDelete ? (
         <Overlay onClose={() => setConfirmDelete(null)}>
           <div
@@ -1997,14 +2329,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 </span>
                 ?
               </p>
+              {/* Only a share view asks: its delete has no trash behind it. */}
               <p className="mb-0 mt-2 text-xs text-muted">
-                {props.shareView
-                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                      confirmDelete.length === 1 ? "it" : "them"
-                    } from. ${
-                      props.shareView.granterEmail ?? "The person who shared it"
-                    } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
+                {`${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+                  confirmDelete.length === 1 ? "it" : "them"
+                } from. ${
+                  props.shareView?.granterEmail ?? "The person who shared it"
+                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
               </p>
               {confirmDelete.length > 1 ? (
                 <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">

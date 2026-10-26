@@ -607,6 +607,7 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
+    newestFilesRequest,
     prepareRestoredTabPruning,
   } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
@@ -937,7 +938,7 @@ export function DesktopWorkspaceShell(props: {
   // polls and subscriptions off onError, so a fresh arrow per shell render
   // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string, cause?: unknown) => reportShellFailure({ message, cause }),
+    (message: string, cause?: unknown, retry?: () => void) => reportShellFailure({ message, cause, retry }),
     [reportShellFailure],
   );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
@@ -2851,6 +2852,22 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  // The Explorer's notices and failures, held to their workspace rather than
+  // to the Explorer, which the side panel unmounts while the workspace stays
+  // open. Undo and Try again run only while that workspace is open here.
+  const explorerReports = useMemo(() => {
+    const owner = workspaceId;
+    const current = () => workspaceIdRef.current === owner;
+    const whileCurrent = (run?: () => void) => run && (() => { if (current()) run(); });
+    return {
+      onError: (message: string, cause?: unknown, retry?: () => void) => {
+        if (current()) reportFailureMessage(message, cause, whileCurrent(retry));
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (current()) showSuccessNotice(message, whileCurrent(undo));
+      },
+    };
+  }, [workspaceId, reportFailureMessage, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
@@ -3893,7 +3910,8 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
-  }, [refreshFiles, reportShellError]);
+    return newestFilesRequest();
+  }, [refreshFiles, newestFilesRequest, reportShellError]);
   const checkForDesktopUpdates = useCallback(
     () => runUpdateCheck(reportShellError),
     [reportShellError],
@@ -5105,6 +5123,7 @@ export function DesktopWorkspaceShell(props: {
         workspaceId={workspaceId}
         files={files}
         folders={folders}
+        listingRequest={fileListingCommit?.request ?? 0}
         editorGroups={wb.editorGroups}
         activeEditorGroup={wb.activeEditorGroup}
         dirtyPaths={dirtyPaths}
@@ -5148,7 +5167,8 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={reportFailureMessage}
+        onError={explorerReports.onError}
+        onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
     </>

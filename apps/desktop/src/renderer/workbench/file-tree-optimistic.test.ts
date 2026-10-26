@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type { FileRow, FolderInput } from './path-tree'
 import {
   applyPendingTreeMoves,
-  pendingTreeMoveSettled,
+  pendingTreeChangeSettled,
   projectTreePath,
+  type AnsweredTreeChange,
   type PendingTreeChange,
   type PendingTreeMove,
 } from './file-tree-optimistic'
@@ -69,53 +70,43 @@ describe('optimistic file tree moves', () => {
     )
   })
 
-  it('keeps a pending move until the live projection catches up', () => {
-    const move: PendingTreeMove = {
+  it('keeps a change main has not answered through every listing', () => {
+    const move: AnsweredTreeChange = {
       id: 'move-1',
       kind: 'file',
       fromPath: 'inbox/note.md',
       toPath: 'projects/alpha/note.md',
     }
 
-    expect(pendingTreeMoveSettled(move, files, folders)).toBe(false)
-    expect(
-      pendingTreeMoveSettled(
-        move,
-        [{ ...files[0]!, path: 'projects/alpha/note.md' }],
-        folders,
-      ),
-    ).toBe(true)
+    expect(pendingTreeChangeSettled(move, 0)).toBe(false)
+    expect(pendingTreeChangeSettled(move, 99)).toBe(false)
   })
 
-  it('settles a pending folder move when the destination appears', () => {
-    const move: PendingTreeMove = {
-      id: 'move-2',
-      kind: 'folder',
-      fromPath: 'projects/alpha',
-      toPath: 'archive/alpha',
+  it('settles an answered change with its listing or a later one, never an earlier one', () => {
+    const deleted: AnsweredTreeChange = {
+      id: 'delete-1',
+      kind: 'delete-file',
+      path: 'inbox/note.md',
+      listing: 4,
     }
 
-    expect(pendingTreeMoveSettled(move, files, folders)).toBe(false)
-    expect(
-      pendingTreeMoveSettled(move, files, [...folders, 'archive/alpha']),
-    ).toBe(true)
-    expect(
-      pendingTreeMoveSettled(
-        move,
-        [{ ...files[1]!, path: 'archive/alpha/spec.md' }],
-        folders,
-      ),
-    ).toBe(true)
+    expect(pendingTreeChangeSettled(deleted, 3)).toBe(false)
+    expect(pendingTreeChangeSettled(deleted, 4)).toBe(true)
+    expect(pendingTreeChangeSettled(deleted, 5)).toBe(true)
   })
 
-  it('projects pending folder creates into the rendered tree rows', () => {
+  it('projects pending creates into the rendered tree rows', () => {
     const pending: PendingTreeChange[] = [
+      { id: 'create-file', kind: 'create-file', path: 'ideas/new.md' },
       { id: 'create-folder', kind: 'create-folder', path: 'ideas' },
     ]
 
     const projected = applyPendingTreeMoves(files, folders, pending)
 
-    expect(projected.files).toEqual(files)
+    expect(projected.files.map((file) => file.path)).toContain('ideas/new.md')
+    expect(projected.files.find((file) => file.path === 'ideas/new.md')).toEqual(
+      { path: 'ideas/new.md', kind: 'file' },
+    )
     expect(projected.folders).toContain('ideas')
   })
 
@@ -131,27 +122,4 @@ describe('optimistic file tree moves', () => {
     expect(projectTreePath('projects/alpha/spec.md', pending)).toBeNull()
   })
 
-  it('keeps pending creates and deletes until the live projection catches up', () => {
-    const createFolder: PendingTreeChange = {
-      id: 'create-folder',
-      kind: 'create-folder',
-      path: 'ideas',
-    }
-    const deleteFile: PendingTreeChange = {
-      id: 'delete-file',
-      kind: 'delete-file',
-      path: 'inbox/note.md',
-    }
-
-    expect(pendingTreeMoveSettled(createFolder, files, folders)).toBe(false)
-    expect(pendingTreeMoveSettled(createFolder, files, [...folders, 'ideas'])).toBe(true)
-    expect(pendingTreeMoveSettled(deleteFile, files, folders)).toBe(false)
-    expect(
-      pendingTreeMoveSettled(
-        deleteFile,
-        files.filter((file) => file.path !== 'inbox/note.md'),
-        folders,
-      ),
-    ).toBe(true)
-  })
 })

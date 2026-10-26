@@ -9,9 +9,11 @@ import { registerWorkspaceHeadingsIpcHandlers, createWorkspaceFilesIpc } from ".
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { registerOperations } from "./operationTable";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
+import { createExplorerMenuIpc } from "./explorerMenuIpc";
+import { explorerMenuOperations } from "./explorerMenuOperations";
 import { CHANNELS } from "./channels";
 import * as visibilityReads from "../workspaces/workspaceListingVisibility";
-import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, type WorkspaceListingVisibility } from "./bridgeContract";
+import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, ExplorerMenuEntries, type WorkspaceListingVisibility } from "./bridgeContract";
 import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
@@ -133,11 +135,18 @@ async function harness() {
   let canInstall = false;
   registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler, assertTrustedSender: trusted, app: { isPackaged: false },
-    exactRendererWorkspaceReferences: references, sharedViewOf: () => sharedScope,
+    exactRendererWorkspaceReferences: references,
     windowForSender: () => undefined, buildFromTemplate: buildMenu,
-    currentUpdateState: () => ({ canInstall }), ensureOwnedProjectionCurrent: repair,
-    shell: { showItemInFolder: reveal },
+    currentUpdateState: () => ({ canInstall }),
   });
+  registerOperations<typeof explorerMenuOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender: trusted,
+    withActiveWorkspace: (event: Event, id, message, work) => withOperation(event.sender, id, message, work),
+  }, explorerMenuOperations, createExplorerMenuIpc<Event, Workspace, Operation>({
+    sharedViewOf: () => sharedScope, ensureOwnedProjectionCurrent: repair,
+    shell: { showItemInFolder: reveal }, platform: "linux",
+  }));
   const invoke = async (channel: string, payload: unknown = { workspaceId: "workspace" }, isTrusted = true) => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`missing ${channel}`);
@@ -261,7 +270,8 @@ describe("registered workspace file handlers", () => {
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
       workspaceFileOperations.openFileExternally.channel,
-      CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
+      CHANNELS.listWorkspaceHeadings, CHANNELS.showWorkbenchMenu,
+      explorerMenuOperations.readExplorerMenu.channel, explorerMenuOperations.revealExplorerPath.channel,
     ]);
     for (const channel of h.handlers.keys()) {
       const payload = channel === workspaceFileOperations.readWorkspaceText.channel
@@ -491,13 +501,11 @@ describe("registered native menu handlers", () => {
 
   it("derives sharing and update controls from main-owned state", async () => {
     const h = await harness();
-    await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
-    expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(true);
-    h.buildMenu.mockClear();
+    const file = { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false };
+    expect(await h.invoke(explorerMenuOperations.readExplorerMenu.channel, file)).toContainEqual({ kind: "item", label: "Share…", id: "share" });
     h.setSharedScope({ access: "view", ended: false });
-    await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
-    expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(false);
-    h.buildMenu.mockClear();
+    expect(await h.invoke(explorerMenuOperations.readExplorerMenu.channel, file)).not.toContainEqual(expect.objectContaining({ id: "share" }));
+    expect(h.buildMenu).not.toHaveBeenCalled();
     h.setCanInstall(true);
     await h.invoke(CHANNELS.showWorkbenchMenu, { workspaceId: "workspace", context: "status" });
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
@@ -510,11 +518,10 @@ describe("registered native menu handlers", () => {
   it("offers Share… on a workspace without sync, but not on the root, a mount path or a shared view", async () => {
     const h = await harness();
     expect(h.workspace.remote).toBeUndefined();
-    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") => {
-      h.buildMenu.mockClear();
-      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
-      return h.buildMenu.mock.calls[0]![0].some((item) => item.label === "Share…");
-    };
+    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") =>
+      ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, { workspaceId: "workspace", path, kind, pinned: false }),
+      ).some((entry) => entry.kind === "item" && entry.label === "Share…");
     expect(await offersShare("notes.md", "file")).toBe(true);
     expect(await offersShare("notes", "folder")).toBe(true);
     expect(await offersShare(undefined, "root")).toBe(false);
@@ -524,8 +531,9 @@ describe("registered native menu handlers", () => {
     expect(await offersShare("notes.md", "file")).toBe(false);
   });
 
-  // main's own reading of the registry marker, through the native menu. The
-  // intact row proves the menu still offers writes when nothing is damaged.
+  // main's own reading of the registry marker, through the entries it
+  // returns. The intact row proves the menu still offers writes when nothing
+  // is damaged.
   it.each([
     ["intact", {}, true],
     ["no share id", { shareId: undefined }, false],
@@ -537,13 +545,23 @@ describe("registered native menu handlers", () => {
       grantedSelector: { paths: [], versionId: "main", access: "edit" }, ...damage,
     }));
     for (const [kind, path] of [["root", undefined], ["folder", "notes"]] as const) {
-      h.buildMenu.mockClear();
-      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
-      const labels = h.buildMenu.mock.calls[0]![0].map((item) => item.label);
-      for (const create of ["New File", "New Collection…", "Import Files…"]) {
-        expect(labels.includes(create), `${kind}: ${create}`).toBe(offered);
+      const entries = ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, { workspaceId: "workspace", path, kind, pinned: false }));
+      const ids = entries.flatMap((entry) => (entry.kind === "item" ? [entry.id] : []));
+      for (const create of ["new-file", "new-collection", "import-files"] as const) {
+        expect(ids.includes(create), `${kind}: ${create}`).toBe(offered);
       }
     }
+  });
+
+  it("reads the menu inside the sender's own workspace", async () => {
+    const h = await harness();
+    await expect(h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+      workspaceId: "foreign", path: "notes.md", kind: "file", pinned: false,
+    })).rejects.toThrow("changed workspaces");
+    await expect(h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+      workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false,
+    }, false)).rejects.toThrow("untrusted");
   });
 
   it("reads test choices per invoke and rejects stale menu results", async () => {
@@ -570,16 +588,14 @@ describe("registered native menu handlers", () => {
 
   it("contains explorer reveals before passing a path to the OS", async () => {
     const h = await harness();
-    vi.stubEnv("DOHC_DESKTOP_TEST", "1");
-    vi.stubEnv("DOHC_TEST_EXPLORER_MENU_CHOICE", "open-externally");
-    await expect(h.invoke(CHANNELS.showExplorerMenu, {
-      workspaceId: "workspace", path: "../outside.md", kind: "file", pinned: false,
+    await expect(h.invoke(explorerMenuOperations.revealExplorerPath.channel, {
+      workspaceId: "workspace", path: "../outside.md",
     })).rejects.toThrow();
     expect(h.reveal).not.toHaveBeenCalled();
     await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
-    await expect(h.invoke(CHANNELS.showExplorerMenu, {
-      workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false,
-    })).resolves.toBe("open-externally");
+    await expect(h.invoke(explorerMenuOperations.revealExplorerPath.channel, {
+      workspaceId: "workspace", path: "notes.md",
+    })).resolves.toBeUndefined();
     expect(h.reveal).toHaveBeenCalledWith(expect.stringMatching(/notes\.md$/));
   });
 });

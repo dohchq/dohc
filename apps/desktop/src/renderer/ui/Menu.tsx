@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -25,6 +26,8 @@ export type MenuItem = {
   /** A row that removes something reads in the danger color. */
   danger?: boolean;
   icon?: ReactNode;
+  /** The key that runs the row's action outside the menu, shown after its label. `keys` is its aria-keyshortcuts. */
+  shortcut?: { label: string; keys: string };
   title?: string;
   testId?: string;
   data?: Readonly<Record<`data-${string}`, string>>;
@@ -61,7 +64,7 @@ export type MenuTriggerProps = {
   ref: RefObject<HTMLButtonElement | null>;
   "aria-haspopup": "menu";
   "aria-expanded": boolean;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 };
 
@@ -181,18 +184,22 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus is the active row: the
-// fill and the accent outline, whether the keyboard or the pointer moved it,
-// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
-// row's. The list scrolls, so the outline sits inside the row, where the
-// scroller cannot clip it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row. A
+// menu opened with the pointer marks none: focus waits on the first row for
+// the keys, and the hover fill follows the pointer, as in a native menu. A
+// menu opened from the keyboard, or the first key that moves, marks the
+// focused row with the fill and the accent outline, as MENU_ACTIVE_OPTION
+// draws it, and the mark then follows focus wherever the pointer moves it.
+// The fill alone would match the current row's. The list scrolls, so the
+// outline sits inside the row, where the scroller cannot clip it on a row
+// scrolled to an edge.
+const MARKED = "focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2";
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
-  rest: { base: `${MENU_ROW_TONE.rest} focus:text-ink`, hover: "hover:bg-hover hover:text-ink" },
-  current: { base: MENU_ROW_TONE.current, hover: "" },
-  danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
+  rest: { base: MENU_ROW_TONE.rest, marked: "focus:text-ink", hover: "hover:bg-hover hover:text-ink" },
+  current: { base: MENU_ROW_TONE.current, marked: "", hover: "" },
+  danger: { base: MENU_ROW_TONE.danger, marked: "", hover: "hover:bg-hover" },
 };
 
 function isField(row: MenuRow): row is MenuField {
@@ -214,6 +221,10 @@ function isField(row: MenuRow): row is MenuField {
  * owner that answers inside the menu (a copied label, a refusal, a field)
  * passes `closeOnPick={false}` and closes when it is done.
  *
+ * A context menu passes `at` instead of a trigger: the list opens at that
+ * point, below it or over it as the room allows, and focus goes back to what
+ * had it when the list opened, such as the row that was right-clicked.
+ *
  * A field takes the typed keys: letters, Space, Home and End stay in it, and
  * the arrows move to the rows around it. Its Escape ends the typing, and the
  * next one closes the menu.
@@ -226,6 +237,10 @@ export function Menu(props: {
   onOpenChange: (open: boolean) => void;
   /** The control that opens the list; the ••• icon button named `label` by default. */
   trigger?: (trigger: MenuTriggerProps) => ReactNode;
+  /** Where a context menu opens, in window coordinates. No trigger is drawn. */
+  at?: { x: number; y: number };
+  /** A context menu the keyboard opened marks its first row at once. A trigger's own keys mark it themselves. */
+  fromKeyboard?: boolean;
   /** The default trigger's test id. */
   testId?: string;
   /** The default trigger stays in its place but cannot open the list. */
@@ -246,6 +261,8 @@ export function Menu(props: {
   const width = props.width ?? MENU_WIDTH_PX;
   const [place, setPlace] = useState<Place | null>(null);
   const [pointerMoved, setPointerMoved] = useState(false);
+  // Whether focus shows as the active row. Cleared when the list closes.
+  const [marked, setMarked] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
   const rows = props.items.filter((entry): entry is MenuRow => entry !== MENU_SEPARATOR);
@@ -254,19 +271,27 @@ export function Menu(props: {
   const lead = rows.some((row) => !isField(row) && (row.icon !== undefined || row.checked !== undefined));
 
   // Measured before the first paint, at its full height, so the side with
-  // room is known before anything shows.
+  // room is known before anything shows. A context menu's point is a trigger
+  // with no size: the list starts at it, with no gap.
+  const at = props.at;
+  const fromKeyboard = props.fromKeyboard === true;
   useLayoutEffect(() => {
     if (!open) return;
-    const box = trigger.current?.getBoundingClientRect();
+    if (fromKeyboard) setMarked(true);
+    const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : trigger.current?.getBoundingClientRect();
+    const gap = at ? 0 : GAP_PX;
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
-      const above = box.top - GAP_PX - EDGE_PX;
+      // A trigger's list ends at its right edge; a context menu's starts at its point.
+      const left = at
+        ? Math.max(EDGE_PX, Math.min(at.x, window.innerWidth - EDGE_PX - width))
+        : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const below = window.innerHeight - box.bottom - gap - EDGE_PX;
+      const above = box.top - gap - EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - box.top + GAP_PX, maxHeight: above, above: true }
-          : { left, top: box.bottom + GAP_PX, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - box.top + gap, maxHeight: above, above: true }
+          : { left, top: box.bottom + gap, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.
@@ -274,8 +299,9 @@ export function Menu(props: {
     return () => {
       setPlace(null);
       setPointerMoved(false);
+      setMarked(false);
     };
-  }, [open, width]);
+  }, [open, width, at?.x, at?.y, fromKeyboard]);
 
   useLayoutEffect(() => {
     const id = refocus.current;
@@ -301,15 +327,28 @@ export function Menu(props: {
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
     if (inField && isComposingKey(event)) return;
+    // A key runs only a row a person can see marked. Until one is, Enter and
+    // Space mark the first row, as Down does. Space clicks on keyup, which the
+    // prevented keydown also stops.
+    if (!marked && !inField && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      setMarked(true);
+      rowElements.current[0]?.focus();
+      return;
+    }
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-    // A field keeps Home, End and the typed letters; the arrows leave it.
+    // A field keeps Home, End and the typed letters; the arrows leave it. The
+    // first key in a list with no marked row moves from outside it, so Down
+    // marks the first row and Up the last.
+    const from = marked || inField ? current() : event.key === "ArrowUp" ? count : -1;
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event, current(), rows.map((row, index) =>
+      ? moveInMenu(event, from, rows.map((row, index) =>
         "label" in row && typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
+      setMarked(true);
       rowElements.current[next]?.focus();
     } else if (event.key === "Escape") {
       // useDismiss already closed it; one Escape closes one surface.
@@ -326,10 +365,15 @@ export function Menu(props: {
     ref: trigger,
     "aria-haspopup": "menu",
     "aria-expanded": open,
-    onClick: () => onOpenChange(!open),
+    // Enter and Space click with no pointer press, so detail is 0.
+    onClick: (event) => {
+      setMarked(event.detail === 0);
+      onOpenChange(!open);
+    },
     onKeyDown: (event) => {
       if (event.key === "ArrowDown" && !open) {
         event.preventDefault();
+        setMarked(true);
         onOpenChange(true);
       }
     },
@@ -339,7 +383,7 @@ export function Menu(props: {
   return (
     // No box of its own: the trigger lays out where the owner puts it.
     <div ref={container} className="contents">
-      {props.trigger ? (
+      {at ? null : props.trigger ? (
         props.trigger(triggerProps)
       ) : (
         <IconButton {...triggerProps} disabled={props.disabled} data-testid={props.testId} aria-label={props.label} title={props.label} className="shrink-0">
@@ -434,6 +478,7 @@ export function Menu(props: {
                 aria-checked={entry.checked}
                 aria-current={entry.current || undefined}
                 aria-disabled={entry.disabled || undefined}
+                aria-keyshortcuts={entry.shortcut?.keys}
                 title={entry.title}
                 data-testid={entry.testId}
                 {...entry.data}
@@ -448,7 +493,7 @@ export function Menu(props: {
                   }
                 }}
                 onClick={() => pick(entry)}
-                className={`${ROW} ${tone.base} ${hover}`}
+                className={`${MENU_ROW} ${tone.base} ${marked ? `${MARKED} ${tone.marked}` : "outline-none"} ${hover}`}
               >
                 {lead ? (
                   <span className={`${MENU_ICON} ${entry.danger ? "" : "text-subtle"}`}>
@@ -456,6 +501,7 @@ export function Menu(props: {
                   </span>
                 ) : null}
                 <span className={MENU_LABEL}>{entry.label}</span>
+                {entry.shortcut ? <kbd aria-hidden className={MENU_SHORTCUT}>{entry.shortcut.label}</kbd> : null}
               </button>
             );
           })}

@@ -2,7 +2,7 @@
 // web app's file-tree-optimistic lib. Retyped for the desktop: FileRow is the
 // {path, kind} wire shape and folders are plain path strings (the pre-pivot
 // _id/title/source fabrication is gone). Pure: pending changes are projected
-// onto (files, folders) until the authoritative refresh confirms them.
+// onto (files, folders) until a listing after main's answer settles them.
 import type { FileRow, FolderInput } from './path-tree'
 
 export type PendingTreeMove = {
@@ -14,7 +14,7 @@ export type PendingTreeMove = {
 
 export type PendingTreeChange =
   | PendingTreeMove
-  | { id: string; kind: 'create-folder'; path: string }
+  | { id: string; kind: 'create-file' | 'create-folder'; path: string }
   | { id: string; kind: 'delete-file' | 'delete-folder'; path: string }
 
 // Not exported on the desktop (knip single-consumer rule): every caller
@@ -64,6 +64,12 @@ export function applyPendingTreeMoves(
   let nextFolders = [...folders]
 
   for (const change of moves) {
+    if (change.kind === 'create-file') {
+      if (!nextFiles.some((file) => file.path === change.path)) {
+        nextFiles.push({ path: change.path, kind: 'file' })
+      }
+      continue
+    }
     if (change.kind === 'create-folder') {
       if (!nextFolders.includes(change.path)) nextFolders.push(change.path)
       continue
@@ -83,31 +89,16 @@ export function applyPendingTreeMoves(
   return { files: nextFiles, folders: nextFolders }
 }
 
-export function pendingTreeMoveSettled(
-  move: PendingTreeChange,
-  files: ReadonlyArray<FileRow>,
-  folders: ReadonlyArray<FolderInput>,
+// A change main answered, with `listing`, the request of the first listing
+// asked for after that answer.
+export type AnsweredTreeChange = PendingTreeChange & { listing?: number }
+
+// That listing, or any later one, settles the change whatever paths it holds,
+// so a file put back at a changed path shows as itself. A listing already in
+// flight at the answer settles nothing.
+export function pendingTreeChangeSettled(
+  change: AnsweredTreeChange,
+  listing: number,
 ): boolean {
-  if (move.kind === 'create-folder') {
-    return folders.includes(move.path)
-  }
-  if (move.kind === 'delete-file') {
-    return !files.some((file) => file.path === move.path)
-  }
-  if (move.kind === 'delete-folder') {
-    return (
-      !folders.some((folder) => pathInsideFolder(folder, move.path)) &&
-      !files.some((file) => pathInsideFolder(file.path, move.path))
-    )
-  }
-  if (move.kind === 'file') {
-    return files.some((file) => file.path === move.toPath)
-  }
-  if (move.kind === 'folder') {
-    return (
-      folders.includes(move.toPath) ||
-      files.some((file) => pathInsideFolder(file.path, move.toPath))
-    )
-  }
-  return false
+  return change.listing !== undefined && listing >= change.listing
 }

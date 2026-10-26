@@ -25,6 +25,8 @@ vi.mock("node:fs/promises", async original => {
 });
 const person = { kind: "human", humanId: "local:test" } as const;
 const agent = { kind: "agent", agentId: "test-agent", onBehalfOf: "local:test" } as const;
+// A refused Undo whose cause main cannot name.
+const refused = (reason: string) => ({ ok: false, reason, refusal: { code: "unexplained" } });
 async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) {
   const root = await createTestScratch("delete-recovery-");
   const os = await createTestScratch("delete-recovery-os-");
@@ -197,10 +199,10 @@ describe("delete recovery", () => {
       release.resolve();
       expect(await pending).toMatchObject({ ok: true, trashed: true, undo: { available: false } });
       const reason = `Cannot undo the delete. folder/rowless.txt is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.`;
-      expect(await undo).toEqual({ ok: false, reason });
+      expect(await undo).toEqual(refused(reason));
       expect(await readDeleteRecovery(f.root, id)).toMatchObject({ noUndo: reason });
       expect((await readDeleteRecovery(f.root, id))?.staged).toBeUndefined();
-      expect(await f.undo(id)).toEqual({ ok: false, reason });
+      expect(await f.undo(id)).toEqual(refused(reason));
       expect(existsSync(join(f.root, "folder"))).toBe(false);
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally {
@@ -226,7 +228,7 @@ describe("delete recovery", () => {
     const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
     expect(result).toMatchObject({ undo: { available: false, paths: ["folder/rowless.txt"],
       reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` } });
-    expect(await f.undo(result.operationId!)).toEqual({ ok: false, reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` });
+    expect(await f.undo(result.operationId!)).toEqual(refused(`Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.`));
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("offers Undo for tracked-only files even after OS trash accepts", async () => {
@@ -240,7 +242,8 @@ describe("delete recovery", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     await f.write("folder/rowless.txt", "occupant");
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now occupies the old path. Move it first." });
+    expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now occupies the old path. Move it first.",
+      refusal: { code: "old-path-occupied", path: "folder/rowless.txt" } });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("occupant");
     expect(existsSync(join(f.root, "folder/tracked.txt"))).toBe(false);
@@ -258,7 +261,7 @@ describe("delete recovery", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     f.interrupt();
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "Interrupted after engine commit" });
+    expect(await f.undo(id)).toEqual(refused("Interrupted after engine commit"));
     expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(false);
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
     expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
@@ -276,7 +279,7 @@ describe("delete recovery", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     f.refuse("Cannot undo: tracked.txt occupies the old path");
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo: tracked.txt occupies the old path" });
+    expect(await f.undo(id)).toEqual(refused("Cannot undo: tracked.txt occupies the old path"));
     expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(false);
   });
   it.each(["not retained", "different bytes"])("keeps an occupant created after engine Undo in place (%s)", async body => {
@@ -330,7 +333,7 @@ describe("recovery durability and path authority", () => {
     const id = recovery(await f.remove());
     faults.beforeLink = async () => { faults.failRecord = true; };
     try {
-      expect(await f.undo(id)).toEqual({ ok: false, reason: "Interrupted after engine commit" });
+      expect(await f.undo(id)).toEqual(refused("Interrupted after engine commit"));
       expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
       faults.beforeLink = async () => { throw new Error("A replay tried to place twice"); };
       expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
@@ -350,7 +353,7 @@ describe("recovery durability and path authority", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     f.operation.workspace.readOnly = true;
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+    expect(await f.undo(id)).toEqual(refused("History operations require the owning workspace. Open it to continue."));
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
 });

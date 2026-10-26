@@ -189,7 +189,7 @@ describe("delete recovery failures", () => {
     const f = await fixture();
     const id = await deleted(f);
     f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("old tracked path occupied"));
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "old tracked path occupied" });
+    expect(await f.undo(id)).toEqual({ ok: false, reason: "old tracked path occupied", refusal: { code: "unexplained" } });
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
     const calls = f.history.undoHistoryOperation.mock.calls as unknown as [{ requestId: string }][];
     expect(calls.map(([input]) => input.requestId)).toEqual([`delete-undo:${id}`, `delete-undo:${id}`]);
@@ -253,7 +253,8 @@ describe("delete recovery failures", () => {
       expect(existsSync(join(f.root, ".dohc/local/trash", record!.staged!))).toBe(false);
       expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
-        reason: `Cannot undo the delete. folder is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
+        reason: `Cannot undo the delete. folder is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`,
+        refusal: { code: "unexplained" } });
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { faults.failRecord = false; }
   });
@@ -361,7 +362,7 @@ describe("delete recovery placement and receipts", () => {
       }
       const result = await f.undo(id);
       if (change === "parent link") {
-        expect(result).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now leads somewhere else." });
+        expect(result).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now leads somewhere else.", refusal: { code: "unexplained" } });
         return;
       }
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: change !== "source",
