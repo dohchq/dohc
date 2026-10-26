@@ -394,10 +394,34 @@ it("puts a removed first agent back in front of the one after it, so a later aut
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex", "default"], expect.any(String)));
 
-  // With Claude Code gone too, Codex goes back first.
+  // With Claude Code removed too, Codex goes behind Gemini, which was
+  // chosen after the Remove, rather than first.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
   onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["codex", "gemini"], expect.any(String)));
+  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex"], expect.any(String)));
+});
+
+it("gives automations back to the agent that woke them when its Remove is undone at once", async () => {
+  const claude = testAgent({ name: "Claude Code" });
+  const codex = testAgent({ name: "Codex", hue: "blue" });
+  // Claude in Terminal has no launch, so Claude Code wakes automations.
+  const first = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
+  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(first.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, codex } }, source: "stored" });
+  first.onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(first.onOrder).toHaveBeenLastCalledWith(["terminal", "default", "codex"], expect.any(String)));
+
+  // The same behind an entry dohc can't use.
+  cleanup();
+  const second = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex } }, agentProblems: [{ ...BROKEN, position: 0 }] });
+  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex } }, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] });
+  second.onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(second.onOrder).toHaveBeenLastCalledWith(["codex-two", "default", "codex"], expect.any(String)));
 });
 
 it("doesn't let Undo of a Remove take automations from the agent chosen since", async () => {

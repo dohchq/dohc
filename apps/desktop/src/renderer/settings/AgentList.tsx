@@ -495,6 +495,7 @@ export function AgentList(props: {
   // then. An agent in the file with its id by then stays.
   const remove = async (agent: Agent) => {
     const [before, after] = neighbours(agent.id);
+    const wasWaking = automation?.id === agent.id;
     const { [agent.id]: entry, ...agents } = settings.agents;
     if (!entry) return;
     const saved = await onSave({ ...settings, agents });
@@ -504,6 +505,8 @@ export function AgentList(props: {
       onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
       return;
     }
+    // The agent that took automations over because of this Remove.
+    const heir = automationAgent(saved.settings)?.id;
     setRenaming((current) => (current === agent.id ? null : current));
     onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
       let file: DesktopUserSettingsResult;
@@ -521,8 +524,10 @@ export function AgentList(props: {
         keep(holder);
         return;
       }
-      // An agent that wasn't first doesn't take automations from the agent that wakes them now.
-      const waking = before === undefined ? undefined : automationAgent(current)?.id;
+      // It doesn't take automations from the agent that wakes them now, unless
+      // it woke them and only this Remove handed them to that agent.
+      const now = automationAgent(current)?.id;
+      const waking = wasWaking && now === heir ? undefined : now;
       const order = placeBack(agentListRows(current, file.agentProblems).map(rowId), agent.id, before, after, waking);
       // Saved from the file just read, so main refuses it if the agent came back since.
       try {
