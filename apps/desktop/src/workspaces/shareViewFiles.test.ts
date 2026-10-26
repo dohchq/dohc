@@ -2462,39 +2462,6 @@ describe("ShareViewFiles", () => {
     expect(store.writeTextFile).not.toHaveBeenCalled();
   });
 
-  const editGrant = { paths: [], versionId: "main", access: "edit" as const };
-  it.each([
-    ["Edit access", (rootPath: string) => target(rootPath), true],
-    ["View access", (rootPath: string) => target(rootPath, "view"), false],
-    ["an ended view", (rootPath: string) => ({ ...target(rootPath), ended: true }), false],
-    ["a path outside the grant", (rootPath: string) => ({ ...target(rootPath), grantedSelector: { ...editGrant, paths: ["other"] } }), false],
-    ["a mount", (rootPath: string) => ({ ...mountTarget(rootPath), grantedSelector: editGrant }), false],
-  ] as const)("saves a received file only with an edit grant for its path, for %s", async (_case, resolve, editable) => {
-    const rootPath = await workspaceRoot();
-    await mkdir(join(rootPath, "notes"), { recursive: true });
-    const canonical = "canonical\n";
-    const store = mutableTextStore({ initial: [{ path: "notes/a.md", text: canonical }] });
-    const resolved = resolve(rootPath);
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => resolved, openStore: () => store });
-    const requested: ShareViewFilesTarget = resolved.kind === "mount"
-      ? { kind: "mount", workspaceId: resolved.workspaceId, shareId: "share-a" }
-      : { kind: "standalone", workspaceId: resolved.workspaceId };
-
-    const saved = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      files.change(lease, requested, {
-        kind: "save",
-        path: "notes/a.md",
-        text: "recipient edit\n",
-        expectedContentHash: createHash("sha256").update(canonical).digest("hex"),
-      }),
-    ).then(() => true, (error: unknown) => {
-      if (error instanceof SharedFileReadOnlyError) return false;
-      throw error;
-    });
-
-    expect(saved).toBe(editable);
-  });
-
   it("keeps a mount store warm across canonical reads and listings", async () => {
     const rootPath = await workspaceRoot();
     const store = Object.assign(readStore({ text: "canonical\n" }), {

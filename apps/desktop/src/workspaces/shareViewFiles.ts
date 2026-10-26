@@ -394,31 +394,6 @@ function assertPathWithinGrant(
   }
 }
 
-// The one grant check for an edit to a received file: an intact, unended
-// standalone view with Edit access, and every path inside the grant.
-function assertMayEdit(
-  target: ResolvedShareViewFilesTarget,
-  paths: readonly string[],
-): asserts target is ActiveShareViewFilesTarget {
-  assertActiveTarget(target);
-  const selector = writableSelector(target);
-  for (const path of paths) assertPathWithinGrant(selector, path);
-}
-
-function changedPaths(change: ShareViewFileChange): string[] {
-  switch (change.kind) {
-    case "save":
-    case "create":
-    case "delete":
-      return [change.path];
-    case "move":
-      return [change.fromPath, change.toPath];
-    case "import":
-      // Each destination is checked as the import chooses it.
-      return [];
-  }
-}
-
 function validatedReadPath(path: string): string {
   const validated = validateUserReadPath(path, { platform: process.platform });
   if (!validated.ok) {
@@ -727,9 +702,18 @@ export function createShareViewFiles(
     lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
     change: ShareViewFileChange,
+    selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
     owner: ShareViewFilesOwnerCapability,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
+    if (change.kind === "save" || change.kind === "create") {
+      assertPathWithinGrant(selector, change.path);
+    } else if (change.kind === "move") {
+      assertPathWithinGrant(selector, change.fromPath);
+      assertPathWithinGrant(selector, change.toPath);
+    } else if (change.kind === "delete") {
+      assertPathWithinGrant(selector, change.path);
+    }
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
     if (target.kind === "standalone" && divergenceScopes.length > 0) {
@@ -797,7 +781,7 @@ export function createShareViewFiles(
             screenAgainstRoots: change.screenAgainstRoots,
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
-            assertPathAllowed: (path) => assertMayEdit(target, [path]),
+            assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
           });
           break;
       }
@@ -1182,9 +1166,10 @@ export function createShareViewFiles(
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
-        assertMayEdit(target, changedPaths(change));
+        assertActiveTarget(target);
+        const selector = writableSelector(target);
         return withOwnerCapability(lease, target, (owner) =>
-          applyChange(lease, target, change, owner),
+          applyChange(lease, target, change, selector, owner),
         );
       });
     },
