@@ -312,11 +312,11 @@ export function SettingsDialog(props: {
     }
   }, [activeSection, filteredSections, query]);
 
-  // Answers whether the settings saved. A failed save reports why and puts back what the file holds.
-  const saveUserSettings = useCallback(async (settings: DesktopUserSettings): Promise<boolean> => {
+  // Answers with what main saved, or null. A failed save reports why and puts back what the file holds.
+  const saveUserSettings = useCallback(async (settings: DesktopUserSettings): Promise<DesktopUserSettingsResult | null> => {
     if (!userResult) {
       setError("User settings are still loading.");
-      return false;
+      return null;
     }
     const requestId = userSaveRequestRef.next();
     const previous = userResult;
@@ -332,22 +332,22 @@ export function SettingsDialog(props: {
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings, base: previous.settings });
-      if (!userSaveRequestRef.isCurrent(requestId)) return true;
+      if (!userSaveRequestRef.isCurrent(requestId)) return saved;
       setUserResult(saved);
       markSaved();
-      return true;
+      return saved;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      if (!userSaveRequestRef.isCurrent(requestId)) return null;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
       // `previous` can hold a change an earlier save failed to make, so the
       // dialog goes back to the settings the file holds.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      if (!userSaveRequestRef.isCurrent(requestId)) return null;
       setUserResult(restored);
       applyLookSettings(restored.settings);
-      return false;
+      return null;
     }
   }, [markSaved, markSaving, props.onError, userResult]);
 

@@ -4,7 +4,7 @@ import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
-import type { AgentProblem, DesktopUserSettings } from "../../settings/userSettings";
+import type { AgentProblem, DesktopUserSettings, DesktopUserSettingsResult } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { ErrorDetailField } from "../shell/copyDetails";
@@ -16,7 +16,7 @@ export function AgentsMcpSettings(props: {
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
-  onSave: (settings: DesktopUserSettings) => Promise<boolean>;
+  onSave: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult | null>;
   onOrder: (order: readonly string[], failure?: string) => Promise<boolean>;
   onNotice?: (message: string, undo?: () => void) => void;
   onOpenSettingsFile: () => void;

@@ -46,7 +46,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
-  const onSave = vi.fn(async (_settings: DesktopUserSettings) => true);
+  const onSave = vi.fn(async (settings: DesktopUserSettings): Promise<DesktopUserSettingsResult | null> => ({ settings, source: "stored" }));
   const onError = vi.fn();
   const onOpenSettingsFile = vi.fn();
   const onOrder = vi.fn(async (_order: readonly string[]) => true);
@@ -363,6 +363,22 @@ it("removes an agent, and Undo puts it back where it was", async () => {
   expect(onSave).toHaveBeenCalledOnce();
   // Saved from the file Undo read, so main refuses it if Codex came back since.
   expect(bridgeMock.setUserSettings).toHaveBeenCalledWith({ settings: { ...saved, agents: { ...saved.agents, codex: SETTINGS.agents.codex } }, base: saved });
+});
+
+it("says the agent stays when the saved file still lists it", async () => {
+  const { onSave, onNotice, onError } = renderList();
+  // Another window put Codex back before main saved the removal.
+  onSave.mockResolvedValueOnce({ settings: SETTINGS, source: "stored" });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc didn't remove Codex because the settings file still lists it."));
+  // Or as an entry dohc can't use.
+  const { codex: _codex, ...rest } = SETTINGS.agents;
+  onSave.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex" }] });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+  expect(onNotice).not.toHaveBeenCalled();
 });
 
 it("leaves an agent that came back after Undo read the file", async () => {

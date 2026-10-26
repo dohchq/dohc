@@ -345,8 +345,8 @@ export function AgentList(props: {
   config: McpConfigResult | null;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
-  // Answers whether the settings saved; a failed save says why in Notices.
-  onSave: (settings: DesktopUserSettings) => Promise<boolean>;
+  // Answers with the settings main saved, or null when a failed save said why in Notices.
+  onSave: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult | null>;
   // Moves these entries to the front of the file; answers whether it saved.
   // A failed move says `failure` when given, with why.
   onOrder: (order: readonly string[], failure?: string) => Promise<boolean>;
@@ -461,7 +461,14 @@ export function AgentList(props: {
   const remove = async (agent: Agent) => {
     const before = fileOrder[fileOrder.indexOf(agent.id) - 1];
     const { [agent.id]: entry, ...agents } = settings.agents;
-    if (!entry || !(await onSave({ ...settings, agents }))) return;
+    if (!entry) return;
+    const saved = await onSave({ ...settings, agents });
+    if (!saved) return;
+    // The file can hold the agent again by the time main saves.
+    if (Object.hasOwn(saved.settings.agents, agent.id) || saved.agentProblems?.some((problem) => problem.id === agent.id)) {
+      onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
+      return;
+    }
     setRenaming((current) => (current === agent.id ? null : current));
     onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
       let file: DesktopUserSettingsResult;
@@ -554,7 +561,7 @@ export function AgentList(props: {
               : {})}
             onRemove={() => void remove(row.agent)}
             onCheck={() => void check(row.agent)}
-            onRename={(name) => onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))}
+            onRename={async (name) => (await onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))) !== null}
             onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
           />
         ))}
