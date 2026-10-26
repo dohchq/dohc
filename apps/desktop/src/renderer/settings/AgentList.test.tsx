@@ -750,6 +750,23 @@ it("files no notice when the agent was removed in a later panel, and files it wh
     "dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
 });
 
+it("files a failed check when the file reads back recovered, or lists the agent as an entry dohc can't use", async () => {
+  const { codex, ...rest } = SETTINGS.agents;
+  bridgeMock.runnerSelfTest
+    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." })
+    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "recovered" });
+  const { onError } = renderList();
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+
+  bridgeMock.getUserSettings.mockResolvedValueOnce({
+    settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex", name: codex!.name }],
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+});
+
 // Fix P: a Try again kept after the panel closed.
 it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
@@ -777,6 +794,20 @@ it("checks from a closed panel's Try again once the workspace was trusted elsewh
   await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
   expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
+});
+
+it("asks main whether agents are paused when a closed panel's Try again runs", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  const { onError, unmount } = renderList();
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  unmount();
+  bridgeMock.readChatDispatchPaused.mockResolvedValueOnce({ paused: true });
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
+  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
+    ["Cause", "Agents are paused. Resume them, then try again."],
+  ], "agent-check:ws-1:codex");
 });
 
 it("starts one check for a double click, without asking main first", async () => {

@@ -85,11 +85,17 @@ function checkIdentity(workspaceId: string, agentId: string): string {
   return `agent-check:${workspaceId}:${agentId}`;
 }
 
-// Why a check from a closed panel can't start: main's trust, read now.
-// Main still refuses what else holds it back.
+const PAUSED_CHECK_REASON = "Agents are paused. Resume them, then try again.";
+
+// Why a check from a closed panel can't start: main's trust and pause, read
+// now. Main still refuses what else holds it back.
 async function closedPanelBlock(workspaceId: string): Promise<string | null> {
-  const trust = await bridge().readWorkspaceTrust({ workspaceId }).catch(() => null);
-  return trust?.trusted === false ? AGENTS_RESTRICTED_MESSAGE : null;
+  const [trust, pause] = await Promise.all([
+    bridge().readWorkspaceTrust({ workspaceId }).catch(() => null),
+    bridge().readChatDispatchPaused({}).catch(() => null),
+  ]);
+  if (trust?.trusted === false) return AGENTS_RESTRICTED_MESSAGE;
+  return pause?.paused ? PAUSED_CHECK_REASON : null;
 }
 
 // A failed check reports only while the settings file lists its agent, so a
@@ -97,7 +103,10 @@ async function closedPanelBlock(workspaceId: string): Promise<string | null> {
 // When the file can't be read, it reports.
 async function stillListed(agentId: string): Promise<boolean> {
   try {
-    return Object.hasOwn((await bridge().getUserSettings()).settings.agents, agentId);
+    const file = await bridge().getUserSettings();
+    return file.source === "recovered"
+      || Object.hasOwn(file.settings.agents, agentId)
+      || (file.agentProblems ?? []).some((problem) => problem.id === agentId);
   } catch {
     return true;
   }
@@ -459,7 +468,7 @@ export function AgentList(props: {
   // Why Check can't start now. Try again on a toast can come at such a time.
   const checkBlocked = useRef<string | null>(null);
   checkBlocked.current = checkNote
-    ?? (paused ? "Agents are paused. Resume them, then try again." : null)
+    ?? (paused ? PAUSED_CHECK_REASON : null)
     ?? (checking !== null ? "A check is already running. Try again when it finishes." : null);
   // A Try again kept in Notices can run after this panel closes. It doesn't
   // read the reason the panel can no longer update; it asks main instead.
