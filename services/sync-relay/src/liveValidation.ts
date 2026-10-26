@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -44,12 +45,32 @@ type CapacityRetry = {
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
 type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; heapExhausted: boolean; exited: Promise<void> };
+/** The validator threw instead of judging the edit, so the edit is tried again. */
+export class LiveValidatorFailure extends Error {
+  constructor(readonly errorClass: string) {
+    super(`Live validation failed with ${errorClass}.`);
+    this.name = "LiveValidatorFailure";
+  }
+}
+const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
+/** Names each validator failure once per document, candidate edit and error class. */
+export function createValidatorFailureLog(log: (message: string) => void = message => console.error(message)) {
+  const logged = new Set<string>();
+  return (document: import("@dohc/live-session-contract").LiveDocumentKey, candidate: Uint8Array, errorClass: string) => {
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
+      createHash("sha256").update(candidate).digest("hex"), errorClass]);
+    if (logged.has(key)) return;
+    if (logged.size >= MAX_LOGGED_VALIDATOR_FAILURES) logged.delete(logged.values().next().value!);
+    logged.add(key);
+    log(`[sync-relay] live validation failed with ${errorClass} for document ${document.objectId}; the edit waits and is tried again.`);
+  };
+}
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
  * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
  * Activation and restore together hold at most one slot, so live edits always keep the other.
  */
-export function createLiveValidationExecutor(heapLimitMb = 512) {
+export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog()) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false;
@@ -199,7 +220,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
         slot.auxiliary = false;
         // A result that arrives after `close` began must not release its hold.
         if (!closed) hold(slot, false);
-        resolve(value as Result);
+        const failed = value as {kind?: unknown; errorClass?: unknown};
+        if (failed.kind === "failed") reject(new LiveValidatorFailure(typeof failed.errorClass === "string" ? failed.errorClass : "unknown"));
+        else resolve(value as Result);
         notify();
       };
       slot.child.once("message", complete);
@@ -227,7 +250,10 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
         { kind: "journal", policy: ownedPolicy, input },
         { kind: "refused", reason: "capacity-refused", source: "final" },
         signal,
-      );
+      ).catch((error: unknown) => {
+        if (error instanceof LiveValidatorFailure) logValidatorFailure(input.document, input.candidate, error.errorClass);
+        throw error;
+      });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
   /** Activation does not wait for a slot: a busy pool answers `retry`, and a later pass captures again. */

@@ -55,12 +55,3 @@ export const START_TILE_ART: Record<StartKind, ReactNode> = {
     </span>
   ),
 };
-
-// Each kind keeps one hue. styles.css has no kind hues yet, so these borrow
-// the identity hues.
-export const KIND_TONE: Record<StartKind, string> = {
-  markdown: "text-ink",
-  collection: "text-hue-teal",
-  drawing: "text-hue-plum",
-  app: "text-hue-amber",
-};

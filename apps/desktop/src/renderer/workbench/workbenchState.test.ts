@@ -654,6 +654,22 @@ describe("tabs", () => {
     expect(parseTab(siteTabPath(reservedRoot))).toEqual({ kind: "site", path: siteTabPath(reservedRoot), siteRoot: reservedRoot });
   });
 
+  // The shell does not load the Apps view's list, so the tab names an app by
+  // its folder, as typed, never by its encoded tab address.
+  it.each([
+    ["apps/trip", "trip"],
+    ["clients/acme/portal", "portal"],
+    ["apps/100% done", "100% done"],
+  ])("names the app at %s by its folder", (root, name) => {
+    const tab = parseTab(siteTabPath(root)), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([name, root, name]);
+  });
+
+  it("keeps the tab address for an app folder that cannot be decoded", () => {
+    const tab = parseTab("tab://app/%ZZ"), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual(["%ZZ", "tab://app/%ZZ", "%ZZ"]);
+  });
+
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
     // openVirtualTab turns exactly this refusal — openTab handing back the
     // same state — into the line naming the limit. A virtual tab that opened

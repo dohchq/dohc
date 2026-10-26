@@ -747,7 +747,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   aria-hidden
                   dateTime={time.iso}
                   title={time.label}
-                  className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                  className="whitespace-nowrap text-[10px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
                 >
                   {formatClockDigits(message.createdAtMs)}
                 </time>
@@ -788,7 +788,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <time
                   dateTime={time.iso}
                   title={time.iso}
-                  className="shrink-0 font-mono text-[11px] text-subtle"
+                  className="shrink-0 text-[11px] tabular-nums text-subtle"
                 >
                   {formatClock(message.createdAtMs)}
                 </time>

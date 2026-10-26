@@ -13,7 +13,7 @@ import { neutralPresentation } from "./actorPresentation";
 // The History timeline: file moments, version markers and Collection
 // changes, newest first, in the order main merged them. File moments keep
 // their summaries ("Saved latest edits", "Merged version X into Main",
-// "Reconciled offline edits", ...) and a multi-file pass (reconcile, switch,
+// "Changed while dohc was closed", ...) and a multi-file pass (reconcile, switch,
 // merge, restore) groups into one expandable item via its correlationId.
 // An agent's consecutive edits to one file fold into one row, a run.
 // Product vocabulary only, no git terms.
@@ -360,7 +360,7 @@ export function missingSourcesWords(
 const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
 const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
-const COUNT = "shrink-0 rounded border border-line px-1 font-mono text-[10px] leading-[14px] text-muted";
+const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
 
 // Who made a change, as chats draw them: an agent's square, a person's face,
 // an automation's mark, a share link's ring. A change with no one author,
@@ -439,13 +439,14 @@ export function momentDescription(moment: EngineMomentRecord): string {
 // Who made a top-level change, after its title. An agent's or an
 // automation's name shows; anyone else shows the file's folder, and their
 // avatar's title and the hidden source name them. Each gives way before the
-// title does.
+// title does. An agent's name keeps at least its ellipsis (9.5px of 11px
+// Inter), as the save state does, so a squeezed name never shows a sliver.
 function MomentDetail(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
   const label = engineMomentSourceLabel(moment);
   if (moment.agentAuthorName !== undefined) {
     return (
-      <span data-testid="engine-moment-source" className="min-w-0 shrink-[999] truncate text-[11px]">
+      <span data-testid="engine-moment-source" className="min-w-[13px] shrink-[999] truncate text-[11px]">
         <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
       </span>
     );
@@ -540,7 +541,7 @@ export function MomentRow(props: {
           data-testid="engine-moment-recorded-at"
           dateTime={recordedAt.iso}
           title={recordedAt.iso}
-          className={`shrink-0 font-mono text-[11px] text-subtle ${fold ? "col-start-3" : ""}`}
+          className={`shrink-0 text-[11px] tabular-nums text-subtle ${fold ? "col-start-3" : ""}`}
         >
           {formatClock(moment.recordedAtMs)}
         </time>
@@ -650,7 +651,7 @@ function GroupRow(props: {
           {group.moments.length}
           <span className="sr-only"> files</span>
         </span>
-        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
           {formatClock(group.recordedAtMs)}
         </time>
       </button>
@@ -682,7 +683,7 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
         <Layers size={14} aria-hidden />
       </span>
       <span className="min-w-0 flex-1 truncate text-muted">{versionMarkerTitle(props.version)}</span>
-      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
         {formatClock(props.version.createdAtMs)}
       </time>
     </div>
@@ -728,7 +729,7 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
             </>
           ) : null}
           {recordedAt ? (
-            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="font-mono">
+            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="tabular-nums">
               {recordedAt.label}
             </time>
           ) : (

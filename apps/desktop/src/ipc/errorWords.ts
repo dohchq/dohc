@@ -470,6 +470,11 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
   return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
 }
 
+/** History's current rules refused a restore. Its words say why and what to do next. */
+export function isRestorePolicyRefusal(error: unknown): boolean {
+  return parse(error).name === "RestorePolicyRefusalError";
+}
+
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";

@@ -35,7 +35,7 @@ interface DesktopWindowsDependencies {
   preloadArguments?: readonly string[];
   afterRendererCrashLoop?: () => void;
   readonly rendererWorkspaceSessions: Pick<
-    RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
+    RendererWorkspaceSessionOwner<WebContents>, "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
   >;
   // A workspace window that finishes loading during a pending exit round
   // joins it; one that closes leaves it.
@@ -415,6 +415,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     const window = followAppZoom(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        currentRendererDocumentId: (sender) => dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
+        prepareForRendererReload,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         role: "manager",
         preloadArguments: dependencies.preloadArguments,
@@ -437,6 +439,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     const window = trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        currentRendererDocumentId: (sender) => dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
+        prepareForRendererReload,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         preloadArguments: dependencies.preloadArguments,
       }),

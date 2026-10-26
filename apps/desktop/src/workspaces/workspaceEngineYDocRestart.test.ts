@@ -2793,7 +2793,9 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   await session.close({ settle: false }); await capture.stop();
 });
 
-it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
+// "frozen": typing after the server refused this file's earlier edits. The
+// engine refuses it, the notice says why, and the recovery row keeps it.
+it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
   const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
@@ -2826,8 +2828,8 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const busy = kind === "uncertain-after-busy" && attempt === 1;
     fixture.state.applyRefusals.push(new DaemonRefusalError({
-      code: busy ? "OVERLOADED" : kind === "definitive" ? "INVALID_PARAMS" : "INTERNAL",
-      message: busy ? "engine-store-busy" : "future-refusal", retry: busy ? "afterBackoff" : "no",
+      code: busy ? "OVERLOADED" : kind === "definitive" || kind === "frozen" ? "INVALID_PARAMS" : "INTERNAL",
+      message: busy ? "engine-store-busy" : kind === "frozen" ? "owner-outbox-frozen" : "future-refusal", retry: busy ? "afterBackoff" : "no",
     }, undefined));
   }
   for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
@@ -2839,7 +2841,8 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "No answer after three attempts.");
+  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit."
+    : kind === "frozen" ? "Live editing is paused for this file." : "No answer after three attempts.");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });

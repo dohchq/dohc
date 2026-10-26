@@ -443,6 +443,23 @@ describe("desktop workspace windows", () => {
     } finally { held.resolve(); await pending; }
   });
 
+  it.each(["manager", "workspace"] as const)("wires %s navigation to document-scoped reload and restores its workspace", async (role) => {
+    const f = fixture();
+    if (role === "manager") f.windows.showOrCreateManagerWindow();
+    else await f.windows.showOrCreateMainWindow();
+    const sender = f.all[0]!.webContents.native;
+    const options = f.createdOptions[0]!;
+    await f.sessions.open(sender, { workspaceId: "b", attachmentId: Symbol("b") }, "document-1");
+    f.windows.setPreferredWorkspaceId("a", sender);
+
+    expect(options.currentRendererDocumentId?.(sender)).toBe("document-1");
+    expect(await options.prepareForRendererReload?.(sender, "document-1")).toBe(true);
+
+    expect(f.sessions.current(sender)).toBeUndefined();
+    expect(options.currentRendererDocumentId?.(sender)).toBeUndefined();
+    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender)[0]!.workspaceId).toBe("b");
+  });
+
   it("leaves preference and the active renderer intact when the reload document is stale", async () => {
     const f = fixture(); const sender = new Contents();
     const session = await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "current");

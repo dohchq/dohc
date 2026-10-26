@@ -61,6 +61,14 @@ export function isIgnoredPathSegment(segment: string, stripAliases = true): bool
     || reservedSegments.some((reserved) => isReserved83Alias(name, reserved))
     || name.startsWith(".dohc-write-")
     || isReserved83Alias(name, ".dohc-write-")
-    || osMetadataSegments.includes(name)
-    || name.startsWith("._");
+    || isOsMetadataName(name);
+}
+
+/** A name the OS writes beside user files, such as .DS_Store or Thumbs.db. */
+export function isOsMetadataSegment(segment: string): boolean {
+  return isOsMetadataName(foldPathSegment(segment).replace(/[. ]+$/, ""));
+}
+
+function isOsMetadataName(name: string): boolean {
+  return osMetadataSegments.includes(name) || name.startsWith("._");
 }

@@ -169,7 +169,7 @@ describe("About for an open conversation", () => {
       expect(avatar).toBeNull();
     } else if (kind === "person") {
       expect(header.querySelector(".lucide-hash")).toBeNull();
-      expect(avatar?.textContent).toBe("SR");
+      expect(avatar?.textContent).toBe("S");
     } else {
       expect(avatar?.querySelector(".lucide-sparkles")).toBeTruthy();
       expect(avatar?.className).toContain("text-hue-teal");

@@ -54,7 +54,7 @@ export function Ref(props: {
         {heading ? <span className="text-muted">{heading}</span> : null}
       </span>
       {props.folder && dir ? (
-        <span aria-hidden={spelled ? undefined : true} className="min-w-0 shrink-[4] truncate font-mono text-[11px] text-subtle">
+        <span aria-hidden={spelled ? undefined : true} className="min-w-0 shrink-[4] truncate text-[11px] tabular-nums text-subtle">
           {dir}
         </span>
       ) : null}
