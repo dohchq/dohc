@@ -291,6 +291,59 @@ it("ends the wait for an open under way when a pause between attempts outlasts t
   } finally { vi.useRealTimers(); }
 });
 
+it("ends the wait for an open under way after two open deadlines in all, however many attempts start", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("crowded");
+  let nowMs = 0, pauses = 0;
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    now: () => nowMs, sleep: () => { pauses += 1; return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 50,
+  });
+  vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockResolvedValue(undefined);
+  refuseOpens(client, Array.from({ length: 3 }, () => daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")));
+  vi.useFakeTimers();
+  try {
+    // Each run's attempt is refused at once and its run pauses for good.
+    const startAttempt = async () => {
+      void sessions.run(workspace, async () => undefined).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+    };
+    await startAttempt();
+    const waited = sessions.openInProgress(workspace);
+    expect(waited).not.toBeNull();
+    let over = false;
+    void waited!.then(() => { over = true; });
+    for (const at of [40, 80]) {
+      nowMs = at;
+      await vi.advanceTimersByTimeAsync(40);
+      await startAttempt();
+    }
+    expect(pauses).toBe(3);
+    nowMs = 99;
+    await vi.advanceTimersByTimeAsync(19);
+    expect(over).toBe(false);
+    nowMs = 100;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(over).toBe(true);
+  } finally { vi.useRealTimers(); }
+});
+
+it("gives nothing to wait on once another run has opened the workspace", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("opened", { localStateReady: true });
+  const paused = deferred<void>();
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: () => { paused.resolve(); return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 60_000,
+  });
+  refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
+  void sessions.run(workspace, async () => undefined).catch(() => undefined);
+  await paused.promise;
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  await sessions.run(workspace, async () => undefined);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await waited;
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });

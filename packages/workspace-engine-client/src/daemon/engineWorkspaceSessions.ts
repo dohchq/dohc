@@ -515,27 +515,29 @@ export class EngineWorkspaceSessions {
    * pause before a retry. Settles when the open does, with its binding
    * published, when its last attempt fails, or when the workspace starts
    * closing or rebuilding. It also settles if an attempt's preparation
-   * outlasts the open deadline, or if its daemon request outlasts that
-   * deadline from when it started. Never opens, and never counts as a run,
-   * so a caller inside a run can wait on it: a close waits for runs.
+   * outlasts the open deadline, if its daemon request outlasts that deadline
+   * from when it started, or after two deadlines in all. Null once the
+   * workspace is open. Never opens, and never counts as a run, so a caller
+   * inside a run can wait on it: a close waits for runs.
    */
-  openInProgress(workspace: EngineWorkspace): Promise<void> | null {
+  openInProgress(workspace: EngineWorkspace, until = this.now() + 2 * this.workspaceOpenDeadlineMs): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || (!entry.opening && entry.openingRuns === 0) ||
-      entry.closing || entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
+      entry.closing || entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
+      this.currentBinding(workspace) || this.now() >= until) return null;
     const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
     return new Promise<boolean>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (lookAgain: boolean) => { clearTimeout(timer); entry.openWaiters.delete(again); resolve(lookAgain); };
       const again = () => finish(true);
       entry.openWaiters.add(again);
-      const wait = () => { clearTimeout(timer); timer = setTimeout(() => finish(false), deadlineMs); timer.unref?.(); };
+      const wait = () => { clearTimeout(timer); timer = setTimeout(() => finish(false), Math.min(deadlineMs, until - this.now())); timer.unref?.(); };
       wait();
       if (!attempt) return;
       // The daemon request's own deadline starts with it, after preparation.
       void attempt.requested.then(() => { if (entry.openWaiters.has(again)) wait(); });
       void attempt.settled.then(again);
-    }).then((lookAgain) => (lookAgain ? this.openInProgress(workspace) ?? undefined : undefined));
+    }).then((lookAgain) => (lookAgain ? this.openInProgress(workspace, until) ?? undefined : undefined));
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */

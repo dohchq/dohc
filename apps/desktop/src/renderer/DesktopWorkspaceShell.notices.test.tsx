@@ -8,14 +8,14 @@ import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
 import { COPY_FAILURE } from "./ui/CopyButton";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
 // generic error. The notice explains what was found; the rebuild is explicit
@@ -1910,6 +1910,23 @@ describe("notices sent to you", () => {
     await waitFor(() => expect(document.activeElement).toBe(toggle));
     expect(bridge.findAutomationCollection).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, automationId: "collection:tasks#first" });
     expect(bridge.listCollectionAutomationRuns).not.toHaveBeenCalled();
+  });
+
+  it("opens a switched-off automation's switch next to the saved tabs once they apply", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = withRuns(makeBridge(stored.promise));
+    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    await act(async () => undefined);
+    expect(bridge.findAutomationCollection).not.toHaveBeenCalled();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
   describe("through an Edit share view", () => {

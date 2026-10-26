@@ -1309,17 +1309,11 @@ export function DesktopWorkspaceShell(props: {
   // Restore per-workspace workbench state from .dohc/local/ui-state.json. The shell
   // renders at once under the opening cover (launch budgets key off shell
   // visibility); the cover lifts in the commit that applies the stored state,
-  // or the defaults when it is missing or unreadable. The stored state applies
-  // only if the user touched nothing in the meantime — a pre-load user action
-  // wins (and gets an immediate write, since wb may never change again to arm the debounced
-  // one). The touched flag is a ref set synchronously inside every workbench
-  // mutation (mutateWb below): comparing committed state against defaults
-  // would race React's commit — a queued-but-uncommitted user action would
-  // read as "untouched" and the stored state would clobber it. Writes stay
-  // off until the load settles so a default-state write can never clobber
-  // the stored one.
+  // or the defaults when it is missing or unreadable. The stored state
+  // replaces whatever changed under the cover, and file opens wait for it, so
+  // nothing done under the cover loses the saved tabs. Writes stay off until
+  // the load settles so a default-state write can never clobber the stored one.
   const uiStateLoaded = useRef(false);
-  const userTouchedWb = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
     groupId: string;
@@ -1336,22 +1330,20 @@ export function DesktopWorkspaceShell(props: {
   // A file open waits for the saved layout. While the opening cover shows, a
   // command does nothing and is not replayed.
   const workbenchRestoredRef = useRef(false);
-  workbenchRestoredRef.current = workbenchRestored;
   const heldFileOpens = useRef<[string, HeadingTarget?, Omit<ScrollTarget, "path">?][]>([]);
   const openingCoverShown = useRef(false);
   // The tab paths the stored state restored — the only ones a file listing is
-  // allowed to close. Empty until the load applies, and empty forever when the
-  // user acted first and the stored tabs were discarded. STATE, not a ref: the
-  // reconciliation below reads it, and the listing can win the race against
-  // this load, so it has to re-run when the restore lands.
+  // allowed to close. Empty until the load applies, and empty forever when
+  // nothing was stored. STATE, not a ref: the reconciliation below reads it,
+  // and the listing can win the race against this load, so it has to re-run
+  // when the restore lands.
   const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   );
 
   // The one mutation seam for workbench state: every user-driven transition
-  // routes through here so the touched flag is set before React even queues
-  // the update. Loading stored state and restored-tab pruning are the only
-  // other writers.
+  // routes through here. Loading stored state and restored-tab pruning are
+  // the only other writers.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
@@ -1368,7 +1360,6 @@ export function DesktopWorkspaceShell(props: {
       ) {
         invalidateDmNavigation(dmNavigationRequest);
       }
-      userTouchedWb.current = true;
       writeWb(next);
     },
     [writeWb],
@@ -1418,14 +1409,14 @@ export function DesktopWorkspaceShell(props: {
   // When the person hides the selected view or unpins the selected app, the
   // selection moves to a view on the rail. Any other change to the rail,
   // such as hiding another view, reordering, or pinning, leaves it alone, and
-  // so does a link or command that opens a hidden view. When the settings
-  // first arrive, a selection the rail does not show moves once; before that
-  // it stands, so a restart keeps the view that was open.
+  // so does a link or command that opens a hidden view. Once the settings
+  // and the saved layout are in, a selection the rail does not show moves
+  // once; before that it stands, so a restart keeps the view that was open.
   const railKey = railOrder.join("\0");
   const settingsLoaded = props.userSettings !== null;
   const previousRailRef = useRef<readonly ActivityViewId[] | null>(null);
   useEffect(() => {
-    if (!settingsLoaded) return;
+    if (!settingsLoaded || !workbenchRestored) return;
     const previous = previousRailRef.current;
     const rail = railOrderRef.current;
     previousRailRef.current = rail;
@@ -1433,7 +1424,7 @@ export function DesktopWorkspaceShell(props: {
       previous === null
         ? keepActiveViewShown(state, rail)
         : keepActiveViewAfterRailChange(state, previous, rail));
-  }, [mutateWb, railKey, settingsLoaded]);
+  }, [mutateWb, railKey, settingsLoaded, workbenchRestored]);
   // Toggling the side panel open shows a view on the rail, never a hidden one.
   const toggleSidePanel = useCallback(
     () => mutateWb((state) => toggleSidebarOnRail(state, railOrderRef.current)),
@@ -1488,7 +1479,7 @@ export function DesktopWorkspaceShell(props: {
     {
       onSuccess: (stored) => {
         let restoredFileSurface: typeof restoredActiveFileSurface.current = null;
-        if (stored && !userTouchedWb.current) {
+        if (stored) {
           const parsed = parseUiState(stored);
           const restoredGroup = activeGroup(parsed);
           if (
@@ -1513,11 +1504,6 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
-        if (userTouchedWb.current) {
-          void bridge()
-            .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
-            .catch(() => undefined);
-        }
       },
       onError: () => {
         restoredActiveFileSurface.current = null;
@@ -2583,7 +2569,10 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Set here, not in render, so a file open that lands before this runs still
+  // waits behind the held ones.
   useEffect(() => {
+    workbenchRestoredRef.current = workbenchRestored;
     if (!workbenchRestored) return;
     for (const held of heldFileOpens.current.splice(0)) openFile(...held);
   }, [openFile, workbenchRestored]);
@@ -2816,11 +2805,12 @@ export function DesktopWorkspaceShell(props: {
     },
     [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
-  // Read once: the shell remounts for each workspace.
+  // Read once: the shell remounts for each workspace. It opens once the saved
+  // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
   useEffect(() => {
     const open = openOnReady.current;
-    if (!workspaceIsReady || open === undefined) return;
+    if (!workbenchRestored || open === undefined) return;
     openOnReady.current = undefined;
     if (typeof open === "string") {
       openFile(open);
@@ -2835,17 +2825,17 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
-  // A file the OS opened with dohc. Main sends it once this window has opened
-  // this workspace, and it opens when the workspace is ready.
-  const [openedFromOs, setOpenedFromOs] = useState<{ path: string } | null>(null);
+  }, [openAutomationControls, openFile, reportShellError, workbenchRestored]);
+  // Files the OS opened with dohc. Main sends each once this window has opened
+  // this workspace, and they open in order when the workspace is ready.
+  const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
   useEffect(() => bridge().onWorkspaceActivated((next, file) => {
-    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs({ path: file });
+    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs((files) => [...files, file]);
   }), [workspaceId]);
   useEffect(() => {
-    if (!workspaceIsReady || openedFromOs === null) return;
-    setOpenedFromOs(null);
-    openFile(openedFromOs.path);
+    if (!workspaceIsReady || openedFromOs.length === 0) return;
+    setOpenedFromOs([]);
+    for (const path of openedFromOs) openFile(path);
   }, [openFile, openedFromOs, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
@@ -5844,7 +5834,7 @@ export function DesktopWorkspaceShell(props: {
           }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenSettings={() => openSettings()}
-          viewsDisabled={!workspaceIsReady || storeUpdateRequired}
+          viewsDisabled={!workbenchRestored || storeUpdateRequired}
           notices={
             <NoticeCenter
               workspaceId={workspaceId}

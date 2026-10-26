@@ -1501,7 +1501,10 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
     await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
-    act(() => bridge.emitMenuCommand("toggle-sidebar"));
+    act(() => {
+      bridge.emitMenuCommand("toggle-sidebar");
+      bridge.emitMenuCommand("export-workspace");
+    });
 
     await act(async () => {
       stored.resolve(STORED_STATE);
@@ -1510,6 +1513,49 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(bridge.exportWorkspaceZip).not.toHaveBeenCalled();
+  });
+
+  it("keeps the saved tabs when the rail is used under the cover", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("activity-history"));
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("opens every file the OS opened before the workspace opened, next to the saved tabs", async () => {
+    const opened = deferred<typeof SYNC_STATUS>();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.openWorkspace.mockImplementationOnce(() => opened.promise);
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: ["a.md", "b.md", "c.md"].map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    act(() => {
+      bridge.emitWorkspaceActivated(WORKSPACE, "a.md");
+      bridge.emitWorkspaceActivated(WORKSPACE, "c.md");
+    });
+
+    await act(async () => {
+      opened.resolve(SYNC_STATUS);
+      await opened.promise;
+    });
+
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-c.md").dataset.active).toBe("true");
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
   // Journey 2: rolling back a rename left `assets/alpha-renamed.png`
