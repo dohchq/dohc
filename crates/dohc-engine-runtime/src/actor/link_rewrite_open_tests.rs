@@ -384,6 +384,8 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
     let f = Fixture::new(2000, 4999);
+    // Publication has its own proof that a queued update waits at most one turn.
+    let _publication = f.capture.clone().lock_owned().await;
     let _index_hold = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {

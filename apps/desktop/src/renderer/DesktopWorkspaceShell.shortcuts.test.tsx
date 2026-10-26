@@ -78,7 +78,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
@@ -93,7 +93,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
@@ -265,7 +265,7 @@ describe("macOS Control-key text editing", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     expect(groups()).toBe(groupsBefore);
     field.remove();
@@ -300,7 +300,7 @@ describe("macOS text editing inside a modal", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
   });
 });
 

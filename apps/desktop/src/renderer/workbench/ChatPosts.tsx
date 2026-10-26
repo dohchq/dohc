@@ -564,7 +564,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
               </AgentName>
             </span>
-            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
             {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
@@ -735,7 +735,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
               </AgentName>
             </span>
-            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} presentation={openingMessage.presentation} /> : null}
             {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge

@@ -775,7 +775,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} presentation={message.presentation} /> : null}
+                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation} /> : null}
                 {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge

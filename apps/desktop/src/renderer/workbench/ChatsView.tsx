@@ -3,7 +3,6 @@ import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
@@ -17,7 +16,6 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { useIsOwnAuthor } from "./AgentBadge";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
@@ -109,7 +107,7 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import type { DesktopUserSettings } from "../../settings/userSettings";
+import { firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -567,7 +565,6 @@ export function ChatsView(props: {
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
 }) {
-  const isOwn = useIsOwnAuthor();
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
   const collaboration = props.collaboration ?? null;
@@ -1102,7 +1099,7 @@ export function ChatsView(props: {
   );
 
   const awaitingAgentChannel = Boolean(
-    props.userSettings?.runner.enabled &&
+    props.userSettings && firstAgentWithLaunch(props.userSettings)?.enabled &&
     overview.status === "ready" &&
     !overview.channels.some((channel) => channel.kind === "agent"),
   );
@@ -4523,11 +4520,11 @@ export function ChatsView(props: {
             <span
               data-testid="chats-agent-screen-runner"
               className="min-w-0 flex-1 truncate"
-              title={agentReady ? (props.userSettings ? configuredRunnerCommand(props.userSettings.runner) : undefined) : undefined}
+              title={agentReady ? (props.userSettings ? firstAgentCommand(props.userSettings) : undefined) : undefined}
             >
               {agentReady
-                ? props.userSettings && configuredRunnerCommand(props.userSettings.runner)
-                  ? `Runs ${runnerProgram(configuredRunnerCommand(props.userSettings.runner))}`
+                ? props.userSettings && firstAgentCommand(props.userSettings)
+                  ? `Runs ${runnerProgram(firstAgentCommand(props.userSettings))}`
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
@@ -5077,7 +5074,7 @@ export function ChatsView(props: {
                         activity={agentSummaryActivity}
                         program={
                           agentReady && props.userSettings
-                            ? runnerProgram(configuredRunnerCommand(props.userSettings.runner))
+                            ? runnerProgram(firstAgentCommand(props.userSettings))
                             : null
                         }
                         testId="chats-my-agent-presence"

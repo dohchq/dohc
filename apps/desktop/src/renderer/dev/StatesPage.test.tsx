@@ -68,7 +68,7 @@ describe("states page", () => {
     expectPinnedHues();
     act(() => {
       setOwnPresentation({ group: "own", hue: "amber", self: true });
-      setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" });
+      setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" } });
     });
     expectPinnedHues();
 
@@ -96,7 +96,7 @@ describe("states page", () => {
     } finally {
       vi.unstubAllGlobals();
       setOwnPresentation(undefined);
-      setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+      setChosenColors(DEFAULT_USER_SETTINGS);
     }
   });
 

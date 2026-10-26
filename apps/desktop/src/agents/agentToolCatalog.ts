@@ -8,6 +8,24 @@ export const AgentLaunchProfile = z.object({
   ),
 }).strict();
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
+
+// How dohc starts an agent: a tool it knows, or the person's own command.
+export const AgentLaunch = z.union([
+  AgentLaunchProfile,
+  z.object({
+    command: z.string().max(4096).refine((value) => value.trim().length > 0, "Enter the command that starts your agent."),
+  }).strict(),
+]);
+export type AgentLaunch = z.infer<typeof AgentLaunch>;
+
+export function launchProfile(launch: AgentLaunch): AgentLaunchProfile | undefined {
+  return "tool" in launch ? launch : undefined;
+}
+
+/** The chosen tool, else the typed command, else null for neither. */
+export function launchFrom(profile: AgentLaunchProfile | undefined, command: string): AgentLaunch | null {
+  return profile ?? (command.trim() ? { command: command.trim() } : null);
+}
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 
 // What a person reads when Restricted Mode holds an agent back: main's
@@ -47,10 +65,10 @@ function quoteRunnerToken(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-export function configuredRunnerCommand(runner: { command: string; profile?: AgentLaunchProfile }): string {
-  return runner.profile
-    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
-    : runner.command.trim();
+export function launchCommand(launch: AgentLaunch): string {
+  return "tool" in launch
+    ? [quoteRunnerToken(launch.executable), ...agentProfileArguments(launch).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
+    : launch.command.trim();
 }
 
 export const AgentToolDetection = z.object({

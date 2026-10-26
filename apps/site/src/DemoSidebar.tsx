@@ -181,7 +181,8 @@ export function DemoSidebar(props: {
           pinned={[]}
           openEditorsHeight={openEditorsHeight}
           onOpenEditorsHeightChange={setOpenEditorsHeight}
-          createRequest={null}
+          newFolderRequest={null}
+          onNewPage={props.onCreateDocument}
           onOpenFile={props.onOpenDocument}
           onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
           onCloseTab={(_groupId, path) => props.onCloseTab(path)}

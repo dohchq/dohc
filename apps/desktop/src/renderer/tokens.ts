@@ -116,7 +116,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   selection: "--dohc-selection",
 };
 
-// Display hue choices. Olive belongs to the agent default.
+// A person's hue choices. Olive marks an agent, so a person never has it.
 export const IDENTITY_HUES = [
   "rust",
   "amber",
@@ -127,6 +127,15 @@ export const IDENTITY_HUES = [
   "rose",
 ] as const;
 export type IdentityHue = (typeof IDENTITY_HUES)[number];
+
+// An agent's hue choices, in the picker's order.
+export const AGENT_HUES = ["olive", ...IDENTITY_HUES] as const;
+export type AgentHue = (typeof AGENT_HUES)[number];
+// A new agent takes the first free hue here. Unlike the picker's order, each
+// next hue is far from the ones before it, so two or three agents side by side stay apart.
+export const AGENT_HUE_ASSIGNMENT_ORDER = [
+  "olive", "blue", "rose", "teal", "plum", "rust", "amber", "indigo",
+] as const satisfies readonly AgentHue[];
 
 export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>> = {
   light: {
