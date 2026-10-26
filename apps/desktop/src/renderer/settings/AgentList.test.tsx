@@ -11,7 +11,8 @@ import { AgentList, agentListRows } from "./AgentList";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 const bridgeMock = {
-  getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" })),
+  getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
   setUserSettings: vi.fn(async (payload: { settings: DesktopUserSettings; base: DesktopUserSettings }): Promise<DesktopUserSettingsResult> => (
     { settings: payload.settings, source: "stored" })),
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
@@ -55,8 +56,8 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
     <AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
       onSave={onSave} onOrder={onOrder} onError={onError} onNotice={onNotice} onOpenSettingsFile={onOpenSettingsFile} {...fields} {...more} />
   );
-  const { rerender } = render(list());
-  return { onSave, onOrder, onNotice, onError, onOpenSettingsFile, rerender: (more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
+  const { rerender, unmount } = render(list());
+  return { onSave, onOrder, onNotice, onError, onOpenSettingsFile, unmount, rerender:(more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
 }
 
 const row = (name: string) => screen.getByRole("button", { name: `Rename ${name}` }).closest<HTMLElement>("[data-agent-id]")!;
@@ -636,4 +637,154 @@ it("takes back a removed agent's failed check, and Undo doesn't bring it back", 
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledOnce());
   expect(onError).toHaveBeenCalledOnce();
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
+});
+
+// Fix P: focus after the card's Trust workspace.
+const trustButton = () => within(screen.getByTestId("restricted-agents-state")).getByRole("button", { name: "Trust workspace" });
+
+async function pressTrust(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
+  const onTrust = vi.fn();
+  const list = renderList({ trust: { trusted: false, asking: false, onTrust }, ...fields });
+  await userEvent.click(trustButton());
+  expect(onTrust).toHaveBeenCalledOnce();
+  // Main's dialog is open, and the band's button is off. Chromium then
+  // moves focus to the body; jsdom keeps it on a disabled button.
+  act(() => trustButton().blur());
+  list.rerender({ trust: { trusted: false, asking: true, onTrust } });
+  return { ...list, onTrust };
+}
+
+it("moves focus to the first agent's Check when the card's Trust workspace trusts the workspace", async () => {
+  const { rerender, onTrust } = await pressTrust();
+  rerender({ trust: { trusted: true, asking: false, onTrust } });
+  expect(document.activeElement).toBe(checkButton("Claude Code"));
+});
+
+it("moves focus to the first Add tile it can when there are no agents", async () => {
+  const empty = { ...SETTINGS, agents: {} };
+  const { rerender, onTrust } = await pressTrust({ settings: empty });
+  await within(tile("Add Codex")).findByText("Ready");
+  rerender({ trust: { trusted: true, asking: false, onTrust } });
+  expect(document.activeElement).toBe(tile("Add Codex"));
+});
+
+it("puts focus back on Trust workspace when the person cancels main's dialog", async () => {
+  const { rerender, onTrust } = await pressTrust();
+  expect(document.activeElement).toBe(document.body);
+  rerender({ trust: { trusted: false, asking: false, onTrust } });
+  expect(document.activeElement).toBe(trustButton());
+});
+
+it("leaves focus alone when trust comes from somewhere else, or the person moved on", async () => {
+  const { rerender } = renderList({ trust: trust(false) });
+  rerender({ trust: trust(true) });
+  expect(document.activeElement).toBe(document.body);
+
+  cleanup();
+  const pressed = await pressTrust();
+  const toggle = within(row("Codex")).getByRole("switch", { name: "Turn on Codex" });
+  act(() => toggle.focus());
+  pressed.rerender({ trust: { trusted: true, asking: false, onTrust: pressed.onTrust } });
+  expect(document.activeElement).toBe(toggle);
+});
+
+// Fix P: a check that ends after the panel closes still reports.
+it("takes back the notice, or files it, when a check ends after the panel closed", async () => {
+  const first = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(first.promise);
+  const onClearError = vi.fn();
+  const passed = renderList({ onClearError });
+  await userEvent.click(checkButton("Codex"));
+  passed.unmount();
+  await act(async () => first.resolve({ ok: true, detail: "ok" }));
+  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
+
+  const second = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(second.promise);
+  const failed = renderList();
+  await userEvent.click(checkButton("Codex"));
+  failed.unmount();
+  await act(async () => second.resolve({ ok: false, detail: "Codex timed out." }));
+  await vi.waitFor(() => expect(failed.onError).toHaveBeenCalledWith("Codex didn't reply to the check.", undefined, expect.any(Function), [
+    ["Cause", "Codex timed out."],
+  ], "agent-check:ws-1:codex"));
+});
+
+// Fix P: Remove during a check.
+it("files no notice for a check that fails after its agent was removed", async () => {
+  const answer = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
+  const onClearError = vi.fn();
+  const { onSave, onError, onNotice } = renderList({ onClearError });
+  await userEvent.click(checkButton("Codex"));
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
+  await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
+  await vi.waitFor(() => expect(bridgeMock.getUserSettings).toHaveBeenCalledOnce());
+  await act(async () => undefined);
+  expect(onError).not.toHaveBeenCalled();
+  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
+});
+
+it("files no notice when the agent was removed in a later panel, and files it when the file can't be read", async () => {
+  const answer = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
+  const first = renderList();
+  await userEvent.click(checkButton("Codex"));
+  first.unmount();
+  const { codex: _codex, ...rest } = SETTINGS.agents;
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored" });
+  await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
+  await vi.waitFor(() => expect(bridgeMock.getUserSettings).toHaveBeenCalledOnce());
+  await act(async () => undefined);
+  expect(first.onError).not.toHaveBeenCalled();
+
+  // Guard: an unreadable file still reports.
+  bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
+  bridgeMock.getUserSettings.mockRejectedValueOnce(new Error("busy"));
+  const second = renderList();
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(second.onError).toHaveBeenCalledWith(
+    "dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
+});
+
+// Fix P: a Try again kept after the panel closed.
+it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  const { onError, unmount } = renderList({ trust: trust(true) });
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  unmount();
+  bridgeMock.readWorkspaceTrust.mockResolvedValueOnce({ workspaceId: "ws-1", trusted: false });
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
+  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
+    ["Cause", AGENTS_RESTRICTED_MESSAGE],
+  ], "agent-check:ws-1:codex");
+});
+
+it("checks from a closed panel's Try again once the workspace was trusted elsewhere", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  const onClearError = vi.fn();
+  const { onError, unmount, rerender } = renderList({ trust: trust(true), onClearError });
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  // The panel last saw Restricted Mode, then closed; the workspace was trusted elsewhere.
+  rerender({ trust: trust(false), onClearError });
+  unmount();
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
+  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
+});
+
+it("starts one check for a double click, without asking main first", async () => {
+  const answer = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
+  renderList();
+  await userEvent.dblClick(checkButton("Codex"));
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
+  expect(bridgeMock.readWorkspaceTrust).not.toHaveBeenCalled();
+  await act(async () => answer.resolve({ ok: true, detail: "ok" }));
 });

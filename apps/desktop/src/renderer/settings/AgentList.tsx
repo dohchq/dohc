@@ -85,6 +85,24 @@ function checkIdentity(workspaceId: string, agentId: string): string {
   return `agent-check:${workspaceId}:${agentId}`;
 }
 
+// Why a check from a closed panel can't start: main's trust, read now.
+// Main still refuses what else holds it back.
+async function closedPanelBlock(workspaceId: string): Promise<string | null> {
+  const trust = await bridge().readWorkspaceTrust({ workspaceId }).catch(() => null);
+  return trust?.trusted === false ? AGENTS_RESTRICTED_MESSAGE : null;
+}
+
+// A failed check reports only while the settings file lists its agent, so a
+// Remove during the check, in this panel or a later one, leaves no notice.
+// When the file can't be read, it reports.
+async function stillListed(agentId: string): Promise<boolean> {
+  try {
+    return Object.hasOwn((await bridge().getUserSettings()).settings.agents, agentId);
+  } catch {
+    return true;
+  }
+}
+
 function configSnippet(config: Extract<McpConfigResult, { command: string }>): string {
   return JSON.stringify({ mcpServers: { dohc: { command: config.command, args: config.args } } }, null, 2);
 }
@@ -421,44 +439,71 @@ export function AgentList(props: {
   const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
   const fileOrder = rows.map(rowId);
   const restricted = props.trust?.trusted === false;
+  const asking = props.trust?.asking ?? false;
+  // Set while main's dialog answers the card's Trust workspace. When it
+  // answers, focus that was on the band goes to the first thing trust turned
+  // on, or back to Trust workspace when the person stayed in Restricted Mode.
+  const card = useRef<HTMLDivElement>(null);
+  const trustPressed = useRef(false);
+  useEffect(() => {
+    if (!trustPressed.current || asking) return;
+    trustPressed.current = false;
+    const band = card.current?.querySelector(`[data-testid="restricted-agents-state"]`);
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && !band?.contains(active)) return;
+    card.current?.querySelector<HTMLElement>(restricted
+      ? `[data-testid="restricted-agents-state"] button`
+      : `[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`)?.focus();
+  }, [asking, restricted]);
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn, restricted);
   // Why Check can't start now. Try again on a toast can come at such a time.
   const checkBlocked = useRef<string | null>(null);
   checkBlocked.current = checkNote
     ?? (paused ? "Agents are paused. Resume them, then try again." : null)
     ?? (checking !== null ? "A check is already running. Try again when it finishes." : null);
+  // A Try again kept in Notices can run after this panel closes. It doesn't
+  // read the reason the panel can no longer update; it asks main instead.
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => { open.current = false; };
+  }, []);
   const config = props.config;
 
   // One row in Notices per agent's failed check, which its next pass takes back.
+  // It reports after the panel closes too; only this panel's state waits on it being open.
   const check = useCallback(async (agent: Agent) => {
     const identity = checkIdentity(workspaceId, agent.id);
-    const blocked = checkBlocked.current;
+    const blocked = open.current ? checkBlocked.current : await closedPanelBlock(workspaceId);
     if (blocked !== null) {
       onError?.(`dohc could not check ${agent.name}.`, undefined, () => check(agent), [["Cause", blocked]], identity);
       return;
     }
     const token = requests.current();
+    const shows = () => open.current && requests.isCurrent(token);
     setChecking(agent.id);
     const started = performance.now();
     let next: CheckState;
     try {
       const result = await bridge().runnerSelfTest({ workspaceId, agentId: agent.id });
-      if (!requests.isCurrent(token)) return;
+      if (result.ok) onClearError?.(identity);
       // The toast names the agent and checks it again; why, and its log, go in the details.
-      if (!result.ok) {
+      else if (await stillListed(agent.id)) {
         onError?.(`${agent.name} didn't reply to the check.`, undefined, () => check(agent), [
           ["Cause", result.detail],
           ...(result.logPath ? [["Log", result.logPath] as const] : []),
         ], identity);
-      } else onClearError?.(identity);
+      }
       next = result.ok
         ? { status: "replied", seconds: Math.max(1, Math.round((performance.now() - started) / 1000)) }
         : { status: "failed" };
     } catch (cause) {
-      if (!requests.isCurrent(token)) return;
-      onError?.(ipcErrorMessage(cause, `dohc could not check ${agent.name}.`), cause, () => check(agent), undefined, identity);
+      if (await stillListed(agent.id)) {
+        onError?.(ipcErrorMessage(cause, `dohc could not check ${agent.name}.`), cause, () => check(agent), undefined, identity);
+      }
       next = { status: "failed" };
     }
+    if (!shows()) return;
     setChecks((current) => ({ ...current, [agent.id]: next }));
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
@@ -594,10 +639,13 @@ export function AgentList(props: {
       {config && "unavailable" in config ? (
         <p data-testid="mcp-unavailable" className="-mt-4 mb-6 text-[12px] text-danger">{config.message}</p>
       ) : null}
-      <div className="rounded-lg border border-line bg-panel px-4">
+      <div ref={card} className="rounded-lg border border-line bg-panel px-4">
         {restricted && props.trust ? (
           <div className="-mx-4 overflow-hidden rounded-t-lg">
-            <RestrictedAgentsBand asking={props.trust.asking} onTrust={props.trust.onTrust} />
+            <RestrictedAgentsBand asking={asking} onTrust={() => {
+              trustPressed.current = true;
+              props.trust?.onTrust();
+            }} />
           </div>
         ) : null}
         {rows.map((row) => row.kind === "broken" ? (

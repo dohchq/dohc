@@ -1309,6 +1309,8 @@ describe("SettingsDialog", () => {
       ok: false,
       detail: "Runner did not report within 120 seconds.",
     });
+    // A failed check reads the file before it reports, to see Nova is still there.
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" });
     bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" });
     const user = userEvent.setup();
     render(
@@ -1345,7 +1347,32 @@ describe("SettingsDialog", () => {
     expect(bridge.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     await waitFor(() => expect(screen.queryByTestId("restricted-agents-state")).toBeNull());
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Check" }).disabled).toBe(false);
+    // A keyboard user carries on from the Check trust turned on.
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Check" }));
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
+  it("puts focus back on the card's Trust workspace when the person cancels main's dialog", async () => {
+    const answer = deferred<{ workspaceId: string; trusted: boolean }>();
+    bridge.requestWorkspaceTrust.mockReturnValueOnce(answer.promise);
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const band = await screen.findByTestId("restricted-agents-state");
+    const trust = within(band).getByRole<HTMLButtonElement>("button", { name: "Trust workspace" });
+    await user.click(trust);
+    await waitFor(() => expect(trust.disabled).toBe(true));
+    // Chromium moves focus off a button that turns off; jsdom only lets an
+    // enabled one blur.
+    act(() => {
+      trust.disabled = false;
+      trust.blur();
+      trust.disabled = true;
+    });
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => answer.resolve({ workspaceId: "ws-1", trusted: false }));
+    await waitFor(() => expect(trust.disabled).toBe(false));
+    expect(document.activeElement).toBe(trust);
   });
 
   it("holds Check back on nothing while trust is still being read", async () => {
@@ -1364,7 +1391,10 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     const onClearError = vi.fn();
     bridge.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner did not report within 120 seconds." });
-    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    // Once for the panel, and once for the failed check's look at the file.
+    bridge.getUserSettings
+      .mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" })
+      .mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents"
       onError={onError} onClearError={onClearError} onClose={() => {}} />);
