@@ -6068,6 +6068,54 @@ fn an_agent_chat_on_another_slug_goes_back_to_its_own() {
     assert_eq!(name_and_slug(&engine, "notes-group"), moved_notes_group());
 }
 
+/// Only a crafted op can leave one agent's chat on another agent's slug. The
+/// notes agent's chat still takes its slug when it arrives, and the other chat
+/// goes back to its own when its agent's chat is made.
+#[test]
+fn an_agent_chat_takes_its_slug_from_another_agents_chat() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+                 VALUES ('ws', 'codex-chat', 'Codex', 'my-agent-notes', 'agent', 1, 1, 'codex')",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("the codex agent's chat on the notes agent's slug");
+    let create = envelope(
+        "device-a",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "notes-chat", "name": "Notes", "slug": "my-agent-notes",
+            "kind": "agent", "createdAtMs": 5, "wireId": "channel_wire_agent_v1_notes"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &create, &NoFaults).expect("the notes agent's chat");
+    assert_eq!(
+        name_and_slug(&engine, "notes-chat"),
+        ("Notes".to_owned(), "my-agent-notes".to_owned())
+    );
+    assert_eq!(
+        name_and_slug(&engine, "codex-chat"),
+        (
+            "Codex".to_owned(),
+            dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "codex-chat", 0)
+        )
+    );
+
+    let chat = LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
+        .expect("the codex agent's chat");
+    assert_eq!(
+        (chat.channel_id.as_str(), chat.slug.as_str()),
+        ("codex-chat", "my-agent-codex")
+    );
+}
+
 #[test]
 fn imported_agent_message_keeps_its_owner_display_name() {
     let (_scratch, _path, mut engine) = open_store();

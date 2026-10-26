@@ -1121,15 +1121,15 @@ fn apply_channel(
     Ok(())
 }
 
-/// An agent's chat holds its agent's slug. A group there moves off it, as
-/// provisioning does.
+/// An agent's chat holds its agent's slug. Any other chat there moves off it,
+/// as provisioning does.
 fn agent_chat_slug(
     tx: &Transaction<'_>,
     workspace_id: &str,
     agent_id: &str,
 ) -> Result<String, SyncError> {
     let slug = agent_channel_slug(agent_id);
-    free_agent_channel_slug(tx, workspace_id, &slug)
+    free_agent_channel_slug(tx, workspace_id, agent_id, &slug)
         .map_err(|error| map_chat_rule(error, "chat channel slug is invalid"))?;
     Ok(slug)
 }

@@ -2413,7 +2413,7 @@ impl<'a> LinkedChatStore<'a> {
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
                 // Sync or an upgrade may have left the chat on another slug.
                 if existing.slug != slug {
-                    free_agent_channel_slug(tx, &ws, &slug)?;
+                    free_agent_channel_slug(tx, &ws, agent_id, &slug)?;
                     tx.execute(
                         "UPDATE chat_channels SET slug = ?3 WHERE workspace_id = ?1 AND channel_id = ?2",
                         params![ws, existing.channel_id, slug],
@@ -2423,7 +2423,7 @@ impl<'a> LinkedChatStore<'a> {
                 }
                 return Ok::<_, DomainError>(existing);
             }
-            free_agent_channel_slug(tx, &ws, &slug)?;
+            free_agent_channel_slug(tx, &ws, agent_id, &slug)?;
             create_well_known_channel(
                 tx,
                 claims,
@@ -6312,22 +6312,25 @@ fn channel_by_slug(
 }
 
 /// Free an agent's slug for its chat. A group an earlier build named like the
-/// agent's chat keeps its name and moves to a slug no agent chat can have.
+/// agent's chat keeps its name and moves to a slug no agent chat can have, and
+/// so does any other chat there.
 pub fn free_agent_channel_slug(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    agent_id: &str,
     slug: &str,
 ) -> Result<(), DomainError> {
     let holder: Option<String> = tx
         .query_row(
-            "SELECT channel_id FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2 AND agent_id IS NULL",
-            params![workspace_id, slug],
+            "SELECT channel_id FROM chat_channels \
+             WHERE workspace_id = ?1 AND slug = ?2 AND agent_id IS NOT ?3",
+            params![workspace_id, slug, agent_id],
             |row| row.get(0),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     match holder {
-        Some(group) => move_channel_off_slug(tx, workspace_id, &group, slug),
+        Some(holder) => move_channel_off_slug(tx, workspace_id, &holder, slug),
         None => Ok(()),
     }
 }
