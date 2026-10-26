@@ -17,7 +17,7 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
-import { absentAsNull, diskSpelling } from "./diskSpelling";
+import { absentAsNull, diskSpelling, lookAlikeSpelling } from "./diskSpelling";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
@@ -260,10 +260,9 @@ async function withCaptureMutationLock<T>(
 async function reachesOtherSpelling(rootDir: string, path: string): Promise<boolean> {
   if (!/^[\x00-\x7f]*$/u.test(path)) return true;
   const segments = path.split("/");
-  const normalizesTo: Record<string, string> = { ";": ";", "`": "`", K: "K" };
   for (const [index, segment] of segments.entries()) {
     const swapped = [...segment].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
-    const composed = [...segment].map((c) => normalizesTo[c] ?? c).join("");
+    const composed = lookAlikeSpelling(segment);
     for (const spelling of [swapped, composed]) {
       if (spelling === segment) continue;
       const probe = [...segments.slice(0, index), spelling, ...segments.slice(index + 1)];

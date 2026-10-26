@@ -1634,8 +1634,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="person, rose chosen">
           <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
-        <Specimen label="agent, Default chosen">
-          <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        <Specimen label="agent, olive chosen">
+          <HueControl label="Your agent's color" value="olive" shape="agent" onChange={noop} />
         </Specimen>
         <Specimen label="agent, teal chosen">
           <HueControl label="Your agent's color" value="teal" shape="agent" onChange={noop} />
@@ -2263,9 +2263,35 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="unknown: no cause dohc can name">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
         </Specimen>
-        <Specimen label="loading, then failed reads: words in Notices">
+        <Specimen label="History paused: the line heads the rows">
           <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }} paused expanded onToggle={noop}
+              onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="the first read: lines after 150 ms until it answers">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="while the workspace is read in: no deadline">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
+            <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <RetryRow testId="linked-chats-failed" onRetry={noop} />
+            </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
@@ -3185,7 +3211,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="agent-color" title="Agent color">
-        <Specimen label="a person and two agents, Default and plum; keyboard focus on the plum agent's avatar">
+        <Specimen label="a person and two agents, olive and plum; keyboard focus on the plum agent's avatar">
           <div data-force-state="focus-visible" data-force-target='[data-message-id="color-orbit"] [data-testid="agent-color-trigger"]'>
             <AgentColorContext.Provider value={noop}>
               <AboutPanelSpecimen>
@@ -3196,8 +3222,8 @@ function Pane(props: { theme: "light" | "dark" }) {
             </AgentColorContext.Provider>
           </div>
         </Specimen>
-        <Specimen label="open, plum chosen, keyboard focus on Default">
-          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Default"]'>
+        <Specimen label="open, plum chosen, keyboard focus on olive">
+          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Olive"]'>
             <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
           </div>
         </Specimen>

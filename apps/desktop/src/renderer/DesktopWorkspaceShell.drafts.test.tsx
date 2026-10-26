@@ -1966,8 +1966,8 @@ describe("explorer destructive change flush boundaries", () => {
     // Start a second Explorer flush while the write and rename are held.
     // The rename settlement must add recovery semantics when it joins this
     // promise, even though the create operation started it without them.
-    await user.click(screen.getByLabelText("New file"));
-    await user.type(await screen.findByLabelText("New file name"), "spare.md{Enter}");
+    await user.click(screen.getByLabelText("New folder"));
+    await user.type(await screen.findByLabelText("New folder name"), "spare{Enter}");
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
 
     await act(async () => {

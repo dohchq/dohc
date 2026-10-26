@@ -50,7 +50,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     pinned: [],
     openEditorsHeight: 180,
     onOpenEditorsHeightChange: vi.fn(),
-    createRequest: null,
+    newFolderRequest: null,
+    onNewPage: vi.fn(),
     onOpenFile: vi.fn(),
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
@@ -433,12 +434,10 @@ describe("Explorer render cost", () => {
     });
     const view = render(<Explorer {...props} />);
 
-    view.rerender(
-      <Explorer {...props} createRequest={{ kind: "file", id: 1 }} />,
-    );
+    view.rerender(<Explorer {...props} newFolderRequest={1} />);
 
     const input = await screen.findByTestId("tree-edit-input");
-    expect(input.getAttribute("aria-label")).toBe("New file name");
+    expect(input.getAttribute("aria-label")).toBe("New folder name");
     expect(document.activeElement).toBe(input);
     expect(screen.getAllByTestId("tree-row").length).toBeLessThanOrEqual(64);
   });

@@ -33,8 +33,8 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
 
     const filesHeader = page.getByTestId("explorer-files-header");
     await page.keyboard.press("ControlOrMeta+n");
-    await page.getByRole("textbox", { name: "File name" }).fill("Welcome.md");
-    await page.getByRole("button", { name: "Create file" }).click();
+    await page.getByLabel("Page title").fill("Welcome");
+    await page.getByLabel("Page title").press("Enter");
     await expect(explorerRow(page, "Welcome.md")).toBeVisible();
     await expect.poll(() => pathExists(join(temp.rootPath, "Welcome.md"))).toBe(true);
     const welcomeTab = page.getByTestId(editorTabTestId("Welcome.md"));
@@ -50,26 +50,26 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
 
     await explorerRow(page, "Research").click();
     await filesHeader.getByRole("button", { name: "New file" }).click();
-    await page.getByRole("textbox", { name: "New file name" }).fill("notes.txt");
-    await page.getByRole("textbox", { name: "New file name" }).press("Enter");
-    await expect(explorerRow(page, "Research/notes.txt")).toBeVisible();
+    await page.getByLabel("Page title").fill("notes");
+    await page.getByLabel("Page title").press("Enter");
+    await expect(explorerRow(page, "Research/notes.md")).toBeVisible();
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
       .toBe(true);
 
-    const created = explorerRow(page, "Research/notes.txt");
+    const created = explorerRow(page, "Research/notes.md");
     await created.click();
     await created.press("F2");
     const rename = page.getByRole("textbox", { name: "New name" });
-    await rename.fill("plan.txt");
+    await rename.fill("plan.md");
     await rename.press("Enter");
-    const renamed = explorerRow(page, "Research/plan.txt");
+    const renamed = explorerRow(page, "Research/plan.md");
     await expect(renamed).toBeVisible();
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
       .toBe(false);
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(true);
     const notice = page.getByTestId("workspace-shell-notice");
     await expect(notice).toContainText("Renamed notes.txt to plan.txt");
@@ -92,7 +92,7 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect(page.getByTestId("delete-confirm")).toHaveCount(0);
     await expect(renamed).toHaveCount(0);
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(false);
     await expect(notice).toContainText("Deleted plan.txt");
     await notice.getByRole("button", { name: "Undo" }).click();

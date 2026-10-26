@@ -1,34 +1,59 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentBadge, AgentSettingsContext, AgentSettingsProvider, isOwnAuthor, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge, AgentSettingsProvider } from "./AgentBadge";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { settingsWithAgent } from "../../testing/agentSettings";
+
+const mine = { group: "agent-mine", hue: null, self: true } as const;
+const theirs = { group: "agent-theirs", hue: null, self: false } as const;
+const ada = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } };
+
+function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?: string }, presentation: typeof mine | typeof theirs, settings = settingsWithAgent({ name: "Nova", launch: { command: "local-tool --private-path" } }, ada)) {
+  render(<AgentSettingsProvider settings={settings}>
+    <AgentBadge testIdPrefix="chats-post" author={author} presentation={presentation} />
+  </AgentSettingsProvider>);
+  fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+  return screen.getByRole("tooltip").textContent ?? "";
+}
 
 afterEach(cleanup);
 describe("agent badge", () => {
-  it("shows the selected tool instead of the saved Advanced command", () => {
-    render(<AgentSettingsContext.Provider value={{ ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova", preferredName: "Ada" }, runner: { ...DEFAULT_USER_SETTINGS.runner, command: "old-tool", profile: { tool: "codex", executable: "/tools/codex" } } }}>
-      <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "owner" }} viewerAuthorId="owner" />
-    </AgentSettingsContext.Provider>);
-    fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
-    expect(screen.getByRole("tooltip").textContent).toContain("/tools/codex");
-    expect(screen.getByRole("tooltip").textContent).not.toContain("old-tool");
+  it("shows the chosen tool's command for your agent", () => {
+    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, mine,
+      settingsWithAgent({ name: "Nova", launch: { tool: "codex", executable: "/tools/codex" } }, ada));
+    expect(text).toContain("/tools/codex");
   });
-  it.each(["owner", "someone-else"])("shows the stored owner and limits the local command for viewer %s", (viewer) => {
-    render(<AgentSettingsContext.Provider value={{ ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova", preferredName: "Ada" }, runner: { ...DEFAULT_USER_SETTINGS.runner, command: "local-tool --private-path" } }}>
-      <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "owner" }} viewerAuthorId={viewer} />
-    </AgentSettingsContext.Provider>);
+
+  it("shows the owner, and your command only on your agent's message", () => {
+    expect(tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, mine)).toContain("Current local command: local-tool --private-path");
+    cleanup();
+    // In a shared workspace, another person's agent can carry your names. It is still theirs.
+    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, theirs);
+    expect(text).toContain("Owned by Ada");
+    expect(text).not.toContain("local-tool");
+  });
+
+  it("finds your agent by the name its messages had before agents had ids", () => {
+    const renamed = settingsWithAgent({ name: "Atlas", nameBeforeMigration: "Nova", launch: { command: "local-tool" } }, ada);
+    expect(tooltipFor({ authorDisplayName: "Nova" }, mine, renamed)).toContain("Current local command: local-tool");
+    cleanup();
+    // Your person's message from an agent you do not have shows no command.
+    expect(tooltipFor({ authorDisplayName: "Cursor" }, mine, renamed)).not.toContain("Current local command");
+  });
+
+  it("closes on Escape, and stays open while it has focus", () => {
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} presentation={theirs} />);
     const badge = screen.getByTestId("chats-post-agent-badge");
     expect(badge.tabIndex).toBe(0);
     badge.focus();
     fireEvent.focus(badge);
-    expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
-    expect(screen.getByRole("tooltip").textContent?.includes("Current local command: local-tool --private-path")).toBe(viewer === "owner");
     fireEvent.mouseLeave(badge.parentElement!);
     expect(screen.getByRole("tooltip")).not.toBeNull();
     fireEvent.keyDown(badge, { key: "Escape" });
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
+
   it("opens its details without opening the containing post", () => {
     const onOpen = vi.fn();
     render(<div onClick={onOpen}>
@@ -37,40 +62,5 @@ describe("agent badge", () => {
     fireEvent.click(screen.getByTestId("chats-post-agent-badge"));
     expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
     expect(onOpen).not.toHaveBeenCalled();
-  });
-});
-
-describe("whose message it is", () => {
-  const profile = { preferredName: "Ada", agentName: "Nova" };
-
-  it("trusts the verified id on a signed-in message over its name", () => {
-    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-1" }, "user-1", profile)).toBe(true);
-    // Someone else named Ada.
-    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-2" }, "user-1", profile)).toBe(false);
-    // The viewer's id has not loaded yet.
-    expect(isOwnAuthor("human", { authorDisplayName: "Ada", authorUserId: "user-1" }, undefined, profile)).toBe(false);
-    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorUserId: "user-1" }, "user-1", profile)).toBe(true);
-  });
-
-  it("goes by your names on a signed-out message", () => {
-    expect(isOwnAuthor("human", { authorDisplayName: "Ada" }, undefined, profile)).toBe(true);
-    expect(isOwnAuthor("human", { authorDisplayName: "You" }, undefined, {})).toBe(true);
-    expect(isOwnAuthor("human", { authorDisplayName: "Grace" }, undefined, profile)).toBe(false);
-    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, undefined, profile)).toBe(true);
-    expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorOwnerDisplayName: "Grace" }, undefined, profile)).toBe(false);
-    // Before you name yourself or your agent, main records "You" and "Agent".
-    expect(isOwnAuthor("agent", { authorDisplayName: "Agent", authorOwnerDisplayName: "You" }, undefined, {})).toBe(true);
-  });
-
-  it("never takes a link holder for you, whatever name they chose", () => {
-    let isOwn: ReturnType<typeof useIsOwnAuthor> | undefined;
-    function Probe() {
-      isOwn = useIsOwnAuthor();
-      return null;
-    }
-    render(<AgentSettingsProvider settings={{ ...DEFAULT_USER_SETTINGS, profile: profile }}><Probe /></AgentSettingsProvider>);
-    expect(isOwn!("human", { authorDisplayName: "Ada" }, undefined)).toBe(true);
-    expect(isOwn!("link", { authorDisplayName: "Ada" }, undefined)).toBe(false);
-    expect(isOwn!("link", { authorDisplayName: "You" }, undefined)).toBe(false);
   });
 });

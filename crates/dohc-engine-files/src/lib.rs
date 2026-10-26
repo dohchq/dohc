@@ -74,7 +74,7 @@ pub use policy::{
 pub use reconcile::{
     AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,
     ReconcileController, ReconcilePlan, ReconcileRun, Respelling, ScanGeneration, StdAbsenceProbe,
-    stored_under_other_spelling,
+    disk_spelling, may_share_entry, stored_under_other_spelling,
 };
 pub use scan::{
     FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,

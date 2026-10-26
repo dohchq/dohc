@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import {
   NOW,
@@ -31,11 +32,7 @@ describe("ChatsView My agent", () => {
     const view = render(navigatorView(0, { suspendPolling: true, userSettings: DEFAULT_USER_SETTINGS }));
     await screen.findByTestId("chats-channel");
     expect(screen.queryByTestId("chats-my-agent")).toBeNull();
-    const enabled = {
-      ...DEFAULT_USER_SETTINGS,
-      profile: { agentName: "Nova" },
-      runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
-    };
+    const enabled = settingsWithAgent({ name: "Nova" });
     view.rerender(navigatorView(0, { suspendPolling: true, userSettings: enabled }));
     await waitFor(() => expect(listeners.size).toBe(1));
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
@@ -250,11 +247,7 @@ describe("ChatsView My agent", () => {
     // The check and the add each wrote the same settings: the name, the
     // command, dispatch on.
     expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
-    expect(onSaveUserSettings).toHaveBeenLastCalledWith({
-      ...DEFAULT_USER_SETTINGS,
-      profile: { ...DEFAULT_USER_SETTINGS.profile, agentName: "Nova" },
-      runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
-    }, DEFAULT_USER_SETTINGS);
+    expect(onSaveUserSettings).toHaveBeenLastCalledWith(settingsWithAgent({ name: "Nova" }), DEFAULT_USER_SETTINGS);
   });
 });
 

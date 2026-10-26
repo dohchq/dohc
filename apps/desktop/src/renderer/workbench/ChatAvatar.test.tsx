@@ -6,10 +6,11 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { AgentBadge } from "./AgentBadge";
 import { setChosenColors } from "./chosenColors";
+import { settingsWithAgent } from "../../testing/agentSettings";
 
 afterEach(() => {
   clearAgentColorOverrides();
-  setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+  setChosenColors(DEFAULT_USER_SETTINGS);
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -77,11 +78,11 @@ describe("ChatAvatar presentation", () => {
     render(<ChatAvatar name="You" kind="human" presentation={{ ...ownPresentation, hue: "teal" }} />);
     render(<ChatAvatar name="Someone" kind="human" presentation={{ ...neutralPresentation, hue: "teal" }} />);
     render(<ChatAvatar name="Agent" kind="agent" presentation={ownPresentation} />);
-    act(() => setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose", yourAgentColor: "rose" }));
+    act(() => setChosenColors({ ...settingsWithAgent({ hue: "rose" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" } }));
     expect(screen.getByTitle("You").className).toContain("text-hue-rose");
     expect(screen.getByTitle("Someone").className).toContain("text-hue-teal");
     expect(screen.getByTitle("Agent").className).toContain("text-hue-rose");
-    act(() => setChosenColors(DEFAULT_USER_SETTINGS.appearance));
+    act(() => setChosenColors(DEFAULT_USER_SETTINGS));
     expect(screen.getByTitle("You").className).toContain("text-hue-teal");
     expect(screen.getByTitle("Agent").className).toContain("text-agent");
   });
