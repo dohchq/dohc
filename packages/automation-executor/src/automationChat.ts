@@ -185,12 +185,15 @@ export interface AutomationChatMessage {
   target:
     | { kind: "group"; channelId: string; lane: ChatThreadLane }
     | { kind: "direct-message"; threadId: string }
-    // The person's own agent, in its "My agent" thread for this automation.
+    // The person's own agent, in its thread for this automation.
     | { kind: "agent" };
   /** Also the idempotency key: a retry replays the recorded message. */
   effectId: string;
   messageId: string;
-  /** The thread a new post starts; a Group's chat lane keeps its running one. */
+  /**
+   * The thread a new post starts; a Group's chat lane keeps its running one.
+   * An agent wake takes the woken agent's thread instead (`automationAgentWakeThreadId`).
+   */
   threadId: string;
   automation: { automationId: string; name: string; depth: number };
   body: string;
@@ -204,9 +207,20 @@ export function automationMessageId(effectId: string): string {
   return hashed("message-auto-", effectId);
 }
 
-/** The "My agent" thread an automation's wakes go to, one per automation. */
+/**
+ * The thread id an automation's wake carries before an agent is chosen.
+ * `wakeAgent` posts it in the woken agent's thread instead.
+ */
 export function automationWakeThreadId(automationId: string): string {
   return hashed("thread-auto-", `wake/${automationId}`);
+}
+
+/**
+ * The thread an automation's wakes go to in one agent's chat, one per
+ * automation and agent, so switching back to an agent continues its thread.
+ */
+export function automationAgentWakeThreadId(automationId: string, agentId: string): string {
+  return hashed("thread-auto-", `wake/${JSON.stringify([automationId, agentId])}`);
 }
 
 /** The thread id a post starts, the same on every attempt. */
