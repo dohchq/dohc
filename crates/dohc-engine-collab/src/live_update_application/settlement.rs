@@ -521,7 +521,11 @@ where
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
-            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction)?)
+            // A settlement still answers a missing dependency as a conflict.
+            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction).map_err(|error| match error {
+                ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                error => error,
+            })?)
         } else {
             None
         };

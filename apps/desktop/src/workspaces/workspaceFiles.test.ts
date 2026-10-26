@@ -19,7 +19,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
@@ -27,6 +27,7 @@ import {
   collectZipEntries,
   couldBeLengthRefusal,
   copyIntoWorkspace,
+  createDurableFile,
   createFile,
   createFolder,
   removeEmptyWorkspaceFolder,
@@ -45,6 +46,7 @@ import { openedLocalState } from "../testing/preparedLocalState";
 import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
+import { deferred } from "../testing/deferred";
 
 let root: string;
 
@@ -272,6 +274,58 @@ describe("createFile", () => {
     await symlink(outside, join(root, "link"), "dir");
     await expect(createFile(root, "link/evil.md", "")).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(outside, "evil.md"))).toBe(false);
+  });
+});
+
+describe("createDurableFile", () => {
+  // The process stops halfway through writing: the final name must not hold a cut-off file.
+  it("keeps the final name empty until the complete bytes are linked there", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const halfWritten = deferred(), stopped = deferred();
+    const open = async (path: string, flags: string, mode?: number) => {
+      const handle = await actual.open(path, flags, mode);
+      if (flags !== "wx") return handle;
+      return {
+        writeFile: async (data: string) => {
+          await handle.writeFile(data.slice(0, data.length / 2));
+          halfWritten.resolve();
+          await stopped.promise;
+          throw new Error("dohc stopped");
+        },
+        sync: () => handle.sync(),
+        close: () => handle.close(),
+      };
+    };
+    const creating = createDurableFile(root, "notes/kept.md", "complete recovery text", { open });
+    await halfWritten.promise;
+    expect(existsSync(join(root, "notes/kept.md"))).toBe(false);
+    const [temporary, ...others] = await readdir(join(root, "notes"));
+    expect(others).toEqual([]);
+    expect(hasEngineIgnoredSegment(`notes/${temporary}`, process.platform)).toBe(true);
+    stopped.resolve();
+    await expect(creating).rejects.toThrow("dohc stopped");
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  it("refuses on a drive without hard links and never writes the final name directly", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const opened: string[] = [];
+    const open = async (path: string, flags: string, mode?: number) => {opened.push(path); return actual.open(path, flags, mode);};
+    const link = async () => {throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });};
+    await expect(createDurableFile(root, "notes/kept.md", "complete recovery text", { open, link }))
+      .rejects.toThrow("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.");
+    expect(opened.filter((path) => basename(path) === "kept.md")).toEqual([]);
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  it("writes a new file of any size and never replaces an existing one", async () => {
+    const text = "x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1);
+    expect(await createDurableFile(root, "notes/./large.md", text)).toBe("notes/large.md");
+    expect(await readFile(join(root, "notes/large.md"), "utf8")).toBe(text);
+    await writeFile(join(root, "keep.md"), "original");
+    await expect(createDurableFile(root, "keep.md", "replacement")).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(root, "keep.md"), "utf8")).toBe("original");
+    expect((await readdir(root)).filter((name) => hasEngineIgnoredSegment(name, process.platform))).toEqual([]);
   });
 });
 

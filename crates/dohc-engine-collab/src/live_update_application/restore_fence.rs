@@ -422,6 +422,13 @@ impl ApplicationOwner {
                 "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,previous_operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?,previous],
             ).map_err(write_sql)?;
+            crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, b).map_err(|error| match error {
+                crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
+                crate::OwnerOutboxError::AcceptedStateIncomplete => {
+                    ApplicationError::AcceptedStateIncomplete
+                }
+                _ => ApplicationError::Corrupt,
+            })?;
             let changed = tx.execute(
                 "UPDATE live_device_application_bindings SET available=0,restore_fence_generation=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
                 params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,input.new_fence],

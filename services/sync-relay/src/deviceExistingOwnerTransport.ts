@@ -244,7 +244,7 @@ export function startExistingOwnerDeviceTransport(options: {
             if (existing?.handoffTimer) throw new Error("Owner handoff is already active.");
             const response = await config.client.sendRequest({...request,id: next(),method: "liveApplication.ownerState",params: {registrationId: nativeId,sessionId: owner.nativeSessionId}},signal);
             owner.assertCurrent();
-            const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+            const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState","retryDeliveryId"]);
             if (state.throughCursor === null) {
               await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}},signal); return;
             }
@@ -297,7 +297,7 @@ export function startExistingOwnerDeviceTransport(options: {
           armedHandoff = true;
           await owner.prepareHandoff(signal); owner.assertCurrent();
           const response = await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,sessionId: owner.nativeSessionId } },signal);
-          owner.assertCurrent(); const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+          owner.assertCurrent(); const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState","retryDeliveryId"]);
           result = {adoptionId: state.adoptionId,expectedLocalSequence: state.expectedLocalSequence,
             throughCursor: state.throughCursor === null && state.outboxId === null ? 0 : state.throughCursor,sessionId: String(registration.nativeId)};
         } else if (operation.method === "liveApplication.ownerOutbox") {
@@ -305,15 +305,16 @@ export function startExistingOwnerDeviceTransport(options: {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const response = await config.client.sendRequest({...request,method: "liveApplication.ownerState",params: {registrationId: registration.nativeId,sessionId: owner.nativeSessionId}},signal);
           owner.assertCurrent();
-          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
+          const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState","retryDeliveryId"]);
           registration.outboxId = state.outboxId === null ? undefined : string(state.outboxId);
-          result = {outboxId: registration.outboxId ?? null,pendingBytes: integer(state.pendingBytes),state: state.outboxState};
+          result = {outboxId: registration.outboxId ?? null,pendingBytes: integer(state.pendingBytes),state: state.outboxState,
+            retryDeliveryId: state.retryDeliveryId === null ? null : string(state.retryDeliveryId)};
         } else if (operation.method === "liveApplication.quarantineOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
-          const params = configRecord(operation.params, ["registrationId", "reason"]);
-          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict" && params.reason !== "capacity-refused") throw new Error("Invalid owner quarantine reason.");
+          const params = configRecord(operation.params, ["registrationId", "reason", "deliveryId", "refusalKey"]);
+          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict" && params.reason !== "capacity-refused" && params.reason !== "invalid-update") throw new Error("Invalid owner quarantine reason.");
           const response = await config.client.sendRequest({...request, method: "ydoc.ownerOutbox.quarantine",
-            params: {outboxId: registration.outboxId, reason: params.reason}}, signal);
+            params: {outboxId: registration.outboxId, reason: params.reason, refusal: {deliveryId: string(params.deliveryId), key: string(params.refusalKey)}}}, signal);
           owner.assertCurrent(); result = response.result;
         } else if (operation.method === "liveApplication.readOwnerOutbox" || operation.method === "liveApplication.acknowledgeOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");

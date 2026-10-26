@@ -24,6 +24,11 @@ pub struct OwnerLiveStop {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred: Option<DeferredOwnerStop>,
+    /// The desktop's digest of the refused edits it recorded before this
+    /// Stop's release took them. Only a Try again naming it settles the
+    /// release again, so a restored older Stop cannot answer for a newer record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_snapshot: Option<String>,
     #[serde(skip)]
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
@@ -169,6 +174,7 @@ pub fn request_in_tx(
         binding: draft.map(|draft| draft.binding),
         record_facts: Vec::new(),
         deferred: None,
+        kept_snapshot: None,
     };
     save_in_tx(tx, key, &stop, now_ms)?;
     Ok(stop)
@@ -198,9 +204,16 @@ pub fn retired_in_tx(
     save_in_tx(tx, key, &stop, now_ms)
 }
 
-pub fn clear_in_tx(tx: &rusqlite::Transaction<'_>, key: &DocKey) -> Result<(), OwnerOutboxError> {
+/// Returns the Stop it cleared in any state, including a finished one that
+/// [`list_requested_in`] no longer shows, so the caller can end what that Stop
+/// held. A Stop that cannot be read is still cleared and names nothing.
+pub fn clear_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
+    let cleared = read_in(tx, key).ok().flatten();
     tx.execute("DELETE FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id]).map_err(write_sql)?;
-    Ok(())
+    Ok(cleared)
 }
 
 pub fn list_requested_in(
@@ -225,10 +238,15 @@ pub fn list_requested_in(
 
 /// The relay has retired exactly this binding's generation. The hook journals
 /// each original entry in the same transaction, as recovery replay does.
+///
+/// `kept_snapshot` names the refused edits the desktop recorded before this
+/// release; a released Stop answers again only for the same one. Without
+/// `accepted_cursor` it is a Try again, which never starts a release.
 pub fn release_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
-    accepted_cursor: i64,
+    accepted_cursor: Option<i64>,
+    kept_snapshot: Option<&str>,
     now_ms: i64,
     mut post_append: impl FnMut(
         &rusqlite::Transaction<'_>,
@@ -247,8 +265,13 @@ pub fn release_in_tx(
         return Err(OwnerOutboxError::StopConflict);
     }
     if stop.state == "released" {
+        if kept_snapshot.is_some() && stop.kept_snapshot.as_deref() != kept_snapshot {
+            return Err(OwnerOutboxError::StopConflict);
+        }
         return Ok(stop);
     }
+    let accepted_cursor = accepted_cursor.ok_or(OwnerOutboxError::StopConflict)?;
+    stop.kept_snapshot = kept_snapshot.map(str::to_owned);
     let observed = read_observed_in(tx, binding)
         .map_err(|error| match error {
             OwnerOutboxError::ParentMismatch => OwnerOutboxError::StopConflict,
@@ -405,7 +428,7 @@ pub fn release_in_tx(
     )
     .map_err(collab)?;
     for id in current {
-        let mut stmt=tx.prepare("SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND update_blob_digest IS NOT NULL UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
+        let mut stmt=tx.prepare("SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 UNION SELECT recovery_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 AND recovery_checkpoint_digest IS NOT NULL UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND update_blob_digest IS NOT NULL UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
         for r in stmt
             .query_map([&id], |r| r.get::<_, String>(0))
             .map_err(read_sql)?

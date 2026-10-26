@@ -24,7 +24,13 @@ process.on("message", message => {
   }
   const {policy,input}=work;
   const {retainStateUpdate, ...projectionInput} = input;
-  const result = createLiveMarkdownJournalValidator(policy)(projectionInput);
+  let result: ReturnType<ReturnType<typeof createLiveMarkdownJournalValidator>>;
+  try {result = createLiveMarkdownJournalValidator(policy)(projectionInput);}
+  catch (error) {
+    // A validator failure is no verdict on the edit: the relay tries it again and names the failure.
+    send({kind: "failed", errorClass: error instanceof Error ? error.name : typeof error});
+    return;
+  }
   if (result.kind === "accepted" &&
     !retainStateUpdate && !liveJournalCheckpointDue(input.suffix.length + 1, input.suffix.reduce((bytes, update) => bytes + update.byteLength, input.candidate.byteLength))) {
     // Do not invoke the stateUpdate getter or clone its bytes before a checkpoint is due.

@@ -2532,6 +2532,9 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
+            // The server refused this file's earlier edits, so its queue takes no more.
+            : reason.includes("owner-outbox-frozen")
+              ? "Live editing is paused for this file."
             : unanswered
               ? "No answer after three attempts."
               : "dohc refused this edit.";

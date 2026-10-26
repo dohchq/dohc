@@ -113,6 +113,14 @@ function buildCliRequest(
     case "fileChats":
     case "documentRead":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+    case "saveRecoveryCopy":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
+        ...(command.incident === undefined ? {} : { incident: command.incident }) } };
+    case "liveKeptEdits":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+    case "retryKeptEdits":
+    case "stopAgain":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path, incident: command.incident } };
     case "documentEdit":
     case "documentCreate": {
       const args = {
@@ -331,7 +339,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -366,6 +374,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       result = await sendCliRequest<typeof command.verb>(request, {
         ...options.client,
         timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
+          // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+          : command.verb === "saveRecoveryCopy" ? 420_000
           : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
         env,
       });
