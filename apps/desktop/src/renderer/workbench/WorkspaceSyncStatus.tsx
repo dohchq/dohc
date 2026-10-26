@@ -62,6 +62,14 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
+// The sync status names the server as the problem: "Server unreachable" or
+// "Server disconnected". Features that need the server then add no
+// indicator, toast or row of their own, since the server's report covers them.
+export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+  return syncStatus?.state === "cloud-disconnected" ||
+    (syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable");
+}
+
 // A file that couldn't save outranks every state but those that stop sync
 // for the whole workspace, which keep the title bar.
 function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: number): string | null {
@@ -82,8 +90,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
   // A failed sync names the server when the server is what failed.
   const stateLabel =
-    state === "sync-failed" &&
-    syncStatus?.syncFailure?.cause === "server-unreachable"
+    state === "sync-failed" && syncNamesServer(syncStatus)
       ? "Server unreachable"
       : state
         ? SYNC_LABEL[state]
@@ -105,8 +112,9 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   // A state that needs the person says so in words beside the dot.
   const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
   // Absent means this workspace has nothing to say about live delivery, so
-  // the title bar says nothing either.
-  const liveDelivery = syncStatus?.ownerLiveDelivery;
+  // the title bar says nothing either. Live editing waits on a server the
+  // title bar already names.
+  const liveDelivery = syncNamesServer(syncStatus) ? undefined : syncStatus?.ownerLiveDelivery;
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;

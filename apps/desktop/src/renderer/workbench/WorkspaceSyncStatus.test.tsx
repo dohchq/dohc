@@ -258,6 +258,41 @@ describe("sync status surface", () => {
     expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
   });
 
+  // Live editing needs the server. While the title bar names the server as
+  // the problem, live editing adds nothing, and it comes back by itself.
+  it.each([
+    {
+      label: "Server unreachable",
+      server: {
+        state: "sync-failed" as const,
+        syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      },
+    },
+    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
+  ])("hides live editing while the title bar says $label", ({ label, server }) => {
+    const { rerender } = renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } });
+    expect(screen.getByTestId("sync-status").textContent).toBe(label);
+    expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
+
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("preparing")} failedSaves={0} />);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Preparing live editing");
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing active");
+  });
+
+  // Any other failure leaves the server's reach unknown, so live editing still speaks.
+  it("keeps live editing beside a sync failure that does not name the server", () => {
+    renderStatus({
+      syncStatus: {
+        ...liveDeliveryStatus("retrying"),
+        state: "sync-failed",
+        syncFailure: { cause: "unknown", detail: "Error: boom", sinceMs: 1, attempts: 1 },
+      },
+    });
+    expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
+  });
+
   it.each([
     ["app", "Update dohc to sync"],
     ["server", "Server needs an update"],

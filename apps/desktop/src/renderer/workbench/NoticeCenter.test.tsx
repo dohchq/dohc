@@ -1610,6 +1610,33 @@ describe("notice center", () => {
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
+  // Live editing needs the server. While the title bar names the server, the
+  // server's own toast and row report the outage, and live editing adds none.
+  it.each([
+    {
+      label: "Server unreachable",
+      server: {
+        state: "sync-failed" as const,
+        syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      },
+    },
+    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
+  ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+
+    rerender(noticeElement({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+
+    // The server comes back: live editing prepares again, with no toast.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("preparing") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
   // Enrollment refusals are one boolean on the status: however many shares it
   // covers, the user gets one announcement and one row, and the list is the
   // only surface that can name the files.

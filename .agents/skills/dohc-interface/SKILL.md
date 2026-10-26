@@ -140,6 +140,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | A control's own input is wrong | Inline, beside the control |
 
 - Use these places. Do not add a new one for a new message.
+- Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.

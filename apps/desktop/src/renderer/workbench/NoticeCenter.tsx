@@ -22,7 +22,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
+import { UPDATE_REQUIRED_LABEL, syncNamesServer } from "./WorkspaceSyncStatus";
 
 export type NoticeAction = {
   label: string;
@@ -952,10 +952,12 @@ export function NoticeCenter(props: {
   // itself renders the same notice, and delivery that recovers to active (or
   // reports nothing at all) leaves no notice and no toast behind.
   // The workspace is part of the key: a dismissal answers one workspace's
-  // failure, so the same failure in another workspace is still news.
+  // failure, so the same failure in another workspace is still news. While
+  // the title bar names the server, the server's own toast and row report
+  // the outage, so live editing files nothing and its open toast closes.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveDeliveryKey =
-    props.syncStatus?.ownerLiveDelivery === "retrying"
+    props.syncStatus?.ownerLiveDelivery === "retrying" && !syncNamesServer(props.syncStatus)
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
