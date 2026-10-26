@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
@@ -49,7 +49,26 @@ type Bridge = Pick<DohcDesktopBridge,
 type Received = { temp: TempWorkspace; app: ElectronApplication; page: Page };
 type LiveDelivery = Awaited<ReturnType<Bridge["getSyncStatus"]>>["ownerLiveDelivery"];
 // One read of the owner's live editing, and when it was asked for.
-type LiveEditingRead = { requestedAt: number; state: LiveDelivery | null | "unread" };
+type LiveEditingRead = { requestedAt: number; state: LiveDelivery | null | "unread"; reason: string | null };
+
+// Each stretch in which the owner's live editing was not active, from the
+// read that saw it leave to the read that saw it back, in ms from `from`.
+function departureWindows(reads: LiveEditingRead[], from: number) {
+  const windows: { from: number; to: number | null; states: LiveEditingRead["state"][]; reasons: string[] }[] = [];
+  for (const read of reads) {
+    const last = windows.at(-1);
+    const open = last?.to === null ? last : undefined;
+    if (read.state === "active") {
+      if (open) open.to = read.requestedAt - from;
+      continue;
+    }
+    const stretch = open ?? { from: read.requestedAt - from, to: null, states: [], reasons: [] };
+    if (!open) windows.push(stretch);
+    if (!stretch.states.includes(read.state)) stretch.states.push(read.state);
+    if (read.reason !== null && !stretch.reasons.includes(read.reason)) stretch.reasons.push(read.reason);
+  }
+  return windows;
+}
 
 async function hasMark(path: string): Promise<boolean> {
   if (process.platform === "win32") {
@@ -141,7 +160,7 @@ async function expectCopies(opened: string[], homeDir: string, originals: { path
 // History moments for both files, and the changes this workspace's journal holds to send.
 function engineCounts(rootPath: string) {
   return withEngineDb(rootPath, (db) => ({
-    moments: db.prepare("SELECT moment_order, path, operation, metadata_origin FROM moments WHERE path IN (?, ?) ORDER BY moment_order")
+    moments: db.prepare("SELECT moment_order, recorded_at_ms, path, operation, metadata_origin FROM moments WHERE path IN (?, ?) ORDER BY moment_order")
       .all(NOTE, DATA),
     toSend: Number(db.prepare("SELECT COUNT(*) AS n FROM replication_log WHERE imported = 0").get()?.n ?? 0),
   }));
@@ -316,10 +335,10 @@ test("a file from another person opens as a marked, read-only copy during a live
   const recipientAccount = { email: `recipient-${randomUUID()}@example.test`, password: `Recipient-proof-${randomUUID()}` };
   // Every request that would offer the recipient's changes to the owner.
   const offered: string[] = [];
-  // The owner's live editing at the Notices baseline, and at the end, when the
-  // first open began, and how often the baseline was taken again.
+  // The owner's live editing at the baseline, and at the end, when the first
+  // open began, and how often the baseline was taken again.
   const delivery: { baseline?: LiveDelivery; end?: LiveDelivery; firstOpenAt?: number; baselineRetakes: number } = { baselineRetakes: 0 };
-  let liveEditingReads: (() => Promise<{ reads: LiveEditingRead[]; at: number }>) | undefined;
+  let liveEditingReads: (() => Promise<LiveEditingRead[]>) | undefined;
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
   let trust: ReturnType<typeof trustFixtureCa> | undefined;
   let ownerBrowser: BrowserContext | undefined;
@@ -409,7 +428,8 @@ test("a file from another person opens as a marked, read-only copy during a live
     await expect(page.getByTestId("markdown-editor")).toContainText("The first draft.");
     expect(await liveStatus()).toBe("ready");
 
-    // A quiet live session can go retrying by itself (#2685), so the baseline waits for active, and any departure after the first open fails the run.
+    // A quiet live session can go retrying by itself (#2685), so the baseline
+    // waits for active, and each time it leaves active is recorded.
     await ownerPage.evaluate((workspaceId) => {
       const api = (window as unknown as { dohcDesktop: Bridge }).dohcDesktop;
       const reads: LiveEditingRead[] = [];
@@ -417,8 +437,8 @@ test("a file from another person opens as a marked, read-only copy during a live
       const read = () => {
         const requestedAt = Date.now();
         const done: Promise<void> = api.getSyncStatus({ workspaceId }).then(
-          (status) => { reads.push({ requestedAt, state: status.ownerLiveDelivery ?? null }); },
-          () => { reads.push({ requestedAt, state: "unread" }); },
+          (status) => { reads.push({ requestedAt, state: status.ownerLiveDelivery ?? null, reason: status.ownerLiveDeliveryReason ?? null }); },
+          () => { reads.push({ requestedAt, state: "unread", reason: null }); },
         ).finally(() => pending.delete(done));
         pending.add(done);
       };
@@ -428,44 +448,46 @@ test("a file from another person opens as a marked, read-only copy during a live
       read();
       Reflect.set(window, "ownerLiveEditing", { reads, pending });
     }, ownerWorkspaceId);
-    // Every read asked for so far, in the order asked, and the time by which
-    // each had answered. A read asked for later starts at or after that time.
+    // Every read asked for so far, once each has answered, in the order asked.
     liveEditingReads = () => ownerPage.evaluate(async () => {
       const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as { reads: LiveEditingRead[]; pending: Set<Promise<void>> };
       while (pending.size) await Promise.all(pending);
-      return { reads: [...reads].sort((a, b) => a.requestedAt - b.requestedAt), at: Date.now() };
+      return [...reads].sort((a, b) => a.requestedAt - b.requestedAt);
     });
-    const departures = (reads: LiveEditingRead[], from: number) =>
-      reads.filter((read) => read.requestedAt >= from && read.state !== "active");
     const liveDelivery = () => ownerPage.evaluate(async (workspaceId) =>
       (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.getSyncStatus({ workspaceId })).ownerLiveDelivery, ownerWorkspaceId);
+    // What the opens must leave as it was: both sides' History, what the view
+    // holds to send, and the owner's proposals.
+    const unchanged = async () => ({
+      recipient: engineCounts(recipientTemp.rootPath),
+      unconfirmed: await unconfirmedChanges(page),
+      owner: engineCounts(ownerTemp.rootPath)?.moments,
+      proposals: await proposals(),
+    });
 
     // Everything opening the view and the note did has settled on both sides.
     expect(await refresh(page)).toMatchObject({ ok: true });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
-    const before = {
-      recipient: engineCounts(recipientTemp.rootPath),
-      unconfirmed: await unconfirmedChanges(page),
-      owner: engineCounts(ownerTemp.rootPath)?.moments,
-    };
-    expect(before.recipient?.moments.length, "the recipient's History holds both files").toBeGreaterThan(0);
-    expect(before.owner?.length, "the owner's History holds both files").toBeGreaterThan(0);
-    expect(await proposals()).toEqual([]);
-    // The baseline counts only if the owner's live editing stayed active from
-    // before its Notices read up to the first open.
+    // The baseline counts only if the owner's live editing stayed active while
+    // it was taken, and nothing in it changed before the first open.
+    let before: Awaited<ReturnType<typeof unchanged>>;
     let notices: Record<"recipient" | "owner", NoticesRow[]>;
     for (;;) {
       signal.throwIfAborted();
       await expect.poll(liveDelivery, { message: "The owner's live editing is active before the baseline.", timeout: 120_000, intervals: [1_000] }).toBe("active");
       const baselineAt = Date.now();
+      before = await unchanged();
       notices = { recipient: await noticesRows(page), owner: await noticesRows(ownerPage) };
       delivery.baseline = await liveDelivery();
-      const log = await liveEditingReads();
-      delivery.firstOpenAt = log.at;
-      if (delivery.baseline === "active" && departures(log.reads, baselineAt).length === 0) break;
+      const left = (await liveEditingReads()).some((read) => read.requestedAt >= baselineAt && read.state !== "active");
+      if (delivery.baseline === "active" && !left && isDeepStrictEqual(await unchanged(), before)) break;
       delivery.baselineRetakes += 1;
     }
+    expect(before.recipient?.moments.length, "the recipient's History holds both files").toBeGreaterThan(0);
+    expect(before.owner?.length, "the owner's History holds both files").toBeGreaterThan(0);
+    expect(before.proposals).toEqual([]);
 
+    delivery.firstOpenAt = Date.now();
     for (const path of [NOTE, DATA]) await openExternally(page, path);
     await expectCopies(await systemOpens(recipient.app), recipientTemp.homeDir, [
       { path: await realpath(join(recipientTemp.rootPath, NOTE)), text: NOTE_TEXT },
@@ -477,11 +499,8 @@ test("a file from another person opens as a marked, read-only copy during a live
     expect(await refresh(page)).toMatchObject({ ok: true, changedPaths: 0 });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
 
-    expect(engineCounts(recipientTemp.rootPath)).toEqual(before.recipient);
-    expect(await unconfirmedChanges(page)).toEqual(before.unconfirmed);
     expect(offered).toEqual([]);
-    expect(engineCounts(ownerTemp.rootPath)?.moments).toEqual(before.owner);
-    expect(await proposals()).toEqual([]);
+    expect(await unchanged()).toEqual(before);
     expect(await readFile(join(ownerTemp.rootPath, NOTE), "utf8")).toBe(NOTE_TEXT);
     expect(await readFile(join(ownerTemp.rootPath, DATA), "utf8")).toBe(DATA_TEXT);
     const sides = [["recipient", page], ["owner", ownerPage]] as const;
@@ -496,14 +515,15 @@ test("a file from another person opens as a marked, read-only copy during a live
     for (const [name, side] of sides) await expectNoNewNotices(side, name, notices[name]);
     delivery.end = await liveDelivery();
     expect(delivery.end, "The owner's live editing is active at the end.").toBe("active");
-    expect(departures((await liveEditingReads()).reads, delivery.firstOpenAt), "The owner's live editing never left active after the first open.").toEqual([]);
   } catch (error) {
     bodyFailure = { error };
     throw error;
   } finally {
     await testInfo.attach("owner live editing", { contentType: "application/json", body: JSON.stringify(delivery) }).catch(() => undefined);
-    const log = await liveEditingReads?.().catch(() => undefined);
-    await testInfo.attach("owner live editing reads", { contentType: "application/json", body: JSON.stringify(log ?? null, null, 2) }).catch(() => undefined);
+    const reads = await liveEditingReads?.().catch(() => undefined);
+    await testInfo.attach("owner live editing reads", { contentType: "application/json", body: JSON.stringify(reads ?? null, null, 2) }).catch(() => undefined);
+    const windows = reads && delivery.firstOpenAt !== undefined ? departureWindows(reads, delivery.firstOpenAt) : null;
+    await testInfo.attach("owner live editing departures, ms from the first open", { contentType: "application/json", body: JSON.stringify(windows, null, 2) }).catch(() => undefined);
     if (stack) {
       await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() }).catch(() => undefined);
     }
