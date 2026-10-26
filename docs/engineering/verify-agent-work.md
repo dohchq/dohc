@@ -56,8 +56,8 @@ Run `pnpm qa:debug` to start a prepared desktop with its own workspace, home, an
 Read the printed `instance.json` for the main-process inspector and renderer debugger addresses.
 Attach a debugger to those loopback endpoints. Confirm the recorded checkout before editing or measuring.
 Close that app or interrupt its command to stop the session and retain logs, a screenshot, and a trace.
-The session retains its workspace and profile beside the evidence for diagnosis.
-On macOS and Linux, its home is a folder in the system temp folder, which the session removes when it ends. That keeps the desktop's CLI socket path under the system's limit, so agents can reply. `instance.json` records the home's path.
+The session retains its disposable data beside the evidence for diagnosis.
+On macOS and Linux, the app reaches its home through a short link in the system temp folder, which keeps the desktop's CLI socket path under the system's limit so agents can reply. The session removes the link when it ends. `instance.json` records the link as `home` and the folder as `homeFiles`.
 
 For native folder-dialog QA, run `pnpm qa:debug -- --native-dialogs`.
 Ask the operator to choose the printed disposable workspace, cancel a second picker, and confirm keyboard focus returns to the app.

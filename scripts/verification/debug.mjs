@@ -41,16 +41,25 @@ const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 const { _electron: electron } = require("playwright");
 const directory = join(repoRoot, ".agent-artifacts/debug", randomUUID());
 const profile = join(directory, "profile");
-const session = makeDebugHome(directory);
-const { home } = session;
 const workspace = join(directory, "workspace");
+let session;
+let leaveStartup;
 let app;
 let processHandle;
 let stop;
 const logs = [];
 try {
   await prepare();
-  for (const path of [profile, home, workspace]) await mkdir(path, { recursive: true });
+  session = makeDebugHome(directory);
+  // Until the session's own handlers take over, a signal ends the launcher at
+  // once, as it always has, but leaves no link to the home behind.
+  leaveStartup = (signal) => {
+    removeDebugHome(session);
+    process.exit(signal === "SIGTERM" ? 143 : 130);
+  };
+  process.once("SIGINT", leaveStartup); process.once("SIGTERM", leaveStartup);
+  const { home } = session;
+  for (const path of [profile, workspace]) await mkdir(path, { recursive: true });
   await writeFile(join(workspace, "debug.md"), "# Debug workspace\n\nThis workspace belongs to this debug session.\n");
   const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: workspace };
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
@@ -65,6 +74,7 @@ try {
       done();
     };
     app.once("close", stop); processHandle.once("exit", stop);
+    process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup);
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
     if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
@@ -78,7 +88,7 @@ try {
   const mainPort = await app.evaluate(() => process.debugPort);
   const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0];
   const instance = { root: repoRoot, commit, supervisorPid: process.pid, launcherPid: app.process().pid,
-    electronPid: await app.evaluate(() => process.pid), workspace, profile, home,
+    electronPid: await app.evaluate(() => process.pid), workspace, profile, home, homeFiles: session.files,
     mainInspector: `http://127.0.0.1:${mainPort}/json/list`, rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`, build: assertPrepared(), directory };
   const debuggerTargets = {};
   for (const [kind, address] of [["main", instance.mainInspector], ["renderer", instance.rendererInspector]]) {
@@ -113,7 +123,11 @@ finally {
       await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
       console.log(`[debug] Evidence retained at ${directory}`);
     } finally {
-      removeDebugHome(session);
+      if (leaveStartup) { process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup); }
+      // The app may still use the link if its process did not exit.
+      if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
+        if (session?.link) console.error(`[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`);
+      } else removeDebugHome(session);
       if (stop) { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
     }
   }

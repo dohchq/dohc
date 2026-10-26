@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -110,12 +110,14 @@ if (process.argv[2] === "fixture") {
     for (const file of ["debug.mjs", "debug-home.mjs", "close-electron.mjs", "desktop-close-policy.mjs"]) copyFileSync(join(import.meta.dirname, file), join(root, file));
     writeFileSync(join(root, "build.mjs"), `export async function prepare() {}\nexport function assertPrepared() { return { desktop: { commit: 'earlier-build-head' } }; }`);
     writeFileSync(join(root, "process.mjs"), `import assert from 'node:assert/strict'; export const repoRoot = import.meta.dirname; export function git(args) { assert.deepEqual(args, ['rev-parse', 'HEAD']); return 'current-checkout-head'; }`);
-    writeFileSync(join(root, "fs-adapter.mjs"), `export { mkdir, readFile } from 'node:fs/promises'; import { writeFile as write } from 'node:fs/promises'; export async function writeFile(path, ...args) { if (String(path).endsWith('desktop.jsonl')) await globalThis.debugFixtureHold('evidence'); return write(path, ...args); }`);
+    writeFileSync(join(root, "fs-adapter.mjs"), `export { readFile } from 'node:fs/promises'; import { mkdir as make, writeFile as write } from 'node:fs/promises'; export async function mkdir(path, ...args) { if (String(path).endsWith('workspace')) await globalThis.debugFixtureHold('startup'); return make(path, ...args); } export async function writeFile(path, ...args) { if (String(path).endsWith('desktop.jsonl')) await globalThis.debugFixtureHold('evidence'); return write(path, ...args); }`);
     for (const [name, source] of [["playwright", "module.exports = { _electron: globalThis.debugFixtureElectron };"], ["electron", "module.exports = 'fixture-electron';"]]) {
       const directory = join(root, "node_modules", name);
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, "index.js"), source);
     }
+    const links = () => new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("dohc-debug-home-")));
+    const linksBefore = links();
     const child = spawn(process.execPath, [import.meta.filename, "fixture", root, signal, phase, probe], {
       windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
@@ -142,6 +144,13 @@ if (process.argv[2] === "fixture") {
     try {
       const result = await closed;
       t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")), supervisorDisconnected: existsSync(join(root, "child-disconnected")) }));
+      if (phase === "startup") {
+        // A signal before the session's own handlers ends the launcher at once, without leaving its link behind.
+        assert.equal(result.code, signal === "SIGTERM" ? 143 : 130, output);
+        assert.equal(protectedCleanup, true, "the launcher listens for the signal during startup");
+        assert.deepEqual([...links()].filter((name) => !linksBefore.has(name)), [], "no link to the session's home remains");
+        return;
+      }
       assert.equal(result.exitSignal, null, output);
       assert.equal(result.code, probe === "fail" ? 1 : 0, output);
       if (phase !== "none") assert.equal(protectedCleanup, true, "signal handlers must remain through cleanup and evidence writes");
@@ -153,10 +162,12 @@ if (process.argv[2] === "fixture") {
       assert.deepEqual(JSON.parse(readFileSync(join(root, "outcome.json"), "utf8")).listeners, [0, 0]);
       const instance = JSON.parse(readFileSync(join(directory, "instance.json"), "utf8"));
       assert.equal(instance.commit, "current-checkout-head", "launch provenance must not reuse the build commit");
-      if (process.platform === "win32") assert.equal(instance.home, join(directory, "home"));
+      assert.equal(instance.homeFiles, join(directory, "home"));
+      assert.ok(existsSync(instance.homeFiles), "the home's files stay with the evidence");
+      if (process.platform === "win32") assert.equal(instance.home, instance.homeFiles);
       else {
-        assert.ok(!instance.home.startsWith(directory), "a Mac or Linux session keeps its home in the temp folder");
-        assert.equal(existsSync(instance.home), false, "the session removes its temporary home");
+        assert.ok(!instance.home.startsWith(directory), "a Mac or Linux session gives the app a short link in the temp folder");
+        assert.equal(existsSync(instance.home), false, "the session removes the link");
       }
       assert.equal(instance.build.desktop.commit, "earlier-build-head");
       if (probe === "utf8") {
@@ -171,24 +182,35 @@ if (process.argv[2] === "fixture") {
       rmSync(root, { recursive: true, force: true });
     }
   }
+  if (process.platform !== "win32") for (const signal of ["SIGINT", "SIGTERM"]) {
+    test(`debug ${signal} during startup leaves no link to the session's home`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase: "startup" }));
+  }
   for (const signal of ["SIGINT", "SIGTERM"]) for (const phase of ["cleanup", "evidence"]) {
     test(`debug repeated ${signal} during ${phase} (${process.platform === "win32" ? "synthetic Windows events" : "native POSIX signals"})`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase }));
   }
   for (const probe of ["pass", "fail"]) {
     test(`debug probe ${probe} retains cleanup and separate launch provenance`, { timeout: 30_000 }, async (t) => fixture(t, { probe }));
   }
-  test("a debug session's CLI socket path fits each platform's limit, and Windows keeps its home in the session", () => {
-    const directory = join(".agent-artifacts", "debug", "0".repeat(36));
-    for (const [platform, limit] of Object.entries(SOCKET_PATH_BYTES)) {
-      const session = makeDebugHome(directory, platform);
-      try {
-        assert.equal(session.temporary, true);
-        const socket = join(session.home, "dohc-cli.sock");
-        assert.ok(Buffer.byteLength(socket) <= limit, `${socket} is ${Buffer.byteLength(socket)} bytes, over ${platform}'s ${limit}`);
-      } finally { removeDebugHome(session); }
-      assert.equal(existsSync(session.home), false);
-    }
-    assert.deepEqual(makeDebugHome(directory, "win32"), { home: join(directory, "home"), temporary: false });
+  test("a debug session's home has a short link on macOS and Linux, and Windows uses the folder itself", () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-debug-test-"));
+    try {
+      const directory = join(root, ".agent-artifacts", "debug", "0".repeat(36));
+      for (const [platform, limit] of Object.entries(SOCKET_PATH_BYTES)) {
+        const session = makeDebugHome(directory, platform);
+        try {
+          assert.equal(session.files, join(directory, "home"));
+          const socket = join(session.home, "dohc-cli.sock");
+          assert.ok(Buffer.byteLength(socket) <= limit, `${socket} is ${Buffer.byteLength(socket)} bytes, over ${platform}'s ${limit}`);
+          assert.equal(realpathSync(session.home), realpathSync(session.files), "the link leads to the session's files");
+        } finally { removeDebugHome(session); }
+        assert.equal(existsSync(session.link), false, "removing the home removes the link");
+        assert.ok(existsSync(session.files), "and keeps the files");
+      }
+      // A temp folder too long for the socket falls back to /tmp.
+      const fallback = makeDebugHome(directory, "darwin", join(root, "t".repeat(80)));
+      try { assert.ok(fallback.link.startsWith("/tmp/dohc-debug-home-"), fallback.link); } finally { removeDebugHome(fallback); }
+      assert.deepEqual(makeDebugHome(directory, "win32"), { files: join(directory, "home"), home: join(directory, "home"), link: null });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
   test("debug evidence preserves split UTF8 in independent streams and flushes an incomplete final character", { timeout: 30_000 }, async (t) => fixture(t, { probe: "utf8" }));
 }
