@@ -105,7 +105,8 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
   if (!record.engine) {
     const destination = await info(join(root, record.to));
     if (!destination) return refuse(`Nothing is at ${record.to} now. Check History for where it went.`);
-    if (await info(join(root, record.from))) return refuse(`${record.from} now occupies the old path. Move it first.`);
+    if (await info(join(root, record.from))) return { ok: false, reason: `Cannot undo the ${word}. ${record.from} now occupies the old path. Move it first.`,
+      refusal: { code: "old-path-occupied", path: record.from } };
     if (destination.isDirectory()) return refuse(`${record.to} is now a folder. Move it first.`);
     assertCurrent();
     record.engine = { requested: true };

@@ -240,7 +240,8 @@ describe("delete recovery", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     await f.write("folder/rowless.txt", "occupant");
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now occupies the old path. Move it first." });
+    expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now occupies the old path. Move it first.",
+      refusal: { code: "old-path-occupied", path: "folder/rowless.txt" } });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("occupant");
     expect(existsSync(join(f.root, "folder/tracked.txt"))).toBe(false);

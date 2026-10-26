@@ -78,6 +78,7 @@ import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from ".
 import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, TreeRow, explorerMenuItems, type VisibleRow } from "../workbench/Explorer";
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { undoRefusedNotice } from "../workbench/explorerOperationNotices";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -1253,14 +1254,16 @@ const EXPLORER_SCOPE: ExplorerMenuScope = {
   kind: "file", pinned: false, isMountPath: false, hasMountRecord: false, canShare: false, shareView: null,
 };
 
-// A finished delete offers Undo; a refused Undo keeps main's words and Try again.
+// A finished delete offers Undo; a refused Undo says what is in the way, with
+// Try again, and Copy keeps the engine's text.
 const UNDO_TOAST = {
   id: "undo", tone: "success" as const, message: "Deleted budget.md", details: "Deleted budget.md",
   atMs: 0, canRetry: false, actionLabel: "Undo", seen: false,
 };
-const REFUSED_UNDO = "Cannot undo the rename. budget.md now occupies the old path. Move it first.";
 const REFUSED_UNDO_TOAST = {
-  id: "refused-undo", message: REFUSED_UNDO, details: `Cause: ${REFUSED_UNDO}`, atMs: 0, canRetry: true, seen: false,
+  id: "refused-undo", message: undoRefusedNotice("rename", { code: "old-path-occupied", path: "docs/budget.md" }),
+  details: "Cause: UndoRefusedError: domain error: Undo refused: old path occupied: docs/budget.md",
+  atMs: 0, canRetry: true, seen: false,
 };
 
 const versionRows: MenuEntry[] = [

@@ -584,6 +584,7 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
+    newestFilesRequest,
     prepareRestoredTabPruning,
   } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
@@ -3718,7 +3719,8 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
-  }, [refreshFiles, reportShellError]);
+    return newestFilesRequest();
+  }, [refreshFiles, newestFilesRequest, reportShellError]);
   const checkForDesktopUpdates = useCallback(
     () => runUpdateCheck(reportShellError),
     [reportShellError],
@@ -4928,6 +4930,7 @@ export function DesktopWorkspaceShell(props: {
         workspaceId={workspaceId}
         files={files}
         folders={folders}
+        listingRequest={fileListingCommit?.request ?? 0}
         editorGroups={wb.editorGroups}
         activeEditorGroup={wb.activeEditorGroup}
         dirtyPaths={dirtyPaths}

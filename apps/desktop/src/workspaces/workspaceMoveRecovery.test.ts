@@ -14,6 +14,7 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
@@ -288,7 +289,8 @@ it.each(["failed", "missing", "expired"])("uses folder words for the result and 
 it("refuses an occupied old file path without changing disk, the record or History", async () => {
   const f = await fixture(); await f.write("a.txt"); const moved = await f.move("a.txt", "b.txt"); await recovery.waitForRecovery(moved.operationId!);
   await f.write("a.txt", "occupant"); const before = await readFile(f.recordPath(), "utf8");
-  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. a.txt now occupies the old path. Move it first." });
+  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. a.txt now occupies the old path. Move it first.",
+    refusal: { code: "old-path-occupied", path: "a.txt" } });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled(); expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
 
@@ -377,12 +379,25 @@ it("retries a rowless file occupied after the receipt without engine work", asyn
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
-it("passes the engine's deleted-member refusal through with only the requested marker", async () => {
+const engineRefusal = (reason: string) => new DaemonRefusalError({ code: "CONFLICT", message: `domain error: Undo refused: ${reason}`, retry: "no" }, undefined);
+it("passes the engine's deleted-member refusal through, unexplained, with only the requested marker", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
   await f.write("archive/tracked.txt", "replacement"); const before = await readFile(f.recordPath(), "utf8");
-  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("Undo refused: object moved or removed: archive/tracked.txt"));
-  expect(await f.undo()).toEqual({ ok: false, reason: "Undo refused: object moved or removed: archive/tracked.txt" });
+  f.history.undoHistoryOperation.mockRejectedValueOnce(engineRefusal("object moved or removed: archive/tracked.txt"));
+  expect(await f.undo()).toEqual({ ok: false, reason: "domain error: Undo refused: object moved or removed: archive/tracked.txt",
+    refusal: { code: "unexplained" } });
   expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toEqual({ ...JSON.parse(before), engine: { requested: true } });
+});
+it.each(["old path occupied", "old path occupied on disk"])("names the old path the engine finds occupied: %s", async reason => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.history.undoHistoryOperation.mockRejectedValueOnce(engineRefusal(`${reason}: folder/tracked.txt`));
+  expect(await f.undo()).toEqual({ ok: false, reason: `domain error: Undo refused: ${reason}: folder/tracked.txt`,
+    refusal: { code: "old-path-occupied", path: "folder/tracked.txt" } });
+});
+it("codes only the engine's refusal, not other text in its words", async () => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
+  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("domain error: Undo refused: old path occupied: folder/tracked.txt"));
+  expect(await f.undo()).toEqual({ ok: false, reason: "domain error: Undo refused: old path occupied: folder/tracked.txt" });
 });
 it("distinguishes a missing move record from an unknown operation and refuses corrupt records", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");

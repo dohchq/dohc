@@ -32,6 +32,18 @@ describe("WorkspaceFileListingCache", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it("walks again when a changed file is missing from the listing", async () => {
+    const cache = new WorkspaceFileListingCache("win32");
+    const load = vi.fn(async () => listing("plan.md"));
+    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    await read();
+    // Deleted after the walk and written again before the next engine scan.
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    cache.invalidate({ workspaceId: "ws-a", paths: ["packing.md"], pathSetChanged: false });
+    await read();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it("does not overwrite newer content metadata with an older worker response", async () => {
     const first = deferred<readonly { path: string; kind: "file"; icon: string }[]>();
     const metadata = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([{ path: "note.md", kind: "file", icon: "newest" }]);

@@ -1,3 +1,4 @@
+import type { UndoHistoryOperationRefusal } from "../../ipc/bridgeContract";
 import { basenameOf, dirnameOf } from "../path";
 import type { PendingTreeChange, PendingTreeMove } from "./file-tree-optimistic";
 
@@ -45,6 +46,15 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
   const refused = done.find((recorded) => !recorded.undoable);
   if (!refused) return { message, undoable: true };
   return { message: refused.noUndo ? `${message}. ${refused.noUndo}` : message, undoable: false };
+}
+
+// An Undo main refused and named. Any other refusal says only what failed;
+// main's own text goes to Copy.
+export function undoRefusedNotice(word: ReturnType<typeof operationWord>, refusal: UndoHistoryOperationRefusal): string {
+  const failed = `Cannot undo the ${word}.`;
+  return refusal.code === "old-path-occupied"
+    ? `${failed} ${basenameOf(refusal.path)} now occupies the old path. Move it first.`
+    : failed;
 }
 
 export function undoneNotice(done: readonly RecordedTreeChange[]): string {

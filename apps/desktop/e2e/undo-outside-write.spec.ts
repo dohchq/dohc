@@ -44,6 +44,7 @@ test("Undo refuses an old path occupied by an outside write @undo-outside-write"
     expect(result).toEqual({
       ok: false,
       reason: "Cannot undo the rename. old.md now occupies the old path. Move it first.",
+      refusal: { code: "old-path-occupied", path: "old.md" },
     });
     expect(await readFile(join(temp.rootPath, "old.md"), "utf8")).toBe("Outside content KEEP.\n");
     expect(await readFile(join(temp.rootPath, "new.md"), "utf8")).toBe("Moved content.\n");

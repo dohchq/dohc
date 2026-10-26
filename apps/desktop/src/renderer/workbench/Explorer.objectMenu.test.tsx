@@ -83,7 +83,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
     onNotice: vi.fn(),
     onNewCollection: vi.fn(),
@@ -310,14 +311,14 @@ describe("Undo after a rename, a move or a delete", () => {
     expect(shownPaths()).not.toContain("plan.md");
     act(() => undoDelete());
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
-    view.rerender(<Explorer {...props} files={[...props.files]} />);
+    view.rerender(<Explorer {...props} files={[...props.files]} listingRequest={1} />);
     expect(shownPaths()).toContain("plan.md");
 
     await renameTo("notes.md", "ideas");
     const undoRename = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
     act(() => undoRename());
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Renamed ideas.md back to notes.md"));
-    view.rerender(<Explorer {...props} files={[...props.files]} />);
+    view.rerender(<Explorer {...props} files={[...props.files]} listingRequest={1} />);
     expect(shownPaths()).toContain("notes.md");
     expect(shownPaths()).not.toContain("ideas.md");
   });
@@ -344,7 +345,7 @@ describe("Undo after a rename, a move or a delete", () => {
     await renameTo("notes.md", "ideas");
     const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
     act(() => undo());
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(reason, expect.any(Error), expect.any(Function)));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(reason, undefined, expect.any(Function)));
     expect(props.onNotice).not.toHaveBeenCalledWith("Renamed ideas.md back to notes.md");
 
     const retry = vi.mocked(props.onError).mock.calls[0]![2]!;
@@ -366,7 +367,23 @@ describe("Undo after a rename, a move or a delete", () => {
     const undo = await noticeWithUndo(props, "Deleted plan.md");
     act(() => undo());
     await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
-      "dohc could not put plan.md back. It stays at drafts/plan.md.", expect.any(Error), undefined));
+      "dohc could not put plan.md back. It stays at drafts/plan.md.", undefined, undefined));
+  });
+
+  // Main's text stays in the cause, for Copy.
+  it.each([
+    [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. notes.md now occupies the old path. Move it first."],
+    [{ code: "unexplained" } as const, "Cannot undo the rename."],
+  ])("words a refusal main named: %o", async (refusal, words) => {
+    const reason = "domain error: Undo refused: old path occupied: notes.md";
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    act(() => undo());
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
+      words, expect.objectContaining({ message: reason }), expect.any(Function)));
   });
 
   it("offers no Undo main cannot run, and says why in main's words", async () => {
@@ -388,6 +405,45 @@ describe("Undo after a rename, a move or a delete", () => {
     await renameTo("notes.md", "ideas");
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     expect(props.onNotice).not.toHaveBeenCalled();
+  });
+});
+
+// After main answers, the Explorer asks for a listing. That listing settles
+// the change whatever paths it holds; one already in flight does not.
+describe("a listing after main's answer", () => {
+  const settling = (overrides: Partial<ExplorerProps> = {}) =>
+    explorerProps({ listingRequest: 1, onRefresh: vi.fn(() => 2), ...overrides });
+
+  it("shows a file recreated at a just-deleted path", async () => {
+    const props = settling();
+    const view = render(<Explorer {...props} />);
+    fireEvent.click(row("plan.md"));
+    fireEvent.keyDown(row("plan.md"), { key: "Delete" });
+    await noticeWithUndo(props, "Deleted plan.md");
+    expect(shownPaths()).not.toContain("plan.md");
+    view.rerender(<Explorer {...props} listingRequest={2} />);
+    expect(shownPaths()).toContain("plan.md");
+  });
+
+  it("shows a new file at a renamed file's old path as itself", async () => {
+    const props = settling();
+    const view = render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    view.rerender(<Explorer {...props} files={[...props.files, { path: "ideas.md", kind: "file" }]} listingRequest={2} />);
+    expect(shownPaths().filter((path) => path === "notes.md" || path === "ideas.md").sort()).toEqual(["ideas.md", "notes.md"]);
+  });
+
+  it("settles nothing with a listing already in flight at the answer", async () => {
+    const props = settling({ onRefresh: vi.fn(() => 3) });
+    const view = render(<Explorer {...props} />);
+    fireEvent.click(row("plan.md"));
+    fireEvent.keyDown(row("plan.md"), { key: "Delete" });
+    await noticeWithUndo(props, "Deleted plan.md");
+    view.rerender(<Explorer {...props} listingRequest={2} />);
+    expect(shownPaths()).not.toContain("plan.md");
+    view.rerender(<Explorer {...props} files={props.files.filter((file) => file.path !== "plan.md")} listingRequest={3} />);
+    expect(shownPaths()).not.toContain("plan.md");
   });
 });
 

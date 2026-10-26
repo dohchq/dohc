@@ -111,7 +111,12 @@ export class WorkspaceFileListingCache {
     for (const fact of facts) {
       // Rules are read separately on every IPC response; they cannot change this path cache.
       if (isWorkspaceVisibilityPolicyPath(fact.path, this.platform)) continue;
-      if (fact.kind !== "changed") { this.#listings.delete(workspaceId); return; }
+      // A file removed and written again between two engine scans reads as
+      // changed. A listing walked between them lacks it, so its paths are stale.
+      if (fact.kind !== "changed" || (entry.settled && !entry.files.has(fact.path))) {
+        this.#listings.delete(workspaceId);
+        return;
+      }
       entry.changed.add(fact.path);
       const file = entry.files.get(fact.path);
       if (file) file.contentIdentity = `observation:${++this.revision}`;

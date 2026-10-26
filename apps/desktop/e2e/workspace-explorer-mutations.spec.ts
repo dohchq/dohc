@@ -75,12 +75,13 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect(notice).toContainText("Renamed notes.txt to plan.txt");
     await expect(notice.getByRole("button", { name: "Undo" })).toBeVisible();
 
-    // The row's menu, opened from the keyboard, gives focus back on Escape.
+    // The row's menu, opened from the keyboard, focuses its first entry and
+    // gives focus back on Escape.
     const menu = page.getByTestId("explorer-menu");
     await renamed.click();
     await renamed.press("Shift+F10");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: "Rename" })).toBeFocused();
+    await expect(menu.getByRole("menuitem").first()).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
     await expect(renamed).toBeFocused();

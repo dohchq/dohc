@@ -320,7 +320,8 @@ export async function undoDeleteRecovery(workspace: LocalStateWorkspace, record:
     for (const path of [...record.paths, ...record.emptyFolders]) {
       const target = await checkedTarget(root, path, record.base);
       const occupant = await info(target);
-      if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
+      if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.`,
+        refusal: { code: "old-path-occupied", path } };
       if (record.paths.includes(path)) {
         const source = await sourcePath(trash, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
         if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in ${WORKSPACE_TRASH}, and History has no copy of it. Check the ${systemTrash}.` };

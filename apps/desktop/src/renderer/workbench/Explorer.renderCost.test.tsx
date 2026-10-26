@@ -67,7 +67,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
     onNotice: vi.fn(),
     onNewCollection: vi.fn(),
@@ -96,7 +97,7 @@ describe("Explorer render cost", () => {
     let listing!: ReturnType<typeof useWorkspaceListing>;
     function Host() {
       listing = useWorkspaceListing(props.workspaceId);
-      return <Explorer {...props} files={listing.files} folders={listing.folders} />;
+      return <Explorer {...props} files={listing.files} folders={listing.folders} listingRequest={listing.fileListingCommit?.request ?? 0} />;
     }
     try {
       render(<Host />);

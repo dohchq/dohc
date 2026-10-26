@@ -49,13 +49,15 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  pendingTreeMoveSettled,
+  pendingTreeChangeSettled,
+  type AnsweredTreeChange,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
 import {
   doneNotice,
   operationWord,
   undoneNotice,
+  undoRefusedNotice,
   type RecordedTreeChange,
 } from "./explorerOperationNotices";
 import { buildTree, type TreeNode } from "./path-tree";
@@ -94,6 +96,8 @@ export interface ExplorerProps {
   workspaceId: string;
   files: WorkspaceFileEntry[];
   folders: string[];
+  // The request of the listing `files` and `folders` came from.
+  listingRequest: number;
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   dirtyPaths: ReadonlySet<string>;
@@ -171,7 +175,8 @@ export interface ExplorerProps {
   // "Share…": offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
-  onRefresh: () => void;
+  // Asks for a listing and answers its request.
+  onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
   // with Try again when asking again can succeed.
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
@@ -540,10 +545,12 @@ function fromMenuKey(keyboardMenu: { current: boolean }): boolean {
   return keyed;
 }
 
-// An Undo main refused, or finished only in part, in main's own words.
-class UndoRefused extends Error {
-  constructor(message: string, readonly retry: boolean) {
-    super(message);
+// An Undo main refused, or finished only in part. A person reads `words`.
+// The message is main's own text, which Copy keeps when the words differ.
+class UndoRefusedError extends Error {
+  constructor(reason: string, readonly retry: boolean, readonly words = reason) {
+    super(reason);
+    this.name = "UndoRefusedError";
   }
 }
 
@@ -573,7 +580,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (count, group) => count + group.tabs.length,
     0,
   );
-  const [pending, setPending] = useState<PendingTreeChange[]>([]);
+  const [pending, setPending] = useState<AnsweredTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
   const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
   const [filesExpanded, setFilesExpanded] = useState(true);
@@ -663,15 +670,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // Prune pending changes the authoritative refresh has confirmed.
+  // Prune pending changes a listing has settled. `unsettled` below leaves
+  // them out from the render that shows that listing.
+  const { listingRequest } = props;
   useEffect(() => {
     setPending((current) => {
-      const next = current.filter(
-        (change) => !pendingTreeMoveSettled(change, props.files, props.folders),
-      );
+      const next = current.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
       return next.length === current.length ? current : next;
     });
-  }, [props.files, props.folders]);
+  }, [listingRequest]);
 
   // The open-editors list caps its height and scrolls internally, so the
   // active row must be brought back into view whenever it changes — or moves:
@@ -710,9 +717,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [],
   );
 
+  // The same array while no change settles, so a listing that changes
+  // nothing keeps the tree.
+  const unsettled = useMemo(() => {
+    const next = pending.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
+    return next.length === pending.length ? pending : next;
+  }, [pending, listingRequest]);
   const projected = useMemo(
-    () => applyPendingTreeMoves(props.files, props.folders, pending),
-    [props.files, props.folders, pending],
+    () => applyPendingTreeMoves(props.files, props.folders, unsettled),
+    [props.files, props.folders, unsettled],
   );
 
   const fileByPath = useMemo(() => {
@@ -964,7 +977,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Optimistic op runner: stage pending changes, run the IPCs, roll back the
   // failures (with a visible error), re-project shell paths for successes,
-  // and refresh — the watcher refresh then confirms and prunes. Answers each
+  // and ask for a listing, which settles the successes. Answers each
   // success with what its IPC returned. `failed` reports a failure in the
   // caller's own words instead.
   const runChanges = useCallback(
@@ -1011,7 +1024,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onError(ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."), cause);
         }
         if (succeeded.length > 0) onPathsChanged(succeeded.map(({ change }) => change));
-        onRefresh();
+        const listing = onRefresh();
+        const answered = new Set(succeeded.map(({ change }) => change.id));
+        setPending((current) => current.map((change) => (answered.has(change.id) ? { ...change, listing } : change)));
         return succeeded;
       } finally {
         // Cell edits resume only after the successful paths are projected,
@@ -1046,24 +1061,27 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             workspaceId,
             operationId: entry.operationId,
           });
-          if (!result.ok) throw new UndoRefused(result.reason, true);
+          if (!result.ok) {
+            throw new UndoRefusedError(result.reason, true,
+              result.refusal && undoRefusedNotice(operationWord(entry.change), result.refusal));
+          }
           if (result.remaining.length > 0) {
-            throw new UndoRefused(
+            throw new UndoRefusedError(
               result.remaining.map((left) => left.reason).join(" "),
               result.remaining.some((left) => left.retry),
             );
           }
-          // The change is undone, so no listing will confirm it.
+          // The change is undone, so it no longer waits for a listing.
           setPending((current) => current.filter((pending) => pending.id !== entry.change.id));
           return entry;
         },
         {
           failed: (change, cause) => {
             const entry = byChange.get(change.id)!;
-            const refused = cause instanceof UndoRefused;
+            const refused = cause instanceof UndoRefusedError;
             onError(
-              refused ? cause.message : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
-              cause,
+              refused ? cause.words : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
+              refused && cause.words === cause.message ? undefined : cause,
               !refused || cause.retry ? () => undoChanges([entry]) : undefined,
             );
           },
