@@ -43,6 +43,8 @@ fn start(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: at,
                 request_id: None,
             },
@@ -75,6 +77,8 @@ fn send(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: at,
                 request_id: None,
             },
@@ -120,7 +124,7 @@ fn bookmark_fixture(store: &mut EngineStore) -> String {
 fn claimed_run(store: &mut EngineStore, trigger: &str, thread: &str, run: &str, at: i64) {
     let mut chats = LinkedChatStore::new(store);
     chats
-        .enqueue_dispatch(WS, trigger, thread, at - 1, &NO_FAULTS)
+        .enqueue_dispatch(WS, trigger, "default", thread, at - 1, &NO_FAULTS)
         .expect("enqueue");
     chats
         .claim_next_pending(WS, run, "agent", None, at, &NO_FAULTS)
@@ -518,7 +522,7 @@ fn pending_dispatch_order_is_created_then_trigger() {
     let mut chats = LinkedChatStore::new(&mut store);
     for (trigger, at) in [("b", 10), ("a", 10), ("old", 9)] {
         chats
-            .enqueue_dispatch(WS, trigger, "thread", at, &NO_FAULTS)
+            .enqueue_dispatch(WS, trigger, "default", "thread", at, &NO_FAULTS)
             .expect("enqueue");
     }
     let rows = chats
@@ -667,16 +671,16 @@ fn fail_pending_is_workspace_thread_scoped() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .enqueue_dispatch(WS, "a", "target", 1, &NO_FAULTS)
+        .enqueue_dispatch(WS, "a", "default", "target", 1, &NO_FAULTS)
         .expect("a");
     chats
-        .enqueue_dispatch(WS, "b", "other", 2, &NO_FAULTS)
+        .enqueue_dispatch(WS, "b", "default", "other", 2, &NO_FAULTS)
         .expect("b");
     chats
-        .enqueue_dispatch(OTHER_WS, "c", "target", 3, &NO_FAULTS)
+        .enqueue_dispatch(OTHER_WS, "c", "default", "target", 3, &NO_FAULTS)
         .expect("c");
     let changed = chats
-        .fail_pending_for_thread(WS, "target", "no runner", 4, &NO_FAULTS)
+        .fail_pending_for_thread(WS, "target", "default", "no runner", 4, &NO_FAULTS)
         .expect("fail");
     let pending = chats
         .list_pending_dispatches(WS, None, 10)
@@ -787,7 +791,7 @@ fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
     let mut chats = LinkedChatStore::new(&mut store);
     for (trigger, at) in [("first", 10), ("covered", 11)] {
         chats
-            .enqueue_dispatch(WS, trigger, "thread", at, &NO_FAULTS)
+            .enqueue_dispatch(WS, trigger, "default", "thread", at, &NO_FAULTS)
             .expect("enqueue");
     }
     chats

@@ -42,6 +42,8 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         needs_decision: false,
         options: Vec::new(),
         attachments: Vec::new(),
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 20,
         request_id: Some("existing-thread-request".to_owned()),
     };
@@ -103,6 +105,8 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         needs_decision: false,
         options: Vec::new(),
         attachments: Vec::new(),
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 30,
         request_id: Some("cancelled-send-request".to_owned()),
     };

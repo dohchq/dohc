@@ -66,10 +66,20 @@ pub const GENERAL_CHANNEL_NAME: &str = "general";
 /// Deterministic cross-machine wire id for the auto-created `general` channel,
 /// so independently minted rows converge as one channel under sync.
 pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
-/// The reserved agent channel's display name.
+/// The default agent's chat's display name. Another agent's chat is named
+/// after that agent when it is created.
 pub const AGENT_CHANNEL_NAME: &str = "My agent";
-/// Deterministic cross-machine wire id for the reserved `My agent` channel.
+/// Deterministic cross-machine wire id for the default agent's chat. Another
+/// agent's chat adds `_<agent id>`.
 pub const AGENT_CHANNEL_WIRE_ID: &str = "channel_wire_agent_v1";
+/// The id of the agent a settings file starts with. Agent work from before
+/// agents had ids belongs to it.
+pub const DEFAULT_AGENT_ID: &str = "default";
+/// An agent chat's slug, and every slug that starts with it and a dash, is
+/// reserved for agent chats.
+const AGENT_CHANNEL_SLUG: &str = "my-agent";
+/// At most this many agents wake for one message.
+const MAX_NAMED_AGENTS: usize = 64;
 /// Workspace-only emptiness probe used to skip the full pending replay scan.
 pub const PENDING_CHAT_WORKSPACE_EXISTS_SQL: &str = "\
 SELECT EXISTS( \
@@ -275,6 +285,8 @@ pub struct ChatChannel {
     pub slug: String,
     pub kind: ChatChannelKind,
     pub group: ChannelGroup,
+    /// The agent whose chat this is. Set on, and only on, an agent chat.
+    pub agent_id: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -365,6 +377,8 @@ pub struct ChatMessage {
     pub automation: Option<ChatMessageAutomation>,
     /// Set on, and only on, a link message.
     pub link_author: Option<ChatMessageLinkAuthor>,
+    /// The agent that wrote the message in one of its runs. Provenance only.
+    pub author_agent_id: Option<String>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -762,6 +776,8 @@ pub struct DispatchClaim {
 pub struct DispatchRecord {
     pub workspace_id: String,
     pub trigger_message_id: String,
+    /// The agent the trigger message wakes.
+    pub agent_id: String,
     pub thread_id: String,
     pub state: String,
     pub run_id: Option<String>,
@@ -776,6 +792,8 @@ pub struct DispatchRecord {
 pub struct AgentRunRecord {
     pub workspace_id: String,
     pub run_id: String,
+    /// The agent that runs.
+    pub agent_id: String,
     pub thread_id: String,
     pub trigger_message_id: String,
     pub command: String,
@@ -841,6 +859,12 @@ pub struct StartChannelThread {
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
+    /// The agent writing in one of its runs. Only an agent author has one.
+    pub author_agent_id: Option<String>,
+    /// The author's own agents the message names. Each one wakes, as does
+    /// the agent whose chat this is. Only a person's message names agents,
+    /// and the ids stay on this computer.
+    pub named_agent_ids: Vec<String>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
     /// the same key + payload replays the recorded result exactly-once instead of
@@ -867,6 +891,10 @@ pub struct SendMessage {
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
+    /// See [`StartChannelThread::author_agent_id`].
+    pub author_agent_id: Option<String>,
+    /// See [`StartChannelThread::named_agent_ids`].
+    pub named_agent_ids: Vec<String>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
     pub request_id: Option<String>,
@@ -965,6 +993,49 @@ fn nfc(value: &str) -> String {
 /// The bounded Unicode lookup slug. Durable rows key on channel_id.
 pub fn channel_slug_for_name(name: &str) -> String {
     crate::names::name_slug(name, 200)
+}
+
+/// An agent id from a settings file: up to 64 lowercase letters, digits and
+/// dashes, starting with a letter.
+pub fn is_agent_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    value.len() <= 64
+        && chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+/// The wire id every computer gives one agent's chat.
+pub fn agent_channel_wire_id(agent_id: &str) -> String {
+    if agent_id == DEFAULT_AGENT_ID {
+        AGENT_CHANNEL_WIRE_ID.to_owned()
+    } else {
+        format!("{AGENT_CHANNEL_WIRE_ID}_{agent_id}")
+    }
+}
+
+/// The agent whose chat a wire id names, if it names one.
+pub fn agent_id_for_channel_wire_id(wire_id: &str) -> Option<&str> {
+    let rest = wire_id.strip_prefix(AGENT_CHANNEL_WIRE_ID)?;
+    if rest.is_empty() {
+        return Some(DEFAULT_AGENT_ID);
+    }
+    rest.strip_prefix('_')
+        .filter(|agent_id| is_agent_id(agent_id) && *agent_id != DEFAULT_AGENT_ID)
+}
+
+/// The slug of one agent's chat.
+pub fn agent_channel_slug(agent_id: &str) -> String {
+    if agent_id == DEFAULT_AGENT_ID {
+        AGENT_CHANNEL_SLUG.to_owned()
+    } else {
+        channel_slug_for_name(&format!("{AGENT_CHANNEL_SLUG}-{agent_id}"))
+    }
+}
+
+/// Whether a slug is one only an agent chat may have.
+pub fn is_agent_channel_slug(slug: &str) -> bool {
+    slug.strip_prefix(AGENT_CHANNEL_SLUG)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
 }
 
 /// base32 lowercase (RFC 4648, no padding) of `bytes` (`base32LowercaseNoPadding`).
@@ -1601,6 +1672,40 @@ fn refuse_local_link_author(author_kind: ChatActorKind) -> Result<(), DomainErro
     Ok(())
 }
 
+/// Check a local message's agents: an agent author may name the agent that
+/// writes in its run, and a person's message may name the author's agents,
+/// each once.
+fn normalize_message_agents(
+    author_kind: ChatActorKind,
+    author_agent_id: Option<&str>,
+    named_agent_ids: &[String],
+) -> Result<(Option<String>, Vec<String>), DomainError> {
+    if let Some(agent_id) = author_agent_id
+        && (author_kind != ChatActorKind::Agent || !is_agent_id(agent_id))
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "only an agent message names its agent, by a valid id",
+        });
+    }
+    let mut named = Vec::<String>::new();
+    for agent_id in named_agent_ids {
+        if author_kind != ChatActorKind::Human || !is_agent_id(agent_id) {
+            return Err(DomainError::InvalidInput {
+                reason: "only a person's message names agents, by valid ids",
+            });
+        }
+        if !named.contains(agent_id) {
+            named.push(agent_id.clone());
+        }
+    }
+    if named.len() > MAX_NAMED_AGENTS {
+        return Err(DomainError::InvalidInput {
+            reason: "a message names too many agents",
+        });
+    }
+    Ok((author_agent_id.map(str::to_owned), named))
+}
+
 /// An automation message must name its Collection automation and chain
 /// depth, and no other message may. The id is `collection:<collection id>#<id>`, and
 /// the depth is bounded like a record change's declared depth.
@@ -2116,14 +2221,7 @@ impl<'a> LinkedChatStore<'a> {
             "workspace_id must not be empty",
         )?;
         let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
-        if matches!(
-            channel_id.as_str(),
-            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
-        ) {
-            return Err(DomainError::InvalidInput {
-                reason: "channel id is reserved",
-            });
-        }
+        refuse_reserved_channel_id(&channel_id)?;
         let name = normalize_channel_name(name)?;
         if kind == ChatChannelKind::Agent {
             return Err(DomainError::chat(
@@ -2138,10 +2236,10 @@ impl<'a> LinkedChatStore<'a> {
                 "Channel name must contain at least one letter or number.",
             ));
         }
-        if slug == channel_slug_for_name(AGENT_CHANNEL_NAME) {
+        if is_agent_channel_slug(&slug) {
             return Err(DomainError::chat(
                 "channel-exists",
-                "The My agent channel name is reserved.",
+                "Names that start with My agent are kept for agent chats.",
             ));
         }
 
@@ -2160,7 +2258,7 @@ impl<'a> LinkedChatStore<'a> {
             // Persist the validated kind (`channel` or `dm`) — not hardcoded:
             // DM privacy depends on the stored kind (`list_personal_feed`
             // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, now_ms)?;
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, None, now_ms)?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
             journal_local_op_in_tx(
@@ -2178,6 +2276,7 @@ impl<'a> LinkedChatStore<'a> {
                 slug: slug_c.clone(),
                 kind,
                 group: group_c.clone(),
+                agent_id: None,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -2194,48 +2293,6 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatChannel, DomainError> {
-        self.ensure_well_known_channel(
-            workspace_id,
-            channel_id,
-            GENERAL_CHANNEL_NAME,
-            GENERAL_CHANNEL_WIRE_ID,
-            ChatChannelKind::Channel,
-            now_ms,
-            faults,
-        )
-    }
-
-    /// Idempotently ensure the reserved `My agent` channel exists, converging on
-    /// the deterministic [`AGENT_CHANNEL_WIRE_ID`] (`ensureAgentChannel`).
-    pub fn ensure_agent_channel(
-        &mut self,
-        workspace_id: &str,
-        channel_id: &str,
-        now_ms: i64,
-        faults: &dyn FaultInjector,
-    ) -> Result<ChatChannel, DomainError> {
-        self.ensure_well_known_channel(
-            workspace_id,
-            channel_id,
-            AGENT_CHANNEL_NAME,
-            AGENT_CHANNEL_WIRE_ID,
-            ChatChannelKind::Agent,
-            now_ms,
-            faults,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn ensure_well_known_channel(
-        &mut self,
-        workspace_id: &str,
-        channel_id: &str,
-        name: &str,
-        wire_id: &str,
-        kind: ChatChannelKind,
-        now_ms: i64,
-        faults: &dyn FaultInjector,
-    ) -> Result<ChatChannel, DomainError> {
         non_empty(
             workspace_id,
             "invalid-channel-name",
@@ -2248,55 +2305,87 @@ impl<'a> LinkedChatStore<'a> {
         // Same reservation create_channel enforces: a LOCAL channel id equal
         // to a well-known WIRE id would poison channel-wire lookups and
         // thread payloads under sync.
-        if matches!(
-            channel_id.as_str(),
-            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
-        ) {
-            return Err(DomainError::InvalidInput {
-                reason: "channel id is reserved",
-            });
-        }
-        let slug = channel_slug_for_name(name);
+        refuse_reserved_channel_id(&channel_id)?;
         let ws = workspace_id.to_owned();
-        let cid = channel_id.clone();
-        let slug_c = slug.clone();
-        let name_c = name.to_owned();
-        let wire = wire_id.to_owned();
+        let slug = channel_slug_for_name(GENERAL_CHANNEL_NAME);
         let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
-            if let Some(existing) = channel_by_slug(tx, &ws, &slug_c)? {
+            if let Some(existing) = channel_by_slug(tx, &ws, &slug)? {
                 // Backfill the well-known wire mapping so imported rows converge.
-                record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
-                if kind == ChatChannelKind::Agent
-                    && (existing.kind != ChatChannelKind::Agent || existing.name != name_c)
-                {
-                    return Err(DomainError::chat(
-                        "channel-exists",
-                        "The reserved My agent channel name is already in use.",
-                    ));
-                }
+                record_channel_wire_id(tx, &ws, GENERAL_CHANNEL_WIRE_ID, &existing.channel_id)?;
                 return Ok::<_, DomainError>(existing);
             }
-            let group = ChannelGroup::default();
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group, now_ms)?;
-            record_channel_wire_id(tx, &ws, &wire, &cid)?;
-            journal_local_op_in_tx(
+            create_well_known_channel(
                 tx,
-                &ws,
-                "chat.channel.create",
-                &channel_create_payload(&cid, &name_c, &slug_c, kind, &group, now_ms, &wire),
-                now_ms,
                 claims,
-            )?;
-            Ok::<_, DomainError>(ChatChannel {
-                workspace_id: ws.clone(),
-                channel_id: cid.clone(),
-                name: name_c.clone(),
-                slug: slug_c.clone(),
-                kind,
-                group,
-                created_at_ms: now_ms,
-                updated_at_ms: now_ms,
-            })
+                &ws,
+                &channel_id,
+                GENERAL_CHANNEL_NAME,
+                &slug,
+                ChatChannelKind::Channel,
+                None,
+                GENERAL_CHANNEL_WIRE_ID,
+                now_ms,
+            )
+        })?;
+        committed(outcome)
+    }
+
+    /// Idempotently ensure one agent's chat exists, converging on that
+    /// agent's [`agent_channel_wire_id`] (`ensureAgentChannel`). The default
+    /// agent's chat is named [`AGENT_CHANNEL_NAME`]; another agent's chat
+    /// takes the agent's name when it is created.
+    pub fn ensure_agent_channel(
+        &mut self,
+        workspace_id: &str,
+        channel_id: &str,
+        agent_id: &str,
+        agent_name: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatChannel, DomainError> {
+        non_empty(
+            workspace_id,
+            "invalid-channel-name",
+            "workspace_id must not be empty",
+        )?;
+        let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
+        refuse_reserved_channel_id(&channel_id)?;
+        if !is_agent_id(agent_id) {
+            return Err(DomainError::InvalidInput {
+                reason: "agent id is invalid",
+            });
+        }
+        let name = if agent_id == DEFAULT_AGENT_ID {
+            AGENT_CHANNEL_NAME.to_owned()
+        } else {
+            normalize_channel_name(agent_name)?
+        };
+        let ws = workspace_id.to_owned();
+        let slug = agent_channel_slug(agent_id);
+        let wire = agent_channel_wire_id(agent_id);
+        let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
+            if let Some(existing) = agent_channel(tx, &ws, agent_id)? {
+                record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
+                return Ok::<_, DomainError>(existing);
+            }
+            if channel_by_slug(tx, &ws, &slug)?.is_some() {
+                return Err(DomainError::chat(
+                    "channel-exists",
+                    "Another channel already has this agent chat's name.",
+                ));
+            }
+            create_well_known_channel(
+                tx,
+                claims,
+                &ws,
+                &channel_id,
+                &name,
+                &slug,
+                ChatChannelKind::Agent,
+                Some(agent_id),
+                &wire,
+                now_ms,
+            )
         })?;
         committed(outcome)
     }
@@ -2358,7 +2447,7 @@ impl<'a> LinkedChatStore<'a> {
                      ) \
                      SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
                             ch.created_at_ms, ch.updated_at_ms, \
-                            ch.type, ch.purpose, ch.folder_path, \
+                            ch.type, ch.purpose, ch.folder_path, ch.agent_id, \
                             COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
                      FROM page ch \
                      LEFT JOIN ( \
@@ -2382,8 +2471,8 @@ impl<'a> LinkedChatStore<'a> {
             let rows = stmt
                 .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit], |row| {
                     let channel = map_channel_row(row)?;
-                    let thread_count = row.get(10)?;
-                    let unread_count = row.get(11)?;
+                    let thread_count = row.get(11)?;
+                    let unread_count = row.get(12)?;
                     Ok(channel.map(|channel| ChatChannelSummary {
                         channel,
                         thread_count,
@@ -2611,6 +2700,11 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let automation =
             normalize_message_automation(input.author_kind, input.automation.as_ref())?;
+        let (author_agent_id, named_agent_ids) = normalize_message_agents(
+            input.author_kind,
+            input.author_agent_id.as_deref(),
+            &input.named_agent_ids,
+        )?;
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -2647,6 +2741,8 @@ impl<'a> LinkedChatStore<'a> {
                 .map_or("", |automation| automation.automation_id.as_str())
                 .as_bytes(),
             automation_depth.as_bytes(),
+            author_agent_id.as_deref().unwrap_or("").as_bytes(),
+            named_agent_ids.join(",").as_bytes(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
@@ -2718,8 +2814,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -2735,10 +2831,20 @@ impl<'a> LinkedChatStore<'a> {
                     automation.as_ref().map(|automation| &automation.automation_id),
                     automation.as_ref().map(|automation| automation.chain_depth),
                     author_actor_key,
+                    author_agent_id,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
-            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
+            dispatch::record_message_triggers(
+                tx,
+                &input.workspace_id,
+                thread_id,
+                &input.message_id,
+                input.author_kind,
+                origin_c.as_deref(),
+                &named_agent_ids,
+                now,
+            )?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
@@ -2802,6 +2908,9 @@ impl<'a> LinkedChatStore<'a> {
             // Collection stay here.
             if let Some(chain_depth) = chain_depth {
                 message_payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
+            }
+            if let Some(agent_id) = &author_agent_id {
+                message_payload.insert("authorAgentId".to_owned(), serde_json::json!(agent_id));
             }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -2879,6 +2988,7 @@ impl<'a> LinkedChatStore<'a> {
                 created_at_ms: now,
                 automation: automation.clone(),
                 link_author: None,
+                author_agent_id: author_agent_id.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -2934,6 +3044,11 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let automation =
             normalize_message_automation(input.author_kind, input.automation.as_ref())?;
+        let (author_agent_id, named_agent_ids) = normalize_message_agents(
+            input.author_kind,
+            input.author_agent_id.as_deref(),
+            &input.named_agent_ids,
+        )?;
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -2975,6 +3090,8 @@ impl<'a> LinkedChatStore<'a> {
                 .map_or("", |automation| automation.automation_id.as_str())
                 .as_bytes(),
             automation_depth.as_bytes(),
+            author_agent_id.as_deref().unwrap_or("").as_bytes(),
+            named_agent_ids.join(",").as_bytes(),
         ]);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
@@ -3009,8 +3126,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -3027,10 +3144,20 @@ impl<'a> LinkedChatStore<'a> {
                     automation.as_ref().map(|automation| &automation.automation_id),
                     automation.as_ref().map(|automation| automation.chain_depth),
                     author_actor_key,
+                    author_agent_id,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
-            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
+            dispatch::record_message_triggers(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                input.author_kind,
+                origin_c.as_deref(),
+                &named_agent_ids,
+                now,
+            )?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
@@ -3095,6 +3222,9 @@ impl<'a> LinkedChatStore<'a> {
             }
             if let Some(chain_depth) = chain_depth {
                 payload.insert("chainDepth".to_owned(), serde_json::json!(chain_depth));
+            }
+            if let Some(agent_id) = &author_agent_id {
+                payload.insert("authorAgentId".to_owned(), serde_json::json!(agent_id));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -3189,6 +3319,7 @@ impl<'a> LinkedChatStore<'a> {
                 created_at_ms: now,
                 automation: automation.clone(),
                 link_author: None,
+                author_agent_id: author_agent_id.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3534,7 +3665,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id \
+                         link_grant_id, link_principal_id, author_agent_id \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3785,7 +3916,9 @@ impl<'a> LinkedChatStore<'a> {
     }
 
     /// Mention rows for a normalized handle in ascending message-coordinate
-    /// order. Inner joins fail closed over missing messages or threads.
+    /// order. Inner joins fail closed over missing messages or threads. A
+    /// message that already woke a dohc agent is that agent's work, so it is
+    /// left out.
     pub fn list_mentions_for_handle(
         &self,
         workspace_id: &str,
@@ -3812,6 +3945,9 @@ impl<'a> LinkedChatStore<'a> {
                      LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
                        AND ars.thread_id = x.thread_id \
                      WHERE x.workspace_id = ?1 AND x.handle = ?2 \
+                       AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
+                         WHERE l.workspace_id = x.workspace_id \
+                           AND l.trigger_message_id = x.message_id) \
                        AND (?3 = 0 OR ars.thread_id IS NULL \
                          OR x.created_at_ms > ars.last_read_created_at_ms \
                          OR (x.created_at_ms = ars.last_read_created_at_ms \
@@ -3956,7 +4092,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -5851,13 +5987,14 @@ fn insert_channel(
     slug: &str,
     kind: ChatChannelKind,
     group: &ChannelGroup,
+    agent_id: Option<&str>,
     now_ms: i64,
 ) -> Result<(), DomainError> {
     tx.execute(
         "INSERT INTO chat_channels \
          (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
-          type, purpose, folder_path) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+          type, purpose, folder_path, agent_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
         params![
             workspace_id,
             channel_id,
@@ -5867,10 +6004,61 @@ fn insert_channel(
             now_ms,
             group.channel_type.as_str(),
             group.purpose,
-            group.folder_path
+            group.folder_path,
+            agent_id
         ],
     )
     .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// Create a channel every computer names with the same wire id, and journal
+/// it under that id.
+#[allow(clippy::too_many_arguments)]
+fn create_well_known_channel(
+    tx: &Transaction<'_>,
+    claims: &mut Vec<crate::AutomationClaim>,
+    workspace_id: &str,
+    channel_id: &str,
+    name: &str,
+    slug: &str,
+    kind: ChatChannelKind,
+    agent_id: Option<&str>,
+    wire_id: &str,
+    now_ms: i64,
+) -> Result<ChatChannel, DomainError> {
+    let group = ChannelGroup::default();
+    insert_channel(tx, workspace_id, channel_id, name, slug, kind, &group, agent_id, now_ms)?;
+    record_channel_wire_id(tx, workspace_id, wire_id, channel_id)?;
+    journal_local_op_in_tx(
+        tx,
+        workspace_id,
+        "chat.channel.create",
+        &channel_create_payload(channel_id, name, slug, kind, &group, now_ms, wire_id),
+        now_ms,
+        claims,
+    )?;
+    Ok(ChatChannel {
+        workspace_id: workspace_id.to_owned(),
+        channel_id: channel_id.to_owned(),
+        name: name.to_owned(),
+        slug: slug.to_owned(),
+        kind,
+        group,
+        agent_id: agent_id.map(str::to_owned),
+        created_at_ms: now_ms,
+        updated_at_ms: now_ms,
+    })
+}
+
+/// A local channel id may not be a well-known wire id: it would poison
+/// channel-wire lookups and thread payloads under sync.
+fn refuse_reserved_channel_id(channel_id: &str) -> Result<(), DomainError> {
+    if channel_id == GENERAL_CHANNEL_WIRE_ID || agent_id_for_channel_wire_id(channel_id).is_some() {
+        return Err(DomainError::InvalidInput {
+            reason: "channel id is reserved",
+        });
+    }
     Ok(())
 }
 
@@ -5986,9 +6174,26 @@ fn channel_by_slug(
 ) -> Result<Option<ChatChannel>, DomainError> {
     conn.query_row(
         "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
-                type, purpose, folder_path \
+                type, purpose, folder_path, agent_id \
          FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
         params![workspace_id, slug],
+        map_channel_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
+}
+
+fn agent_channel(
+    conn: &Connection,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<Option<ChatChannel>, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path, agent_id \
+         FROM chat_channels WHERE workspace_id = ?1 AND agent_id = ?2",
+        params![workspace_id, agent_id],
         map_channel_row,
     )
     .optional()
@@ -6019,7 +6224,7 @@ fn require_channel(
 ) -> Result<ChatChannel, DomainError> {
     conn.query_row(
         "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
-                type, purpose, folder_path \
+                type, purpose, folder_path, agent_id \
          FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
         params![workspace_id, channel_id],
         map_channel_row,
@@ -7027,7 +7232,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -7047,7 +7252,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7165,6 +7370,7 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
     let type_str: String = row.get(7)?;
     let purpose: String = row.get(8)?;
     let folder_path: Option<String> = row.get(9)?;
+    let agent_id: Option<String> = row.get(10)?;
     Ok(ChatChannelKind::from_db(&kind_str).and_then(|kind| {
         let channel_type = ChatChannelType::from_db(&type_str)?;
         Ok(ChatChannel {
@@ -7178,6 +7384,7 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
                 purpose,
                 folder_path,
             },
+            agent_id,
             created_at_ms,
             updated_at_ms,
         })
@@ -7258,6 +7465,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let author_actor_key: Option<String> = row.get(14)?;
     let link_grant_id: Option<String> = row.get(15)?;
     let link_principal_id: Option<String> = row.get(16)?;
+    let author_agent_id: Option<String> = row.get(17)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -7290,6 +7498,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             created_at_ms,
             automation,
             link_author,
+            author_agent_id,
             attachments: Vec::new(),
         }),
     )

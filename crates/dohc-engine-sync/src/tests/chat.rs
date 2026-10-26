@@ -154,6 +154,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 needs_decision: true,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("decision-thread".to_owned()),
             },
@@ -177,6 +179,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: Some("local-resolver".to_owned()),
             },
@@ -3058,6 +3062,8 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("default-thread-request".to_owned()),
             },
@@ -3283,6 +3289,8 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("long-wire-local-request".to_owned()),
             },
@@ -3864,6 +3872,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 needs_decision: true,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-message-after-refusal".to_owned()),
             },
@@ -3905,6 +3915,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 33,
                 request_id: Some("authored-child-after-refusal".to_owned()),
             },
@@ -4057,6 +4069,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-thread-after-refusal".to_owned()),
             },
@@ -4080,6 +4094,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 32,
                 request_id: Some("second-local-message-after-refusal".to_owned()),
             },
@@ -5663,14 +5679,9 @@ fn imported_agent_message_keeps_its_owner_display_name() {
 }
 
 #[test]
-fn old_received_and_parked_messages_do_not_enter_local_backward_clock_discovery() {
+fn received_and_parked_messages_wake_no_agent_here() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
-    engine.write_with(&NoFaults, |tx| {
-        tx.execute("INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101)", [])
-            .map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    }).unwrap();
     applied_claims(apply_chat_envelope(
         &mut engine,
         &group_message(
@@ -5714,15 +5725,9 @@ fn old_received_and_parked_messages_do_not_enter_local_backward_clock_discovery(
         Ok::<_, dohc_engine_storage::StorageError>((
             conn.query_row("SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id IN ('received-old','parked-old')", [], |row| row.get(0))
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-            conn.query_row("SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id='ws'", [], |row| row.get(0))
+            conn.query_row("SELECT COUNT(*) FROM chat_dispatch_ledger WHERE workspace_id='ws'", [], |row| row.get(0))
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
         ))
     }).unwrap();
-    assert_eq!(counts, (2, 0));
-    assert_eq!(
-        LinkedChatStore::new(&mut engine)
-            .record_eligible_triggers("ws", Some("ana"), 110, &NoFaults)
-            .unwrap(),
-        0
-    );
+    assert_eq!(counts, (2, 0), "only the sender's computer records a request");
 }

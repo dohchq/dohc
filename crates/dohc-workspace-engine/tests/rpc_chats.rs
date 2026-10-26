@@ -1146,27 +1146,6 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         );
         assert_eq!(mentions["mentions"][0]["messageId"], json!("message"));
     }
-    let first = call(
-        &transport,
-        &handle,
-        &mut id,
-        "chats.dispatch.recordEligibleTriggers",
-        json!({}),
-    )
-    .await;
-    let retry = call(
-        &transport,
-        &handle,
-        &mut id,
-        "chats.dispatch.recordEligibleTriggers",
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        (first, retry),
-        (json!(1), json!(0)),
-        "scan-before-backfill or a non-idempotent ledger changes this pair."
-    );
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     let conn = rusqlite::Connection::open(&db_path).expect("open closed engine db");
@@ -5601,6 +5580,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         options: vec![],
         attachments: vec![],
         automation: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
     };
@@ -5619,6 +5600,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         options: vec![],
         attachments: vec![],
         automation: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),
     };

@@ -85,6 +85,8 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         channel_id: String,
+        agent_id: String,
+        agent_name: String,
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
@@ -93,7 +95,14 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                    .ensure_agent_channel(
+                        &workspace_id,
+                        &channel_id,
+                        &agent_id,
+                        &agent_name,
+                        now_ms,
+                        &NoFaults,
+                    )
                     .map_err(RuntimeError::from)
             }
         })
@@ -295,30 +304,6 @@ impl ActorHandle {
             chats
                 .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
                 .map_err(RuntimeError::from)
-        })
-        .await
-    }
-
-    pub async fn chat_dispatch_record_eligible_triggers(
-        &self,
-        workspace_id: String,
-        verified_user_id: Option<String>,
-        at_ms: i64,
-        token: CancellationToken,
-    ) -> Result<i64, RuntimeError> {
-        self.run_chats(move |chats| {
-            if token.is_cancelled() {
-                Err(RuntimeError::Cancelled)
-            } else {
-                chats
-                    .record_eligible_triggers(
-                        &workspace_id,
-                        verified_user_id.as_deref(),
-                        at_ms,
-                        &NoFaults,
-                    )
-                    .map_err(RuntimeError::from)
-            }
         })
         .await
     }
@@ -863,6 +848,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         trigger_message_id: String,
+        agent_id: String,
         thread_id: String,
         now_ms: i64,
         token: CancellationToken,
@@ -875,6 +861,7 @@ impl ActorHandle {
                     .enqueue_dispatch(
                         &workspace_id,
                         &trigger_message_id,
+                        &agent_id,
                         &thread_id,
                         now_ms,
                         &NoFaults,
@@ -917,7 +904,7 @@ impl ActorHandle {
     pub async fn chat_dispatch_list_pending(
         &self,
         workspace_id: String,
-        after: Option<(i64, String)>,
+        after: Option<(i64, String, String)>,
         limit: i64,
     ) -> Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError> {
         self.run_chats(move |chats| {
@@ -1058,6 +1045,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         thread_id: String,
+        agent_id: String,
         reason: String,
         now_ms: i64,
         token: CancellationToken,
@@ -1067,7 +1055,14 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .fail_pending_for_thread(&workspace_id, &thread_id, &reason, now_ms, &NoFaults)
+                    .fail_pending_for_thread(
+                        &workspace_id,
+                        &thread_id,
+                        &agent_id,
+                        &reason,
+                        now_ms,
+                        &NoFaults,
+                    )
                     .map_err(RuntimeError::from)
             }
         })

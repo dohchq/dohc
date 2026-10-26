@@ -54,6 +54,8 @@ fn start_thread(
         now_ms: now,
         request_id: None,
     }
+    author_agent_id: None,
+    named_agent_ids: Vec::new(),
 }
 
 fn send_msg(
@@ -81,6 +83,8 @@ fn send_msg(
         now_ms: now,
         request_id: None,
     }
+    author_agent_id: None,
+    named_agent_ids: Vec::new(),
 }
 
 // ------------------------------------------------------- channel round-trips
@@ -651,7 +655,7 @@ fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
         .expect("remove the table only the full replay query reads");
 
     let changed = LinkedChatStore::new(&mut store)
-        .fail_pending_for_thread(WS, "no-pending-thread", "not needed", 2, &NO_FAULTS)
+        .fail_pending_for_thread(WS, "no-pending-thread", "default", "not needed", 2, &NO_FAULTS)
         .expect("empty pending set must bypass the full replay query");
     assert_eq!(changed, 0);
 }
@@ -817,10 +821,10 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
     assert_eq!(g1.slug, "general");
 
     let a1 = chats
-        .ensure_agent_channel(WS, "agent-1", 12, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 12, &NO_FAULTS)
         .expect("a1");
     let a2 = chats
-        .ensure_agent_channel(WS, "agent-2", 13, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-2", "default", "My agent", 13, &NO_FAULTS)
         .expect("a2");
     assert_eq!(a1.channel_id, a2.channel_id, "agent is idempotent");
     assert_eq!(a1.kind, ChatChannelKind::Agent);
@@ -2936,7 +2940,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     chats
         .start_channel_thread(
@@ -2952,7 +2956,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
         )
         .expect("start");
     chats
-        .enqueue_dispatch(WS, "m0", "t1", 21, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
 
     for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
@@ -3053,7 +3057,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     chats
         .start_channel_thread(
@@ -3062,7 +3066,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
         )
         .expect("start");
     chats
-        .enqueue_dispatch(WS, "m0", "t1", 21, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
     chats
         .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
@@ -3107,7 +3111,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     // Two triggers in two threads (a claim marks only same-thread pendings done).
     chats
@@ -3123,10 +3127,10 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         )
         .expect("t2");
     chats
-        .enqueue_dispatch(WS, "mA", "t1", 22, &NO_FAULTS)
+        .enqueue_dispatch(WS, "mA", "default", "t1", 22, &NO_FAULTS)
         .expect("enq A");
     chats
-        .enqueue_dispatch(WS, "mB", "t2", 23, &NO_FAULTS)
+        .enqueue_dispatch(WS, "mB", "default", "t2", 23, &NO_FAULTS)
         .expect("enq B");
 
     let a = chats
@@ -3201,7 +3205,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         chats
             .start_channel_thread(
@@ -3210,7 +3214,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
             )
             .expect("start");
         chats
-            .enqueue_dispatch(WS, "mA", "t1", 21, &NO_FAULTS)
+            .enqueue_dispatch(WS, "mA", "default", "t1", 21, &NO_FAULTS)
             .expect("enqueue");
         chats
             .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
@@ -3785,7 +3789,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     let mut chats = LinkedChatStore::new(&mut store);
     for ws in [WS, OTHER_WS] {
         chats
-            .ensure_agent_channel(ws, "agent-x", 10, &NO_FAULTS)
+            .ensure_agent_channel(ws, "agent-x", "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         let mut start = start_thread("agent-x", "t-x", "m-x", "@agent", ChatActorKind::Human, 20);
         start.workspace_id = ws.to_owned();
@@ -3793,7 +3797,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .start_channel_thread(&start, &NO_FAULTS)
             .expect("start");
         chats
-            .enqueue_dispatch(ws, "m-x", "t-x", 21, &NO_FAULTS)
+            .enqueue_dispatch(ws, "m-x", "default", "t-x", 21, &NO_FAULTS)
             .expect("enqueue");
     }
 
@@ -3814,7 +3818,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
         .start_channel_thread(&start_y, &NO_FAULTS)
         .expect("start y");
     chats
-        .enqueue_dispatch(WS, "m-y", "t-y", 24, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m-y", "default", "t-y", 24, &NO_FAULTS)
         .expect("enqueue y");
     assert_eq!(
         chats

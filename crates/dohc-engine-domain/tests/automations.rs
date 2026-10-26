@@ -1583,6 +1583,8 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         now_ms,
         request_id: None,
     }
+    author_agent_id: None,
+    named_agent_ids: Vec::new(),
 }
 
 /// Store a post and return the claims its write took.
@@ -1614,7 +1616,7 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
             .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
             .expect("DM");
         chats
-            .ensure_agent_channel(WS, "agent-1", 5, &NO_FAULTS)
+            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 5, &NO_FAULTS)
             .expect("agent channel");
     }
     // Only a Group this computer has can be watched: not a DM, the agent
@@ -1740,6 +1742,8 @@ fn a_group_message_claims_each_matching_subscription_once() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 25,
                 request_id: None,
             },
@@ -2069,7 +2073,7 @@ fn ask_agent(
         .start_channel_thread(&request, &NO_FAULTS)
         .expect("message");
     chats
-        .enqueue_dispatch(WS, message_id, &request.thread_id, now_ms, &NO_FAULTS)
+        .enqueue_dispatch(WS, message_id, "default", &request.thread_id, now_ms, &NO_FAULTS)
         .expect("queue the agent");
     chats
         .claim_next_pending(
@@ -2108,7 +2112,7 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
         .expect("subscribe");
     }
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
 
     // A person asks the agent directly: its writes start a chain at 0.
@@ -2182,7 +2186,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     let mut store = open_store(&scratch);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let thread = StartChannelThread {
         channel_id: MY_AGENT.to_owned(),
@@ -2213,6 +2217,8 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                         automation_id: ASK.to_owned(),
                         chain_depth,
                     }),
+                    author_agent_id: None,
+                    named_agent_ids: Vec::new(),
                     now_ms: 11,
                     request_id: None,
                 },
@@ -2222,7 +2228,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     }
     for (message_id, now_ms) in [("m-first", 12), ("m-deep", 13), ("m-shallow", 14)] {
         chats
-            .enqueue_dispatch(WS, message_id, &thread.thread_id, now_ms, &NO_FAULTS)
+            .enqueue_dispatch(WS, message_id, "default", &thread.thread_id, now_ms, &NO_FAULTS)
             .expect("queue");
     }
     let claim = chats
@@ -2268,6 +2274,8 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 17,
                 request_id: None,
             },
@@ -2275,7 +2283,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
         )
         .expect("a person's request");
     chats
-        .enqueue_dispatch(WS, "m-early", &thread.thread_id, 11, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m-early", "default", &thread.thread_id, 11, &NO_FAULTS)
         .expect("queue");
     let again = chats
         .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
@@ -2306,7 +2314,7 @@ fn an_agents_post_during_a_run_claims_at_the_runs_depth() {
     let mut store = open_group(&scratch);
     watch_groups(&mut store, &[(ALL, GROUP, None)]).expect("all");
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let woken = ask_agent(&mut store, "m-wake", Some(2), 10);
     let by_agent = |message_id: &str, now_ms: i64| StartChannelThread {

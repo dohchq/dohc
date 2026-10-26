@@ -3409,6 +3409,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               PRIMARY KEY (outbox_id, refusal_key)) STRICT;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 71,
+        id: "v2-agent-ids",
+        sql: include_str!("agent_ids.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4568,6 +4574,10 @@ mod tests {
                 "v2-owner-outbox-retry",
                 "2ac9352889cc37f605b39b3e39fff5fe5611721fd7cdf369c4187a5d72e3aaeb",
             ),
+            (
+                "v2-agent-ids",
+                "bbb96ebf48f6e4c5092fc8af092cc456267c10b7fb9aff8320367f64826c82a1",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5105,7 +5115,8 @@ mod tests {
         let before = migration_index("v2-chat-local-dispatch-discovery");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO chat_channels (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES ('ws','channel','Channel','channel','channel',1,1); INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('ws','thread','Thread',20,20,'channel'); INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('ws','thread',0,'old','human','Ada','@agent',20); INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101);").unwrap();
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let removed = migration_index("v2-agent-ids");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..removed], &ctx, &NoFaults).unwrap();
         let state: (i64, i64, i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM chat_messages), (SELECT COUNT(*) FROM chat_dispatch_local_discovery), (SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id='ws')",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -6589,6 +6600,100 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, 1);
+    }
+
+    /// The agent chat, its requests and its runs belong to the default agent
+    /// after the agent-ids migration, and every request keeps its state.
+    #[test]
+    fn agent_ids_migration_gives_existing_agent_work_to_the_default_agent() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-agent-ids");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'agent', 'My agent', 'my-agent', 'agent', 1, 1), \
+                        ('ws', 'general', 'general', 'general', 'channel', 1, 1); \
+             INSERT INTO chat_dispatch_ledger \
+                 (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'm1', 't1', 'failed', 'run-1', 'app-quit', 1, 2, 3), \
+                        ('ws', 'm2', 't1', 'pending', NULL, NULL, 0, 4, 4); \
+             INSERT INTO agent_run_records \
+                 (workspace_id, run_id, thread_id, trigger_message_id, command, started_at_ms, ended_at_ms, exit_code, failure_reason) \
+                 VALUES ('ws', 'run-1', 't1', 'm1', 'agent', 2, 3, 143, 'app-quit'); \
+             INSERT INTO chat_dispatch_scan_cursor (workspace_id, max_created_at_ms, updated_at_ms) VALUES ('ws', 4, 5);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let channels: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT channel_id, agent_id FROM chat_channels ORDER BY channel_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            channels,
+            vec![
+                ("agent".to_owned(), Some("default".to_owned())),
+                ("general".to_owned(), None)
+            ]
+        );
+        let ledger: Vec<(String, String, String, Option<String>, i64)> = conn
+            .prepare(
+                "SELECT trigger_message_id, agent_id, state, run_id, attempt_count \
+                 FROM chat_dispatch_ledger ORDER BY trigger_message_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            ledger,
+            vec![
+                ("m1".into(), "default".into(), "failed".into(), Some("run-1".into()), 1),
+                ("m2".into(), "default".into(), "pending".into(), None, 0),
+            ]
+        );
+        let run_agent: String = conn
+            .query_row("SELECT agent_id FROM agent_run_records WHERE run_id = 'run-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(run_agent, "default");
+        conn.execute(
+            "INSERT INTO chat_dispatch_ledger \
+                 (workspace_id, trigger_message_id, agent_id, thread_id, state, attempt_count, created_at_ms, updated_at_ms) \
+             VALUES ('ws', 'm2', 'codex', 't1', 'pending', 0, 4, 4)",
+            [],
+        )
+        .expect("a second agent's request for the same message");
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+                 VALUES ('ws', 'agent-2', 'Second', 'second', 'agent', 1, 1, 'default')",
+                [],
+            )
+            .is_err(),
+            "an agent has one chat"
+        );
+        let removed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name IN \
+                 ('chat_dispatch_scan_cursor', 'chat_dispatch_local_discovery')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(removed, 0);
     }
 
     /// Plugin subscriptions and claims written before the automation facts
