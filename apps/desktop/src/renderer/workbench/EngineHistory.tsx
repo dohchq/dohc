@@ -13,7 +13,7 @@ import { neutralPresentation } from "./actorPresentation";
 // The History timeline: file moments, version markers and Collection
 // changes, newest first, in the order main merged them. File moments keep
 // their summaries ("Saved latest edits", "Merged version X into Main",
-// "Reconciled offline edits", ...) and a multi-file pass (reconcile, switch,
+// "Changed while dohc was closed", ...) and a multi-file pass (reconcile, switch,
 // merge, restore) groups into one expandable item via its correlationId.
 // An agent's consecutive edits to one file fold into one row, a run.
 // Product vocabulary only, no git terms.
