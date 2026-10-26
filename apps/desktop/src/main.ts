@@ -1011,7 +1011,7 @@ const desktopWindows = createDesktopWindows({
   preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
-    RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
+    RendererWorkspaceSessionOwner<WebContents>, "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
   get exitRounds() { return exitRounds; },
 });
@@ -5808,6 +5808,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        currentRendererDocumentId: (sender) => rendererWorkspaceSessions.currentDocumentId(sender),
+        prepareForRendererReload,
         afterRendererCrashLoop,
         preloadArguments,
       }),
