@@ -7065,7 +7065,7 @@ function registerIpcHandlers(): void {
   });
 
   const buttonsIpc = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
     // A file is a record of the nearest Collection folder above it, when
@@ -7189,7 +7189,7 @@ function registerIpcHandlers(): void {
     CloudSessionCredentials
   >({
     hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),
