@@ -13,6 +13,7 @@ import {
   type OwnerAdmissionPending,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
 import { startRelayWatch } from "./relayWatch";
@@ -396,6 +397,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     displacedDueAtMs: number | null | undefined,
     countsAsAttempt: boolean,
   ): void {
+    // Quit stopped waiting for the relay. Nothing failed, and sync is ending.
+    if (error instanceof EngineWorkspaceShuttingDownError) return;
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
@@ -642,7 +645,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         try {
           applied = await doPass(retryClaim);
         } catch (error) {
-          failed = true;
+          failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {

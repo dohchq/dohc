@@ -8,6 +8,7 @@ import {
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRelaySyncEngine,
@@ -941,6 +942,23 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(sync.snapshot().syncFailure).toBeNull();
     expect(changes.mock.calls.length).toBeGreaterThan(changesAtFailure);
+    errorSpy.mockRestore();
+  });
+
+  it("ends a pass that quit stopped waiting for without calling it a failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pushMock.mockRejectedValue(new EngineWorkspaceShuttingDownError());
+    const afterPass = vi.fn(async () => false);
+    const sync = engine({ capture: capture(), afterPass });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    expect(afterPass).toHaveBeenCalledExactlyOnceWith({ failed: false });
+    expect(errorSpy).not.toHaveBeenCalled();
+    // No backoff retries the pass.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pushMock).toHaveBeenCalledTimes(1);
     errorSpy.mockRestore();
   });
 
