@@ -36,6 +36,7 @@ export const CHATS_METHOD = {
   conversationLinks: "chats.conversations.listLinks",
   attachmentsListFileMentions: "chats.attachments.listFileMentions",
   mentionsListForHandle: "chats.mentions.listForHandle",
+  agentReadListUnreadRequests: "chats.agentReadState.listUnreadRequests",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
   agentReadMarkThreadRead: "chats.agentReadState.markThreadRead",
   followsSet: "chats.follows.set",
@@ -104,6 +105,7 @@ export type ChatDispatchClaim = typeof ChatDispatchClaimSchema.Type;
 export type ChatThreadPause = typeof ChatThreadPauseSchema.Type;
 export type ChatAgentReadState = typeof ChatAgentReadStateSchema.Type;
 export type ChatMention = typeof ChatMentionSchema.Type;
+export type ChatAgentRequest = typeof ChatAgentRequestSchema.Type;
 export type ChatChannel = typeof ChatChannelSchema.Type;
 export type ChatChannelSummary = typeof ChatChannelSummarySchema.Type;
 export type ChatThreadWireRecord = typeof ChatThreadWireRecordSchema.Type;
@@ -242,6 +244,7 @@ type ChatMentionsParams = ChatPageParams & {
   handle: string;
   unreadByAgentOnly?: boolean;
 };
+type ChatAgentRequestsParams = ChatPageParams & { agentId: string };
 type ChatAgentReadMarkParams = ChatsJsonObject & {
   threadId: string;
   upTo: ChatsJsonObject & { createdAtMs: number; messageId: string };
@@ -393,6 +396,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
+  [CHATS_METHOD.agentReadListUnreadRequests]: ChatAgentRequestsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatPageParams;
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadMarkParams;
   [CHATS_METHOD.followsSet]: ChatFollowSetParams;
@@ -707,6 +711,13 @@ const ChatMentionSchema = mutableStruct({
   authorKind: MessageAuthorKindSchema,
   createdAtMs: AnyInt,
 });
+// A message that asked one agent, which that agent has not read.
+const ChatAgentRequestSchema = mutableStruct({
+  threadId: Schema.String,
+  messageId: Schema.String,
+  authorKind: MessageAuthorKindSchema,
+  createdAtMs: AnyInt,
+});
 const ChatChannelOpeningMessageSchema = mutableStruct({
   authorActorKey: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),
@@ -824,6 +835,9 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.attachmentsListFileMentions]: Schema.Unknown,
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
+  }),
+  [CHATS_METHOD.agentReadListUnreadRequests]: pageSchema({
+    requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),
   }),
   [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,

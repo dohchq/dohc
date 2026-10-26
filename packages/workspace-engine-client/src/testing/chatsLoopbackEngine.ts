@@ -598,6 +598,8 @@ function allowedKeys(method: string): readonly string[] {
       return ["objectId", "pathHint", "pageLimit", "cursor"];
     case CHATS_METHOD.mentionsListForHandle:
       return ["handle", "unreadByAgentOnly", "pageLimit", "cursor"];
+    case CHATS_METHOD.agentReadListUnreadRequests:
+      return ["agentId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadListUnreadThreads:
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
@@ -813,6 +815,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.fileMentions(state, workspace, params);
       case CHATS_METHOD.mentionsListForHandle:
         return this.mentionsList(state, workspace, params);
+      case CHATS_METHOD.agentReadListUnreadRequests:
+        return this.agentUnreadRequests(state, workspace, params);
       case CHATS_METHOD.agentReadListUnreadThreads:
         return this.agentUnreadThreads(state, workspace, params);
       case CHATS_METHOD.agentReadMarkThreadRead:
@@ -1989,6 +1993,41 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.messageId, right.messageId));
     const result = page(rows, params, `${workspace}\0mentions\0${handle}\0${unreadOnly}`);
     return jsonResult({ mentions: result.values, nextCursor: result.nextCursor });
+  }
+
+  // The engine's rule: each message with a request for the agent, beyond the
+  // agent cursor of its thread, oldest first.
+  private agentUnreadRequests(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const agentId = requiredString(params, "agentId", "invalid-input");
+    if (!AGENT_ID_PATTERN.test(agentId)) throw new Error("invalid-input");
+    const rows = [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.agentId === agentId)
+      .flatMap((dispatch) => {
+        const message = state.messages.get(dispatch.triggerMessageId);
+        return message && state.threads.has(message.threadId) ? [message] : [];
+      })
+      .filter((message) => {
+        const read = state.agentReads.get(message.threadId);
+        return !read ||
+          message.createdAtMs > read.lastReadCreatedAtMs ||
+          (
+            message.createdAtMs === read.lastReadCreatedAtMs &&
+            compareText(message.id, read.lastReadMessageId) > 0
+          );
+      })
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
+      .map((message) => ({
+        threadId: message.threadId,
+        messageId: message.id,
+        authorKind: message.author.kind,
+        createdAtMs: message.createdAtMs,
+      }));
+    const result = page(rows, params, `${workspace}\0agentRequests\0${agentId}`);
+    return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
   }
 
   private agentUnreadThreads(

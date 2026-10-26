@@ -3255,10 +3255,10 @@ async function dispatchWorkspace(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
       const unread = await context.store.listAgentUnreadThreads(context.workspaceId);
-      // Inside a run dohc dispatched, the inbox is that run's agent's chat.
-      // Each message naming the agent starts its own run, so mentions are
-      // left out. Outside a run, a self-connected agent reads every agent
-      // chat and the plain @agent mentions no dohc agent took.
+      // Inside a run dohc dispatched, the inbox is that run's agent's unread
+      // work: its chat, and each message elsewhere that asked it. Outside a
+      // run, a self-connected agent reads every agent chat and the plain
+      // @agent mentions no dohc agent took.
       const runAgentId = options.dispatchedAgent(context.workspaceId);
       const agentChannelIds = new Set(
         channels
@@ -3289,16 +3289,20 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = runAgentId !== null ? [] : await context.store.listMentionsForHandle(
-        context.workspaceId,
-        "agent",
-        { unreadByAgentOnly: true },
-      );
+      const mentionRows = runAgentId !== null
+        ? await context.store.listAgentUnreadRequests(context.workspaceId, runAgentId)
+        : await context.store.listMentionsForHandle(
+          context.workspaceId,
+          "agent",
+          { unreadByAgentOnly: true },
+        );
       const messageCache = new Map<string, ChatMessage[]>();
       const mentions: CliResultByVerb["inbox"]["mentions"] = [];
       for (const mention of mentionRows) {
         const thread = loadedById.get(mention.threadId);
         if (!thread) continue;
+        // A request in the run's agent's own chat is already in its threads.
+        if (runAgentId !== null && thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
         let messages = messageCache.get(thread.thread.id);
         if (!messages) {
           messages = await context.store.listMessages({

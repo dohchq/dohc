@@ -2,9 +2,9 @@ use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
-    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention,
-    ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatAgentRequest, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
     ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
     DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
     ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
@@ -484,6 +484,21 @@ impl ActorHandle {
         self.run_chats(move |chats| {
             chats
                 .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn chat_agent_unread_requests(
+        &self,
+        workspace_id: String,
+        agent_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequest>, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .list_agent_unread_requests(&workspace_id, &agent_id, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

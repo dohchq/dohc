@@ -880,6 +880,14 @@ impl EngineService {
                 )
                 .await?
             }
+            "chats.agentReadState.listUnreadRequests" => {
+                self.chats_agent_read_state_list_unread_requests(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
             "chats.agentReadState.listUnreadThreads" => {
                 self.chats_agent_read_state_list_unread_threads(
                     &ctx,
@@ -1516,6 +1524,7 @@ mod tests {
             "capture.renew",
             "capture.setAuthor",
             "capture.clearRecovery",
+            "chats.agentReadState.listUnreadRequests",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",

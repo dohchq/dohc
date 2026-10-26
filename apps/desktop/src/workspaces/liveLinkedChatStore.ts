@@ -221,6 +221,11 @@ export function createLiveLinkedChatStore(
         async (adapter) =>
           await adapter.listAgentUnreadThreads(workspaceId),
       ),
+    listAgentUnreadRequests: async (workspaceId, agentId) =>
+      await invokeRead(
+        async (adapter) =>
+          await adapter.listAgentUnreadRequests(workspaceId, agentId),
+      ),
     listMentionsForHandle: async (workspaceId, handle, options) =>
       await invokeRead(
         async (adapter) =>

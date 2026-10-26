@@ -982,6 +982,84 @@ fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
 }
 
 #[test]
+fn an_agent_lists_the_unread_messages_that_asked_it() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
+        .expect("agent chat");
+    start_message(
+        &mut store,
+        "research-chat",
+        "agent-thread",
+        "direct",
+        ChatActorKind::Human,
+        None,
+        None,
+        "hello",
+        20,
+    );
+    start_message(
+        &mut store,
+        "channel",
+        "group-thread",
+        "opening",
+        ChatActorKind::Human,
+        None,
+        None,
+        "Opening",
+        21,
+    );
+    for (message_id, agent_id, now_ms) in [
+        ("asks-research", "research", 30),
+        ("asks-nova", "default", 31),
+    ] {
+        send_naming(
+            &mut store,
+            "group-thread",
+            message_id,
+            ChatActorKind::Human,
+            None,
+            &[agent_id],
+            "Can you look?",
+            now_ms,
+            &NO_FAULTS,
+        )
+        .expect("send");
+    }
+    let unread = |store: &mut EngineStore, after: Option<(i64, String)>| {
+        LinkedChatStore::new(store)
+            .list_agent_unread_requests(WS, "research", after, 10)
+            .expect("requests")
+            .into_iter()
+            .map(|request| request.message_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(unread(&mut store, None), vec!["direct", "asks-research"]);
+    assert_eq!(
+        unread(&mut store, Some((20, "direct".to_owned()))),
+        vec!["asks-research"]
+    );
+
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read_by_agent(
+            WS,
+            "group-thread",
+            30,
+            "asks-research",
+            None,
+            40,
+            &NO_FAULTS,
+        )
+        .expect("read");
+    assert_eq!(unread(&mut store, None), vec!["direct"]);
+    let error = LinkedChatStore::new(&mut store)
+        .list_agent_unread_requests(WS, "code--review", None, 10)
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid-input");
+}
+
+#[test]
 fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

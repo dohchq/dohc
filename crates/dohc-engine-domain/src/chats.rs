@@ -507,6 +507,15 @@ pub struct ChatMention {
     pub created_at_ms: i64,
 }
 
+/// A message that asked one agent, which that agent has not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAgentRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub author_kind: ChatActorKind,
+    pub created_at_ms: i64,
+}
+
 /// The per-thread read cursor (server-owned monotonic register + CAS revision).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatThreadReadState {
@@ -4016,6 +4025,73 @@ impl<'a> LinkedChatStore<'a> {
                                 created_at_ms,
                             }),
                         )
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// The messages that asked one agent and lie beyond the agent cursor of
+    /// their thread, in ascending message-coordinate order.
+    pub fn list_agent_unread_requests(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequest>, DomainError> {
+        validate_chat_page_limit(limit)?;
+        if !is_agent_id(agent_id) {
+            return Err(DomainError::InvalidInput {
+                reason: "agent id is invalid",
+            });
+        }
+        let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms \
+                     FROM chat_dispatch_ledger l \
+                     JOIN chat_messages m ON m.workspace_id = l.workspace_id \
+                       AND m.thread_id = l.thread_id AND m.message_id = l.trigger_message_id \
+                     JOIN chat_threads t ON t.workspace_id = m.workspace_id \
+                       AND t.thread_id = m.thread_id \
+                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id \
+                       AND ars.thread_id = m.thread_id \
+                     WHERE l.workspace_id = ?1 AND l.agent_id = ?2 \
+                       AND (ars.thread_id IS NULL \
+                         OR m.created_at_ms > ars.last_read_created_at_ms \
+                         OR (m.created_at_ms = ars.last_read_created_at_ms \
+                           AND m.message_id > ars.last_read_message_id)) \
+                       AND (?3 = 0 OR m.created_at_ms > ?4 \
+                         OR (m.created_at_ms = ?4 AND m.message_id > ?5)) \
+                     ORDER BY m.created_at_ms, m.message_id LIMIT ?6",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        agent_id,
+                        has_after,
+                        after_created_at_ms,
+                        after_message_id,
+                        limit
+                    ],
+                    |row| {
+                        let thread_id: String = row.get(0)?;
+                        let message_id: String = row.get(1)?;
+                        let author_kind: String = row.get(2)?;
+                        let created_at_ms: i64 = row.get(3)?;
+                        Ok(ChatActorKind::from_db(&author_kind).map(|author_kind| {
+                            ChatAgentRequest {
+                                thread_id,
+                                message_id,
+                                author_kind,
+                                created_at_ms,
+                            }
+                        }))
                     },
                 )
                 .map_err(DomainError::sql_corrupt)?;

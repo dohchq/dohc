@@ -25,6 +25,7 @@ import {
   type ChatFeedReadState,
   type ChatFollow,
   type ChatLocalAttachmentParams,
+  type ChatAgentRequest,
   type ChatMention,
   type ChatMessage,
   type ChatProjection,
@@ -535,6 +536,23 @@ export class ChatsLiveAdapter {
         },
       );
       rows.push(...page.threads);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    return rows;
+  }
+
+  // The messages that asked one agent and that it has not read.
+  async listAgentUnreadRequests(workspaceId: string, agentId: string): Promise<ChatAgentRequest[]> {
+    this.assertWorkspace(workspaceId);
+    const rows: ChatAgentRequest[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
+        agentId,
+        pageLimit: 500,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      rows.push(...page.requests);
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;

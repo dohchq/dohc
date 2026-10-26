@@ -884,6 +884,14 @@ interface ChatAgentReadState {
   updatedAtMs: number;
 }
 
+// A message that asked one agent, which that agent has not read.
+interface ChatAgentRequestRecord {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  authorKind: ChatActor["kind"];
+  createdAtMs: number;
+}
+
 interface ChatMentionRecord {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
@@ -1191,6 +1199,7 @@ export interface LinkedChatStore {
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
   listAgentUnreadThreads(workspaceId: WorkspaceId): Promise<ChatThread[]>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, agentId: string): Promise<ChatAgentRequestRecord[]>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,

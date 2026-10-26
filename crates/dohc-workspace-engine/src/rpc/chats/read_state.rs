@@ -32,6 +32,15 @@ struct UnreadFileThreadPageParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAgentRequestPageParams {
+    agent_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAgentReadCoordinateParams {
     created_at_ms: i64,
     message_id: String,
@@ -206,6 +215,71 @@ impl EngineService {
         };
         Ok(json!({
             "threads": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    pub(crate) async fn chats_agent_read_state_list_unread_requests(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatAgentRequestPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.agentReadState.listUnreadRequests",
+            &workspace_id,
+            &[params.agent_id.as_str()],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.agentReadState.listUnreadRequests",
+            open.actor.chat_agent_unread_requests(
+                workspace_id,
+                params.agent_id,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|row| {
+                json!({
+                    "threadId": row.thread_id,
+                    "messageId": row.message_id,
+                    "authorKind": row.author_kind.as_str(),
+                    "createdAtMs": row.created_at_ms,
+                })
+            })
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: None,
+                first: last.created_at_ms,
+                second: last.message_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "requests": values[..included].to_vec(),
             "nextCursor": next_cursor,
         }))
     }

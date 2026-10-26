@@ -4899,6 +4899,23 @@ describe("CLI socket server", () => {
       body: "This should be unread by the human",
     });
     if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const askedCodex = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["codex"],
+      body: "@Codex can you check the release notes?",
+    });
+    await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["default"],
+      body: "@Nova can you book the room?",
+    });
     const fileThread = await store.createThread({
       workspaceId: WORKSPACE_ID,
       title: "Unread file discussion",
@@ -4927,15 +4944,21 @@ describe("CLI socket server", () => {
       }),
     ]);
 
-    // A dispatched run sees only its own agent's chat. Each message naming
-    // that agent starts its own run, so the run lists no mentions.
+    // A dispatched run sees its own agent's unread work: its chat, and each
+    // message elsewhere that asked it.
     dispatchedRun = "codex";
     const runInbox = await invoke("inbox", {
       cwd: workspaceRoot,
       actor: "agent",
     });
     expect(runInbox.threads.map((thread) => thread.id)).toEqual([codexDm.threadId]);
-    expect(runInbox.mentions).toEqual([]);
+    expect(runInbox.mentions).toEqual([
+      expect.objectContaining({
+        threadId: cliThreadId(askedCodex.thread.id),
+        messageId: cliMessageId(askedCodex.message.id),
+        text: "@Codex can you check the release notes?",
+      }),
+    ]);
     dispatchedRun = null;
 
     const humanInbox = await invoke("inbox", {

@@ -89,6 +89,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { agentId: "codex" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,
@@ -452,8 +453,8 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 61 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(61);
+  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(62);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),
