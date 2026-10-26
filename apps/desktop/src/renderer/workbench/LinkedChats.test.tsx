@@ -8,7 +8,8 @@ import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AboutFile, AccessContext } from "./About";
+import type { AboutFile } from "./About";
+import type { AccessContext } from "./accessReason";
 
 const messageRenderGate = vi.hoisted(() => ({
   current: null as { resume: Promise<void>; onRender: () => void } | null,

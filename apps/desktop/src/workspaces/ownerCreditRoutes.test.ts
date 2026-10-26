@@ -1,6 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
 import * as Y from "yjs";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {OwnerYDocFrameDelivery} from "./ownerYDocFrameDelivery";
 import type {OwnerYDocDeliveryEnvelope} from "./ownerYDocOutbox";
 import {createNamedLiveFrameSession} from "../../../../services/sync-relay/src/namedLiveFrameSession";
@@ -20,11 +21,13 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
   if (route === "outbox") {
     let pending = bytes.length;
     vi.spyOn(OwnerYDocOutbox.prototype, "readDeliveryHead").mockResolvedValue({...envelope, state: "active", pendingBytes: pending,
-      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, entry: {...envelope, byteLength: pending, createdAtMs: 0}});
+      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null, frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
+      entry: {...envelope, byteLength: pending, createdAtMs: 0}});
     vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {pending = 0; return {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null};});
     const validateJournal = createLiveMarkdownJournalValidator(policy);
-    const result = await drainOwnerOutbox({storage: f.storage, client: {sendRequest: async () => ({result: {outboxId: "outbox", pendingBytes: pending, state: "active"}})} as never,
+    const result = await drainOwnerOutbox({storage: f.storage, client: {sendRequest: async () => ({result: {outboxId: "outbox", pendingBytes: pending, state: "active", retryDeliveryId: null}})} as never,
       admission: {trustedAccount: accountId => ({accountId, name: "Relay name"}), shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
+        refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _, ...input}) => validateJournal(input)},
       workspace: "handle", host: captured.host, registrationId: 1, binding, adoption: {adoptionId: "adoption", sequence: 0, applied() {}},
       nextRequestId: () => 1, deadlineMs: 1000, assertCurrent() {}, applyThrough: async receipt => ({...receipt, localYDocSequence: 1, applicationReplayed: false})});

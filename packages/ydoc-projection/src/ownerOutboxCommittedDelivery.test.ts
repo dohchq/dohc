@@ -1,5 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "../../workspace-engine-client/src/daemon/engineClient.js";
+import {OwnerKnownRefusals} from "../../workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.js";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {OwnerOutboxAdmission} from "../../../services/sync-relay/src/ownerOutboxDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
@@ -32,7 +33,7 @@ it("replays a real journal admission and retains the owner entry until native ap
       sendRequest: vi.fn<EngineClient["sendRequest"]>(async request => {
         const params = request.params as Record<string,unknown>;
         if (request.method === "liveApplication.register") return {id: request.id,result: {registrationId: 1}};
-        if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pending ? update.byteLength : 0,state: pending ? "sealed" : "active"}};
+        if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pending ? update.byteLength : 0,state: pending ? "sealed" : "active",retryDeliveryId: null}};
         if (request.method === "liveApplication.acknowledgeOwnerOutbox") {
           const receipts = params.receipts as LiveUpdateReceipt[];
           expect(receipts).toHaveLength(1);
@@ -50,7 +51,8 @@ it("replays a real journal admission and retains the owner entry until native ap
           bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: binding.lineageClaimId,
             baseByteLength: f.input.baselineBytes.byteLength,state: pending ? "sealed" : "active",pendingBytes: pending ? update.byteLength : 0,
             pendingEntryCount: pending ? 1 : 0,nextSequence: 2,oldestEntryAtMs: pending ? 10 : null,
-            quarantineReason: null,observedBinding: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null}));
+            quarantineReason: null,observedBinding: null,retryDeliveryId: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null,
+            frozenAtRefusedSeed: false,checkpointDigest: null,recoveryCheckpointDigest: null}));
           nextCursor = cursor("base");
         } else if (current.part === "entryHeader") {
           expect(pending).toBe(true); bytes = Buffer.from(JSON.stringify(entry)); nextCursor = cursor("update",1);
@@ -67,7 +69,7 @@ it("replays a real journal admission and retains the owner entry until native ap
     };
     const consumer = new OwnerCommittedDelivery(f.storage,history,{client: client as unknown as EngineClient,
       workspace: "handle",host,deadlineMs: 1_000,nextRequestId: () => ++requestId,bounds,
-      ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,validate}});
+      ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,refusals: new OwnerKnownRefusals(),validate}});
     client.sendLiveApplication.mockResolvedValueOnce({id: 1,result: {status: "pending",reason: "native busy"}});
     expect(await consumer.drain(document)).toMatchObject({kind: "pending",continueDrain: false});
     expect(pending).toBe(true); expect(removed).toEqual([]); expect(nativeAck).toBeNull();

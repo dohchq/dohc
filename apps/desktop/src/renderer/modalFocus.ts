@@ -78,7 +78,7 @@ export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
     ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
   ].filter((element) => {
     if (
-      element.closest('[hidden], [aria-hidden="true"]') !== null ||
+      element.closest('[hidden], [aria-hidden="true"], [inert]') !== null ||
       element.matches(':disabled, input[type="hidden"]') ||
       (element.hasAttribute("tabindex") && element.tabIndex < 0)
     ) return false;

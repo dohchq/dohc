@@ -317,7 +317,11 @@ pub fn is_receipt_applied_in(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let parent = find_parent_for_binding(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
-    if parent.binding != *binding || parent.state == OwnerOutboxState::Quarantined {
+    // A quarantined outbox reports only the head its owner asked to try again.
+    if parent.binding != *binding
+        || (parent.state == OwnerOutboxState::Quarantined
+            && parent.retry_delivery_id.as_deref() != Some(receipt.delivery_id.as_str()))
+    {
         return Err(OwnerOutboxError::Frozen);
     }
     let row: Option<(String, i64, Option<String>)> = conn.query_row(

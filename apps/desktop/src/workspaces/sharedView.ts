@@ -8,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
@@ -16,6 +17,7 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
+import { absentAsNull, diskSpelling } from "./diskSpelling";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
@@ -287,8 +289,8 @@ function spellingGroups(paths: Iterable<string>): Map<string, string[]> {
 // The first other spelling in `spellings` that `owns` accepts, by path, whose
 // regular file is the one at `target`, as `Notes.md` reaches `notes.md`'s
 // file on a disk that ignores case. The disk decides, so a folder that keeps
-// case apart holds two files. Trouble reading a spelling means it shares
-// nothing.
+// case apart holds two files. Unknown identities stop materialization and
+// exclude paths from capture; collision checks keep them as local collisions.
 async function spellingSharingFile(
   rootDir: string,
   path: string,
@@ -298,11 +300,33 @@ async function spellingSharingFile(
 ): Promise<string | null> {
   const others = (spellings.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path && owns(other)).sort();
   if (others.length === 0) return null;
-  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? realpath(at) : null, () => null);
-  const file = await fileAt(target);
-  if (file === null) return null;
+  const file = await lstat(target, { bigint: true }).catch(absentAsNull);
+  if (!file?.isFile()) return null;
+  const realFile = await realpath(target).catch(absentAsNull);
+  if (realFile === null) return null;
+  let storedFile: Promise<string | null> | undefined;
   for (const other of others) {
-    if ((await fileAt(containedTarget(rootDir, other))) === file) return other;
+    const otherTarget = containedTarget(rootDir, other);
+    const otherFile = await lstat(otherTarget, { bigint: true }).catch(absentAsNull);
+    if (!otherFile?.isFile()) continue;
+    const realOther = await realpath(otherTarget).catch(absentAsNull);
+    if (realOther === null) continue;
+    if (realFile === realOther) return other;
+    // Only Linux realpath keeps lookup case; elsewhere the realpath check above decides.
+    if (process.platform === "linux" && basename(target) === basename(otherTarget)
+      && file.dev === otherFile.dev && file.ino === otherFile.ino && file.ctimeNs === otherFile.ctimeNs) {
+      const [parent, otherParent] = await Promise.all([
+        stat(dirname(target), { bigint: true }).catch(absentAsNull),
+        stat(dirname(otherTarget), { bigint: true }).catch(absentAsNull),
+      ]);
+      if (parent !== null && otherParent !== null && parent.ino !== 0n && parent.dev === otherParent.dev && parent.ino === otherParent.ino) return other;
+    }
+    storedFile ??= diskSpelling(rootDir, target);
+    const [stored, storedOther] = await Promise.all([
+      storedFile,
+      diskSpelling(rootDir, otherTarget),
+    ]);
+    if (stored !== null && stored === storedOther) return other;
   }
   return null;
 }
@@ -351,12 +375,6 @@ async function materializeSharedViewPaths(
   // The view's live paths, grouped by how a disk that ignores case or Unicode
   // normalization names them. Read once, at the first delete that needs them.
   let aliases: Map<string, string[]> | undefined;
-  // A missing entry is an answer; any other failure at the delete's own target
-  // stops the refresh before it deletes.
-  const absentAsNull = (error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-    throw error;
-  };
   // The first other live path, by path, that reaches the regular file at
   // `target`: that path's head owns the file, as the engine decides for
   // workspace peers (#2157). A link or folder at the target has no owner; the
@@ -374,8 +392,12 @@ async function materializeSharedViewPaths(
   async function ownerWrite(owner: string, target: string): Promise<ShareViewChangedPath | null> {
     const head = await store.readTextFile({ workspaceId, versionId: main.id, path: owner });
     if (head === null) return null;
-    if (diskMatchesSnapshot(await readDiskContent(target), head)
-      && basename(await realpath(target)) === basename(owner)) return null;
+    if (diskMatchesSnapshot(await readDiskContent(target), head)) {
+      const real = await realpath(target).catch(() => null);
+      if (real !== null && basename(real) === basename(owner)) return null;
+      const spelling = await diskSpelling(rootDir, target).catch(() => null);
+      if (spelling !== null && basename(spelling) === basename(owner)) return null;
+    }
     return { path: owner, operation: "write", contentKind: head.contentKind === "binary" ? "binary" : "text" };
   }
   // Every delete before every write. On a disk that ignores case or Unicode
@@ -2030,7 +2052,8 @@ async function captureSharedViewLocalDivergence(input: {
     if (work.collision) {
       const owner = await withCaptureMutationLock(rootDir, work.path, workspaceLease, (resolvedTarget) =>
         spellingSharingFile(rootDir, work.path, resolvedTarget, spellings, (other) => !everyCollisionRecordedPath.has(other)),
-      ).catch(() => null);
+      ).catch(() => undefined);
+      if (owner === undefined) return unjournalableVerdict(work.path, "unreadable");
       if (owner !== null && work.tracked === null) {
         return { kind: "repaired", action: { kind: "none" }, resolveCollision: true };
       }
@@ -2049,7 +2072,8 @@ async function captureSharedViewLocalDivergence(input: {
       && await withCaptureMutationLock(rootDir, work.path, workspaceLease, async (resolvedTarget) =>
         !(await lstat(resolvedTarget).then(() => true, () => false))
           || (await spellingSharingFile(rootDir, work.path, resolvedTarget, knownSpellings)) !== null,
-      ).catch(() => false);
+      ).catch(() => undefined);
+    if (sharedSpelling === undefined) return unjournalableVerdict(work.path, "unreadable");
     if (preserved.has(work.path) && !sharedSpelling) {
       // These bytes predate the restriction. Journal them locally before
       // releasing protection, even when this copy is now read-only.
@@ -2400,7 +2424,7 @@ async function refreshSharedViewOnce(input: {
     let spellings: Map<string, string[]> | undefined;
     const collisionEntry = async (path: string, target: string): Promise<UnjournalablePath> => {
       spellings ??= spellingGroups(preTrackedPaths);
-      const owner = await spellingSharingFile(input.rootDir, path, target, spellings, (other) => !collisionRecordedPaths.has(other));
+      const owner = await spellingSharingFile(input.rootDir, path, target, spellings, (other) => !collisionRecordedPaths.has(other)).catch(() => null);
       return owner === null ? { path, reason: "local-collision" } : { path, reason: "spelling-collision", owner };
     };
     for (const change of pull.changedPaths) {

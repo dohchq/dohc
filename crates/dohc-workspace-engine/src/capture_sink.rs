@@ -81,7 +81,7 @@ use busy_retry::CaptureBatchRetry;
 
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps one summary + correlation id across every moment it records
-/// ("Reconciled offline edits"); a live watcher batch leaves both unset and
+/// ("Changed while dohc was closed"); a live watcher batch leaves both unset and
 /// each ingest falls back to a per-file "Updated <basename>" summary with no
 /// correlation id.
 #[derive(Clone, Default)]

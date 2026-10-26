@@ -1,14 +1,32 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   ListRelayShareLinksResult,
   type RelayShareDiscussionMessage,
   type RelayShareGrantedRow,
 } from "../ipc/bridgeContract";
-import { RelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
+import { RelayShareDialog as ProductionRelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
+import type { AccessContext, AccessFacts } from "./workbench/accessReason";
+
+function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
+  return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
+}
+const SYNCED: AccessFacts["cloud"] = { connected: true, workspaceSynced: true, workspaceSyncConnected: true };
+const CAN_SHARE = accessContextFor(SYNCED);
+
+// The shell's Access context, for a workspace that can share unless a test
+// says otherwise.
+type DialogProps = ComponentProps<typeof ProductionRelayShareDialog>;
+function RelayShareDialog(
+  props: Omit<DialogProps, "accessContext" | "server"> & Partial<Pick<DialogProps, "accessContext" | "server">>,
+) {
+  return <ProductionRelayShareDialog accessContext={CAN_SHARE} server={null} {...props} />;
+}
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
@@ -5884,5 +5902,126 @@ describe("advertised public Edit release", () => {
     render(<RelayShareDialog workspaceId="ws-1" target={{kind: "version", versionId: "version-7", versionName: "review"}} onClose={() => {}} />);
     await showLinkPane(user);
     expect(within(screen.getByRole("radiogroup", {name: "Link access"})).queryByRole("radio", {name: "Edit"})).toBeNull();
+  });
+});
+
+// Sharing that cannot work yet says why before anyone fills in a share, with
+// the one action that changes it, and holds the forms. The cause is About's
+// rule for the workspace's own shares.
+describe("sharing that cannot work yet", () => {
+  const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
+  // The controls a person would fill in, the share-with choice included.
+  const formControls = () => [
+    screen.getByRole("radio", { name: "Anyone with the link", hidden: true }),
+    screen.getByTestId("share-access-edit"),
+    screen.getByTestId("share-email"),
+    screen.getByTestId("share-create"),
+  ];
+
+  it.each([
+    {
+      reason: "not-synced",
+      cloud: { connected: true, workspaceSynced: false, workspaceSyncConnected: false },
+      words: ["Sharing needs sync."],
+      action: "Set up sync",
+      runs: "openSyncSettings",
+    },
+    {
+      reason: "signed-out",
+      cloud: { connected: false, workspaceSynced: true, workspaceSyncConnected: false },
+      words: ["Not connected to sync.example.org", "Others may have access."],
+      action: "Connect server",
+      runs: "connect",
+    },
+    {
+      reason: "other-account",
+      cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: false },
+      words: [`${SYNC_UNCONFIRMED_ACCOUNT} Resume sync to share.`],
+      action: "Sync and sharing",
+      runs: "openSyncSettings",
+    },
+  ] as const)("$reason: says why, holds the forms, and offers $action", async (held) => {
+    const context = accessContextFor(held.cloud);
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={onClose}
+        accessContext={context} server="https://sync.example.org" />,
+    );
+
+    const setup = screen.getByTestId("share-setup");
+    expect(setup.dataset.reason).toBe(held.reason);
+    expect([...setup.querySelectorAll("p")].map((line) => line.textContent)).toEqual(held.words);
+    expect(setup.closest("[inert]")).toBeNull();
+    for (const control of formControls()) expect(control.closest("[inert]")).not.toBeNull();
+
+    // The dialog gives way to the place the action opens.
+    await user.click(within(setup).getByRole("button", { name: held.action }));
+    expect(context[held.runs]).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(bridgeMock.createRelayShare).not.toHaveBeenCalled();
+    expect(bridgeMock.listRelayShareLinks).not.toHaveBeenCalled();
+  });
+
+  it("names the server in the interface font", () => {
+    render(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}}
+        accessContext={accessContextFor({ connected: false, workspaceSynced: true, workspaceSyncConnected: false })}
+        server="https://sync.example.org" />,
+    );
+    const server = within(screen.getByTestId("share-setup")).getByText("sync.example.org");
+    expect(server.closest("code, .font-mono")).toBeNull();
+  });
+
+  it("holds the forms, unexplained, until the server connection is read", () => {
+    const view = render(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} accessContext={accessContextFor("checking")} />,
+    );
+    expect(screen.queryByTestId("share-setup")).toBeNull();
+    for (const control of formControls()) expect(control.closest("[inert]")).not.toBeNull();
+
+    view.rerender(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} accessContext={CAN_SHARE} />);
+    expect(screen.queryByTestId("share-setup")).toBeNull();
+    for (const control of formControls()) expect(control.closest("[inert]")).toBeNull();
+  });
+
+  // A connection dohc could not read names no cause, so main stays the one
+  // that refuses a share it cannot make.
+  it.each([
+    ["can share", SYNCED],
+    ["has an unreadable server connection", "unreadable"],
+  ] as const)("shows today's dialog for a workspace that %s", async (_state, cloud) => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} accessContext={accessContextFor(cloud)} />,
+    );
+    expect(screen.queryByTestId("share-setup")).toBeNull();
+    expect(container.querySelector("[inert], .opacity-50")).toBeNull();
+
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+    expect(await screen.findByTestId("share-code")).toBeTruthy();
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      recipientEmail: "friend@dohc.test",
+      access: "view",
+      paths: ["docs/plan.md"],
+    });
+  });
+
+  // Sync can stop while the dialog is open. The forms hold what the person
+  // typed, and main's refusal stays for a share already on its way.
+  it("keeps what was typed when sync stops while the dialog is open", async () => {
+    const user = userEvent.setup();
+    const view = render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+
+    view.rerender(
+      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}}
+        accessContext={accessContextFor({ connected: true, workspaceSynced: false, workspaceSyncConnected: false })} />,
+    );
+    expect(screen.getByTestId("share-setup").dataset.reason).toBe("not-synced");
+    expect((screen.getByTestId("share-email") as HTMLInputElement).value).toBe("friend@dohc.test");
+    expect(screen.getByTestId("share-email").closest("[inert]")).not.toBeNull();
   });
 });

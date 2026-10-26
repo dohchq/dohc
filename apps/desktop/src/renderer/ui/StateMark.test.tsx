@@ -107,7 +107,7 @@ describe("StateMark", () => {
     // The chip has its own column and keeps room for its mark and an ellipsis.
     const chip = screen.getByTestId("mark");
     expect(chip.parentElement!.parentElement).toBe(status);
-    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[25px]");
+    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[28px]");
     expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 

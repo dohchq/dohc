@@ -27,7 +27,7 @@ import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
-import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
+import {OwnerKnownRefusals, runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/serverOwnerDelivery.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLinkLiveHttp } from "../../sync-relay/src/linkLiveHttp.js";
@@ -363,8 +363,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(discovered.status).toBe(200);
     const ownerTarget = readyOwnerDeliveryDocuments(await discovered.json(), "workspace")[0]!;
     expect(ownerTarget).toBeDefined();
+    const refusals = new OwnerKnownRefusals();
     const runOwnerPass = () => runNativeOwnerDeliveryPass({client: owner!, workspaceHandle: handle, document: ownerTarget,
-      config: {...profile.owner, nativeConfigPath: ownerConfigPath, relayUrl, documents: [ownerTarget]},
+      config: {...profile.owner, nativeConfigPath: ownerConfigPath, relayUrl, documents: [ownerTarget]}, refusals,
       signal: AbortSignal.timeout(30_000), bearer, accountId: ownerUser.id, assertCurrent() {expect(owner).toBeDefined();}});
     expect(["empty", "acknowledged"]).toContain(await runOwnerPass());
     const nativeRequest = () => ({id: 0, workspace: handle, deadlineMs: 30_000});
@@ -915,7 +916,7 @@ it("parks a stopped document in its store and resumes the same activation when i
   harness.unreachable.add("sync.push"); harness.unreachable.add("liveApplication.settle");
   const accepted = await proof.liveEdit("beforeStop", "live");
   const saved = proof.activation()!, before = await proof.hostState(), stores = readdirSync(proof.hostRoot);
-  expect(stores).toEqual([basename(proof.store)]);
+  expect([...stores].sort()).toEqual([".recovery", basename(proof.store)].sort());
   expect(before.markdown).toContain("beforeStop");
   const waiting = proof.unpushed();
   expect(waiting.map(row => row.op_kind)).toContain("ydoc.update");
@@ -1061,6 +1062,7 @@ const bothReady = (proof: SelfHostProof) => vi.waitFor(async () => expect(await 
 it("pushes a write the host accepted before it reconnected, while another document is held", () => withSelfHostProof("self-host-reconnect", async proof => {
   const second = await proof.ownerDocument("docs/b.md", "Second");
   await bothReady(proof);
+  const held = proof.activation()!.source.objectId;
   await stopLiveEditing(proof);
   // While docs/a.md is stopped its owner edits it on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
@@ -1075,7 +1077,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
   await proof.retire();
   await vi.waitFor(async () => {
     expect(proof.live().coordinate.connectionId).not.toBe(before);
-    expect((await proof.documents())[0]).toEqual({path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"});
+    expect((await proof.documents())[0]).toEqual({path: "docs/a.md", objectId: held, status: "unavailable", reason: "live-edit-unadmitted"});
   }, {timeout: 30000});
   expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
   expect(proof.unpushed()).toEqual(expect.arrayContaining(waiting));
@@ -1126,10 +1128,11 @@ it("converges on the next pull after the reply to a hosted commit is lost, and a
 }), 120000);
 
 it("blocks a document its owner edited while live editing was stopped, and Resume gives it one more attempt", () => withSelfHostProof("self-host-refused", async proof => {
+  const objectId = proof.activation()!.source.objectId;
   await stopLiveEditing(proof);
   // The owner keeps editing on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
-  const refused = [{path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"}];
+  const refused = [{path: "docs/a.md", objectId, status: "unavailable", reason: "live-edit-unadmitted"}];
   const attempts = () => proof.started("captureOwnerActivation");
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual(refused), {timeout: 30000});
@@ -1149,7 +1152,7 @@ it("blocks a document its owner edited while live editing was stopped, and Resum
   const retried = harness.pulls.length;
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(retried + 4), {timeout: 30000});
   expect(attempts()).toBe(blocked + 1);
-  expect(readdirSync(proof.hostRoot)).toEqual([basename(proof.store)]);
+  expect(readdirSync(proof.hostRoot).sort()).toEqual([".recovery", basename(proof.store)].sort());
   return {attemptsBeforeResume: blocked, reports: proof.reports};
 }), 120000);
 
@@ -1161,7 +1164,7 @@ it("blocks a document written only as text, and activates it once its owner open
   const attempts = () => proof.started("captureOwnerActivation"), from = harness.calls.length;
   const failures = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.message);
   const plain = await proof.ownerDocument("docs/plain.md", "Written as text", {seeded: false});
-  const refused = {path: "docs/plain.md", status: "unavailable", reason: "live-document-without-lineage"};
+  const refused = {path: "docs/plain.md", objectId: plain.objectId, status: "unavailable", reason: "live-document-without-lineage"};
   await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(refused), {timeout: 30000});
   expect(failures().at(-1)).toContain("live-document-without-lineage");
   expect(failures().filter(message => !message?.includes("hosted-document-unready"))).toEqual([expect.stringContaining("live-document-without-lineage")]);

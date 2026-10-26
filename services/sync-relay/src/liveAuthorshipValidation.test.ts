@@ -4,6 +4,7 @@ import type {LiveAuthorContext} from '@dohc/live-session-contract'
 import type {LiveUpdateJournalCommitInput} from './storage.js'
 import type {LiveJournalValidation} from './storage/types.js'
 import type {EngineClient} from '@dohc/workspace-engine-client/daemon'
+import {OwnerKnownRefusals} from '@dohc/workspace-engine-client/owner-ydoc-drainer'
 import {registered, cleanupLiveDeliveryFixtures, policy, hash} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js'
 import type {StorageContext} from './storage/context.js'
 import {appendValidatedLiveJournal} from './storage/liveUpdateJournal.js'
@@ -226,7 +227,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     const client = {sendRequest: async (request: {id: number; method: string; params: Record<string, unknown>}) => {
       const pendingBytes = pending.reduce((sum, entry) => sum + entry.byteLength, 0)
       if (request.method === 'liveApplication.ownerOutbox') {
-        return {id: request.id, result: {outboxId: 'outbox', pendingBytes, state: 'active'}}
+        return {id: request.id, result: {outboxId: 'outbox', pendingBytes, state: 'active', retryDeliveryId: null}}
       }
       if (request.method === 'liveApplication.acknowledgeOwnerOutbox') {
         const receipt = (request.params.receipts as Array<{deliveryId: string; updateDigest: string}>)[0]!
@@ -245,8 +246,9 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
       if (at.part === 'header') {
         bytes = Buffer.from(JSON.stringify({outboxId: 'outbox', binding, baseUpdateDigest: binding.lineageClaimId,
           baseByteLength: f.input.baselineBytes.byteLength, state: 'active', pendingBytes, pendingEntryCount: pending.length,
-          nextSequence: 3, oldestEntryAtMs: pending[0]?.createdAtMs ?? null, quarantineReason: null, observedBinding: null,
-          firstEntryCursor: pending[0] ? cursor(snapshot, 'entryHeader', pending[0].sequence) : null}))
+          nextSequence: 3, oldestEntryAtMs: pending[0]?.createdAtMs ?? null, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
+          firstEntryCursor: pending[0] ? cursor(snapshot, 'entryHeader', pending[0].sequence) : null,
+          frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null}))
         nextCursor = cursor(snapshot, 'base')
       } else if (at.part === 'entryHeader') {
         bytes = Buffer.from(JSON.stringify(pending.find(entry => entry.sequence === at.sequence)))
@@ -262,7 +264,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     }}
     const retained: Array<boolean | undefined> = [], validations: LiveJournalValidation[] = []
     const admission: OwnerOutboxAdmission = {shares: new Map([[document.workspaceId, 'share']]), maxEntriesPerDrain: 1,
-      maxBytesPerDrain: 10_000, trustedAccount: accountId => ({accountId, name: 'Alice'}),
+      maxBytesPerDrain: 10_000, refusals: new OwnerKnownRefusals(), trustedAccount: accountId => ({accountId, name: 'Alice'}),
       validate: async (input, signal) => {
         retained.push(input.retainStateUpdate)
         const result = await validate(input, signal)

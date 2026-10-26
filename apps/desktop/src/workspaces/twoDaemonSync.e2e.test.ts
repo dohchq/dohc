@@ -17,6 +17,7 @@ import { parseFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, YdocLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
@@ -723,8 +724,9 @@ it.skipIf(engine.missing).each([
     catch (error) { throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() }), { cause: error }); }
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
+    const refusals = new OwnerKnownRefusals();
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, refusals, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     let saveState: string | undefined;
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
@@ -994,10 +996,17 @@ it.skipIf(engine.missing).each([
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
-          if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
+          if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
-        }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+          return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+            : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+        }), liveDocument: async (_workspace, target) => {
+          const resolved = await source.sessions.run(source.workspace, async ({client, workspace}) =>
+            new VersionedLiveAdapter(client, workspace, {workspaceId: source.workspace.workspaceId}).resolveFiles({workspaceId: source.workspace.workspaceId, targets: [target]}));
+          const [file] = resolved.results;
+          return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+        }, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+        sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({
         handle: (channel, handler) => {handlers.set(channel, handler);},
@@ -1098,7 +1107,7 @@ it.skipIf(engine.missing).each([
         const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
         return {ready, row};
       };
-      const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
+      const unadmitted = {ready: false, row: {path, objectId: document.binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"}};
       // The operator's reports that the host's copy misses the owner's edit.
       const reports = () => relayServer!.diagnostics().stderr
         .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
