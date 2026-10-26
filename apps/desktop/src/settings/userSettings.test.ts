@@ -19,6 +19,8 @@ import {
   agentProblem,
   listAgents,
   newAgentHue,
+  newAgentId,
+  newAgentName,
   ownAgentNamed,
   withFirstAgent,
   effectiveThemeMode,
@@ -267,6 +269,15 @@ describe("desktop user settings model", () => {
     expect(agentNameTaken(agents, "codex", "Nova")).toBe(true);
     expect(agentNameTaken(agents, "codex", "Codex")).toBe(false);
     expect(agentNameTaken(agents, "default", "Claude Code")).toBe(false);
+  });
+
+  it("gives the first agent the default id, and each next one an id and a name no agent has", () => {
+    expect(newAgentId([], "codex")).toBe("default");
+    // An id the file holds for an entry dohc could not use is taken too.
+    expect(newAgentId(["default", "codex", "codex-2"], "codex")).toBe("codex-3");
+    const agents = { default: testAgent({ name: "Codex" }), other: testAgent({ name: "codex 2" }) };
+    expect(newAgentName(agents, "Codex")).toBe("Codex 3");
+    expect(newAgentName(agents, "Claude Code")).toBe("Claude Code");
   });
 
   it("finds your agent by its name, or by the name its messages had before agents had ids", () => {

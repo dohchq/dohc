@@ -161,7 +161,7 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy} checkLabel="Check"
+        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
           onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>

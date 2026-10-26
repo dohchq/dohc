@@ -214,6 +214,23 @@ export function newAgentHue(agents: AgentsSettings, yourHue: IdentityHue | null)
   return AGENT_HUE_ASSIGNMENT_ORDER.reduce((least, hue) => (uses(hue) < uses(least) ? hue : least));
 }
 
+/** A new agent's id: `default` for the first, else `base`, `base-2`, `base-3` and on, past every id in the file. */
+export function newAgentId(taken: readonly string[], base: string): string {
+  if (taken.length === 0) return DEFAULT_AGENT_ID;
+  for (let count = 1; ; count += 1) {
+    const id = count === 1 ? base : `${base}-${count}`;
+    if (!taken.includes(id)) return id;
+  }
+}
+
+/** A new agent's name that no agent has: `base`, `base 2`, `base 3` and on. */
+export function newAgentName(agents: AgentsSettings, base: string): string {
+  for (let count = 1; ; count += 1) {
+    const name = count === 1 ? base : `${base} ${count}`;
+    if (!agentNameTaken(agents, "", name)) return name;
+  }
+}
+
 /** Whether another of your agents has this name, or one a chat cannot tell apart from it. */
 export function agentNameTaken(agents: AgentsSettings, id: string, name: string): boolean {
   const others = Object.fromEntries(Object.entries(agents).filter(([other]) => other !== id));

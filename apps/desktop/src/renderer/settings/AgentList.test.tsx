@@ -46,9 +46,12 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
   const onSave = vi.fn(async (_settings: DesktopUserSettings) => true);
   const onError = vi.fn();
   const onOpenSettingsFile = vi.fn();
-  render(<AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
-    onSave={onSave} onError={onError} onOpenSettingsFile={onOpenSettingsFile} {...fields} />);
-  return { onSave, onError, onOpenSettingsFile };
+  const list = (more: Partial<Parameters<typeof AgentList>[0]> = {}) => (
+    <AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
+      onSave={onSave} onError={onError} onOpenSettingsFile={onOpenSettingsFile} {...fields} {...more} />
+  );
+  const { rerender } = render(list());
+  return { onSave, onError, onOpenSettingsFile, rerender: (more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
 }
 
 const row = (name: string) => screen.getByRole("button", { name: `Rename ${name}` }).closest<HTMLElement>("[data-agent-id]")!;
@@ -166,4 +169,61 @@ it("shows how dohc starts an agent in its details", async () => {
   expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(1);
   await userEvent.click(within(details).getByRole("button", { name: "Details" }));
   expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
+});
+
+const tile = (name: string) => screen.getByRole<HTMLButtonElement>("button", { name: new RegExp(`^${name}`) });
+
+it("says what each tool needs before it can be added", async () => {
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+    workingDirectory: "C:\\Work",
+    tools: [
+      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.300", auth: "signed-out", probe: "detected" },
+      { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
+    ],
+  });
+  renderList();
+  expect(within(tile("Add Claude Code")).getByLabelText("Looking for Claude Code")).toBeTruthy();
+  await within(tile("Add Claude Code")).findByText("Sign in first");
+  expect(tile("Add Claude Code").disabled).toBe(true);
+  expect(within(tile("Add Codex")).getByText("Not found")).toBeTruthy();
+  expect(tile("Add Codex").disabled).toBe(true);
+  expect(within(tile("Add one you run")).getByText("Through MCP")).toBeTruthy();
+  expect(screen.getByText("Runs on this computer. Turn an agent on for one computer per workspace.")).toBeTruthy();
+});
+
+it("adds a tool that is ready, on, with an id and name of its own, then checks it", async () => {
+  const { onSave } = renderList();
+  await within(tile("Add Codex")).findByText("Ready");
+  await userEvent.click(tile("Add Codex"));
+  const agents = onSave.mock.calls[0]![0].agents;
+  expect(Object.keys(agents)).toEqual(["default", "codex", "terminal", "codex-2"]);
+  expect(agents["codex-2"]).toMatchObject({
+    name: "Codex 2", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe" }, enabled: true, timeoutMinutes: 30,
+  });
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" });
+});
+
+it("gives the first agent you add the default id", async () => {
+  const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
+  await within(tile("Add Codex")).findByText("Ready");
+  await userEvent.click(tile("Add Codex"));
+  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
+});
+
+it("adds an agent you run, off, and opens it on its name", async () => {
+  const { onSave, rerender } = renderList();
+  await userEvent.click(tile("Add one you run"));
+  const saved = onSave.mock.calls[0]![0];
+  expect(saved.agents.agent).toEqual({ name: "Agent", hue: expect.any(String), changesFiles: true, enabled: false, timeoutMinutes: 30 });
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
+  rerender({ settings: saved });
+  expect(screen.getByRole("textbox", { name: "Name of Agent" })).toBeTruthy();
+});
+
+it("says so when dohc could not look for tools, and stops looking", async () => {
+  bridgeMock.detectAgentTools.mockRejectedValueOnce(new Error("probe failed"));
+  const { onError } = renderList();
+  await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(within(tile("Add Codex")).queryByLabelText("Looking for Codex")).toBeNull();
+  expect(tile("Add Codex").disabled).toBe(true);
 });

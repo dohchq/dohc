@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Pause, Pencil, Play, Plug, TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, TriangleAlert } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
-import type { AgentToolsResult } from "../../agents/agentToolCatalog";
+import { AGENT_TOOLS, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
 import { withErrorWords } from "../../ipc/errorWords";
 import {
   agentNameTaken,
   listAgents,
+  newAgentDefaults,
+  newAgentId,
+  newAgentName,
   withAgent,
   type Agent,
   type AgentProblem,
@@ -22,6 +25,7 @@ import { isComposingKey } from "../ui/keys";
 import { Menu } from "../ui/Menu";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { useRequestSequence } from "../useRequestSequence";
+import { ownPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { AgentDetails } from "./AgentDetails";
 import { SwitchControl } from "./SettingRow";
@@ -70,6 +74,7 @@ type CheckState = { status: "replied"; seconds: number } | { status: "failed" };
 const ROW = "border-b border-line last:border-b-0";
 const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
+const TILE_LINE = "mt-0.5 flex items-center gap-1 text-[12px]";
 const ROW_BUTTON = "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-default disabled:text-subtle disabled:hover:bg-bg";
 // Holds the place of a control the row does not have, so every row's controls line up.
 const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
@@ -158,12 +163,13 @@ function AgentRow(props: {
   canCheck: boolean;
   checkNote: string | null;
   tools: AgentToolsResult | null;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
   onCheck: () => void;
   onRename: (name: string) => Promise<boolean>;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
 }) {
-  const { agent } = props;
-  const [editing, setEditing] = useState(false);
+  const { agent, editing, onEditingChange: setEditing } = props;
   const [menuOpen, setMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const launched = agent.launch !== undefined;
@@ -236,6 +242,46 @@ function AgentRow(props: {
   );
 }
 
+type ToolTileState =
+  | { status: "ready"; executable: string }
+  | { status: "sign-in" | "update" | "not-found" };
+
+// What an Add tile says about a tool: Ready, Sign in first, Update first or
+// Not found. Null while dohc looks, or when it could not look.
+function toolTileState(tool: "claude" | "codex", tools: AgentToolsResult | null): ToolTileState | null {
+  if (!tools) return null;
+  const found = tools.tools.find((entry) => entry.tool === tool);
+  if (!found?.executable || found.probe === "not-found") return { status: "not-found" };
+  if (found.probe !== "detected" || !supportsAgentProfile(tool, found.version)) return { status: "update" };
+  return found.auth === "signed-out" ? { status: "sign-in" } : { status: "ready", executable: found.executable };
+}
+
+const TILE_STATE: Record<ToolTileState["status"], { text: string; className: string }> = {
+  ready: { text: "Ready", className: "text-success" },
+  "sign-in": { text: "Sign in first", className: "text-warning" },
+  update: { text: "Update first", className: "text-warning" },
+  "not-found": { text: "Not found", className: "text-muted" },
+};
+
+function AddTile(props: { title: string; logo: ReactNode; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={props.disabled}
+      title={props.hint}
+      onClick={props.onAdd}
+      className="flex h-[52px] min-w-0 items-center gap-3 rounded-lg border border-line bg-bg px-3 text-left transition-colors hover:bg-hover disabled:cursor-default disabled:hover:bg-bg"
+    >
+      <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-panel-2 text-[12px] font-bold text-ink">{props.logo}</span>
+      <span className="min-w-0">
+        <span className="block truncate text-[13px] font-medium text-ink">{props.title}</span>
+        {props.state}
+      </span>
+      <Plus size={16} aria-hidden className="ml-auto shrink-0 text-muted" />
+    </button>
+  );
+}
+
 function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () => void }) {
   const { problem } = props;
   const name = problem.name ?? problem.id;
@@ -288,18 +334,23 @@ export function AgentList(props: {
     setChecking(null);
     setChecks({});
   }, [workspaceId]);
-  // The tools installed on this computer, for each agent's details.
-  const [tools, setTools] = useState<AgentToolsResult | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  // The tools installed on this computer, for the Add tiles and each agent's details.
+  const [detection, setDetection] = useState<AgentToolsResult | "failed" | null>(null);
+  const tools = detection === "failed" ? null : detection;
   const toolRequests = useRequestSequence([workspaceId]);
   const reportError = useRef(onError);
   reportError.current = onError;
   useEffect(() => {
     const token = toolRequests.next();
-    setTools(null);
+    setDetection(null);
     void bridge().detectAgentTools({ workspaceId }).then((found) => {
-      if (toolRequests.isCurrent(token)) setTools(found);
+      if (toolRequests.isCurrent(token)) setDetection(found);
     }, (cause: unknown) => {
-      if (toolRequests.isCurrent(token)) reportError.current?.(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."), cause);
+      if (!toolRequests.isCurrent(token)) return;
+      setDetection("failed");
+      reportError.current?.(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."), cause);
     });
   }, [toolRequests, workspaceId]);
 
@@ -328,6 +379,18 @@ export function AgentList(props: {
     setChecks((current) => ({ ...current, [agent.id]: next }));
     setChecking(null);
   }, [onError, requests, workspaceId]);
+
+  // A new agent takes the first free id and name. One dohc starts is on and
+  // is checked at once; one you run opens on its name.
+  const add = async (fields: Pick<AgentSettings, "name" | "launch" | "enabled">, idBase: string) => {
+    const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
+    const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
+    if (!agent.launch) setRenaming(id);
+    setAdding(true);
+    const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
+    setAdding(false);
+    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
+  };
 
   const setPaused = (next: boolean) => {
     void bridge().setChatDispatchPaused({ paused: next }).catch((cause: unknown) => onError?.(
@@ -368,29 +431,66 @@ export function AgentList(props: {
       {config && "unavailable" in config ? (
         <p data-testid="mcp-unavailable" className="-mt-4 mb-6 text-[12px] text-danger">{config.message}</p>
       ) : null}
-      {rows.length > 0 ? (
-        <div className="rounded-lg border border-line bg-panel px-4">
-          {rows.map((row) => row.kind === "broken" ? (
-            <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
-          ) : (
-            <AgentRow
-              key={row.agent.id}
-              agent={row.agent}
-              agents={settings.agents}
-              paused={paused}
-              checking={checking === row.agent.id}
-              check={checks[row.agent.id]}
-              // One check at a time: main runs one runner per workspace.
-              canCheck={!paused && checking === null && checkNote === null}
-              checkNote={checkNote}
-              tools={tools}
-              onCheck={() => void check(row.agent)}
-              onRename={(name) => onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))}
-              onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
-            />
-          ))}
+      <div className="rounded-lg border border-line bg-panel px-4">
+        {rows.map((row) => row.kind === "broken" ? (
+          <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
+        ) : (
+          <AgentRow
+            key={row.agent.id}
+            agent={row.agent}
+            agents={settings.agents}
+            paused={paused}
+            checking={checking === row.agent.id}
+            check={checks[row.agent.id]}
+            // One check at a time: main runs one runner per workspace.
+            canCheck={!paused && checking === null && checkNote === null}
+            checkNote={checkNote}
+            tools={tools}
+            editing={renaming === row.agent.id}
+            onEditingChange={(editing) => setRenaming(editing ? row.agent.id : null)}
+            onCheck={() => void check(row.agent)}
+            onRename={(name) => onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))}
+            onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
+          />
+        ))}
+        <div data-testid="agent-add" className="grid grid-cols-3 gap-2 py-4 max-[640px]:grid-cols-1">
+          {(["claude", "codex"] as const).map((tool) => {
+            const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
+            const found = toolTileState(tool, tools);
+            return (
+              <AddTile
+                key={tool}
+                title={`Add ${name}`}
+                logo={tool === "claude" ? "C" : "X"}
+                disabled={found?.status !== "ready" || adding || checking !== null}
+                hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
+                state={found ? (
+                  <span className={`${TILE_LINE} ${TILE_STATE[found.status].className}`}>
+                    {found.status === "ready" ? <Check size={12} aria-hidden /> : null}{TILE_STATE[found.status].text}
+                  </span>
+                ) : detection === "failed" ? null : (
+                  <span className={`${TILE_LINE} text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
+                )}
+                onAdd={() => {
+                  if (found?.status === "ready") {
+                    void add({ name: newAgentName(settings.agents, name), launch: { tool, executable: found.executable }, enabled: true }, tool);
+                  }
+                }}
+              />
+            );
+          })}
+          <AddTile
+            title="Add one you run"
+            logo={<Plug size={14} />}
+            disabled={adding}
+            state={<span className={`${TILE_LINE} text-muted`}>Through MCP</span>}
+            onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
+          />
         </div>
-      ) : null}
+      </div>
+      <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
+        <Monitor size={14} aria-hidden />Runs on this computer. Turn an agent on for one computer per workspace.
+      </p>
       {checkNote ? (
         <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
       ) : null}
