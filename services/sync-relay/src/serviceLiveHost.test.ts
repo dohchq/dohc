@@ -1973,15 +1973,19 @@ it("retains a departed document through a failed file removal and a restart unti
 
 // Proves: a page that leaves a document held clears its readiness at once,
 // without holding back the workspace's pulls, until a later capture succeeds.
-it("clears a held document's readiness until its next capture succeeds", async () => {
+it.each(["hosted-backfill-work-waiting", "hosted-conflict-parent-withheld"] as const)("clears a held document's readiness and %s reason when its next capture succeeds", async reason => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   o.refuseCapture(unready());
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason,
+    ...(reason === "hosted-conflict-parent-withheld" ? {conflictId: "conflict"} : {})}]};
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
+  expect(o.host.holdReason(o.sibling)).toBe(reason);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.host.holdReason({...o.sibling, objectId: "unknown"})).toBeUndefined();
   // Pulls go on, and the document waits: every pass captures it again while the engine holds it.
   await vi.waitFor(() => expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures + 2));
   await o.nextPull();
@@ -1989,6 +1993,7 @@ it("clears a held document's readiness until its next capture succeeds", async (
   o.replies.pass = {};
   o.refuseCapture(undefined);
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.host.holdReason(o.sibling)).toBeUndefined();
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 

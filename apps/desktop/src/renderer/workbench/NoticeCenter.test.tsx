@@ -1498,6 +1498,11 @@ describe("notice center", () => {
       title: "Live editing can't resume",
       body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
     },
+    {
+      reason: "conflict-parent-withheld" as const,
+      title: "Live editing can't resume",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
+    },
   ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();
@@ -1511,6 +1516,8 @@ describe("notice center", () => {
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain(`${title}. ${body}`);
     expect(liveDeliveryIcon(toast)).toBe("triangle-alert");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Live documents" })).toBeTruthy();
     await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
 

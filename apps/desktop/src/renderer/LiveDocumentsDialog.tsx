@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
@@ -172,7 +172,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "session-host-refused") return "Stopped by the server";
   if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
-  if (row.reason === "live-edit-unadmitted") return "Can't resume";
+  if (row.reason === "live-edit-unadmitted" || row.reason === "conflict-parent-withheld") return "Can't resume";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -207,7 +207,7 @@ function canResume(row: LiveDocumentRow): boolean {
 function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
   const one = stop.unsentEdits === 1;
   const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
-  const resume = row.reason === "session-host-diverged" || row.reason === "live-edit-unadmitted" ? ""
+  const resume = row.reason === "session-host-diverged" || row.reason === "live-edit-unadmitted" || row.reason === "conflict-parent-withheld" ? ""
     : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
@@ -721,6 +721,11 @@ export function LiveDocumentsDialog({
                 {row.reason === "live-edit-unadmitted" ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.
+                  </p>
+                ) : null}
+                {row.reason === "conflict-parent-withheld" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.
                   </p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

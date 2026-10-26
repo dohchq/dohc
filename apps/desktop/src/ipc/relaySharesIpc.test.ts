@@ -266,14 +266,14 @@ describe("owner live document enrollment", () => {
   });
   // Proves: a deferred Stop does not offer Resume on a document whose server
   // copy misses an edit made while live editing was off.
-  it("offers no Resume for a deferred Stop on a document edited while live editing was off",async () => {
+  it.each(["live-edit-unadmitted", "conflict-parent-withheld"])("offers no Resume for a deferred Stop with %s",async reason => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
       ? {ok:true,documents:[],nextCursor:null}
-      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason:"live-edit-unadmitted"}]});
+      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"edited.md",objectId:"object",status:"unavailable",reason:"live-edit-unadmitted",canResume:false,deferredStop:{unsentEdits:1,editable:true}},
+      {path:"edited.md",objectId:"object",status:"unavailable",reason,canResume:false,deferredStop:{unsentEdits:1,editable:true}},
     ],nextCursor:null});
   });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
@@ -673,6 +673,21 @@ describe("owner live document enrollment", () => {
   it("refuses mismatched action responses instead of claiming another file stopped", async () => {
     const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", objectId:"other-object", status: "retired", acceptedCursor: 0});
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
+  });
+
+  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+    const h = harness();
+    const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown("retired")], nextCursor: "unknown.md"}
+      : {ok: true, documents: [unknown("ready"), {path: "live.md", objectId: "live", status: "ready"},
+        {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
+      {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      {path: "live.md", objectId: "live", status: "ready", canResume: false},
+      {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
+    ], nextCursor: "unknown.md"});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "unknown.md"})).rejects.toThrow("list changed");
   });
 
   it("refuses invalid retired paging cursors and malformed document paths", async () => {

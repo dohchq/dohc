@@ -115,6 +115,17 @@ describe("LiveDocumentsDialog", () => {
       expect(actions(path)).toEqual([]);
     }
   });
+  it.each([0, 2])("does not suggest Resume for a conflict hold with %s deferred edits", async unsentEdits => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("held.md", {status: "unavailable", reason: "conflict-parent-withheld",
+      canResume: false, deferredStop: {unsentEdits, editable: true}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const held = await screen.findByTestId("live-document-row-held.md");
+    expect(held.children[1]?.textContent).toBe("Can't resume");
+    expect(held.textContent).toContain("your edits may not reach them.");
+    expect(held.textContent).not.toContain("Resume");
+    expect(actions("held.md")).toEqual([]);
+  });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
@@ -264,6 +275,11 @@ describe("LiveDocumentsDialog", () => {
           canResume: false,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
+        row("docs/held.md", {
+          status: "unavailable",
+          reason: "conflict-parent-withheld",
+          canResume: false,
+        }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
     );
@@ -284,6 +300,7 @@ describe("LiveDocumentsDialog", () => {
       "Not started",
       "Server copy doesn't match",
       "Can't resume",
+      "Can't resume",
       "Stopped",
       "Stopped",
     ]);
@@ -294,6 +311,10 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
     expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
+    const held = "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
+    expect(screen.getAllByText(held)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
+    expect(actions("docs/held.md")).toEqual(["Stop live editing"]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";

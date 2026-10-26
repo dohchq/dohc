@@ -11,6 +11,7 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./servic
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 
@@ -33,6 +34,7 @@ async function fixture() {
   // The documents the session host blocked until their owner tries again.
   const blocked = new Map<string, ServiceActivationBlock>();
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
+    holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
@@ -370,6 +372,42 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+it("reports only a conflict-parent hold, after document state and existing blocks", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const state = async () => (await (await f.handle(f.request())).json()).documents[0];
+  const base = {path: binding.currentPath, objectId: binding.objectId};
+  expect(await state()).toEqual({...base, status: "preparing"});
+  for (const hold of [undefined, "hosted-backfill-work-waiting", "hosted-backfill-path-held",
+    "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted"] as const) {
+    f.host.holdReason.mockReturnValue(hold);
+    f.host.unavailable = true;
+    expect(await state()).toEqual({...base, status: "unavailable"});
+    f.host.unavailable = false;
+    expect(await state()).toEqual({...base, status: "preparing"});
+  }
+  f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "conflict-parent-withheld"});
+  for (const [block, reason] of [["without-lineage", "live-document-without-lineage"],
+    ["refused", "session-host-refused"], ["live-edit-unadmitted", "live-edit-unadmitted"]] as const) {
+    f.host.block(enrolled.objectId, block);
+    expect(await state()).toEqual({...base, status: "unavailable", reason});
+  }
+  f.host.unblock(enrolled);
+  f.host.holdReason.mockReturnValue(undefined);
+  expect(await state()).toEqual({...base, status: "preparing"});
+  f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  expect(await state()).toEqual({...base, status: "paused"});
+  f.host.diverged.mockReturnValue(true);
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "session-host-diverged"});
+  f.host.diverged.mockReturnValue(false);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true});
+  f.raw.prepare("UPDATE sync_relay_object_moments SET path='moved.md' WHERE workspace_id=?").run(scope.workspaceId);
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "document-unavailable"});
+  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "workspace-changed"});
 });
 
 // Proves: a document the session host blocked reads as refused until its
