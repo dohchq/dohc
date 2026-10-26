@@ -215,7 +215,7 @@ if (process.argv[2] === "fixture") {
       }
       // A temp folder too long for the socket falls back to /tmp.
       const fallback = makeDebugHome(directory, "darwin", join(root, "t".repeat(80)));
-      try { assert.ok(fallback.link.startsWith("/tmp/dohc-debug-home-"), fallback.link); } finally { removeDebugHome(fallback); }
+      try { assert.ok(fallback.link.startsWith(join("/tmp", "dohc-debug-home-")), fallback.link); } finally { removeDebugHome(fallback); }
       assert.deepEqual(makeDebugHome(directory, "win32"), { files: join(directory, "home"), home: join(directory, "home"), link: null });
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
