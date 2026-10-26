@@ -434,12 +434,15 @@ test("a file from another person opens as a marked, read-only copy during a live
       const api = (window as unknown as { dohcDesktop: Bridge }).dohcDesktop;
       const reads: LiveEditingRead[] = [];
       const pending = new Set<Promise<void>>();
+      // Each read takes its place in the log when it is asked for, and its
+      // state when it answers.
       const read = () => {
-        const requestedAt = Date.now();
-        const done: Promise<void> = api.getSyncStatus({ workspaceId }).then(
-          (status) => { reads.push({ requestedAt, state: status.ownerLiveDelivery ?? null, reason: status.ownerLiveDeliveryReason ?? null }); },
-          () => { reads.push({ requestedAt, state: "unread", reason: null }); },
-        ).finally(() => pending.delete(done));
+        const entry: LiveEditingRead = { requestedAt: Date.now(), state: "unread", reason: null };
+        reads.push(entry);
+        const done: Promise<void> = api.getSyncStatus({ workspaceId }).then((status) => {
+          entry.state = status.ownerLiveDelivery ?? null;
+          entry.reason = status.ownerLiveDeliveryReason ?? null;
+        }, () => undefined).finally(() => pending.delete(done));
         pending.add(done);
       };
       api.onWorkspaceActivity((event) => {
@@ -452,18 +455,17 @@ test("a file from another person opens as a marked, read-only copy during a live
     liveEditingReads = () => ownerPage.evaluate(async () => {
       const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as { reads: LiveEditingRead[]; pending: Set<Promise<void>> };
       while (pending.size) await Promise.all(pending);
-      return [...reads].sort((a, b) => a.requestedAt - b.requestedAt);
+      return reads;
     });
     const liveDelivery = () => ownerPage.evaluate(async (workspaceId) =>
       (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.getSyncStatus({ workspaceId })).ownerLiveDelivery, ownerWorkspaceId);
-    // What the opens must leave as it was: both sides' History, what the view
-    // holds to send, and the owner's proposals.
-    const unchanged = async () => ({
-      recipient: engineCounts(recipientTemp.rootPath),
-      unconfirmed: await unconfirmedChanges(page),
-      owner: engineCounts(ownerTemp.rootPath)?.moments,
-      proposals: await proposals(),
-    });
+    // What the opens must leave as it was: what the view holds to send, the
+    // owner's proposals, and both sides' History, read last with no wait after.
+    const unchanged = async () => {
+      const unconfirmed = await unconfirmedChanges(page);
+      const ownerProposals = await proposals();
+      return { unconfirmed, proposals: ownerProposals, recipient: engineCounts(recipientTemp.rootPath), owner: engineCounts(ownerTemp.rootPath)?.moments };
+    };
 
     // Everything opening the view and the note did has settled on both sides.
     expect(await refresh(page)).toMatchObject({ ok: true });
