@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AUTOMATION_NO_RUNNER, wakeAgent, wokenAgent, type AgentWakeDependencies } from "./automationAgentWake";
+import { AUTOMATION_NO_RUNNER, wakeAgent, wokenAgent, type AgentWakeDependencies, type WokenAgent } from "./automationAgentWake";
 import { testAgent } from "../testing/agentSettings";
 import { automationAgentWakeThreadId, type AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 
@@ -23,7 +23,8 @@ const deliveredMessage: AutomationChatMessage = {
 
 function dependencies(overrides: Partial<AgentWakeDependencies> = {}) {
   return {
-    readyAgent: vi.fn(async () => ({ id: "codex", name: "Codex" })),
+    posted: vi.fn(async (_messageId: string) => null),
+    readyAgent: vi.fn(async (): Promise<WokenAgent | null> => ({ id: "codex", name: "Codex" })),
     agentChannelId: vi.fn(async () => "agent-channel"),
     threadExists: vi.fn(async () => false),
     start: vi.fn(async () => undefined),
@@ -53,13 +54,57 @@ describe("waking a person's agent", () => {
     expect(wake.recordTrigger).toHaveBeenCalledOnce();
   });
 
-  it("queues the trigger once more when the thread's first message landed before a stop", async () => {
+  // Each agent's chat is named for it. Like the engine, a message id is
+  // posted once, and its key can't post it somewhere else.
+  function chat(threads = new Map<string, string>()) {
+    const at = new Map<string, string>();
+    const woken = { current: { id: "codex", name: "Codex" } };
+    const post = (threadId: string, messageId: string) => {
+      if (at.has(messageId)) throw new Error("idempotency-key-reuse-mismatch");
+      at.set(messageId, threadId);
+    };
     const wake = dependencies({
-      threadExists: vi.fn(async () => true),
-      send: vi.fn(async () => { throw new Error("idempotency-key-reuse-mismatch"); }),
+      posted: vi.fn(async (messageId: string) => {
+        const threadId = at.get(messageId);
+        return threadId === undefined ? null : { threadId, agentId: threads.get(threadId)! };
+      }),
+      readyAgent: vi.fn(async () => woken.current),
+      agentChannelId: vi.fn(async (agent: WokenAgent) => agent.id),
+      threadExists: vi.fn(async (threadId: string) => threads.has(threadId)),
+      start: vi.fn(async ({ channelId, message: started }: { channelId: string; message: AutomationChatMessage }) => {
+        post(started.threadId, started.messageId);
+        threads.set(started.threadId, channelId);
+      }),
+      send: vi.fn(async ({ message: sent }: { message: AutomationChatMessage }) => post(sent.threadId, sent.messageId)),
+      // The first attempt posts the message, then stops before it queues it.
+      recordTrigger: vi.fn().mockRejectedValueOnce(new Error("stopped")).mockResolvedValue(true),
     });
+    return { wake, woken };
+  }
+  const claudeThread = automationAgentWakeThreadId("collection:Tasks#ask", "claude");
+
+  it.each([
+    ["Claude Code has a thread for it", new Map([[claudeThread, "claude"]])],
+    ["Claude Code has no thread yet", new Map<string, string>()],
+  ])("finishes a retried wake in Codex's thread after Settings chose Claude Code (%s)", async (_case, threads) => {
+    const { wake, woken } = chat(threads);
+    await expect(wakeAgent(wake, message)).rejects.toThrow("stopped");
+    woken.current = { id: "claude", name: "Claude Code" };
     await wakeAgent(wake, message);
-    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: codexThread, agentId: "codex" });
+    expect(wake.recordTrigger).toHaveBeenLastCalledWith({ triggerMessageId: "message-auto-1", threadId: codexThread, agentId: "codex" });
+    expect(wake.recordTrigger).not.toHaveBeenCalledWith(expect.objectContaining({ agentId: "claude" }));
+    expect(wake.start).toHaveBeenCalledOnce();
+    expect(wake.send).not.toHaveBeenCalled();
+    expect(wake.scan).toHaveBeenCalledOnce();
+  });
+
+  it("finishes a retried wake in the thread it went to when the agent stayed the same", async () => {
+    const { wake } = chat();
+    await expect(wakeAgent(wake, message)).rejects.toThrow("stopped");
+    await wakeAgent(wake, message);
+    expect(wake.recordTrigger).toHaveBeenLastCalledWith({ triggerMessageId: "message-auto-1", threadId: codexThread, agentId: "codex" });
+    expect(wake.start).toHaveBeenCalledOnce();
+    expect(wake.send).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("labels writer-supplied text as trigger data without changing it (existing thread: %s)", async (existing) => {

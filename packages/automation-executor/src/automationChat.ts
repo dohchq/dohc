@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
-import type { ChatChannelKind, ChatChannelType, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelKind, ChatChannelType, ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { ReachRoster } from "./automationReach";
 
-export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
-  try { return (await store.getMessage({ workspaceId, messageId })) !== null; }
+/** The message, or null when the store has no message with this id. */
+export async function findChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<ChatMessage | null> {
+  try { return await store.getMessage({ workspaceId, messageId }); }
   catch (error) {
-    if (error instanceof Error && error.message === "message-not-found") return false;
+    if (error instanceof Error && error.message === "message-not-found") return null;
     throw error;
   }
+}
+
+export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
+  return (await findChatMessage(store, workspaceId, messageId)) !== null;
 }
 
 // Where an automation's messages go (item 6, section 2). A post goes to a

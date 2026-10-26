@@ -339,7 +339,7 @@ import { automationFailedNoticeId } from "@dohc/automation-executor/automation-f
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { localAutomationStoreFolder } from "./automations/localAutomationStore";
-import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
+import { findChatMessage, hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent, wokenAgent, type WokenAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
@@ -3902,6 +3902,16 @@ async function wakeAutomationAgent(
       resolveAttachments: async () => [],
     };
     await wakeAgent({
+      posted: async (messageId) => {
+        signal.throwIfAborted();
+        const posted = await findChatMessage(place.store, workspaceId, messageId);
+        if (posted === null) return null;
+        const channelId = await place.store.findThreadChannelId({ workspaceId, threadId: posted.threadId });
+        const agentId = channelId === null ? undefined
+          : (await place.store.listChannels({ workspaceId })).find((channel) => channel.id === channelId)?.agentId;
+        if (agentId === undefined) throw new Error("dohc could not find the agent chat this automation's message is in.");
+        return { threadId: posted.threadId, agentId };
+      },
       readyAgent,
       agentChannelId: async (agent) => {
         signal.throwIfAborted();
