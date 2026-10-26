@@ -914,3 +914,76 @@ fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
             .is_none()
     );
 }
+
+/// A run dohc's quit stopped, in a store from before agent ids, belongs to the
+/// default agent after the migration, and Try again runs its request once.
+#[test]
+fn try_again_runs_a_request_from_before_agent_ids_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    let conn = rusqlite::Connection::open(&db).expect("open earlier store");
+    conn.execute_batch(
+        "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+             VALUES ('b2-ws', 'agent', 'My agent', 'my-agent', 'agent', 1, 1); \
+         INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+             VALUES ('b2-ws', 'thread', 'Thread', 10, 10, 'agent'); \
+         INSERT INTO chat_messages \
+             (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, body, created_at_ms) \
+             VALUES ('b2-ws', 'thread', 0, 'trigger', 'human', 'Ada', 'Hi', 10); \
+         INSERT INTO chat_dispatch_ledger \
+             (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+             VALUES ('b2-ws', 'trigger', 'thread', 'failed', 'run', 'app-quit', 1, 10, 30); \
+         INSERT INTO agent_run_records \
+             (workspace_id, run_id, thread_id, trigger_message_id, command, started_at_ms, ended_at_ms, exit_code, failure_reason) \
+             VALUES ('b2-ws', 'run', 'thread', 'trigger', 'agent', 20, 30, 143, 'app-quit');",
+    )
+    .expect("seed the earlier store");
+    drop(conn);
+
+    let mut store = EngineStore::open(&db, 1).expect("migrate");
+    let mut chats = LinkedChatStore::new(&mut store);
+    let recoveries = chats
+        .list_app_quit_recoveries(WS, None, 10)
+        .expect("recoveries");
+    assert_eq!(
+        recoveries
+            .iter()
+            .map(|row| (row.run.run_id.as_str(), row.run.agent_id.as_str(), row.attempt_count))
+            .collect::<Vec<_>>(),
+        vec![("run", "default", 1)]
+    );
+    assert!(
+        chats
+            .requeue_failed_trigger(WS, "trigger", "run", 40, &NO_FAULTS)
+            .expect("try again")
+    );
+    assert!(
+        !chats
+            .requeue_failed_trigger(WS, "trigger", "run", 41, &NO_FAULTS)
+            .expect("try again twice"),
+        "a second Try again must not queue the request again"
+    );
+    let claim = chats
+        .claim_next_pending(WS, "run-2", "agent", None, 42, &NO_FAULTS)
+        .expect("claim")
+        .expect("the request runs again");
+    assert_eq!(
+        (
+            claim.dispatch.trigger_message_id.as_str(),
+            claim.dispatch.agent_id.as_str(),
+            claim.run.agent_id.as_str(),
+        ),
+        ("trigger", "default", "default")
+    );
+    chats
+        .complete_dispatch(WS, "run-2", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-3", "agent", None, 51, &NO_FAULTS)
+            .expect("claim")
+            .is_none(),
+        "the request ran once"
+    );
+}
