@@ -8,6 +8,7 @@ import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorP
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
 import { SmilePlus } from "lucide-react";
@@ -525,6 +526,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   bottomSpace?: number;
 }) {
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
+  // Long messages parse in the chat's worker; start it before they need it.
+  useEffect(retainChatParser, []);
   const reactionsByMessage = useMemo(() => {
     const grouped = new Map<string, ChatReactionRecord[]>();
     for (const reaction of props.reactionControls?.reactions ?? []) {

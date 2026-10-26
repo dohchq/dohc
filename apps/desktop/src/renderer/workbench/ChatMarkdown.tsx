@@ -2,129 +2,35 @@ import {
   createContext,
   memo,
   useContext,
+  useEffect,
   useMemo,
+  useState,
   type ClipboardEvent,
   type CSSProperties,
   type KeyboardEvent,
   type MouseEvent,
-  type ReactElement,
   type ReactNode,
 } from "react";
-import Markdown, { type Components, type ExtraProps } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { findMentions, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+import type { Root as HastRoot } from "hast";
+import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx-runtime";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
+import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
-import {
-  extractChatFileReferenceTokens,
-  fileReferenceKey,
-  resolveFileMentionNavigationTargets,
-  type FileMentionNavigationTarget,
-} from "./chatFileMentions";
+import { chatChips, fitsMainThread, parseChatMarkdown, SAFE_HREF, type Chip } from "./chatMarkdownParse";
+import { parseChatInWorker } from "./chatMarkdownWorker";
 
 // A chat message's body, rendered as Markdown. Chat text comes from other
-// people, agents and link holders, so it renders no raw HTML (react-markdown
-// shows it as text), loads no remote image, and opens only http, https and
-// mailto links, through the same path a read-only document uses.
-
-// A mention or a page reference, at its range in the message's source. The
-// ranges come from the scanners the engine indexes with, so a chip appears
-// exactly where the engine saw a mention, and never inside code.
-type Chip =
-  | { kind: "mention"; start: number; end: number; mentionKind: MentionCandidate["kind"] }
-  | { kind: "file"; start: number; end: number; path: string; heading?: string; target: FileMentionNavigationTarget };
-
-function chatChips(
-  body: string,
-  candidates: readonly MentionCandidate[],
-  attachments: readonly ChatAttachmentRecord[],
-): Chip[] {
-  const fileTokens = extractChatFileReferenceTokens(body);
-  const targets = resolveFileMentionNavigationTargets(fileTokens, attachments);
-  // A file token owns its whole range: a handle inside a filename is not a mention.
-  const mentions = findMentions(body, candidates, { ignoreCode: true }).filter(
-    (mention) => !fileTokens.some((token) => mention.start < token.end && mention.end > token.start),
-  );
-  const chips: Chip[] = [
-    ...fileTokens.map((token): Chip => ({
-      kind: "file",
-      start: token.start,
-      end: token.end,
-      path: token.path,
-      ...(token.headingAnchor ? { heading: token.headingAnchor } : {}),
-      target: targets.get(fileReferenceKey(token)) ?? token,
-    })),
-    ...mentions.map((mention): Chip => ({
-      kind: "mention",
-      start: mention.start,
-      end: mention.end,
-      mentionKind: mention.candidate.kind,
-    })),
-  ];
-  return chips.sort((left, right) => left.start - right.start);
-}
-
-// The few mdast fields the plugin reads and writes.
-interface MdNode {
-  type: string;
-  value?: string;
-  children?: MdNode[];
-  position?: { start: { offset?: number }; end: { offset?: number } };
-  data?: { hName?: string; hProperties?: Record<string, string> };
-}
-
-const NEWLINE = /\r?\n|\r/u;
-
-// Splits text nodes in two ways. A chip's source text becomes a span the
-// `span` component draws as the chip; chips stay out of link text, where a
-// page chip's button cannot sit. Then every remaining newline becomes a line
-// break, as remark-breaks does, so Shift+Enter keeps its break.
-function remarkChatText(options: { body: string; chips: readonly Chip[] }) {
-  const split = (node: MdNode, inLink: boolean): MdNode[] => {
-    const value = node.value ?? "";
-    const from = node.position?.start.offset;
-    const to = node.position?.end.offset;
-    const pieces: MdNode[] = [];
-    let cursor = 0;
-    if (!inLink && from !== undefined && to !== undefined) {
-      options.chips.forEach((chip, index) => {
-        if (chip.start < from || chip.end > to) return;
-        // The node's value can differ from its source, as escapes do, so
-        // find the chip's own text rather than trust the offset.
-        const text = options.body.slice(chip.start, chip.end);
-        const at = value.indexOf(text, cursor);
-        if (at < 0) return;
-        if (at > cursor) pieces.push({ type: "text", value: value.slice(cursor, at) });
-        pieces.push({
-          type: "chatChip",
-          data: { hName: "span", hProperties: { dataChatChip: String(index) } },
-          children: [{ type: "text", value: text }],
-        });
-        cursor = at + text.length;
-      });
-    }
-    if (cursor < value.length) pieces.push({ type: "text", value: value.slice(cursor) });
-    return pieces.flatMap((piece) => {
-      if (piece.type !== "text" || !NEWLINE.test(piece.value ?? "")) return [piece];
-      return (piece.value ?? "").split(NEWLINE).flatMap((line, at): MdNode[] => [
-        ...(at > 0 ? [{ type: "break" }] : []),
-        ...(line ? [{ type: "text", value: line }] : []),
-      ]);
-    });
-  };
-  const visit = (node: MdNode, inLink: boolean) => {
-    if (!node.children) return;
-    const link = inLink || node.type === "link" || node.type === "linkReference";
-    node.children = node.children.flatMap((child) => {
-      if (child.type === "text") return split(child, link);
-      visit(child, link);
-      return [child];
-    });
-  };
-  return (tree: MdNode) => visit(tree, false);
-}
+// people, agents and link holders, so it renders no raw HTML (it reads as
+// text), loads no remote image, and opens only http, https and mailto links,
+// through the same path a read-only document uses.
+//
+// A short body parses where it is drawn. A longer one parses in the chat's
+// worker and shows as its words without Markdown syntax until the tree
+// arrives. A body the parser gives up on keeps that look.
 
 interface ChatTextScope {
   chips: readonly Chip[];
@@ -133,9 +39,12 @@ interface ChatTextScope {
 }
 
 const ChatTextContext = createContext<ChatTextScope>({ chips: [] });
+// Inside a link, nothing else may be a link or a button, so it has one target.
+const InLink = createContext(false);
 
 function ChipView(props: { index: number; children?: ReactNode }) {
   const scope = useContext(ChatTextContext);
+  const inLink = useContext(InLink);
   const chip = scope.chips[props.index];
   if (!chip) return <span>{props.children}</span>;
   if (chip.kind === "mention") {
@@ -149,7 +58,7 @@ function ChipView(props: { index: number; children?: ReactNode }) {
       </span>
     );
   }
-  const onOpenPath = scope.onOpenPath;
+  const onOpenPath = inLink ? undefined : scope.onOpenPath;
   return (
     <Ref
       path={chip.path}
@@ -165,13 +74,12 @@ function ChipSpan(props: { children?: ReactNode } & ExtraProps) {
   return <ChipView index={index === undefined ? -1 : Number(index)}>{props.children}</ChipView>;
 }
 
-const SAFE_HREF = /^(?:https?:\/\/|mailto:)/iu;
-
 // Outside links open the way a read-only document's do. Anything else, such
 // as a relative path or a scheme dohc does not open, reads as plain text.
 function ChatLink(props: { href?: string; children?: ReactNode }) {
+  const inLink = useContext(InLink);
   const href = props.href?.trim();
-  if (!href || !SAFE_HREF.test(href)) return <>{props.children}</>;
+  if (inLink || !href || !SAFE_HREF.test(href)) return <>{props.children}</>;
   const activate = (event: MouseEvent<HTMLAnchorElement> | KeyboardEvent<HTMLAnchorElement>) =>
     activateReadOnlyLinkHref(href, event);
   return (
@@ -187,7 +95,7 @@ function ChatLink(props: { href?: string; children?: ReactNode }) {
       }}
       className="cursor-pointer border-b border-match/45 text-match no-underline hover:border-match"
     >
-      {props.children}
+      <InLink value={true}>{props.children}</InLink>
     </a>
   );
 }
@@ -206,7 +114,7 @@ function CodeBlock(props: ExtraProps) {
       <pre className="m-0 overflow-x-auto whitespace-pre rounded-md border border-line bg-panel-2 px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">
         <code>{code}</code>
       </pre>
-      <div className="absolute right-1 top-1 rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100">
+      <div className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100">
         <CopyButton iconOnly label="Copy code" getText={() => code} />
       </div>
     </div>
@@ -217,7 +125,7 @@ function CodeBlock(props: ExtraProps) {
 // one-line message stays one line tall.
 const BLOCK = "mb-0 mt-1.5 first:mt-0";
 const LIST = `${BLOCK} pl-[22px] marker:text-muted [li>&]:mt-0.5`;
-const HEADING = "mb-0 mt-2 first:mt-0 text-[15px] font-semibold leading-[22px]";
+const HEADING = `${BLOCK} text-[15px] font-semibold leading-[22px]`;
 type Children = { children?: ReactNode };
 
 const COMPONENTS = {
@@ -258,7 +166,7 @@ const COMPONENTS = {
   pre: CodeBlock,
   a: ChatLink,
   // A remote image would tell its server who read the message, so it shows
-  // as a link to the image instead.
+  // as a link to the image instead, or as its text inside another link.
   img: (props: { src?: string; alt?: string }) => (
     <ChatLink href={props.src}>{props.alt || props.src}</ChatLink>
   ),
@@ -278,63 +186,222 @@ const COMPONENTS = {
   span: ChipSpan,
 } satisfies Components;
 
-// Copying a whole message copies what its author wrote, Markdown and all.
-// A selection inside it copies the text as shown.
-function copySource(event: ClipboardEvent<HTMLDivElement>, body: string) {
+function drawTree(tree: HastRoot): ReactNode {
+  return toJsxRuntime(tree, {
+    Fragment,
+    jsx,
+    jsxs,
+    components: COMPONENTS,
+    passKeys: true,
+    passNode: true,
+    ignoreInvalidStyle: true,
+  });
+}
+
+// The words of the body with its chips, as one paragraph with its line
+// breaks. `strip` drops Markdown syntax; a body without any skips it.
+function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean }) {
+  const { text, atoms } = props.strip
+    ? stripMarkdown(props.body, props.chips)
+    : { text: props.body, atoms: props.chips.map((chip, index) => ({ start: chip.start, end: chip.end, index })) };
+  const content: ReactNode[] = [];
+  const pushText = (piece: string, key: number) =>
+    piece.split(/\r?\n|\r/u).forEach((line, at) => {
+      if (at > 0) content.push(<br key={`${key}:${at}`} />, "\n");
+      if (line) content.push(line);
+    });
+  let cursor = 0;
+  for (const atom of atoms) {
+    pushText(text.slice(cursor, atom.start), cursor);
+    content.push(<ChipView key={`chip:${atom.start}`} index={atom.index}>{text.slice(atom.start, atom.end)}</ChipView>);
+    cursor = atom.end;
+  }
+  pushText(text.slice(cursor), cursor);
+  return <p className={BLOCK}>{content}</p>;
+}
+
+// Copying a whole message copies what its author wrote, Markdown and all,
+// unless the source holds something the reader could not see. A selection
+// inside it, or across messages, copies the text as shown.
+function copySource(event: ClipboardEvent<HTMLDivElement>, body: string, copiesSource: boolean) {
+  if (!copiesSource) return;
   const selection = document.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return;
   const range = selection.getRangeAt(0);
   const root = event.currentTarget;
   if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
-  if (range.toString().trim() !== (root.textContent ?? "").trim()) return;
+  const edges = textEdges(root);
+  if (!edges || !range.isPointInRange(edges.first, edges.firstOffset) || !range.isPointInRange(edges.last, edges.lastOffset)) {
+    return;
+  }
   event.preventDefault();
   event.clipboardData.setData("text/plain", body);
+}
+
+// The first and last characters of the message's own text, leaving out
+// controls and live regions such as a code block's Copy and its "Copied".
+function textEdges(root: HTMLElement) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const control = node.parentElement?.closest("button, [aria-live], [role=status]");
+      if (control && root.contains(control)) return NodeFilter.FILTER_REJECT;
+      return node.nodeValue?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const first = walker.nextNode() as Text | null;
+  if (!first) return null;
+  let last = first;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) last = node as Text;
+  return {
+    first,
+    firstOffset: first.data.length - first.data.trimStart().length,
+    last,
+    lastOffset: last.data.trimEnd().length,
+  };
 }
 
 // Text the Markdown parser would turn into one paragraph of the same text:
 // nothing Markdown or GFM gives meaning to, no blank line, and no edge
 // spaces. Most chat lines are like this, so they skip the parser.
-const MARKDOWN_SYNTAX = /[\\`*_~\[\]<>&|#!:]|\w@|www\.|^\s|\s$|^\s*(?:[-+=]|\d+[.)])/mu;
+const MARKDOWN_SYNTAX = /[\\`*_~\[\]<>&|#!:]|\w@|www\.|^\s|\s$|^(?:[-+=]|\d+[.)])/mu;
 
-function PlainText(props: { body: string; chips: readonly Chip[] }) {
-  const content: ReactNode[] = [];
-  const pushText = (text: string, key: number) =>
-    text.split(NEWLINE).forEach((line, at) => {
-      if (at > 0) content.push(<br key={`${key}:${at}`} />, "\n");
-      if (line) content.push(line);
-    });
-  let cursor = 0;
-  props.chips.forEach((chip, index) => {
-    pushText(props.body.slice(cursor, chip.start), cursor);
-    content.push(<ChipView key={`chip:${chip.start}`} index={index}>{props.body.slice(chip.start, chip.end)}</ChipView>);
-    cursor = chip.end;
-  });
-  pushText(props.body.slice(cursor), cursor);
-  return <p className={BLOCK}>{content}</p>;
+interface Drawn {
+  content: ReactNode;
+  chips: readonly Chip[];
+  copiesSource: boolean;
 }
 
-// Parsed bodies of recent messages, so reopening a chat or scrolling back to a
-// message skips the parse. The tree holds where each chip sits, not what it
-// opens, so the key is the body and the chip ranges.
-const PARSED_LIMIT = 500;
-const parsed = new Map<string, ReactElement>();
+const textOnly = (body: string, chips: readonly Chip[]): Drawn => ({
+  content: <PlainText body={body} chips={chips} strip />,
+  chips,
+  copiesSource: false,
+});
 
-function parseBody(body: string, chips: readonly Chip[]): ReactElement {
-  const key = `${body}\u0000${chips.map((chip) => `${chip.start}-${chip.end}`).join(",")}`;
-  const cached = parsed.get(key);
-  if (cached) {
-    parsed.delete(key);
-    parsed.set(key, cached);
-    return cached;
+// Drawn bodies of recent messages, so reopening a chat or scrolling back to a
+// message skips the parse, oldest dropped first past the size limit. The key
+// holds the body and what its chips depend on.
+export function createDrawnCache<Value>(maxChars: number) {
+  const entries = new Map<string, Value>();
+  let chars = 0;
+  return {
+    remember(key: string, value: Value) {
+      if (entries.delete(key)) chars -= key.length;
+      entries.set(key, value);
+      chars += key.length;
+      for (const [oldest] of entries) {
+        if (chars <= maxChars) break;
+        entries.delete(oldest);
+        chars -= oldest.length;
+      }
+    },
+    recall(key: string): Value | undefined {
+      const value = entries.get(key);
+      if (value !== undefined) {
+        entries.delete(key);
+        entries.set(key, value);
+      }
+      return value;
+    },
+  };
+}
+
+const { remember, recall } = createDrawnCache<Drawn>(2_000_000);
+// Bodies the parser gave up on this session, by hash, so none is tried again.
+const gaveUp = new Set<number>();
+const parsing = new Map<string, Promise<Drawn>>();
+
+// cyrb53: a 53-bit string hash.
+function hash(text: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let at = 0; at < text.length; at++) {
+    const code = text.charCodeAt(at);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
   }
-  const element = Markdown({
-    children: body,
-    components: COMPONENTS,
-    remarkPlugins: [remarkGfm, [remarkChatText, { body, chips }]],
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+// Chips depend on the mention candidates and the attachments, so a body with
+// an "@" keys on them too, through a short id per distinct list.
+const listIds = new WeakMap<object, string>();
+const contentIds = new Map<string, string>();
+function listId(list: object, content: () => unknown): string {
+  let id = listIds.get(list);
+  if (id === undefined) {
+    const text = JSON.stringify(content());
+    id = contentIds.get(text) ?? `${contentIds.size}`;
+    contentIds.set(text, id);
+    listIds.set(list, id);
+  }
+  return id;
+}
+
+function drawKey(body: string, candidates: readonly MentionCandidate[], attachments: readonly ChatAttachmentRecord[]) {
+  if (!body.includes("@")) return body;
+  const people = listId(candidates, () => candidates.map((candidate) => [candidate.kind, candidate.handle]));
+  return `${body}\u0000${people}\u0000${listId(attachments, () => attachments)}`;
+}
+
+// Draws a body on the main thread when that is cheap and safe; null means it
+// goes to the worker.
+function drawNow(
+  key: string,
+  body: string,
+  candidates: readonly MentionCandidate[],
+  attachments: readonly ChatAttachmentRecord[],
+): Drawn | null {
+  const known = recall(key);
+  if (known) return known;
+  if (!MARKDOWN_SYNTAX.test(body)) {
+    const chips = chatChips(body, candidates, attachments);
+    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true };
+  }
+  const sync = fitsMainThread(body);
+  if (gaveUp.has(hash(key))) return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
+  if (!sync) return null;
+  const chips = chatChips(body, candidates, attachments);
+  let value: Drawn;
+  try {
+    const parsed = parseChatMarkdown(body, chips);
+    value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource };
+  } catch {
+    gaveUp.add(hash(key));
+    value = textOnly(body, chips);
+  }
+  remember(key, value);
+  return value;
+}
+
+function drawLater(
+  key: string,
+  body: string,
+  candidates: readonly MentionCandidate[],
+  attachments: readonly ChatAttachmentRecord[],
+): Promise<Drawn> {
+  let pending = parsing.get(key);
+  if (pending) return pending;
+  pending = parseChatInWorker({ body, candidates, attachments }).then((answer) => {
+    parsing.delete(key);
+    let value: Drawn | undefined;
+    if (answer?.parsed) {
+      try {
+        value = { content: drawTree(answer.parsed.tree), chips: answer.chips, copiesSource: answer.parsed.copiesSource };
+      } catch {
+        value = undefined;
+      }
+    }
+    if (!value) {
+      gaveUp.add(hash(key));
+      value = textOnly(body, answer?.chips ?? []);
+    }
+    remember(key, value);
+    return value;
   });
-  parsed.set(key, element);
-  if (parsed.size > PARSED_LIMIT) parsed.delete(parsed.keys().next().value!);
-  return element;
+  parsing.set(key, pending);
+  return pending;
 }
 
 const NO_ATTACHMENTS: readonly ChatAttachmentRecord[] = [];
@@ -349,28 +416,35 @@ export const ChatMarkdown = memo(function ChatMarkdown(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   className?: string;
 }) {
+  const { body, candidates } = props;
   const attachments = props.attachments ?? NO_ATTACHMENTS;
-  const chips = useMemo(
-    () => chatChips(props.body, props.candidates, attachments),
-    [props.body, props.candidates, attachments],
-  );
-  const content = useMemo(
-    () => MARKDOWN_SYNTAX.test(props.body)
-      ? parseBody(props.body, chips)
-      : <PlainText body={props.body} chips={chips} />,
-    [props.body, chips],
-  );
+  const key = useMemo(() => drawKey(body, candidates, attachments), [body, candidates, attachments]);
+  const now = useMemo(() => drawNow(key, body, candidates, attachments), [key, body, candidates, attachments]);
+  const [later, setLater] = useState<{ key: string; value: Drawn } | null>(null);
+  useEffect(() => {
+    if (now) return;
+    let current = true;
+    void drawLater(key, body, candidates, attachments).then((value) => {
+      if (current) setLater({ key, value });
+    });
+    return () => {
+      current = false;
+    };
+  }, [now, key, body, candidates, attachments]);
+  const ready = now ?? (later?.key === key ? later.value : null);
+  const shown = useMemo(() => ready ?? textOnly(body, []), [ready, body]);
   const scope = useMemo(
-    () => ({ chips, testId: props.testId, onOpenPath: props.onOpenPath }),
-    [chips, props.testId, props.onOpenPath],
+    () => ({ chips: shown.chips, testId: props.testId, onOpenPath: props.onOpenPath }),
+    [shown.chips, props.testId, props.onOpenPath],
   );
   return (
     <div
       data-testid={props.testId}
-      onCopy={(event) => copySource(event, props.body)}
+      onCopy={(event) => copySource(event, body, shown.copiesSource)}
       className={`min-w-0 select-text cursor-text break-words text-[14px] leading-[22px] text-ink ${props.className ?? ""}`}
     >
-      <ChatTextContext value={scope}>{content}</ChatTextContext>
+      <ChatTextContext value={scope}>{shown.content}</ChatTextContext>
     </div>
   );
 });
+

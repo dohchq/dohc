@@ -20,6 +20,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { retainChatParser } from "./chatMarkdownWorker";
 import {
   MessageReactions,
   TOOLBAR_BUTTON,
@@ -424,6 +425,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
+  // Long messages parse in the chat's worker; start it before they need it.
+  useEffect(retainChatParser, []);
   const {
     nav,
     messages,
