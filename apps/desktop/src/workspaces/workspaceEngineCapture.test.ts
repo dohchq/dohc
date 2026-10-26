@@ -4291,7 +4291,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     };
   }
 
-  it("opens a document and publishes an authored file between bounded relay passes", async () => {
+  it("opens a document and publishes an authored file while a relay push waits", async () => {
     const root = await createTestScratch("dohc-drain-interleave-");
     const loopback = new VersionedLoopbackEngine();
     const path = "note.md";
@@ -4332,17 +4332,17 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     try {
       const pass = sync.start();
       await entered.promise;
-      const opened = engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
-      const written = engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
-        { kind: "agent", agentId: "agent", onBehalfOf: "local" }).then(result => {
-        events.push("authored write");
-        return result;
-      });
-      release.resolve();
-      const [, session] = await Promise.all([pass, opened, written]);
-      await continued.promise;
-      expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2"]);
+      // Neither waits for the push on the relay.
+      const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+      await engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
+        { kind: "agent", agentId: "agent", onBehalfOf: "local" });
+      events.push("authored write");
+      expect(events).toEqual(["push 1", "document opened", "authored write"]);
       expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("authored content");
+      release.resolve();
+      await pass;
+      await continued.promise;
+      expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2"]);
       releaseContinuation.resolve();
       await sync.stop();
       expect(events.at(-1)).toBe("pull");

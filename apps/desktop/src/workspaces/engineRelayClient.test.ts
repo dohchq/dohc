@@ -2355,6 +2355,13 @@ describe("EngineRelayClient", () => {
     });
     const { client, sessions } = await harness(daemon);
     await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    // The session is fine, so neither request reopens it.
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+      "sync.push",
+    ]);
     await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
       RelayWorkspaceUnavailableError,
     );

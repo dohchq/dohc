@@ -779,8 +779,9 @@ export interface WorkspaceEngineCapture {
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
-  // Relay sync runs on the same capture chain as local batch capture and
-  // version operations. The task owns engine push/pull; returned
+  // A relay pull runs on the same capture chain as local batch capture and
+  // version operations. The task owns the engine pull; pushes run off the
+  // chain because they write no workspace files. Returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
   // Data-safety contract: the task must give every pull page to the supplied
