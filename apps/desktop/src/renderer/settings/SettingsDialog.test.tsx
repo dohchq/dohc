@@ -1265,7 +1265,7 @@ describe("SettingsDialog", () => {
 
     await user.click(await screen.findByRole("button", { name: "Check" }));
     expect(await screen.findByText("Didn't reply.")).toBeTruthy();
-    expect(onError).toHaveBeenCalledWith("Nova didn't reply to the check.", undefined, undefined, [
+    expect(onError).toHaveBeenCalledWith("Nova didn't reply to the check.", undefined, expect.any(Function), [
       ["Cause", "Runner did not report within 120 seconds."],
     ]);
     expect(screen.getByRole("switch", { name: "Turn on Nova" }).getAttribute("aria-checked")).toBe("false");

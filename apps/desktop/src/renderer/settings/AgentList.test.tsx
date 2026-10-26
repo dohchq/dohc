@@ -119,12 +119,31 @@ it("says an agent didn't reply, names it in Notices with why and its log, and of
   const { onError } = renderList();
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
   expect(await within(row("Claude Code")).findByText("Didn't reply.")).toBeTruthy();
-  expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, undefined, [
+  expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, expect.any(Function), [
     ["Cause", "Runner self-test timed out after 120 seconds."],
     ["Log", "C:\\Logs\\check.log"],
   ]);
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Try again" }));
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
+});
+
+it("checks the agent again from the failed check's toast", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
+  const { onError } = renderList();
+  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  const retry = onError.mock.calls[0]![2] as () => Promise<void>;
+  await act(() => retry());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenLastCalledWith({ workspaceId: "ws-1", agentId: "codex" });
+  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+
+  // While another check runs, the toast's Try again waits for the row's.
+  const running = deferred<RunnerSelfTestResult>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(running.promise);
+  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
+  await act(() => retry());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
+  await act(async () => running.resolve({ ok: true, detail: "self-test ok" }));
 });
 
 it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {

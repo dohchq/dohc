@@ -347,7 +347,7 @@ export function AgentList(props: {
   // Moves these entries to the front of the file; answers whether it saved.
   onOrder: (order: readonly string[]) => Promise<boolean>;
   onOpenSettingsFile: () => void;
-  onError?: (message: string, cause?: unknown, retry?: undefined, details?: ReadonlyArray<ErrorDetailField>) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
   onNotice?: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
@@ -392,6 +392,9 @@ export function AgentList(props: {
   const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
   const fileOrder = rows.map((row) => (row.kind === "agent" ? row.agent.id : row.problem.id));
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn);
+  // Try again on a failed check's toast runs only when Check could.
+  const checkable = useRef(false);
+  checkable.current = !paused && checking === null && checkNote === null;
   const config = props.config;
 
   const check = useCallback(async (agent: Agent) => {
@@ -402,9 +405,11 @@ export function AgentList(props: {
     try {
       const result = await bridge().runnerSelfTest({ workspaceId, agentId: agent.id });
       if (!requests.isCurrent(token)) return;
-      // The toast names the agent; why, and its log, go in the details.
+      // The toast names the agent and checks it again; why, and its log, go in the details.
       if (!result.ok) {
-        onError?.(`${agent.name} didn't reply to the check.`, undefined, undefined, [
+        onError?.(`${agent.name} didn't reply to the check.`, undefined, async () => {
+          if (checkable.current) await check(agent);
+        }, [
           ["Cause", result.detail],
           ...(result.logPath ? [["Log", result.logPath] as const] : []),
         ]);
