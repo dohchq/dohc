@@ -1249,8 +1249,8 @@ export function createShareViewFiles(
         return await withCurrentTarget(requested, async (target) => {
           assertMayEdit(target, [path]);
           // A file placed in the folder by hand isn't tracked, so its save never reaches the share.
-          const tracked = normalizedWritePath(path);
-          if (tracked === null) return false;
+          // assertMayEdit has validated the path.
+          const tracked = normalizedWritePath(path)!;
           return withStore(target, async (store) => {
             const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
             const [file] = await resolveEngineFileTargets(store, target.storeWorkspaceId, [{ path: tracked }], undefined, main.id);

@@ -70,10 +70,10 @@ type SharedPlaces = Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView"
  * current standalone shared view, and no other shared place. "other": the
  * real shared-with-me of the current workspace or of any registered workspace,
  * or the real root of another registered shared view, since one can sit inside
- * another. When dohc cannot tell for the current workspace, it is "other".
+ * another. When dohc cannot tell, it is "other".
  *
  * Registered roots are saved as real paths, so only entries whose saved place
- * could hold the file are resolved. One that fails to resolve holds nothing.
+ * could hold the file are resolved.
  */
 export async function fileOrigin(
   workspace: SharedPlaces,
@@ -82,11 +82,11 @@ export async function fileOrigin(
   resolve: (path: string) => Promise<string> = realpath,
 ): Promise<"own" | "shared view" | "other"> {
   const target = fileSystemCase(realTarget);
-  const holds = async (place: string, unclear: boolean) => {
+  const holds = async (place: string) => {
     try {
       return isInside(fileSystemCase(await resolve(place)), target);
     } catch (error) {
-      return error instanceof Error && "code" in error && error.code === "ENOENT" ? false : unclear;
+      return !(error instanceof Error && "code" in error && error.code === "ENOENT");
     }
   };
   const elsewhere = registered
@@ -94,8 +94,8 @@ export async function fileOrigin(
     .map((entry) => shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER))
     .filter((place) => isInside(fileSystemCase(place), target));
   const answers = await Promise.all([
-    holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER), true),
-    ...elsewhere.map((place) => holds(place, false)),
+    holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER)),
+    ...elsewhere.map(holds),
   ]);
   if (answers.includes(true)) return "other";
   return shareViewIsPresent(workspace.shareView) ? "shared view" : "own";

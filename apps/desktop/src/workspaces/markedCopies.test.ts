@@ -160,7 +160,7 @@ describe("marked copies", () => {
     await expect(fileOrigin({ ...saved, rootPath: scratch }, [saved], join(scratch, "notes.md"))).resolves.toBe("shared view");
   });
 
-  it("counts a registered workspace that fails to resolve as holding nothing", async () => {
+  it("counts a file as another person's when a registered workspace that could hold it fails to resolve", async () => {
     const scratch = await createTestScratch("marked-copy-registered-");
     const file = join(scratch, "inner", "shared-with-me", "sam", "notes.bin");
     await mkdir(dirname(file), { recursive: true });
@@ -171,7 +171,7 @@ describe("marked copies", () => {
       return realpath(path);
     });
     await expect(fileOrigin({ workspaceId: "own", rootPath: scratch },
-      [{ workspaceId: "inner", rootPath: join(scratch, "inner") }], file, resolve)).resolves.toBe("own");
+      [{ workspaceId: "inner", rootPath: join(scratch, "inner") }], file, resolve)).resolves.toBe("other");
     expect(resolve).toHaveBeenCalledWith(join(scratch, "inner", "shared-with-me"));
   });
 
