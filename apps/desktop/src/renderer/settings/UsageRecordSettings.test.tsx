@@ -107,7 +107,7 @@ describe("usage record in Privacy", () => {
     bridge.readUsageRecord.mockResolvedValueOnce({ ...EMPTY, enabled: false });
     render(<UsageRecordSettings />);
     expect((await screen.findByTestId("usage-record-empty")).textContent).toBe(
-      "No counts saved.Turn the record on to count what you do in dohc.");
+      "No counts saved. Turn the record on to count what you do in dohc.");
     expect(card().dataset.state).toBe("off");
     expect(screen.queryByTestId("usage-record-clear")).toBeNull();
     expect(screen.queryByTestId("usage-record-off")).toBeNull();

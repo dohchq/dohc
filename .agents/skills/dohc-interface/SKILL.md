@@ -57,7 +57,7 @@ Most strings do one of four jobs:
 | Ready: something new became usable | `Agent result, ready to review` |
 | Next: what the person can do | `Choose which copy to keep` |
 
-Every error and empty state needs a Next. A toast usually reports a Change. A status bar shows a State.
+Every error needs a Next, and so does an empty state when the person can act there. A toast usually reports a Change. A status bar shows a State.
 
 - Follow the instruction rules in `dohc-writing`: one instruction per sentence, 20 words or fewer.
 - Use the active voice and name who acted. Leave dohc out when the surface makes it obvious: `Saved`.
@@ -85,13 +85,13 @@ The sync strings show the standard: `A file changed on two machines`, `This mach
 
 ### Empty states
 
-Use `EmptyState`, with one line that says what is missing and what to do.
+Use `EmptyState`, with one line that says what is missing, and what to do when the person can act there.
 Check that the action exists on that surface before you name it.
 
 | Instead of | Write |
 | --- | --- |
-| `No results` | `No files match "budget". Try a shorter search.` |
-| `Nothing here yet` | `This folder is empty. Add a file to start.` |
+| `No results` | `No files match "budget".` |
+| `Nothing here yet` | `This folder is empty.` |
 
 ### Agents
 
@@ -224,6 +224,12 @@ Use the classes in `styles.css` instead of writing shadows:
 
 Flat panels get borders, not shadows.
 
+### Spacing
+
+| Part | Spacing |
+| --- | --- |
+| Empty state | `EmptyState`: the picture, 12 px, one line, 16 px, at most one action. Do not build your own. |
+
 ### Recipes
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
@@ -252,7 +258,7 @@ Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, 
 
 Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
-Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
+Empty state: when a panel or page has nothing yet, `EmptyState` shows a picture of what it holds once it has items, one `text-[13px] text-muted` line, and at most one compact action. Use `PrimaryButton` only when making the thing is the surface's job. A failure keeps its warning glyph and Try again, never a picture. An empty section inside a surface with other content stays one muted line.
 
 `Pill` changes meaning through its `tone`, which swaps the text color and keeps the fill.
 
@@ -286,7 +292,7 @@ A running agent shows a 6px round `bg-agent` dot.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
    Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
-5. Does each string do one job, and does every error and empty state give a Next?
+5. Does each string do one job, does every error give a Next, and does every empty state give one when the person can act there?
 6. Does every noun match the surrounding UI?
 7. Read each string as someone whose sync just failed. Does it help them?
 8. Would Notion or Linear ship it? If not, it is not done.

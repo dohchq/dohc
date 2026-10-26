@@ -109,6 +109,17 @@ describe("ChatsView hybrid feed", () => {
     expect(await screen.findByTestId("chats-channel")).toBeTruthy();
   });
 
+  it("centers an empty Home in the height below its header", async () => {
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const empty = (await screen.findByText("No posts in your groups yet.")).parentElement!;
+    // Every box up to the list grows.
+    const list = empty.closest<HTMLElement>('[role="list"]')!;
+    for (let box = empty; box !== list; box = box.parentElement!) {
+      expect(box.className.split(" ")).toContain("flex-1");
+    }
+  });
+
   it.each([
     { access: "read-only", ended: false, locked: true },
     { access: "read-write", ended: true, locked: true },

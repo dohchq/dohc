@@ -9,7 +9,7 @@ import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { DangerButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { DangerButton, EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
@@ -17,7 +17,6 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   ABOUT_ROW,
-  AboutNote,
   AccessChecked,
   AccessUnknown,
   LEVELS,
@@ -28,6 +27,7 @@ import {
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
+import { EMPTY_ART } from "./EmptyArt";
 import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";
 
@@ -53,14 +53,14 @@ const LANE = {
     label: "Shared by me",
     // What each list covers, stated beside when it was checked.
     scope: "for this workspace",
-    empty: "No shares from this workspace. Right-click a file and choose Share… to share it.",
+    empty: "Nothing shared from this workspace yet.",
     unexplained: "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
     failed: "dohc could not check the shares from this workspace.",
   },
   received: {
     label: "Shared with me",
     scope: "for your account",
-    empty: "No shares to your account.",
+    empty: "Nothing shared with you yet.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
     failed: "dohc could not check the shares to your account.",
   },
@@ -553,7 +553,9 @@ function Section(props: {
               <>
                 <AccessChecked testId={`sharing-${lane}-freshness`} answer={view.answer} scope={words.scope} />
                 {view.answer.rows.length === 0 && local.length === 0 ? (
-                  <AboutNote testId={`sharing-${lane}-empty`}>{words.empty}</AboutNote>
+                  <div className="flex py-4">
+                    <EmptyState data-testid={`sharing-${lane}-empty`} picture={EMPTY_ART.shares} title={words.empty} />
+                  </div>
                 ) : (
                   <ul className="m-0 list-none p-0">{props.children(view.answer)}{local}</ul>
                 )}

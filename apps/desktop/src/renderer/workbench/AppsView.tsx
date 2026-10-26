@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   CircleDashed,
-  Globe2,
   Pin,
   Plus,
   Users,
@@ -17,6 +16,7 @@ import { ObjectGlyph } from "../ui/KindGlyph";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import type { AboutNotices } from "./About";
+import { EMPTY_ART } from "./EmptyArt";
 import { siteTabPath } from "./workbenchState";
 import { ipcErrorMessage } from "../ipcError";
 
@@ -276,18 +276,17 @@ export function AppsView(props: {
         </div>
       ) : apps.length === 0 ? (
         props.receivedShareWorkspace ? (
-          <EmptyState
-            icon={Globe2}
-            title="No apps in this workspace yet."
-            hint="This shared view cannot create an app. Ask the workspace owner to add one."
-          />
+          <EmptyState picture={EMPTY_ART.apps} title="No apps in this workspace yet." />
         ) : (
-          <EmptyState icon={Globe2} title="No apps in this workspace yet.">
+          <EmptyState picture={EMPTY_ART.apps} title="No apps in this workspace yet.">
             <PrimaryButton
               data-testid="sites-create-first"
+              size="compact"
+              className="inline-flex items-center gap-1.5"
               disabled={creating}
               onClick={() => void createFirstApp()}
             >
+              <Plus size={12} aria-hidden />
               {creating ? "Creating app…" : "Create app"}
             </PrimaryButton>
           </EmptyState>

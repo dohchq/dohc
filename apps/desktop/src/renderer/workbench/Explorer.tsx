@@ -2,7 +2,7 @@ import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/w
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isDeleteKey } from "../ui/keys";
-import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -51,6 +51,7 @@ import {
   type EditorGroup,
   clampOpenEditorsHeight,
 } from "./workbenchState";
+import { EMPTY_ART } from "./EmptyArt";
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -1641,7 +1642,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         onDrop={onContainerDrop}
         onDragLeave={onContainerDragLeave}
         onContextMenu={onContainerContextMenu}
-        className={`min-h-0 flex-1 overflow-y-auto py-1 ${
+        className={`min-h-0 flex-1 overflow-y-auto py-1 ${empty ? "flex flex-col" : ""} ${
           rootDropPreview
             ? `outline outline-1 -outline-offset-2 ${
                 rootDropPreview.kind === "blocked" ? "outline-danger/30" : "outline-ink/30"
@@ -1866,7 +1867,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
-        <section data-testid="explorer-files-section" aria-label="Files">
+        <section data-testid="explorer-files-section" aria-label="Files" className={empty ? "flex flex-1 flex-col" : undefined}>
           <header
             data-testid="explorer-files-header"
             className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
@@ -1958,14 +1959,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               ) : null}
 
               {empty ? (
-                <button
-                  type="button"
-                  onClick={() => props.onNewPage("")}
-                  className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                  Create your first file
-                </button>
+                <EmptyState picture={EMPTY_ART.files} title="This workspace has no files yet.">
+                  <SecondaryButton
+                    size="compact"
+                    className="inline-flex items-center gap-1.5"
+                    onClick={() => props.onNewPage("")}
+                  >
+                    <FilePlus2 size={12} aria-hidden />
+                    New file
+                  </SecondaryButton>
+                </EmptyState>
               ) : (
                 <ul
                   ref={workspaceTreeRef}

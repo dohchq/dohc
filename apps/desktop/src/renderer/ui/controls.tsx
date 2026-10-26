@@ -159,25 +159,37 @@ const emptyGlyphToneClass = {
   warning: { glyph: "text-warning", mark: "text-warning" },
 } as const;
 
-/** Centered empty state: a ghost glyph, one muted line that says what is
- * missing, and the surface's own next action as children. The glyph is the
- * drop-lobe mark unless the surface names its own; a state that exists
- * because something failed draws it in the danger tone. Every other
- * attribute, such as a pinned `data-testid` or `role`, lands on the root. */
+/** Centered empty state: one muted line that says what is missing, and the
+ * surface's own next action as children. A surface with nothing yet shows a
+ * `picture` of what it holds once it has items. A state that exists because
+ * something failed or holds back shows a glyph in its tone instead, never a
+ * picture; with neither, it shows the drop-lobe mark. Every other attribute,
+ * such as a pinned `data-testid` or `role`, lands on the root. */
 export function EmptyState({
+  picture,
   icon: Icon,
   tone = "ghost",
   title,
-  hint,
   children,
   ...rest
-}: {
-  icon?: LucideIcon;
-  tone?: keyof typeof emptyGlyphToneClass;
+}: (
+  | { picture: ReactNode; icon?: never; tone?: never }
+  | { picture?: never; icon?: LucideIcon; tone?: keyof typeof emptyGlyphToneClass }
+) & {
   title: ReactNode;
-  hint?: string;
   children?: ReactNode;
 } & Omit<HTMLAttributes<HTMLDivElement>, "title" | "className" | "children">) {
+  if (picture) {
+    return (
+      <div {...rest} className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+        {/* The fade's mask gets its own layer: in the page's layer, software
+            rendering drops subpixel text across the page. */}
+        <span aria-hidden className="relative h-19 w-30 shrink-0 mask-b-from-58% will-change-transform">{picture}</span>
+        <span className="mt-3 max-w-60 text-[13px] text-balance text-muted wrap-anywhere">{title}</span>
+        {children ? <div className="mt-4 flex items-center gap-2">{children}</div> : null}
+      </div>
+    );
+  }
   const toneClass = emptyGlyphToneClass[tone];
   return (
     <div {...rest} className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
@@ -186,10 +198,7 @@ export function EmptyState({
       ) : (
         <DohcMark size={30} className={toneClass.mark} />
       )}
-      <div className="flex max-w-sm flex-col gap-1 text-balance wrap-anywhere">
-        <span className="text-sm text-muted">{title}</span>
-        {hint ? <span className="text-[11px] text-subtle">{hint}</span> : null}
-      </div>
+      <span className="max-w-sm text-sm text-balance text-muted wrap-anywhere">{title}</span>
       {children}
     </div>
   );

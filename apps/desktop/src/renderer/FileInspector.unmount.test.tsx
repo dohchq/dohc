@@ -5924,7 +5924,7 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="data/empty.csv" />);
 
-    await screen.findByTestId("csv-empty-table");
+    expect((await screen.findByTestId("csv-empty-table")).textContent).toBe("This table is empty.RowColumn");
     await user.click(screen.getByTestId("csv-empty-add-row"));
     view.unmount();
 

@@ -1,7 +1,8 @@
 import { formatChatTime, formatClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
-import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, HardDrive, History, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, HardDrive, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { EmptyState } from "../ui/controls";
+import { EMPTY_ART } from "./EmptyArt";
 import { Ref } from "../ui/Ref";
 import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
@@ -909,7 +910,7 @@ export function EngineHistoryView(props: {
   const partial = words.unavailable !== null || words.omitted !== null;
 
   // A known page with no rows. The caller renders this view only when it
-  // has a page: "No changes yet" states something about the workspace,
+  // has a page: "No changes yet." states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
@@ -943,13 +944,7 @@ export function EngineHistoryView(props: {
         </div>
       );
     }
-    return (
-      <EmptyState
-        icon={History}
-        title="No changes yet"
-        hint="Edits by you or your agent appear here as a timeline you can review."
-      />
-    );
+    return <EmptyState picture={EMPTY_ART.history} title="No changes yet." />;
   }
 
   return (

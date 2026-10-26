@@ -48,8 +48,9 @@ import {
   type JoinedLaneOrder,
   type ShareListing,
 } from "./chatShareLanes";
-import { SectionLabel } from "../ui/controls";
+import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { EMPTY_ART } from "./EmptyArt";
 import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
@@ -60,7 +61,6 @@ import {
   Hash,
   House,
   MessageSquare,
-  MessagesSquare,
   Plus,
   Square,
   Users,
@@ -3721,21 +3721,19 @@ export function ChatsView(props: {
           items={personalFeed}
           itemKey={(item) => item.message.id}
           columnClassName={pageColumn}
-          header={<>
-            {personalFeed.length === 0 && !personalFeedLoading ? (
-              <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
-                <p className="m-0">No posts in your groups yet.</p>
-                <button
-                  type="button"
+          empty={personalFeedLoading ? undefined : (
+            <div className="flex flex-1 py-12">
+              <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <SecondaryButton
                   data-testid="chats-feed-empty-groups"
+                  size="compact"
                   onClick={variant === "page" ? props.onOpenNavigator : goBack}
-                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
                 >
                   Open Groups
-                </button>
-              </div>
-            ) : null}
-          </>}
+                </SecondaryButton>
+              </EmptyState>
+            </div>
+          )}
           footer={<>
             {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
@@ -4725,17 +4723,12 @@ export function ChatsView(props: {
           empty={threadsLoading ? (
               <SkeletonRows label="Loading..." className="pt-4" />
             ) : (
-              <div
-                data-testid="chats-channel-empty"
-                className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
-              >
-                <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-[13px] text-subtle">
-                  {nav.channel.kind === "agent"
-                    ? "No posts yet."
-                    : `No posts in #${nav.channel.name} yet.`}
-                  {channelLocked ? "" : " Start one above."}
-                </span>
+              <div className="flex flex-1 py-12">
+                <EmptyState
+                  data-testid="chats-channel-empty"
+                  picture={EMPTY_ART.posts}
+                  title={nav.channel.kind === "agent" ? "No posts yet." : `No posts in #${nav.channel.name} yet.`}
+                />
               </div>
             )}
           renderItem={(thread) => {

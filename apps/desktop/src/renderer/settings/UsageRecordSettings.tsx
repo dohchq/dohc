@@ -199,7 +199,7 @@ export function UsageRecordCard(props: {
       ) : view.status === "unreadable" ? (
         <div className="py-6">
           <EmptyState icon={TriangleAlert} tone="danger" data-testid="usage-record-unreadable"
-            title={unreadableWords(view.code)} hint={unreadableHint(view.code)}>
+            title={`${unreadableWords(view.code)} ${unreadableHint(view.code)}`}>
             {view.code === INVALID_USAGE_RECORD ? (
               <SecondaryButton size="row" data-testid="usage-record-start" disabled={props.busy} aria-disabled={props.busy}
                 onClick={props.onStart}>
@@ -215,10 +215,9 @@ export function UsageRecordCard(props: {
       ) : (
         <div className="py-6">
           <EmptyState data-testid="usage-record-empty"
-            title={view.enabled ? "Nothing counted yet." : "No counts saved."}
-            hint={view.enabled
-              ? "dohc adds a count when you finish an action it counts, such as creating a version."
-              : "Turn the record on to count what you do in dohc."} />
+            title={view.enabled
+              ? "Nothing counted yet. dohc adds a count when you finish an action it counts, such as creating a version."
+              : "No counts saved. Turn the record on to count what you do in dohc."} />
         </div>
       )}
       {view.status === "readable" || view.status === "unreadable" ? (

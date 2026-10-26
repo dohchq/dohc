@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Diff, Merge, MessageSquare, MoreHorizontal, Plus, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -77,6 +77,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { EMPTY_ART, type EmptyArtKind } from "../workbench/EmptyArt";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -167,7 +168,7 @@ function Specimen(props: { label: string; children: ReactNode; className?: strin
 
 // A side panel's width, as Search, Apps and Chats give their empty states.
 function EmptyPanel(props: { children: ReactNode }) {
-  return <div className="flex h-44 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
+  return <div className="flex h-60 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
 }
 
 function Swatch(props: { label: string; className: string }) {
@@ -1652,26 +1653,29 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="empty" title="Empty">
-        <Specimen label="glyph, line, action in focus">
+        <Specimen label="picture, line, action in focus">
           <EmptyPanel>
-            <EmptyState icon={SearchX} title='No files or chats match "budget".'>
-              <SecondaryButton data-force-state="focus-visible">Clear filters</SecondaryButton>
+            <EmptyState picture={EMPTY_ART.search} title='No files or chats match "budget".'>
+              <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" data-force-state="focus-visible">
+                <X size={12} aria-hidden />
+                Clear filters
+              </SecondaryButton>
             </EmptyState>
           </EmptyPanel>
         </Specimen>
         <Specimen label="create">
           <EmptyPanel>
-            <EmptyState icon={Globe2} title="No apps in this workspace yet.">
-              <PrimaryButton>Create app</PrimaryButton>
+            <EmptyState picture={EMPTY_ART.apps} title="No apps in this workspace yet.">
+              <PrimaryButton size="compact" className="inline-flex items-center gap-1.5">
+                <Plus size={12} aria-hidden />
+                Create app
+              </PrimaryButton>
             </EmptyState>
           </EmptyPanel>
         </Specimen>
-        <Specimen label="mark, line, hint">
+        <Specimen label="mark, line">
           <EmptyPanel>
-            <EmptyState
-              title="No live documents in this workspace."
-              hint="Reload after a document starts live editing."
-            />
+            <EmptyState title="No live documents in this workspace. Reload after a document starts live editing." />
           </EmptyPanel>
         </Specimen>
         <Specimen label="failed">
@@ -1690,8 +1694,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="a long query wraps">
           <EmptyPanel>
-            <EmptyState icon={SearchX} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
+            <EmptyState picture={EMPTY_ART.search} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
           </EmptyPanel>
+        </Specimen>
+        <Specimen label="every picture">
+          <div className="grid grid-cols-3 gap-2">
+            {(Object.keys(EMPTY_ART) as EmptyArtKind[]).map((kind) => (
+              <div key={kind} className="flex h-36 w-44 flex-col rounded-lg border border-line bg-panel">
+                <EmptyState picture={EMPTY_ART[kind]} title={kind} />
+              </div>
+            ))}
+          </div>
         </Specimen>
       </Section>
 
@@ -1902,6 +1915,11 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="no changes yet">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop} />
           </div>
         </Specimen>
         <Specimen label="one Collection, unavailable">

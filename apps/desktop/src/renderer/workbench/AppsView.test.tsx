@@ -319,11 +319,9 @@ describe("AppsView", () => {
       />,
     );
 
-    expect(
-      await screen.findByText(
-        "This shared view cannot create an app. Ask the workspace owner to add one.",
-      ),
-    ).toBeTruthy();
+    // One line under the picture, with no action.
+    const line = await screen.findByText("No apps in this workspace yet.");
+    expect(line.parentElement!.textContent).toBe("No apps in this workspace yet.");
     expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
     expect(screen.queryByTestId("sites-create-first")).toBeNull();
     expect(screen.queryByTestId("ask-agent")).toBeNull();

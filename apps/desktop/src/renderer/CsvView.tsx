@@ -8,6 +8,7 @@ import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { ViewActions } from "./fileInspectorUi";
+import { EMPTY_ART } from "./workbench/EmptyArt";
 import { extensionOf } from "./path";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import {
@@ -750,28 +751,30 @@ export function CsvTable(props: {
     return (
       <EmptyState
         data-testid="csv-empty-table"
-        icon={Table}
-        title={locked ? "This table is empty." : "This table is empty. Add a row or a column to start."}
+        picture={EMPTY_ART.table}
+        title="This table is empty."
       >
         {!locked ? (
-          <div className="flex items-center gap-2">
+          <>
             <SecondaryButton
+              size="compact"
               onClick={props.onAddRow}
-              className="inline-flex items-center gap-1"
+              className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-row"
             >
               <Plus size={12} aria-hidden />
               Row
             </SecondaryButton>
             <SecondaryButton
+              size="compact"
               onClick={props.onAddColumn}
-              className="inline-flex items-center gap-1"
+              className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-column"
             >
               <Plus size={12} aria-hidden />
               Column
             </SecondaryButton>
-          </div>
+          </>
         ) : null}
       </EmptyState>
     );

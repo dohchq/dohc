@@ -327,3 +327,15 @@ describe("Explorer kind glyphs", () => {
     fireEvent.keyDown(rename, { key: "Escape" });
   });
 });
+
+describe("Explorer with no files", () => {
+  it("shows the files picture, its line and New file, which opens a new page at the root", () => {
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    const empty = screen.getByText("This workspace has no files yet.").parentElement!;
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    expect(empty.textContent).toBe("This workspace has no files yet.New file");
+    fireEvent.click(within(empty).getByRole("button", { name: "New file" }));
+    expect(props.onNewPage).toHaveBeenCalledWith("");
+  });
+});

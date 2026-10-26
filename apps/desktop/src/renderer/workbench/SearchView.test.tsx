@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -97,10 +97,7 @@ describe("SearchView", () => {
   it("names the query that found nothing, not the next one the input holds", () => {
     render(<SearchView search={emptySearch({ query: "agent" })} onOpenResult={vi.fn()} />);
 
-    expect(screen.getByTestId("search-empty-state").textContent).toContain(
-      'No files or chats match "agnet".',
-    );
-    expect(screen.getByTestId("search-empty-state").textContent).toContain("Try a shorter search.");
+    expect(screen.getByTestId("search-empty-state").textContent).toBe('No files or chats match "agnet".');
     expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
   });
 
@@ -108,8 +105,7 @@ describe("SearchView", () => {
     const search = emptySearch({ regex: true, includeGlob: "*.md" });
     render(<SearchView search={search} onOpenResult={vi.fn()} />);
 
-    expect(screen.getByTestId("search-empty-state").textContent).not.toContain("Try a shorter search.");
-    const clear = screen.getByRole("button", { name: "Clear filters" });
+    const clear = within(screen.getByTestId("search-empty-state")).getByRole("button", { name: "Clear filters" });
     clear.focus();
     await userEvent.setup().keyboard("{Enter}");
 
