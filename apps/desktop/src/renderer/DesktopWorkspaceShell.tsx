@@ -5635,6 +5635,7 @@ export function DesktopWorkspaceShell(props: {
             <NoticeCenter
               workspaceId={workspaceId}
               syncStatus={syncStatus}
+              failedSaves={failedSaves}
               agentActive={agentActive}
               conflictSummaries={conflictSummaries}
               onOpenHistory={openHistoryView}

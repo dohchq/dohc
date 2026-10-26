@@ -307,6 +307,17 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
   });
 
+  // A failed save or a required update takes the title bar's words from the
+  // server, so live editing shows beside them.
+  it.each([
+    { label: "Couldn't save 1 file", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "Update dohc to sync", status: { state: "cloud-disconnected" as const, updateRequired: "app" as const }, failedSaves: 0 },
+  ])("keeps live editing beside $label", ({ label, status, failedSaves }) => {
+    renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...status }, failedSaves });
+    expect(screen.getByTestId("sync-status").textContent).toBe(label);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
+  });
+
   it.each([
     ["app", "Update dohc to sync"],
     ["server", "Server needs an update"],

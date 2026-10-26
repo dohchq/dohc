@@ -62,12 +62,19 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
-// The sync status names the server as the problem: "Server unreachable" or
-// "Server disconnected". Features that need the server then add no
-// indicator, toast or row of their own, since the server's report covers them.
-export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+// The sync state names the server as the problem.
+function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
   return syncStatus?.state === "cloud-disconnected" ||
     (syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable");
+}
+
+// The title bar says "Server unreachable" or "Server disconnected". Features
+// that need the server then add no indicator, toast or row of their own,
+// since the server's report covers them. A failed save or a required update
+// takes the title bar's words, and then they show again.
+export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefined, failedSaves: number): boolean {
+  return syncNamesServer(syncStatus) && !syncStatus?.updateRequired &&
+    saveFailedLabel(syncStatus ?? null, failedSaves) === null;
 }
 
 // A file that couldn't save outranks every state but those that stop sync
@@ -114,7 +121,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.
-  const liveDelivery = syncNamesServer(syncStatus) ? undefined : syncStatus?.ownerLiveDelivery;
+  const liveDelivery = titleBarNamesServer(syncStatus, failedSaves) ? undefined : syncStatus?.ownerLiveDelivery;
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;

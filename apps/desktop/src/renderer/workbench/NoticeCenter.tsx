@@ -22,7 +22,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import { UPDATE_REQUIRED_LABEL, syncNamesServer } from "./WorkspaceSyncStatus";
+import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 
 export type NoticeAction = {
   label: string;
@@ -733,6 +733,9 @@ export function NoticeCenter(props: {
   // activity bar.
   host?: NoticeHostPlacement;
   syncStatus: SyncStatusResult | null;
+  // Files in this workspace whose save failed. The title bar names them
+  // ahead of a disconnected server.
+  failedSaves?: number;
   agentActive: boolean;
   conflictSummaries: string[];
   onOpenHistory: () => void;
@@ -979,7 +982,7 @@ export function NoticeCenter(props: {
     props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
-  const serverNamed = syncNamesServer(props.syncStatus);
+  const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
   const liveDeliveryKey = useLasted(
     serverNamed ? null : liveRetryKey,
     liveDeliveryReason ? 0 : QUIET_RETRY_MS,

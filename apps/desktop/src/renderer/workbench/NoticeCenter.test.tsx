@@ -68,6 +68,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       workspaceId={props.workspaceId ?? "ws-status-test"}
       {...(props.host ? { host: props.host } : {})}
       syncStatus={props.syncStatus ?? null}
+      {...(props.failedSaves !== undefined ? { failedSaves: props.failedSaves } : {})}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
@@ -1614,9 +1615,14 @@ describe("notice center", () => {
         syncStatus: liveDeliveryStatus("retrying"),
       }),
     );
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
     act(() => vi.advanceTimersByTime(14_999));
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
     act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
@@ -1679,6 +1685,16 @@ describe("notice center", () => {
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
     outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // A failed save or a required update takes the title bar's words from the
+  // server, so live editing reports its own state again.
+  it.each([
+    { label: "a file couldn't save", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
+  ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {
+    renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying", "document-unavailable"), ...status }, failedSaves });
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
   });
 
   // The server's report does not explain a named reason, so once the server
