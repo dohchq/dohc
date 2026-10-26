@@ -1,9 +1,11 @@
 import { Worker } from "node:worker_threads";
+import * as Y from "yjs";
 import {
   documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
+  yDocToMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
 import { isLossyDocumentState, isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
@@ -21,11 +23,26 @@ export type DocumentProjectionRequest =
   | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
   // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
   // the verdict by `digest`, the SHA-256 of the text.
-  | { kind: "lossy"; markdown: string; digest: string };
+  | { kind: "lossy"; markdown: string; digest: string }
+  | { kind: "recover"; updates: readonly Uint8Array[] };
 
 type DocumentProjectionResult<Request extends DocumentProjectionRequest> =
-  Request extends { kind: "edit" | "create" } ? Uint8Array | null
-    : Request extends { kind: "lossy" } ? boolean : string;
+  Request extends { kind: "recover" } ? string | null
+    : Request extends { kind: "edit" | "create" } ? Uint8Array | null
+      : Request extends { kind: "lossy" } ? boolean : string;
+
+/** The document a recovery package's updates rebuild, or null when one still waits on what it depends on. */
+export function recoveredDocumentMarkdown(updates: readonly Uint8Array[]): string | null {
+  const doc = new Y.Doc();
+  try {
+    for (const update of updates) Y.applyUpdate(doc, update);
+    // An update missing what it depends on would leave its edit out of the copy.
+    if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) return null;
+    return yDocToMarkdown(doc);
+  } finally {
+    doc.destroy();
+  }
+}
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -70,6 +87,8 @@ export function runDocumentProjection(
       });
     case "lossy":
       return isLossyMarkdownCached(request.digest, request.markdown);
+    case "recover":
+      return recoveredDocumentMarkdown(request.updates);
   }
 }
 

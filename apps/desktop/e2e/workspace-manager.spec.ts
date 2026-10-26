@@ -36,7 +36,31 @@ test("workspace manager creates another window and forgets a workspace without d
       await manager.emulateMedia({ reducedMotion: "reduce" });
       await manager.screenshot({ path: testInfo.outputPath(`manager-${theme}.png`) });
     }
-    await manager.getByRole("textbox", { name: "Folder name" }).fill("second");
+    // A cut path puts "…" right after its first folder, at every width.
+    const cutPath = () => manager.getByTestId("workspace-manager-row").evaluate((row) => {
+      const dots = row.querySelector("[data-path-cut]");
+      const first = dots?.previousElementSibling;
+      const folders = dots?.nextElementSibling;
+      const name = folders?.nextElementSibling;
+      if (!dots || !first || !folders || !name) return null;
+      return {
+        afterFirst: dots.getBoundingClientRect().left - first.getBoundingClientRect().right,
+        beforeFolders: folders.getBoundingClientRect().left - dots.getBoundingClientRect().right,
+        nameCut: name.scrollWidth > name.clientWidth,
+      };
+    });
+    await resize.focus();
+    await manager.keyboard.press("Home");
+    for (const width of ["220", "236", "252"]) {
+      await expect(resize).toHaveAttribute("aria-valuenow", width);
+      await expect.poll(cutPath).toEqual({
+        afterFirst: expect.closeTo(0, 1),
+        beforeFolders: expect.closeTo(0, 1),
+        nameCut: false,
+      });
+      await manager.keyboard.press("ArrowRight");
+    }
+    await manager.getByRole("textbox", { name: "Workspace name" }).fill("second");
     const secondOpened = desktop.app.waitForEvent("window");
     await manager.getByRole("button", { name: "Create workspace", exact: true }).click();
     const second = await secondOpened;

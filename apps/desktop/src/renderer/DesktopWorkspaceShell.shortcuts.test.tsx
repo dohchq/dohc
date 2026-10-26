@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
@@ -47,19 +48,11 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     }
   });
 
-  it("labels the empty-editor chips with each command's primary binding", async () => {
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])), platform);
-    renderShell(bridge);
-    await screen.findByText("Select a file, or create one");
-    const chips = platform === "darwin"
-      ? ["⌘N · new file", "⇧⌘P · commands", "⌘P · go to"]
-      : ["Ctrl N · new file", "Ctrl Shift P · commands", "Ctrl P · go to"];
-    for (const text of chips) {
-      const chip = screen.getByRole("button", { name: text });
-      // A narrow group wraps whole chips instead of clipping or splitting one.
-      expect(chip.className).toContain("whitespace-nowrap");
-      expect(chip.parentElement!.className.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "max-w-full"]));
-    }
+  it("labels the start surface's document tile with the new-file binding", async () => {
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs([])), platform));
+    const tile = await within(await screen.findByTestId("start-surface")).findByRole("button", { name: FILE_KIND_RECORDS.markdown.name });
+    expect(tile.textContent).toContain(platform === "darwin" ? "⌘N" : "Ctrl N");
+    expect(tile.getAttribute("aria-keyshortcuts")).toBe(platform === "darwin" ? "Meta+N" : "Control+N");
   });
 
   it.each(shellBindings(platform))("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
@@ -229,17 +222,11 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await waitFor(() => expect(screen.queryByTestId("shortcut-confirm")).toBeNull());
   });
 
-  it.each(["menu", "shell", "chip", "empty-editor chip"])("takes a changed registry binding through %s", async (consumer) => {
+  it.each(["menu", "shell", "chip"])("takes a changed registry binding through %s", async (consumer) => {
     const accelerators = SHORTCUTS["quick-open"].accelerators;
     const original = accelerators[0];
     Reflect.set(accelerators, "0", "CommandOrControl+O");
     try {
-      if (consumer === "empty-editor chip") {
-        renderShell(makeBridge(Promise.resolve(storedStateWithTabs([])), platform));
-        await screen.findByText("Select a file, or create one");
-        expect(screen.getByRole("button", { name: `${platform === "darwin" ? "⌘O" : "Ctrl O"} · go to` })).toBeTruthy();
-        return;
-      }
       await ready(platform);
       if (consumer === "chip") {
         const trigger = screen.getByTestId("titlebar-quick-open");

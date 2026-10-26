@@ -608,6 +608,14 @@ describe("tabs", () => {
     expect(parseTab(path).kind).toBe("collection");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
     expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(TAB_KINDS.collection.title(parseTab(path))).toBe("road trips");
+    expect(TAB_KINDS.collection.tooltip(parseTab(path))).toBe("projects/road trips");
+    expect(TAB_KINDS.collection.explorerTitle(parseTab(path))).toBe("road trips");
+    for (const name of ["100% done", "a%zz"]) {
+      const literal = parseTab(collectionTabPath(`projects/${name}`));
+      expect(TAB_KINDS.collection.title(literal)).toBe(name);
+      expect(TAB_KINDS.collection.tooltip(literal)).toBe(`projects/${name}`);
+    }
     expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
     expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
@@ -674,6 +682,22 @@ describe("tabs", () => {
     const shown = replaceTab(withTabs(page, "Untitled.md"), page, "Untitled.md");
     expect(allTabs(shown).map((tab) => tab.path)).toEqual(["Untitled.md"]);
     expect(replaceTab(state, "tab://new-page/gone/", "Untitled.md")).toBe(state);
+  });
+
+  // The shell does not load the Apps view's list, so the tab names an app by
+  // its folder, as typed, never by its encoded tab address.
+  it.each([
+    ["apps/trip", "trip"],
+    ["clients/acme/portal", "portal"],
+    ["apps/100% done", "100% done"],
+  ])("names the app at %s by its folder", (root, name) => {
+    const tab = parseTab(siteTabPath(root)), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual([name, root, name]);
+  });
+
+  it("keeps the tab address for an app folder that cannot be decoded", () => {
+    const tab = parseTab("tab://app/%ZZ"), rules = TAB_KINDS.site;
+    expect([rules.title(tab), rules.tooltip(tab), rules.explorerTitle(tab)]).toEqual(["%ZZ", "tab://app/%ZZ", "%ZZ"]);
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {

@@ -23,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -86,12 +86,12 @@ import {
   AboutHistoryView,
   AboutLinksView,
   AboutSection,
-  type AccessReason,
   type AccessSetup,
   type AccessView,
   type ChatLinksView,
   type LinksView,
 } from "../workbench/About";
+import type { AccessReason } from "../workbench/accessReason";
 import type { AboutConversation } from "../workbench/aboutConversation";
 import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
@@ -574,7 +574,8 @@ const REFUSED_RESTORE = new Error(
 );
 const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",
-  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  title: "dohc could not restore notes/plan.md",
+  message: readError(REFUSED_RESTORE).words ?? "",
   details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
   atMs: 0,
   canRetry: true,
@@ -896,7 +897,7 @@ function AgentOfferComposer(props: {
       agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
       above={props.replying ? (
         <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
-          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
   const focused = props.focus ? (
@@ -3022,7 +3023,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={
                 <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
-                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
               }
               poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>

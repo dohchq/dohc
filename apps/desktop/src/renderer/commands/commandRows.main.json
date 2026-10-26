@@ -3,6 +3,7 @@
   "context": {
     "shareView": null,
     "activeDocumentKind": "markdown",
+    "activeDocumentShareable": true,
     "pinnedApps": [
       {
         "root": "apps/Trip planner",
@@ -70,6 +71,10 @@
     {
       "id": "toggle-markdown-source",
       "label": "Toggle markdown source view"
+    },
+    {
+      "id": "share-file",
+      "label": "Share…"
     },
     {
       "id": "toggle-about",

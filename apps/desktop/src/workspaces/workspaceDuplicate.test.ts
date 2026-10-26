@@ -8,6 +8,33 @@ import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import type { WorkspaceEngineCapture, AuthoredPathChanges } from "./workspaceEngineCapture";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import * as fsPromises from "node:fs/promises";
+import { forceStoredNameListing } from "../testing/storedNameListing";
+
+vi.mock("node:fs/promises", async importOriginal => ({ ...await importOriginal<typeof import("node:fs/promises")>() }));
+
+it.each(["before", "under"])("names Duplicate when the stored identity is unknown %s the hold", async when => {
+  const f = await fixture();
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  const refuseListing = () => {
+    forceStoredNameListing(join(f.rootPath, "source.md"));
+    vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+  };
+  if (when === "under") vi.mocked(f.changePathsAs).mockImplementation(async (_paths, _author, work) => {
+    refuseListing();
+    return work(f.engine);
+  });
+  else refuseListing();
+  try {
+    await expect(f.run()).rejects.toThrow("dohc did not duplicate source.md. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again.");
+    expect(f.engine.duplicateFile).not.toHaveBeenCalled();
+    expect(f.engine.recordDisk).not.toHaveBeenCalled();
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    vi.restoreAllMocks();
+  }
+});
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, {recursive: true, force: true}); });
 async function fixture() {

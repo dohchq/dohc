@@ -90,7 +90,7 @@ export const AgentOffer = memo(function AgentOffer(props: {
       role="status"
       data-testid="composer-agent-offer"
       data-state={offer.state}
-      className={`dohc-pop-in flex min-w-0 items-center gap-1.5 text-[11px] text-muted ${
+      className={`dohc-pop-in flex min-w-0 items-center gap-1.5 text-[11px] tabular-nums text-muted ${
         props.surface === "post"
           ? "@container flex-1 px-1.5"
           : "absolute bottom-full right-2 z-10 mb-1.5 h-7 max-w-[calc(100%-1rem)] rounded-full border border-line bg-panel pl-1 pr-2 shadow-sm"
@@ -134,7 +134,7 @@ export const AgentOffer = memo(function AgentOffer(props: {
           <span
             data-testid="composer-agent-offer-reach"
             title={`Reaches ${offer.reach}`}
-            className={`inline-flex h-[18px] min-w-0 shrink-[100] items-center gap-1 overflow-hidden rounded border border-line bg-panel-2 px-1.5 font-mono text-[11px] text-muted ${hideFolder}`}
+            className={`inline-flex h-[18px] min-w-0 shrink-[100] items-center gap-1 overflow-hidden rounded border border-line bg-panel-2 px-1.5 text-[11px] text-muted ${hideFolder}`}
           >
             <Folder size={10} strokeWidth={2} aria-hidden className="shrink-0" />
             <span className="sr-only">reaches </span>

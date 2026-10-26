@@ -54,6 +54,12 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
         OwnerOutboxError::ParentMismatch => "owner-outbox-parent-mismatch",
         OwnerOutboxError::AppendKeyMismatch => "owner-outbox-append-key-mismatch",
         OwnerOutboxError::Frozen => "owner-outbox-frozen",
+        OwnerOutboxError::NotQuarantined => "owner-outbox-not-quarantined",
+        OwnerOutboxError::RecoveryCheckpointOutdated => "owner-outbox-read-changed",
+        OwnerOutboxError::RecoveryCheckpointUnavailable => {
+            "owner-outbox-recovery-checkpoint-unavailable"
+        }
+        OwnerOutboxError::AcceptedStateIncomplete => "owner-outbox-accepted-state-incomplete",
         OwnerOutboxError::NotFound => "owner-outbox-not-found",
         OwnerOutboxError::ReceiptMismatch => "owner-outbox-receipt-mismatch",
         OwnerOutboxError::Corrupt => {
@@ -226,6 +232,17 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // involved, and there is nothing for a person to do.
     if store_busy(error) {
         return WireError::new(ErrorCode::Overloaded, "engine-store-busy");
+    }
+    // A read that never migrates, as a CLI read of a workspace dohc has not
+    // opened since it updated, found migrations this build has yet to run.
+    if matches!(
+        error,
+        RuntimeError::Storage(dohc_engine_storage::StorageError::MigrationPending)
+    ) {
+        return WireError::new(
+            ErrorCode::Internal,
+            "Open the workspace in dohc first, then try again.",
+        );
     }
     // Keep the storage refusal code so the desktop can offer move-aside
     // recovery instead of reporting a generic workspace failure.
@@ -1095,6 +1112,18 @@ mod tests {
             assert_eq!(mapped.code, expected);
             assert_eq!(mapped.message, message);
         }
+    }
+
+    #[test]
+    fn a_store_with_pending_migrations_asks_for_the_workspace_to_open_first() {
+        let mapped = map_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::MigrationPending,
+        ));
+        assert_eq!(mapped.code, ErrorCode::Internal);
+        assert_eq!(
+            mapped.message,
+            "Open the workspace in dohc first, then try again."
+        );
     }
 
     #[test]

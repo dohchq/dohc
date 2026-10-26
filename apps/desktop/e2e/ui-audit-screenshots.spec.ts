@@ -227,9 +227,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     const page = desktop.page;
 
     // 01 — first-run surface (before opening the workspace)
-    const openFolder = page.getByRole("button", {
-      name: /open an existing folder as a workspace/i,
-    });
+    const openFolder = page.getByTestId("workspace-manager").getByRole("button", { name: "Open folder", exact: true });
     await openFolder.waitFor({ state: "visible", timeout: 8_000 });
     await shot(page, "01-first-run-light");
     await setTheme(page, "dark");

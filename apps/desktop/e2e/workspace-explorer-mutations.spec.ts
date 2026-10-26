@@ -221,9 +221,12 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
     expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
 
-    // A drop of empty folders lands no file; the folders show in the tree.
+    // A drop of empty folders lands no file, and the folder it landed is
+    // selected all the same.
     await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
     await dropFromOs(join(outside, "Empty"));
+    await expect(explorerRow(page, "Empty")).toHaveAttribute("aria-selected", "true");
+    await expect(explorerRow(page, "Empty")).toBeFocused();
     await revealExplorerPath(page, "Empty/Inner");
     await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("empty-folder-drop.png") });

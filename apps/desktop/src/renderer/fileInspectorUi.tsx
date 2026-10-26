@@ -40,15 +40,15 @@ export function ViewActions(props: {
   const slot = useTabRowActionsSlot();
   const content = (
     <>
-      {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
+      {/* 28px: the widest mark (12px), its gap and an ellipsis. A grid of
           minmax(auto, max-content) columns, so its words set how wide it can
           grow and each item's own minimum how narrow: a label (min-w-0)
-          shrinks, and the row shrinks it to 25px before any tab name gives
+          shrinks, and the row shrinks it to 28px before any tab name gives
           way, while Try again keeps its natural width. */}
       {props.status ? (
         <div
           data-view-status=""
-          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[28px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
         >
           {props.status}
         </div>

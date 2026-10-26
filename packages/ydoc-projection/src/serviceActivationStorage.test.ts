@@ -589,7 +589,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
-    workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()}}:undefined,
+    workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
     config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
@@ -661,7 +661,7 @@ function nativeOwner(f:ReturnType<typeof fixture>){
     await hold(request.method)
     if(request.method==='liveApplication.register')return {id:request.id,result:{registrationId:7}}
     if(request.method==='liveApplication.ownerState')return {id:request.id,result:{adoptionId:f.capture.activationId,
-      expectedLocalSequence:f.capture.source.nativeHeadSequence,throughCursor:0,outboxId:null,pendingBytes:0,outboxState:'active'}}
+      expectedLocalSequence:f.capture.source.nativeHeadSequence,throughCursor:0,outboxId:null,pendingBytes:0,outboxState:'active',retryDeliveryId:null}}
     if(request.method==='liveApplication.settle'){
       const terminal=request.params.terminalReceipt as LiveUpdateReceipt|null
       return {id:request.id,result:{status:'settled',settlement:{settlementId:'settlement',previousCursor:0,terminalCursor:terminal?.journalCursor??0,

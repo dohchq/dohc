@@ -510,7 +510,7 @@ mod tests {
                     let reader = if raw {
                         Connection::open(path).unwrap()
                     } else {
-                        crate::schema::open_engine_db_read_only(&path, None)
+                        crate::schema::open_engine_db_read_only(&path, None, None)
                             .unwrap()
                             .conn
                     };

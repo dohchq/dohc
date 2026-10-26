@@ -1274,7 +1274,7 @@ impl ActorHandle {
     /// Capture and index text against one reconcile-owned policy snapshot.
     pub fn capture_ingest_with_search_policy_blocking(
         &self,
-        input: CaptureIngest,
+        input: &CaptureIngest,
         root_dir: PathBuf,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
@@ -1417,7 +1417,7 @@ impl ActorHandle {
     /// Capture a binary file on the actor's writer, blocking the caller.
     pub fn capture_ingest_binary_blocking(
         &self,
-        input: CaptureIngestBinary,
+        input: Arc<CaptureIngestBinary>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
@@ -1434,7 +1434,7 @@ impl ActorHandle {
     /// state; custody stays at the composition layer).
     pub fn capture_secret_blocking(
         &self,
-        input: CaptureSecret,
+        input: Arc<CaptureSecret>,
         key: SecretDataKey,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<SecretWriteResult, RuntimeError> {
@@ -3614,7 +3614,7 @@ mod capture_secret_root_guard_tests {
         std::fs::write(root.join(SECRET_PATH), b"TOKEN=original").expect("write original secret");
         actor
             .capture_secret_blocking(
-                CaptureSecret {
+                Arc::new(CaptureSecret {
                     workspace_id: WORKSPACE_ID.to_owned(),
                     version_id: VERSION_ID.to_owned(),
                     path: SECRET_PATH.to_owned(),
@@ -3623,7 +3623,7 @@ mod capture_secret_root_guard_tests {
                     metadata_correlation_id: None,
                     now_ms: 2,
                     claim_foreign_head: true,
-                },
+                }),
                 SecretDataKey::from_bytes(&[0x41; 32]).expect("secret key"),
                 Arc::new(NoFaults),
             )

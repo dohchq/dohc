@@ -222,11 +222,16 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work)?;
+        let opened = open_engine_db_read_only(path, work, None)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
-        let flushes = crate::flush::Flushes::read_only();
-        Ok(EngineStore {
-            conn: opened.conn,
+        Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// A store for queries only over `conn`, a checked connection to a current
+    /// store at `path` that this open neither migrates nor writes.
+    pub(crate) fn from_read_only(conn: Connection, path: &Path, passive: bool) -> Self {
+        EngineStore {
+            conn,
             checkpoints: None,
             checkpoint_changes: 0,
             freshly_created: false,
@@ -235,8 +240,8 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
-            flushes,
-        })
+            flushes: crate::flush::Flushes::read_only(),
+        }
     }
 
     /// Count this connection's SQLite work into `work` for as long as someone

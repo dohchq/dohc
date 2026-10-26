@@ -116,7 +116,11 @@ export function CommandPalette(props: {
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 moveSelection(-1);
-              } else if (event.key === "Enter") runCommand(matches[selected]);
+              } else if (event.key === "Enter") {
+                // Its keypress would press whatever the command focused.
+                event.preventDefault();
+                runCommand(matches[selected]);
+              }
             }}
             // Intentional focus treatment (the input autofocuses on open): no
             // ring — the framing row and caret carry focus, and the global
