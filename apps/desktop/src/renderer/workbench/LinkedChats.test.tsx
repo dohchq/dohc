@@ -178,7 +178,7 @@ describe("LinkedChatsPanel with no file focused", () => {
 });
 
 describe("LinkedChatsPanel startup", () => {
-  it("shows the Chats header alone until the first read answers", async () => {
+  it("shows loading lines until the first read answers", async () => {
     const fileRead = deferred<unknown>();
     bridgeMock.listFileChats.mockReturnValue(fileRead.promise);
     render(
@@ -192,7 +192,7 @@ describe("LinkedChatsPanel startup", () => {
 
     await act(async () => undefined);
     expect(screen.getByTestId("about-chats-toggle")).toBeTruthy();
-    expect(screen.queryByText("Loading Chats...")).toBeNull();
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
     expect(screen.queryByTestId("linked-chats-panel")).toBeNull();
     expect(screen.queryByTestId("about-chats-count")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("loading");

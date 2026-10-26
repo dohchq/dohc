@@ -177,11 +177,14 @@ export function AboutNote(props: {
   );
 }
 
-// Said while a link index builds: the rows shown may grow.
+// Said while a link index builds: the rows shown may grow. Its words start
+// where a row's name does.
 export function AboutGathering(props: { testId: string }) {
   return (
-    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted">
-      <LoaderCircle size={12} aria-hidden className="shrink-0 text-subtle motion-safe:animate-spin" />
+    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-2 px-2 py-1 text-[12px] text-muted">
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+        <LoaderCircle size={12} className="motion-safe:animate-spin" />
+      </span>
       Gathering links
     </p>
   );
@@ -944,9 +947,9 @@ export function AboutHistoryView(props: {
       expanded={props.expanded}
       onToggle={props.onToggle}
     >
-      {/* A settled read answers within 100 ms, so the header shows alone
-          until it does. */}
-      {view.status === "loading" ? null : view.status === "failed" ? (
+      {view.status === "loading" ? (
+        <SkeletonLines rows={2} className="px-2 py-1" />
+      ) : view.status === "failed" ? (
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>

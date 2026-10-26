@@ -520,9 +520,7 @@ export function LinkedChatsPanel(props: {
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
         >
-          {/* A settled read answers within 100 ms, so the first read shows
-              the header alone. Only a wait on the engine shows lines. */}
-          {threads === null ? null : threads.status === "updating" ? (
+          {threads === null || threads.status === "updating" ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
           ) : threads.status === "unavailable" ? (
             <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />

@@ -1373,8 +1373,8 @@ describe("About History", () => {
     const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
     expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
-    // A settled read answers within 100 ms, so the header shows alone.
-    expect(sectionBody("history").childElementCount).toBe(0);
+    expect(sectionBody("history").childElementCount).toBe(1);
+    expect(screen.queryByTestId("about-history-updating")).toBeNull();
     // While the engine reads the workspace in, History says it is adding changes.
     rerender(<HistorySection file={{ status: "updating" }} />);
     expect(screen.getByTestId("about-history-updating").textContent).toBe("Adding recent changes to History");
@@ -1394,11 +1394,11 @@ describe("About History", () => {
     expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  it("shows its header alone, then says when the file has no changes", async () => {
+  it("shows loading lines, then says when the file has no changes", async () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
-    expect(sectionBody("history").childElementCount).toBe(0);
+    expect(sectionBody("history").childElementCount).toBe(1);
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));

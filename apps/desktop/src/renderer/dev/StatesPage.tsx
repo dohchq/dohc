@@ -2153,10 +2153,12 @@ function Pane(props: { theme: "light" | "dark" }) {
               onOpenMoment={noop} />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="the first read: each header alone until it answers">
+        <Specimen label="the first read: lines after 150 ms until it answers">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>{null}</AboutSection>
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
           </AboutPanelSpecimen>
         </Specimen>
