@@ -1080,9 +1080,9 @@ impl<'a> LinkedChatStore<'a> {
     /// single-writer claim guard forever. For each such row this marks the run
     /// record ended-with-failure, then requeues the trigger to `pending` (so a
     /// fresh worker can claim it) when `attempt_count < max_attempts`, else leaves
-    /// it terminally `failed`. Each trigger the run covered goes back the same
-    /// way, whichever way its first trigger went. Returns the first trigger ids
-    /// requeued to `pending`.
+    /// it terminally `failed`. Each trigger the run covered goes back to
+    /// `pending` when it has attempts left, whichever way its first trigger
+    /// went. Returns the first trigger ids requeued to `pending`.
     ///
     /// Because the engine is the single writer, this sweep is safe only when a
     /// freshly-created actor establishes the startup recovery boundary. An

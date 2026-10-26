@@ -2955,7 +2955,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   // The engine's rule: an interrupted run's covered triggers go back to the
-  // queue with its first trigger, unless they have used their attempts.
+  // queue unless they have used their attempts, whether or not its first
+  // trigger goes back.
   private requeueCovered(state: WorkspaceState, runId: string, maxAttempts: number, atMs: number): void {
     for (const covered of state.dispatches.values()) {
       if (covered.runId !== runId || covered.state !== "done" || covered.attemptCount >= maxAttempts) continue;
