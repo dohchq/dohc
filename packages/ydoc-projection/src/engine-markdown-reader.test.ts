@@ -284,8 +284,10 @@ it('refuses schema check failures in the reader and its strict journal', () => {
     const checkpoint = Y.encodeStateAsUpdate(doc)
     expect(reader.prove({...context, source, checkpoint}))
       .toEqual({kind: 'refused', reason: 'invalid-schema'})
-    expect(createLiveMarkdownJournalValidator(policy, true)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])}))
-      .toMatchObject({kind: 'refused', reason: 'invalid-schema'})
+    for (const engineReader of [true, false]) {
+      expect(createLiveMarkdownJournalValidator(policy, engineReader)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])}))
+        .toMatchObject({kind: 'refused', reason: 'invalid-schema'})
+    }
   } finally {doc.destroy()}
 })
 
@@ -297,7 +299,10 @@ it.each([new RangeError('Array buffer allocation failed'), new RangeError('Maxim
     const trap = vi.spyOn(Object.getPrototypeOf(tree(doc)), 'check').mockImplementation(() => {throw error})
     try {
       expect(() => reader.prove({...context, source: 'Body', checkpoint})).toThrow(error)
-      expect(() => createLiveMarkdownJournalValidator(policy, true)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])})).toThrow(error)
+      // The relay's journal too: a validator failure retries an owner's edit instead of refusing it.
+      for (const engineReader of [true, false]) {
+        expect(() => createLiveMarkdownJournalValidator(policy, engineReader)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])})).toThrow(error)
+      }
     } finally {trap.mockRestore(); doc.destroy()}
   },
 )

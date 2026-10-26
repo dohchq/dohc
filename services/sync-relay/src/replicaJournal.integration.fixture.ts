@@ -11,6 +11,7 @@ import {Duplex} from "node:stream";
 import * as Y from "yjs";
 import {EngineClient, DuplexEngineClientConnection} from "@dohc/workspace-engine-client/daemon";
 import {YdocLiveAdapter} from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {markdownToYDoc, yDocToMarkdown} from "../../../packages/ydoc-projection/src/import-export";
 import {createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation";
 import {initializeRelayDeployment, openRelayDeployment} from "./relayDeployment";
@@ -169,7 +170,7 @@ async function openHost(configured = true) {
     consumer = new OwnerCommittedDelivery(storage, deployment.history, {client: bridge.client, workspace: handle, host: coordinate,
       deadlineMs: 120_000, nextRequestId: () => id++, bounds: {maxBytes: 4 * 1024 * 1024, maxEvents: 64},
       ownerAdmission: {shares: new Map([["workspace", "share"]]), trustedAccount: () => undefined,
-        maxEntriesPerDrain: 64, maxBytesPerDrain: 16 * 1024 * 1024, validate: createLiveMarkdownJournalValidator(policy)}});
+        maxEntriesPerDrain: 64, maxBytesPerDrain: 16 * 1024 * 1024, refusals: new OwnerKnownRefusals(), validate: createLiveMarkdownJournalValidator(policy)}});
   }
   return {pid: hostProcess.pid, main};
 }

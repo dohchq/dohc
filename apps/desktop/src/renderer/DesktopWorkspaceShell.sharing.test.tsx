@@ -301,6 +301,13 @@ describe("adding a share to this workspace", () => {
 describe("active file sharing", () => {
   it("opens the relay share dialog for the active inspector path and returns a code", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true,
+      workspaceSyncConnected: true,
+    }));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -310,6 +317,8 @@ describe("active file sharing", () => {
 
     const dialog = await screen.findByTestId("share-dialog");
     expect(within(dialog).getByText("a.md")).toBeTruthy();
+    await waitFor(() => expect(dialog.querySelector("[inert]")).toBeNull());
+    expect(within(dialog).queryByTestId("share-setup")).toBeNull();
 
     await user.type(within(dialog).getByTestId("share-email"), "friend@dohc.test");
     await user.click(within(dialog).getByTestId("share-create"));
@@ -359,6 +368,37 @@ describe("active file sharing", () => {
     const palette = await screen.findByTestId("command-palette");
     expect(within(palette).queryAllByRole("option")).toEqual([]);
     expect(within(palette).getByText("No matching commands")).toBeTruthy();
+  });
+
+  // Share reads the same facts as About's Access, and its one action opens
+  // the place that fixes the cause, where About's would.
+  it.each([
+    [
+      "does not sync",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false },
+      "not-synced", "Set up sync", "settings-section-cloud",
+    ],
+    [
+      "is not connected to its server",
+      { connected: false, email: "", serverUrl: "", workspaceSynced: true, workspaceServerUrl: "https://sync.example.org" },
+      "signed-out", "Connect server", "cloud-server-url",
+    ],
+  ] as const)("says why before the form when the workspace %s", async (_case, status, reason, action, opens) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("file-share"));
+
+    const setup = await within(await screen.findByTestId("share-dialog")).findByTestId("share-setup");
+    expect(setup.dataset.reason).toBe(reason);
+    if (reason === "signed-out") expect(setup.textContent).toContain("Not connected to sync.example.org");
+    await user.click(within(setup).getByRole("button", { name: action }));
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
   });
 });
 
@@ -1795,8 +1835,9 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 
     // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await screen.findByTestId("command-palette");
-    await user.keyboard("mcp{Enter}");
+    const palette = await screen.findByTestId("command-palette");
+    await user.keyboard("mcp");
+    await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>

@@ -244,7 +244,8 @@ function captureLiveFrameHost(options: {
         const trustedAutomationGrant = input.trustedAutomationGrant;
         if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
-        if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "invalid-update" };
+        if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
+        if (updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
         if (options.validationBudget) {
           releaseValidation = options.validationBudget.reserve() ?? undefined;

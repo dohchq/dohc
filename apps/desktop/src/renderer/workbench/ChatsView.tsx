@@ -3877,11 +3877,11 @@ export function ChatsView(props: {
                             </AgentName>
                           </span>
                           {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" /> : null}
-                          <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
+                          <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
                           <time
                             dateTime={time.iso}
                             title={time.label}
-                            className="shrink-0 font-mono text-[11px] text-subtle"
+                            className="shrink-0 text-[11px] tabular-nums text-subtle"
                           >
                             {formatShortTime(item.message.createdAtMs)}
                           </time>
@@ -4188,7 +4188,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -4213,7 +4213,7 @@ export function ChatsView(props: {
         {computerDispatchPaused && dispatchState && dispatchState.pendingCount > 0 && liveRunId === null ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
             <span>dispatch paused on this computer — </span>
             {!threadLocked ? (
@@ -4234,7 +4234,7 @@ export function ChatsView(props: {
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
             <span>dispatch paused — </span>
             {!threadLocked ? (
@@ -4255,7 +4255,7 @@ export function ChatsView(props: {
           dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
           >
             {liveRunId !== null
               ? `agent working${
@@ -4339,7 +4339,7 @@ export function ChatsView(props: {
                         setReplyTarget(null);
                       }}
                     >
-                      Replying to {replyTarget.authorLabel} ·
+                      Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>
                   ) : null}
                 </>}
@@ -4539,7 +4539,7 @@ export function ChatsView(props: {
               <span
                 data-testid="chats-agent-screen-reach"
                 title={props.workspacePath}
-                className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
+                className="hidden shrink-0 truncate text-[10px] tabular-nums text-subtle sm:inline"
               >
                 reaches {reachName(props.workspacePath)}
               </span>
@@ -4604,7 +4604,7 @@ export function ChatsView(props: {
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
                     ) : null}
                     <button
                       type="button"
@@ -4932,7 +4932,7 @@ export function ChatsView(props: {
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 font-mono text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
+                    <span className="shrink-0 text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"
@@ -4974,7 +4974,7 @@ export function ChatsView(props: {
                       trailing={
                         <>
                           {dm.connected ? null : (
-                            <span className="shrink-0 font-mono text-[10px] text-subtle">ended</span>
+                            <span className="shrink-0 text-[10px] text-subtle">ended</span>
                           )}
                           <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
                         </>
@@ -5073,7 +5073,7 @@ export function ChatsView(props: {
                       {agentReady ? null : (
                         <span
                           data-testid="chats-my-agent-state"
-                          className="shrink-0 font-mono text-[10px] text-subtle"
+                          className="shrink-0 text-[10px] text-subtle"
                         >
                           not set up
                         </span>
@@ -5106,7 +5106,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="shrink-0 truncate font-mono text-[10px] text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
                             via {agent.owner}
                           </span>
                         }

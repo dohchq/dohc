@@ -1350,6 +1350,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return this.#fileMutationPort;
   }
 
+  /**
+   * Changes a document's live editing for a main-side door, as the window
+   * does once its editors closed: refused while an editor holds the
+   * document, and an editor that opens meanwhile waits for the change.
+   */
+  async withLiveEditingChange<T>(authorityId: symbol, path: string, change: () => Promise<T>): Promise<T> {
+    try {
+      return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
+    } catch (error) {
+      if (!(error instanceof LiveDocumentOwnedError)) throw error;
+      throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`, { cause: error });
+    }
+  }
+
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {

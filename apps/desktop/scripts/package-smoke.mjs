@@ -161,15 +161,20 @@ if (config) {
       `publish URL is release-ready (${publishConfig?.url ?? "missing"})`,
     );
   }
-  const fileExtensions = config.fileAssociations?.flatMap((entry) =>
-    Array.isArray(entry.ext) ? entry.ext : [entry.ext],
-  ) ?? [];
+  // fileAssociations would give each macOS document the full app icon.
+  check(!config.fileAssociations && !config.mac?.fileAssociations, "macOS document types come only from mac.extendInfo");
+  const macTypes = config.mac?.extendInfo?.CFBundleDocumentTypes ?? [];
+  check(
+    macTypes.length > 0 && macTypes.every((type) => type.CFBundleTypeIconSystemGenerated === true),
+    "macOS draws the icon of every dohc document type",
+  );
+  const windowsExtensions = config.win?.fileAssociations?.flatMap((entry) => [entry.ext].flat()) ?? [];
   // Markdown may make dohc its default app; text, CSV and JSON never do.
   const expectedRanks = { md: "Default", markdown: "Default", txt: "Alternate", csv: "Alternate", json: "Alternate" };
   for (const [ext, rank] of Object.entries(expectedRanks)) {
-    check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
-    const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
-    check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
+    check(windowsExtensions.includes(ext), `Windows Open with dohc includes .${ext}`);
+    const ranks = macTypes.filter((type) => type.CFBundleTypeExtensions?.includes(ext)).map((type) => type.LSHandlerRank);
+    check(ranks.length === 1 && ranks[0] === rank, `macOS .${ext} has one document type, ranked ${rank} (${ranks.join(", ") || "missing"})`);
   }
   // A Linux desktop entry names types, not extensions.
   for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {

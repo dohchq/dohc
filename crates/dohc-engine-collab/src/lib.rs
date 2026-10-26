@@ -58,12 +58,16 @@ pub use lease::{Lease, LeaseRegistry};
 pub use live_object_binding::LiveObjectBinding;
 pub use owner_outbox::{
     acknowledge as acknowledge_owner_outbox, append as append_owner_outbox,
+    prepare_recovery_checkpoint as prepare_owner_outbox_recovery_checkpoint,
     quarantine as quarantine_owner_outbox, read_pending as read_pending_owner_outbox,
-    read_pending_page as read_pending_owner_outbox_page, OwnerDeliveryReceipt,
-    OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput, OwnerOutboxAppendResult,
-    OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits, OwnerOutboxPageResult,
-    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
-    OwnerOutboxReadPart, OwnerOutboxState,
+    read_pending_hosted_page as read_pending_hosted_owner_outbox_page,
+    read_pending_page as read_pending_owner_outbox_page,
+    record_refusal as record_owner_outbox_refusal, retry as retry_owner_outbox,
+    HostedStoreIdentity, OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult,
+    OwnerOutboxAppendInput, OwnerOutboxAppendResult, OwnerOutboxEntry, OwnerOutboxError,
+    OwnerOutboxLimits, OwnerOutboxPageResult, OwnerOutboxPending, OwnerOutboxQuarantineInput,
+    OwnerOutboxReadCursor, OwnerOutboxReadPage, OwnerOutboxReadPart, OwnerOutboxRefusal,
+    OwnerOutboxRetryInput, OwnerOutboxState,
 };
 pub use replay_parity::{
     apply_replay_validated_batch, validate_replay_parity, validate_replay_parity_with_scratch,

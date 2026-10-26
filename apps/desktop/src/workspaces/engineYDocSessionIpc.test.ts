@@ -640,6 +640,21 @@ describe("engine Y.Doc IPC adapter", () => {
     await holding;
     await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
   });
+  // An agent's Stop again refuses a document an editor holds, as the window closes its own editors first.
+  it("changes a document's live editing for a main-side door only while no editor holds it", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const change = vi.fn(async () => "stopped");
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
+      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+    expect(change).not.toHaveBeenCalled();
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
+    // The change's own failure passes through unchanged.
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", async () => {throw new Error("Stop live editing is waiting.");}))
+      .rejects.toThrow("Stop live editing is waiting.");
+  });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();

@@ -61,6 +61,7 @@ import {
   isYdocRemoteUpdatesPendingRefusal,
   isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
+  isWorkspaceUpdatingRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
@@ -2531,6 +2532,9 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
+            // The server refused this file's earlier edits, so its queue takes no more.
+            : reason.includes("owner-outbox-frozen")
+              ? "Live editing is paused for this file."
             : unanswered
               ? "No answer after three attempts."
               : "dohc refused this edit.";
@@ -4103,24 +4107,27 @@ export function createWorkspaceEngineCapture(
   // Wraps one background capture task so its overall outcome (ok / failed)
   // reaches onCaptureOutcome, whether the failure was a thrown task (store
   // unavailable) or per-path errors the task swallowed to keep the batch
-  // going. Rethrows so enqueue's catch still logs via onError.
+  // going. Rethrows so enqueue's catch still logs via onError. An engine
+  // still taking in files is busy, not broken: that refusal leaves the
+  // previous outcome standing.
   async function reportCaptureOutcome(task: () => Promise<boolean>): Promise<void> {
-    let ok = false;
+    let ok: boolean;
     try {
       ok = await task();
       storeRefused = null;
       storeRefusedDetail = null;
     } catch (error) {
+      if (isWorkspaceUpdatingRefusal(error)) return;
       // A thrown pass says whether the engine refused the store or
       // failed some other way; a pass that completed — even degraded —
       // reached the store, so any earlier refusal no longer describes it.
       storeRefused = engineStoreRefusalOf(error);
       storeRefusedDetail =
         storeRefused === null ? null : engineStoreRefusalDetailOf(error);
+      emitCaptureOutcome(false);
       throw error;
-    } finally {
-      emitCaptureOutcome(ok);
     }
+    emitCaptureOutcome(ok);
   }
 
   function drainPendingCollectionAdoptions(
@@ -4300,12 +4307,15 @@ export function createWorkspaceEngineCapture(
           options.onHeldFiles?.(status.heldFiles);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
+        const healthy =
+          status === undefined || (status.running && !status.degraded && !status.terminal);
         if (status === undefined || (status.running && !status.terminal)) {
-          await drainPendingCollectionAdoptions(engine);
+          await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
+            // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
+            if (healthy || !isWorkspaceUpdatingRefusal(error)) throw error;
+          });
         }
-        return status === undefined
-          ? true
-          : status.running && !status.degraded && !status.terminal;
+        return healthy;
       }).finally(() => {
         daemonCaptureHealthQueued = false;
       }),
