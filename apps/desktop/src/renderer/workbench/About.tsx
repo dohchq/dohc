@@ -38,7 +38,7 @@ import type { AboutConversation } from "./aboutConversation";
 import { accessReasonForLane, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { HistoryPaused, HistoryUpdating, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryPaused, HistoryUpdating, MARK_BOX, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -239,7 +239,9 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       onClick={props.onOpen}
       className={`${ABOUT_ROW_BUTTON} h-10`}
     >
-      <MessageSquare size={14} aria-hidden className="shrink-0 text-subtle" />
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+        <MessageSquare size={14} />
+      </span>
       <span className="flex min-w-0 flex-col">
         <span className="truncate">{props.thread.title}</span>
         <time dateTime={when.iso} className="truncate text-[11px] text-subtle">
@@ -681,7 +683,9 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       onClick={props.onOpen}
       className={`${ABOUT_ROW_BUTTON} py-1`}
     >
-      <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} className="mt-px self-start text-subtle" />
+      <span className={`${MARK_BOX} self-start text-subtle`}>
+        <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} />
+      </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-2">
           <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
@@ -822,10 +826,12 @@ export function AboutLinksView(props: {
 // ---- History ----
 
 // The file History asks about. Its object id comes from the file's chats
-// read: loading until that answers, null for a file the engine does not
-// track, and a failed read offers that read's Try again.
+// read: loading until that answers, updating while the engine still reads the
+// workspace's files in, null for a file the engine does not track, and a
+// failed read offers that read's Try again.
 export type AboutFile =
   | typeof LOADING
+  | { status: "updating" }
   | { status: "failed"; retry: () => void }
   | { status: "ready"; objectId: string | null };
 
@@ -844,7 +850,11 @@ export type HistoryView =
 const HISTORY_ROWS = 5;
 
 // A change with no one author, or several, keeps the file mark here.
-const FILE_MARK = <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
+const FILE_MARK = (
+  <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+    <FileText size={14} />
+  </span>
+);
 
 export function AboutHistory(props: {
   workspaceId: string;
@@ -903,7 +913,7 @@ export function AboutHistory(props: {
   }, [cancel, load, objectId, props.expanded, props.revision]);
 
   const view: HistoryView =
-    file.status === "loading" ? LOADING
+    file.status === "loading" || file.status === "updating" ? file
     : file.status === "failed" ? { status: "failed", retry: file.retry }
     : file.objectId === null ? { status: "untracked" }
     : read.view;
@@ -923,8 +933,8 @@ export function AboutHistoryView(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
-  // Its words start where a file row's name does.
-  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="py-1 pl-1.5 pr-2" /> : null;
+  // Its words start where a row's name does.
+  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
   return (
     <AboutSection
       id="history"
@@ -934,9 +944,9 @@ export function AboutHistoryView(props: {
       expanded={props.expanded}
       onToggle={props.onToggle}
     >
-      {view.status === "loading" ? (
-        <SkeletonLines rows={2} className="px-2 py-1" />
-      ) : view.status === "failed" ? (
+      {/* A settled read answers within 100 ms, so the header shows alone
+          until it does. */}
+      {view.status === "loading" ? null : view.status === "failed" ? (
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
@@ -1032,7 +1042,9 @@ function AccessRowView(props: { row: AccessRow }) {
         {row.appId === null ? (
           <ChatAvatar presentation={neutralPresentation} name={row.principal} kind="human" size="strip" />
         ) : (
-          <ObjectGlyph kind="app" size={14} className="text-subtle" />
+          <span className={`${MARK_BOX} text-subtle`}>
+            <ObjectGlyph kind="app" size={14} />
+          </span>
         )}
         <span className="min-w-0 flex-1 truncate">{row.principal}</span>
       </div>

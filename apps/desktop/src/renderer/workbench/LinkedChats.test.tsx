@@ -178,7 +178,34 @@ describe("LinkedChatsPanel with no file focused", () => {
 });
 
 describe("LinkedChatsPanel startup", () => {
-  it("keeps loading and retries while the workspace import is still settling", async () => {
+  it("shows the Chats header alone until the first read answers", async () => {
+    const fileRead = deferred<unknown>();
+    bridgeMock.listFileChats.mockReturnValue(fileRead.promise);
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByTestId("about-chats-toggle")).toBeTruthy();
+    expect(screen.queryByText("Loading Chats...")).toBeNull();
+    expect(screen.queryByTestId("linked-chats-panel")).toBeNull();
+    expect(screen.queryByTestId("about-chats-count")).toBeNull();
+    expect(screen.getByTestId("about-history-file").textContent).toBe("loading");
+
+    await act(async () => {
+      fileRead.resolve({ fileObjectId: "object-1", threads: [] });
+      await fileRead.promise;
+    });
+    expect(screen.getByTestId("linked-chats-empty")).toBeTruthy();
+    expect(screen.getByTestId("about-history-file").textContent).toBe("ready:object-1");
+  });
+
+  it("shows loading lines and asks again while the engine reads the workspace in", async () => {
     vi.useFakeTimers();
     bridgeMock.listFileChats
       .mockResolvedValueOnce({
@@ -191,13 +218,16 @@ describe("LinkedChatsPanel startup", () => {
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath="docs/plan.md"
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
         onError={() => undefined}
       />,
     );
 
     await act(async () => undefined);
     expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByTestId("about-chats-count")).toBeNull();
     expect(screen.queryByText("Try again")).toBeNull();
+    expect(screen.getByTestId("about-history-file").textContent).toBe("updating");
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -260,7 +290,9 @@ describe("LinkedChatsPanel startup", () => {
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
   });
 
-  it("stops persistent updating retries at the limit", async () => {
+  // The engine ends its first capture ready or degraded, so its answer ends
+  // the wait, not a deadline here.
+  it("keeps waiting with no deadline while the engine reads the workspace in", async () => {
     vi.useFakeTimers();
     bridgeMock.listFileChats.mockResolvedValue({
       status: "refused",
@@ -276,30 +308,23 @@ describe("LinkedChatsPanel startup", () => {
     );
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(121_000);
+      await vi.advanceTimersByTimeAsync(300_000);
     });
 
-    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
-    expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({
-      identity: "about-chats:docs/plan.md",
-      message: "Workspace is still updating. Try again.",
-    }));
-    expect(screen.getByText("Try again")).toBeTruthy();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(301);
+    expect(notices.report).not.toHaveBeenCalled();
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByText("Try again")).toBeNull();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
-
-    bridgeMock.listFileChats.mockResolvedValueOnce({
+    bridgeMock.listFileChats.mockResolvedValue({
       fileObjectId: "object-1",
       threads: [],
     });
-    await act(async () => screen.getByText("Try again").click());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
     expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
-    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(123);
-    // The read that answered clears the row it filed.
-    expect(notices.clear).toHaveBeenLastCalledWith("about-chats:docs/plan.md");
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(302);
   });
 
   it("cancels an updating retry when the selected file changes", async () => {

@@ -57,19 +57,19 @@ const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
 // `key` names the workspace and file an answer is for: a state for another
 // file reads as loading, so a switch never shows the last file's chats.
+// `updating` is the engine still reading the workspace's files in.
 type ThreadsState =
   | { status: "loading" }
+  | { status: "updating"; key: string }
   | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
 const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { links: true, chats: true, history: true, access: false };
 
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+// The engine answers "still updating" only while its first capture of the
+// workspace runs, and that capture ends ready or degraded. So the read asks
+// again each second, with no deadline of its own.
 const THREAD_LOAD_RETRY_MS = 1_000;
-// Initial capture has a 120s early-import decision ceiling. Leave one retry
-// interval for the Ready/Degraded transition, with a fail-safe if that bound
-// is ever violated.
-const THREAD_LOAD_RETRY_DEADLINE_MS = 121_000;
 
 function isWorkspaceUpdatingResponse(
   response: ListFileChatsResponse,
@@ -183,23 +183,15 @@ export function LinkedChatsPanel(props: {
       notices.report({ identity, message, cause, retry: () => void refreshThreads() });
     };
     setThreadsState({ status: "loading" });
-    let updatingStartedAtMs: number | null = null;
     while (current()) {
       try {
         const result = await bridge().listFileChats({ workspaceId, path: filePath });
         if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
-          const now = performance.now();
-          updatingStartedAtMs ??= now;
-          const remainingMs =
-            updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
-          if (remainingMs <= 0) {
-            fail(WORKSPACE_UPDATING_MESSAGE);
-            return;
-          }
-          await new Promise((resolveDelay) =>
-            setTimeout(resolveDelay, Math.min(THREAD_LOAD_RETRY_MS, remainingMs)),
+          setThreadsState((state) =>
+            state.status === "updating" && state.key === threadsKey ? state : { status: "updating", key: threadsKey },
           );
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, THREAD_LOAD_RETRY_MS));
           continue;
         }
         notices.clear(identity);
@@ -500,9 +492,10 @@ export function LinkedChatsPanel(props: {
 
   const threads = "key" in threadsState && threadsState.key === threadsKey ? threadsState : null;
   // History asks about the file's object id, which this file's chats read
-  // answers. History keeps its place while that read runs or fails.
+  // answers. History keeps its place while that read runs, waits or fails.
   const file: AboutFile =
     threads === null ? { status: "loading" }
+    : threads.status === "updating" ? { status: "updating" }
     : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
     : { status: "ready", objectId: threads.fileObjectId };
   return (
@@ -527,7 +520,9 @@ export function LinkedChatsPanel(props: {
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
         >
-          {threads === null ? (
+          {/* A settled read answers within 100 ms, so the first read shows
+              the header alone. Only a wait on the engine shows lines. */}
+          {threads === null ? null : threads.status === "updating" ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
           ) : threads.status === "unavailable" ? (
             <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />

@@ -1347,6 +1347,10 @@ function HistorySection(props: {
   );
 }
 
+// What a section shows under its header: the body its toggle controls.
+const sectionBody = (id: string) =>
+  document.getElementById(screen.getByTestId(`about-${id}-toggle`).getAttribute("aria-controls")!)!;
+
 describe("About History", () => {
   it("reads the file's newest changes by its object id and opens one", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue(
@@ -1365,9 +1369,15 @@ describe("About History", () => {
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
   });
 
-  it("keeps its place while the file's read runs, and offers that read's Try again when it fails", async () => {
+  it("keeps its place while the file's read runs or waits, and offers that read's Try again when it fails", async () => {
     const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
     expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    // A settled read answers within 100 ms, so the header shows alone.
+    expect(sectionBody("history").childElementCount).toBe(0);
+    // While the engine reads the workspace in, History says it is adding changes.
+    rerender(<HistorySection file={{ status: "updating" }} />);
+    expect(screen.getByTestId("about-history-updating").textContent).toBe("Adding recent changes to History");
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     const retry = vi.fn();
     rerender(<HistorySection file={{ status: "failed", retry }} />);
@@ -1384,10 +1394,11 @@ describe("About History", () => {
     expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  it("shows loading lines, then says when the file has no changes", async () => {
+  it("shows its header alone, then says when the file has no changes", async () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
+    expect(sectionBody("history").childElementCount).toBe(0);
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
