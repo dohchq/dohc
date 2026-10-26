@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { ChildProcess, execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import { createLiveValidationExecutor } from "./liveValidation.js";
+import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
 import { LiveRestoreBusy, LiveRestoreTooLarge } from "./liveRestoreValidation.js";
 
 import {registered, cleanupLiveDeliveryFixtures} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
@@ -243,6 +243,37 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   await expect(validate(null as never)).rejects.toThrow("exited");
   expect(validate.hasCapacity?.()).toBe(true);
   expect((await validate(input)).kind).toBe("accepted");
+});
+
+it("names a validator failure once per document and edit, retries it, and keeps the child", async () => {
+  const messages: string[] = [];
+  const pool = createLiveValidationExecutor(512, createValidatorFailureLog(message => messages.push(message))); pools.push(pool);
+  const {input} = fixture(), validate = pool.validator(policy);
+  // Stands in for a validator that throws: the child answers with the failure it caught.
+  const emit = ChildProcess.prototype.emit;
+  ChildProcess.prototype.emit = function (this: ChildProcess, event: string | symbol, ...args: unknown[]) {
+    return Reflect.apply(emit, this, [event, ...(event === "message" ? [{kind: "failed", errorClass: "RangeError"}] : args)]) as boolean;
+  } as typeof emit;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) await expect(validate(input)).rejects.toThrow(LiveValidatorFailure);
+    await expect(validate({...input, candidate: Uint8Array.of(0, 1)})).rejects.toThrow("RangeError");
+  } finally {ChildProcess.prototype.emit = emit;}
+  expect(messages).toEqual([
+    "[sync-relay] live validation failed with RangeError for document object; the edit waits and is tried again.",
+    "[sync-relay] live validation failed with RangeError for document object; the edit waits and is tried again.",
+  ]);
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+});
+
+it("forgets the oldest named failure once the log is full", () => {
+  const messages: string[] = [], log = createValidatorFailureLog(message => messages.push(message));
+  const document = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
+  for (let index = 0; index <= 1024; index++) log(document, Uint8Array.of(index & 255, index >> 8), "TypeError");
+  log(document, Uint8Array.of(0, 0), "TypeError");
+  expect(messages).toHaveLength(1026);
+  log(document, Uint8Array.of(0, 4), "TypeError");
+  expect(messages).toHaveLength(1026);
 });
 
 it("kills a child at its deadline and keeps its slot until the child exits", async () => {

@@ -1,5 +1,70 @@
 import { describe, expect, it } from "vitest";
-import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import { nextPagePath, pageFileStem, withMarkdownDefault, withRenameDefault } from "./new-file-name";
+
+describe("pageFileStem", () => {
+  it("keeps a title a file can hold as typed", () => {
+    expect(pageFileStem("Trip to Lisbon", "win32")).toBe("Trip to Lisbon");
+    expect(pageFileStem("Café, día 2", "darwin")).toBe("Café, día 2");
+  });
+
+  it("turns characters a file name cannot hold into spaces", () => {
+    expect(pageFileStem("Q3: plan/budget?", "linux")).toBe("Q3 plan budget");
+    expect(pageFileStem('a\\b*c"d<e>f|g', "win32")).toBe("a b c d e f g");
+    expect(pageFileStem("line one\nline two\t", "win32")).toBe("line one line two");
+  });
+
+  it("drops leading dots and trailing dots and spaces", () => {
+    expect(pageFileStem(".env notes", "linux")).toBe("env notes");
+    expect(pageFileStem("  Wait...  ", "win32")).toBe("Wait");
+  });
+
+  it("is Untitled when nothing nameable is left", () => {
+    expect(pageFileStem("", "win32")).toBe("Untitled");
+    expect(pageFileStem("   ", "win32")).toBe("Untitled");
+    expect(pageFileStem("???", "darwin")).toBe("Untitled");
+    expect(pageFileStem("CON", "win32")).toBe("Untitled");
+  });
+
+  it("caps a long title at 120 characters", () => {
+    const stem = pageFileStem(`${"é".repeat(119)} tail`, "win32");
+    expect(Array.from(stem)).toHaveLength(119);
+  });
+});
+
+describe("nextPagePath", () => {
+  it("takes the plain name in the folder when it is free", () => {
+    expect(nextPagePath("", "Untitled", new Set(), "win32")).toBe("Untitled.md");
+    expect(nextPagePath("Trip", "Plan", new Set(["plan.md"]), "win32")).toBe("Trip/Plan.md");
+  });
+
+  it("numbers the name past every taken one, ignoring case", () => {
+    expect(nextPagePath("", "Untitled", new Set(["untitled.md"]), "win32")).toBe("Untitled 2.md");
+    expect(nextPagePath("Trip", "Plan", new Set(["trip/plan.md", "trip/plan 2.md"]), "win32")).toBe("Trip/Plan 3.md");
+  });
+
+  it("cuts the name short so a path in a deep folder stays inside the engine's limit", () => {
+    const folder = Array.from({ length: 5 }, () => "f".repeat(200)).join("/");
+    const stem = pageFileStem("旅".repeat(120), "win32");
+    const path = nextPagePath(folder, stem, new Set(), "win32");
+    expect(workspaceDestinationError(path, "win32")).toBeNull();
+    expect(path).toBe(`${folder}/${"旅".repeat(5)}.md`);
+    const next = nextPagePath(folder, stem, new Set([path.toLowerCase()]), "win32");
+    expect(workspaceDestinationError(next, "win32")).toBeNull();
+    expect(next).toBe(`${folder}/${"旅".repeat(4)} 2.md`);
+  });
+
+  it.each([
+    ["a name the cut leaves empty", "😀"],
+    ["a name the cut turns into a device name", "CONvoy"],
+  ])("falls back to a cut Untitled for %s", (_case, title) => {
+    // Three bytes are left for the name.
+    const folder = [200, 200, 200, 200, 213].map((length) => "f".repeat(length)).join("/");
+    const path = nextPagePath(folder, pageFileStem(title, "win32"), new Set(), "win32");
+    expect(path).toBe(`${folder}/Unt.md`);
+    expect(workspaceDestinationError(path, "win32")).toBeNull();
+  });
+});
 
 describe("withMarkdownDefault", () => {
   it("appends .md to a plain name", () => {

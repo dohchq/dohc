@@ -93,11 +93,7 @@ export function registerNativeMenusIpcHandlers<
           shareView,
           isMountPath,
           hasMountRecord: mountForPath !== undefined,
-          canShare:
-            !isSharedView &&
-            !isMountPath &&
-            !!registryEntry.remote &&
-            input.kind !== "root",
+          canShare: !isSharedView && !isMountPath && input.kind !== "root",
         };
       },
     );
@@ -130,8 +126,9 @@ export function registerNativeMenusIpcHandlers<
             isMountPath: menuContext.isMountPath,
             hasMountRecord: menuContext.hasMountRecord,
             // Sharing onward is offered nowhere in a share view or a mount:
-            // someone else's files are not this account's to grant, and a share
-            // needs a relay-side workspace to grant from.
+            // someone else's files are not this account's to grant. A
+            // workspace that does not sync still offers it, as the toolbar
+            // does, and the dialog says how to set up sync.
             canShare: menuContext.canShare,
             shareView: menuContext.shareView,
           }, process.platform).map((entry) =>

@@ -124,7 +124,7 @@ function AppRow(props: {
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-medium text-ink">{app.title}</span>
-          <span className="block truncate font-mono text-[11px] leading-[1.4] text-subtle">
+          <span className="block truncate text-[11px] leading-[1.4] text-subtle">
             {app.root}
           </span>
         </span>
@@ -249,7 +249,7 @@ export function AppsView(props: {
       {props.head
         ? createPortal(
             <>
-              <output data-testid="sites-count" className="mr-1 font-mono text-[11px] text-subtle">
+              <output data-testid="sites-count" className="mr-1 text-[11px] text-subtle">
                 {state.status === "ready" ? `${apps.length} app${apps.length === 1 ? "" : "s"}` : null}
               </output>
               {state.status === "ready" && apps.length > 0 && !props.receivedShareWorkspace ? (

@@ -18,6 +18,7 @@ import {
   Fragment,
   Suspense,
   lazy,
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -54,7 +55,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isPrivacyDenied, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -88,6 +89,7 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
+  firstAgent,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -121,7 +123,8 @@ import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
-import { errorDetails } from "./shell/copyDetails";
+import { importSkipLines } from "./shell/importSkips";
+import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -157,6 +160,10 @@ import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
+import { NewPage, type NewPageFile } from "./NewPage";
+import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
+import { nextPagePath, pageFileStem } from "./workbench/new-file-name";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { useSharedViewAccess } from "./shell/useSharedViewAccess";
@@ -173,7 +180,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { LiveDocumentsDialog } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -198,6 +205,7 @@ import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  captureOrphanedDraft,
   loadLiveDraftRecovery,
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
@@ -217,6 +225,9 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
   fileMomentSteps,
+  HistoryPaused,
+  HistoryUpdating,
+  isHistoryPaused,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -263,6 +274,8 @@ import {
   openTab,
   resizeEditorGroups,
   moveTabToNewGroup,
+  newPageTabPath,
+  replaceTab,
   appViewId,
   keepActiveViewAfterRailChange,
   keepActiveViewShown,
@@ -288,7 +301,8 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
-import type { AboutNotices, AccessContext } from "./workbench/About";
+import type { AboutNotices } from "./workbench/About";
+import type { AccessContext } from "./workbench/accessReason";
 import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
@@ -413,6 +427,20 @@ function uniqueUntitledPath(
     if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
   return `Untitled ${Date.now()}.${extension}`;
+}
+
+// A new page someone gave a title, an icon or a body. One that has none, or
+// only blank space in its body, leaves nothing behind.
+function typedNewPage(page: { draft: string; body: string }): boolean {
+  const { meta } = parseFrontmatter(page.draft);
+  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "" || page.body.trim() !== "";
+}
+
+// A new page's text as its file would hold it: the title and icon, then the
+// body as it was typed.
+function newPageText(page: { draft: string; body: string }): string {
+  if (page.body === "") return page.draft;
+  return page.draft === "" ? `${page.body}\n` : `${page.draft.replace(/\n+$/, "")}\n\n${page.body}\n`;
 }
 
 type EditorFocus = {
@@ -638,6 +666,12 @@ export function DesktopWorkspaceShell(props: {
   const [liveDocumentsWorkspaceId, setLiveDocumentsWorkspaceId] = useState<
     string | null
   >(null);
+  // The document a notice opened the list for, so the list shows that row.
+  const [liveDocumentsReveal, setLiveDocumentsReveal] = useState<string | null>(null);
+  const openLiveDocuments = useCallback((id: string, reveal: string | null = null) => {
+    setLiveDocumentsReveal(reveal);
+    setLiveDocumentsWorkspaceId(id);
+  }, []);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   // The Open a share surface: empty, or for a share a notice named.
@@ -647,11 +681,8 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     if (handoffStatus.status !== "idle") setOpenShare(null);
   }, [handoffStatus.status]);
-  // Inline-create requests routed INTO the explorer (palette/menu/header).
-  const [createRequest, setCreateRequest] = useState<{
-    kind: "file" | "folder";
-    id: number;
-  } | null>(null);
+  // Inline folder creates routed INTO the explorer (palette/menu).
+  const [newFolderRequest, setNewFolderRequest] = useState<number | null>(null);
   const [wb, setWbState] = useState<WorkbenchState>(defaultWorkbenchState);
   // wbRef holds the newest workbench, set with each write rather than after
   // commit. Handlers read it to choose what to act on, and a keydown can
@@ -855,6 +886,7 @@ export function DesktopWorkspaceShell(props: {
     reportDriveLimit,
     reportNetworkShare,
     reportKeptFiles,
+    reportImportSkips,
     showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
@@ -929,9 +961,16 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
+  // A Stop names the row's document. A Try again closes that document's
+  // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
-    (id: string, path: string) =>
-      withClosedEngineDocSession(id, path, () => bridge().stopOwnerLiveDocument({ workspaceId: id, path })),
+    async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
+      let result: LiveDocumentStopResult = { keptEdits: "none" };
+      await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
+        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
+      });
+      return result;
+    },
     [],
   );
   const resumeLiveDocument = useCallback(
@@ -965,10 +1004,27 @@ export function DesktopWorkspaceShell(props: {
       reportShellError(message, error, () => {
         if (workspaceIdRef.current !== failedFor) return;
         if (retry()) return;
-        setLiveDocumentsWorkspaceId(failedFor);
+        openLiveDocuments(failedFor);
       });
     },
-    [reportShellError],
+    [reportShellError, openLiveDocuments],
+  );
+  // Refused edits a Stop wrote into the file. Edits it kept stay in their
+  // own notice, which the sync status carries.
+  const liveDocumentStopped = useCallback(
+    (path: string, keptEdits: "recovered" | "kept") => {
+      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
+    },
+    [showSuccessNotice],
+  );
+  // Save recovery copy, from a notice or the Live documents dialog, of the
+  // kept edits the row's incident names. Set once the shell can open the copy it wrote.
+  const saveLiveRecoveryCopyRef = useRef<(id: string, path: string, incident?: string) => Promise<void>>(async () => undefined);
+  const saveLiveRecoveryCopyFromDialog = useCallback((id: string, path: string, incident?: string) => saveLiveRecoveryCopyRef.current(id, path, incident), []);
+  const readKeptEdits = useCallback(
+    (id: string, objectId: string, incident: string) =>
+      bridge().retryOwnerLiveQuarantine({ workspaceId: id, objectId, incident }),
+    [],
   );
 
   const reportCloudStatusUnavailable = useCallback(
@@ -978,8 +1034,14 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
+  const {
+    chatCollaboration,
+    refreshCloudStatus,
+    readCloudStatusAgainIfBusy,
+    workspaceSynced,
+    cloudStatus,
+    cloudStatusUnreadable,
+  } = useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
   const { start: startAccountDeletion, reviewing: reviewingAccountDeletion, attach: attachAccountDeletion } =
     props.accountDeletion;
   // Closing Settings reads the status again, as the old Cloud dialog did on
@@ -1113,7 +1175,7 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
-  const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
+  const localAgentName = (props.userSettings && firstAgent(props.userSettings.settings)?.name) ?? "Your agent";
   const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.agentRunActive);
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
@@ -1790,12 +1852,115 @@ export function DesktopWorkspaceShell(props: {
       const identity=`owner-stop:${workspaceId}:${failure.path}`;
       if (shownStopFailures.current.get(identity)===failure.detail) continue;
       shownStopFailures.current.set(identity,failure.detail);
-      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,()=>bridge().stopOwnerLiveDocument({workspaceId,path:failure.path})).catch(error => {
+      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
         if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
       });};
       reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
+  // One notice per document whose edits the server refused, once per
+  // incident and recovery step: a refusal after a Try again is a new
+  // incident. Dismissing the row hides it and leaves the edits kept. While a
+  // Try again or a Stop waits, the row stays quiet. Save recovery copy is on
+  // every row, including one whose Stop took the edits but could not write them.
+  const shownQuarantines=useRef({workspaceId,shown:new Map<string,string>()});
+  useEffect(() => {
+    if (captureDecidedFor!==workspaceId || syncStatus===null) return;
+    if (shownQuarantines.current.workspaceId!==workspaceId) shownQuarantines.current={workspaceId,shown:new Map()};
+    const shown=shownQuarantines.current.shown;
+    // An earlier Stop's edits keep their own row beside the document's current queue.
+    const identityOf=(row:{objectId:string;recovery:string}) =>
+      `owner-live-quarantine:${workspaceId}:${row.objectId}${row.recovery==="not-written" || row.recovery==="cannot-write" ? ":release" : ""}`;
+    const rows=syncStatus.ownerLiveQuarantines ?? [];
+    const listed=new Set(rows.map(identityOf));
+    for (const identity of [...shown.keys()]) {
+      if (!listed.has(identity)) {shown.delete(identity);clearIdentity(identity);}
+    }
+    for (const row of rows) {
+      const identity=identityOf(row), incident=`${row.recovery}${row.earlier ? " earlier" : ""}\n${row.incident}`;
+      if (shown.get(identity)===incident) continue;
+      shown.set(identity,incident);
+      const onServer=row.storedOn==="server";
+      const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on",onServer ? "The server" : "This computer"],["Reason",row.reason],["Incident",row.incident]];
+      const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
+      // The engine refused to read the queue: Try again reads it again. Save needs what it could not read.
+      if (row.recovery==="unreadable") {
+        const read=() => {
+          bridge().retryOwnerLiveQuarantine({workspaceId,objectId:row.objectId,incident:row.incident}).catch((error: unknown) => {
+            if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+            reportShellError(`dohc could not read the edits it kept for ${row.path}.`,error,read,undefined,identity);
+          });
+        };
+        reportShellFailure({title:`Live editing paused for ${row.path}`,
+          message:"dohc kept edits on this computer but could not read them.",details,retry:read,action:open,identity});
+        continue;
+      }
+      const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
+      // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
+      // Its editors close wherever the document is now, since a record keeps the path it had.
+      const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
+      const stopAgain=() => {
+        let result:LiveDocumentStopResult={keptEdits:"none"};
+        void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
+          .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
+            (error: unknown) => {
+              if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+              reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
+            });
+      };
+      // An earlier Stop's edits: the document may be live again, so the row names only the edits.
+      if (row.recovery==="not-written") {
+        reportShellFailure({title:`Edits not written to ${row.path}`,
+          message:"When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
+        continue;
+      }
+      if (row.recovery==="cannot-write") {
+        reportShellFailure({title:`Edits not written to ${row.path}`,
+          message:"When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+        continue;
+      }
+      if (row.recovery==="stopped-kept") {
+        reportShellFailure({title:`Live editing stopped for ${row.path}`,
+          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+        continue;
+      }
+      if (row.recovery==="stopping") {
+        reportShellFailure({title:`Stopping live editing for ${row.path}`,tone:"warning",quiet:true,
+          message:"dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.",details,retry:stopAgain,action:save,identity});
+        continue;
+      }
+      if (row.recovery==="retrying") {
+        reportShellFailure({title:`Trying again for ${row.path}`,tone:"warning",quiet:true,
+          message:"dohc is sending your kept edits to the server once more.",details,action:save,identity});
+        continue;
+      }
+      // Try again cannot reach an earlier copy of the workspace, so the row offers only Save.
+      if (row.earlier && row.recovery==="paused") {
+        reportShellFailure({title:`Live editing paused for ${row.path}`,
+          message:"The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.",
+          details,action:save,identity});
+        continue;
+      }
+      const retry=() => {
+        bridge().retryOwnerLiveQuarantine({workspaceId,objectId:row.objectId,incident:row.incident}).catch((error: unknown) => {
+          // A slow answer for a workspace this window left repaints nothing.
+          if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+          reportShellError(`dohc could not try again to send your edits to ${row.path}.`,error,retry,undefined,identity);
+        });
+      };
+      // The server keeps them, and the owner saved a recovery copy, maybe on another computer: the row stays quiet.
+      // Try again still cannot reach an earlier copy of the workspace.
+      if (row.recovery==="copied") {
+        reportShellFailure({title:`Live editing paused for ${row.path}`,tone:"warning",quiet:true,
+          message:"The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.",
+          details,...(row.earlier ? {} : {retry}),action:save,identity});
+        continue;
+      }
+      reportShellFailure({title:`Live editing paused for ${row.path}`,
+        message:`The server could not accept your edits. dohc kept them ${onServer ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`,
+        details,retry,action:save,identity});
+    }
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -1960,8 +2125,11 @@ export function DesktopWorkspaceShell(props: {
       latestMomentRequest.current = token;
       if (!shareView) latestMomentLane.settle(
         token,
-        readNewestMomentOrder(workspaceId, () =>
-          latestMomentRequest.current === token && !workspaceAdmission.superseded),
+        readNewestMomentOrder(
+          workspaceId,
+          () => latestMomentRequest.current === token && !workspaceAdmission.superseded,
+          () => syncStatusLane.latest()?.historyCaptureFailed === true,
+        ),
         (order) => order ?? latestMomentLane.latest(),
         (error) =>
           reportLaneFailure("dohc could not check whether open files changed.", error, askAgain),
@@ -2161,8 +2329,11 @@ export function DesktopWorkspaceShell(props: {
   // absent = root) — the drop target, or the folder whose context menu ran
   // "Import Files…". Every import shows what landed, where, and how many
   // sources were skipped — never a silent shrink.
+  // Where the import began. An Explorer import selects what landed in the
+  // Explorer. The palette and the start surface may show no Explorer, so a
+  // notice says what landed.
   const importFiles = useCallback(
-    async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+    async (from: "explorer" | "palette" | "start-surface", droppedPaths?: string[], targetDir?: string) => {
       const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
@@ -2199,14 +2370,16 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
-      const folders = outcome.folders ?? 0;
+      const folders = outcome.folders ?? [];
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      // A stopped import's notice is about the stop, and Copy names the skips.
+      const skipDetails = importSkipLines(outcome.skipped, outcome.skippedSources ?? []).details;
       // The first copy failed, so nothing landed.
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
           message: fitImportMessage(`Could not import files${skippedSuffix}. `, importStopSentence(outcome.stop), ""),
-          details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
+          details: [...(outcome.stop.detail ? [["Cause", outcome.stop.detail] as const] : []), ...skipDetails],
           retry,
           kind: "import-files",
         });
@@ -2225,9 +2398,9 @@ export function DesktopWorkspaceShell(props: {
                   stopSentence,
                   " Import only the files that are still missing.",
                 )
-              : folders > 0
+              : folders.length > 0
                 ? fitImportMessage(
-                    `Created ${folders} ${folders === 1 ? "folder" : "folders"} before the import stopped.`,
+                    `Created ${folders.length} ${folders.length === 1 ? "folder" : "folders"} before the import stopped.`,
                     stopSentence,
                     " Delete the empty folders before you import again.",
                   )
@@ -2236,6 +2409,7 @@ export function DesktopWorkspaceShell(props: {
           details: [
             ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
             ...importedPathDetails(outcome.imported),
+            ...skipDetails,
           ],
           retry,
           kind: "import-files",
@@ -2251,25 +2425,25 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const skipped = outcome.skipped;
-      if (count === 0 && folders === 0 && skipped === 0) return; // cancelled dialog
-      // The same sources would be skipped again, so there is nothing to try again.
-      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported.`;
-      if (count === 0 && folders === 0) {
-        reportShellFailure({ message: notImported, kind: "import-files" });
+      if (count === 0 && folders.length === 0 && skipped === 0) return; // cancelled dialog
+      // Each skip names its file and why. The same sources would be skipped
+      // again, so there is nothing to try again.
+      const reportSkips = (title: string) =>
+        reportImportSkips({ title, ...importSkipLines(skipped, outcome.skippedSources ?? []) });
+      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported`;
+      if (count === 0 && folders.length === 0) {
+        reportSkips(notImported);
         return;
       }
       // The Explorer shows what landed, so its message is only the skip.
       if (from === "explorer") {
-        if (skipped > 0) reportShellFailure({ message: notImported, kind: "import-files" });
+        if (skipped > 0) reportSkips(notImported);
         else clearKind("import-files");
       } else {
-        // A drop of empty folders lands folders and no file.
-        const landed = count > 0
-          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`
-          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}.`;
-        if (skipped > 0) {
-          reportShellFailure({ message: `${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`, kind: "import-files" });
-        } else showSuccessNotice(landed, undefined, "import-files");
+        // The palette's dialog picks files, never folders.
+        const landed = `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`;
+        if (skipped > 0) reportSkips(`${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`);
+        else showSuccessNotice(landed, undefined, "import-files");
       }
       try {
         await refreshFiles();
@@ -2287,10 +2461,13 @@ export function DesktopWorkspaceShell(props: {
         ),
       );
       const prefix = targetDir ? `${targetDir}/` : "";
-      const items = [...new Set(outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]))];
+      const items = [...new Set([
+        ...folders,
+        ...outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]),
+      ])];
       if (items.length > 0) setExplorerReveal({ workspaceId, paths: items });
     },
-    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice, clearKind, mutateWb],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, reportImportSkips, showSuccessNotice, clearKind, mutateWb],
   );
   const importFromExplorer = useCallback(
     (droppedPaths?: string[], targetDir?: string) => void importFiles("explorer", droppedPaths, targetDir),
@@ -2395,6 +2572,33 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Main writes the copy next to the file and keeps the queue; a slow answer
+  // for a workspace this window left paints nothing. One save per file runs
+  // at a time, and asking again while it runs waits for it.
+  const recoverySaves = useRef(new Map<string, Promise<void>>());
+  useEffect(() => {
+    saveLiveRecoveryCopyRef.current = (id, path, incident) => {
+      const key = `${id}\n${path}\n${incident ?? ""}`, running = recoverySaves.current.get(key);
+      if (running) return running;
+      const saving = bridge().saveOwnerLiveRecoveryCopy({ workspaceId: id, path, ...(incident === undefined ? {} : { incident }) }).then((saved) => {
+        if (workspaceIdRef.current !== id) return;
+        const opened = saved.copyPath ?? saved.packagePath;
+        const slash = saved.packagePath.lastIndexOf("/");
+        const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
+        const kept = saved.keptEdits === "copied" ? " The server may now release your kept edits."
+          : saved.keptEdits === "kept" ? ` Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.` : "";
+        showSuccessNotice(saved.copyPath
+          ? `Saved a recovery copy of ${path} in ${folder}.${kept}`
+          : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.${kept}`,
+        undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
+      }, (error: unknown) => {
+        if (workspaceIdRef.current !== id) return;
+        reportShellError(`dohc could not save a recovery copy of ${path}.`, error, () => { void saveLiveRecoveryCopyRef.current(id, path, incident); });
+      }).finally(() => recoverySaves.current.delete(key));
+      recoverySaves.current.set(key, saving);
+      return saving;
+    };
+  }, [openFile, showSuccessNotice, reportShellError]);
   const reportKeptCopyFailure = useCallback(
     (message: string, retry: () => void) => reportShellFailure({ message, retry }),
     [reportShellFailure],
@@ -2700,9 +2904,11 @@ export function DesktopWorkspaceShell(props: {
       ...(path !== null && table ? { openHistory: () => openCollectionHistory(path, table.tableId) } : {}),
     }];
   })), [datasets, openCollectionHistory]);
-  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
+  // A new page's tab says its title as it is typed (New pages, below).
+  const [newPageTitles, setNewPageTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles, ...newPageTitles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
-  ]), [knownTabLabels, chatEditors.titles, dataCollections]);
+  ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
@@ -2916,13 +3122,18 @@ export function DesktopWorkspaceShell(props: {
   }, [captureRecoveries, refreshAfterHistoryRestore]);
   // One row per file in Notices: a newer failure for the file replaces it. A
   // shared live file's refusal goes to its kept typing's row instead, which
-  // then says to replace the file's text with the kept version.
+  // then says to replace the file's text with the kept version. A refusal by
+  // History's rules takes the sentence as its title and the rules' words as
+  // its body, so the clamp never hides what to fix.
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
-      reportShellError(fallback, error, retry, undefined, identity);
+      const { words } = readError(error);
+      if (words && isRestorePolicyRefusal(error)) {
+        reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
+      } else reportShellError(fallback, error, retry, undefined, identity);
     },
-    [captureRecoveries, reportShellError],
+    [captureRecoveries, reportShellError, reportShellFailure],
   );
   // Try again on a failed restore opens the change's tab, and that page asks
   // before it restores, with its Undo restore after.
@@ -3026,6 +3237,150 @@ export function DesktopWorkspaceShell(props: {
     [openChatThreadInPanel, openPathAtLine],
   );
 
+  // New pages. A page's title and icon wait here, as frontmatter, until the
+  // person leaves the title. Its tab then becomes its file's, and the file
+  // keeps the page's host while that tab is open, so the editor that opens
+  // under it takes the keystrokes the page held (NewPage).
+  const newPageDrafts = useRef(new Map<string, { draft: string; body: string; writing: Promise<string | null> | null }>());
+  const [bornPages, setBornPages] = useState<ReadonlyMap<string, { id: string; handedOff: boolean }>>(() => new Map());
+  // A created page's title, icon and body wait here, by its file, until its
+  // editor takes them, with the text its file or recovery already holds. A
+  // page that unmounts first gets them back when it mounts again.
+  const bornDrafts = useRef(new Map<string, { draft: string; body: string; held: string }>());
+  // Text no editor has taken goes to recovery, where its file shows it,
+  // unless the file or recovery already holds it. The page stays, so what is
+  // typed after goes the same way.
+  const keepBornDraft = useCallback((path: string) => {
+    const born = bornDrafts.current.get(path);
+    if (!born) return;
+    const text = newPageText(born);
+    if (text === born.held) return;
+    captureOrphanedDraft(workspaceId, path, text);
+    born.held = text;
+  }, [workspaceId]);
+  const retireBornDraft = useCallback((path: string) => {
+    keepBornDraft(path);
+    bornDrafts.current.delete(path);
+  }, [keepBornDraft]);
+  const openNewPage = useCallback(
+    (folder: string) => {
+      const path = newPageTabPath(crypto.randomUUID(), folder);
+      newPageDrafts.current.set(path, { draft: "", body: "", writing: null });
+      openVirtualTab(path);
+    },
+    [openVirtualTab],
+  );
+  // The tab follows the title without holding up the keystroke.
+  const newPageDraftChanged = useCallback((tabPath: string, draft: string) => {
+    const pending = newPageDrafts.current.get(tabPath);
+    if (pending) pending.draft = draft;
+    const title = displayFrontmatterValue(parseFrontmatter(draft).meta.title);
+    startTransition(() =>
+      setNewPageTitles((titles) => (titles.get(tabPath) ?? "") === title ? titles : new Map(titles).set(tabPath, title)));
+  }, []);
+  // A closed page's draft, title and host go with its tab, and a created
+  // page's tab is its file's.
+  useEffect(() => {
+    const open = new Set(allTabs(wb).map((tab) => tab.path));
+    for (const [path, page] of newPageDrafts.current) {
+      if (!open.has(path) && !page.writing) newPageDrafts.current.delete(path);
+    }
+    for (const path of [...bornDrafts.current.keys()]) {
+      if (!open.has(path)) retireBornDraft(path);
+    }
+    const keepOpen = <T,>(pages: ReadonlyMap<string, T>) =>
+      [...pages.keys()].every((path) => open.has(path)) ? pages : new Map([...pages].filter(([path]) => open.has(path)));
+    setBornPages(keepOpen);
+    setNewPageTitles(keepOpen);
+  }, [retireBornDraft, wb]);
+  // Writes a new page's file, named from its title, and gives its path, or
+  // null if it was not written. An opened file starts empty, so its live
+  // session opens at once, and its editor takes the title and body from the
+  // page; a closed one starts with the title, icon and body. A name another
+  // file took first moves on to the next number.
+  const writeNewPage = useCallback(
+    (tabPath: string, open: boolean): Promise<string | null> => {
+      const page = parseTab(tabPath);
+      const pending = newPageDrafts.current.get(tabPath);
+      if (page.kind !== "newPage" || !pending) return Promise.resolve(null);
+      if (pending.writing) return pending.writing;
+      const selection = workspaceSelection.current;
+      const title = displayFrontmatterValue(parseFrontmatter(pending.draft).meta.title);
+      const stem = pageFileStem(title, bridge().platform);
+      const occupied = new Set([...files.map((file) => file.path), ...folders].map((path) => path.toLowerCase()));
+      const initialText = open ? "" : newPageText(pending);
+      const create = async (): Promise<string> => {
+        for (;;) {
+          const relativePath = nextPagePath(page.folder, stem, occupied, bridge().platform);
+          try {
+            return (await bridge().createWorkspaceFile({ workspaceId, relativePath, initialText, exclusive: true })).path;
+          } catch (error) {
+            if (!isPathTaken(error)) throw error;
+            occupied.add(relativePath.toLowerCase());
+          }
+        }
+      };
+      pending.writing = create().then(
+        (path) => {
+          if (workspaceSelection.current !== selection) return null;
+          newPageDrafts.current.delete(tabPath);
+          if (open) {
+            bornDrafts.current.set(path, { draft: pending.draft, body: pending.body, held: initialText });
+            setBornPages((pages) => new Map(pages).set(path, { id: page.id, handedOff: false }));
+            mutateWb((state) =>
+              replaceTab(ancestorDirs(path).reduce((next, dir) => setFolderExpanded(next, dir, true), state), tabPath, path));
+          }
+          void refreshFiles();
+          return path;
+        },
+        (error: unknown) => {
+          pending.writing = null;
+          if (workspaceSelection.current !== selection) return null;
+          reportShellError("Could not create the page.", error, () => void writeNewPage(tabPath, open));
+          return null;
+        },
+      );
+      return pending.writing;
+    },
+    [files, folders, mutateWb, refreshFiles, reportShellError, workspaceId],
+  );
+  const pageHandedOff = useCallback((path: string, taken: boolean) => {
+    if (taken) bornDrafts.current.delete(path);
+    else retireBornDraft(path);
+    setBornPages((pages) => {
+      const page = pages.get(path);
+      return page && !page.handedOff ? new Map(pages).set(path, { ...page, handedOff: true }) : pages;
+    });
+  }, [retireBornDraft]);
+  // A typed page not yet created is written when the app quits, the window
+  // closes or the workspace switches, as closing its tab writes it, and its
+  // tab becomes its file's in case the quit stops. A page that cannot be
+  // written stops the quit, and its error says why. What a created page
+  // holds that its editor has not taken goes to recovery, and the page stays
+  // in case the quit stops.
+  const keepBornDrafts = useRef<() => void>(() => undefined);
+  keepBornDrafts.current = () => {
+    for (const path of bornDrafts.current.keys()) keepBornDraft(path);
+  };
+  const writeTypedPages = useRef<() => Promise<void>>(async () => undefined);
+  writeTypedPages.current = async () => {
+    const pages = [...newPageDrafts.current].filter(([, page]) => typedNewPage(page)).map(([path]) => path);
+    const written = await Promise.all(pages.map((path) => writeNewPage(path, false)));
+    mutateWb((state) => pages.reduce((next, tabPath, index) => {
+      const path = written[index];
+      return path ? replaceTab(next, tabPath, path) : next;
+    }, state));
+    keepBornDrafts.current();
+    if (written.includes(null)) throw new Error("Could not create the page.");
+  };
+  useEffect(() => registerPendingEditorDraft(
+    () =>
+      [...newPageDrafts.current.values()].some(typedNewPage) ||
+      [...bornDrafts.current.values()].some((page) => newPageText(page) !== page.held),
+    () => writeTypedPages.current(),
+    () => keepBornDrafts.current(),
+  ), []);
+
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
   // re-render the whole strip on every shell render, incl. each 800ms dirty
   // flip while typing). Capture the requested tab objects and their owners
@@ -3069,27 +3424,53 @@ export function DesktopWorkspaceShell(props: {
         }
         mutateWb(closeRequestedTabs);
       };
-      const needsFlush = hasDrafts(
-        (groupId, tab) => requested.get(tab) === groupId,
-      );
-      if (!needsFlush) {
-        commitClose();
+      const closeAfterFlush = () => {
+        const needsFlush = hasDrafts(
+          (groupId, tab) => requested.get(tab) === groupId,
+        );
+        if (!needsFlush) {
+          commitClose();
+          return;
+        }
+
+        // The active tab can change while a flush waits. If the new active tab
+        // object was also in the original close request, flush its own mounted
+        // editor before closing it. A reopened tab has a new object identity.
+        void flushStableDrafts(
+          (groupId, tab) => requested.get(tab) === groupId,
+        )
+          .then(commitClose)
+          .catch((error) => {
+            reportShellError(
+              "Could not save the draft, so the tab stays open.",
+              error,
+            );
+          });
+      };
+      // A typed new page is written as it closes, and stays open if it
+      // cannot be. An untouched one leaves nothing. A page whose file was
+      // already being created for its editor has become that file's tab,
+      // which closes in its place.
+      const typedPages = [...requested.keys()].filter((tab) => {
+        const page = newPageDrafts.current.get(tab.path);
+        return page !== undefined && typedNewPage(page);
+      });
+      if (typedPages.length === 0) {
+        closeAfterFlush();
         return;
       }
-
-      // The active tab can change while a flush waits. If the new active tab
-      // object was also in the original close request, flush its own mounted
-      // editor before closing it. A reopened tab has a new object identity.
-      void flushStableDrafts(
-        (groupId, tab) => requested.get(tab) === groupId,
-      )
-        .then(commitClose)
-        .catch((error) => {
-          reportShellError(
-            "Could not save the draft, so the tab stays open.",
-            error,
-          );
+      void Promise.all(typedPages.map((tab) => writeNewPage(tab.path, false))).then((written) => {
+        typedPages.forEach((tab, index) => {
+          const groupId = requested.get(tab)!;
+          const tabs = wbRef.current.editorGroups.find((candidate) => candidate.id === groupId)?.tabs ?? [];
+          const path = written[index];
+          if (path && tabs.includes(tab)) return;
+          requested.delete(tab);
+          const fileTab = path ? tabs.find((candidate) => candidate.path === path) : undefined;
+          if (fileTab) requested.set(fileTab, groupId);
         });
+        if (requested.size > 0) closeAfterFlush();
+      });
     },
     [
       flushStableDrafts,
@@ -3097,6 +3478,7 @@ export function DesktopWorkspaceShell(props: {
       invalidateDeferredFileOpen,
       mutateWb,
       reportShellError,
+      writeNewPage,
     ],
   );
 
@@ -3351,13 +3733,10 @@ export function DesktopWorkspaceShell(props: {
   // Reveal-then-create: the inline editbox lives in the explorer view, so
   // make that view visible first (never setView — re-selecting the active
   // view toggles the panel).
-  const requestExplorerCreate = useCallback(
-    (kind: "file" | "folder") => {
-      mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
-      setCreateRequest((current) => ({ kind, id: (current?.id ?? 0) + 1 }));
-    },
-    [mutateWb],
-  );
+  const requestExplorerFolder = useCallback(() => {
+    mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+    setNewFolderRequest((current) => (current ?? 0) + 1);
+  }, [mutateWb]);
 
   const setExplorerFolderExpanded = useCallback(
     (path: string, expanded: boolean) =>
@@ -3392,6 +3771,7 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create an untitled text file.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
@@ -3938,6 +4318,7 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) => {
         if (!workspaceAdmission.superseded) reportShellError("Could not refresh history.", error);
       });
+      readCloudStatusAgainIfBusy();
       if (!shareView || shareViewReadsCollections) void refreshCollections();
       if (!shareView) {
         void refreshDatasets().catch(error => {
@@ -3987,6 +4368,7 @@ export function DesktopWorkspaceShell(props: {
     captureRecoveries,
     hasCommittedListing,
     invalidateVisibility,
+    readCloudStatusAgainIfBusy,
   ]);
 
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
@@ -4000,6 +4382,11 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [props.onSwitchWorkspace, reportShellError]);
 
+  // The file Share… shares: the active editor's, wherever it draws Share file.
+  const activeSharePath =
+    activeDocumentPath && !shareView && !isMountedSharePath(activeDocumentPath)
+      ? activeDocumentPath
+      : null;
   // The command registry: the palette renders it and the application menu
   // routes through it (onMenuCommand below) — one definition per action.
   const commandContext = useMemo<CommandContext>(
@@ -4011,15 +4398,17 @@ export function DesktopWorkspaceShell(props: {
         ? { access: shareViewDamaged ? null : shareAccess ?? null, ended: shareViewEnded }
         : null,
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
+      activeDocumentShareable: activeSharePath !== null,
       pinnedApps,
     }),
-    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
-      "new-file": () => setNewFileOpen(true),
+      "new-file": () => openNewPage(""),
+      "new-file-at-path": () => setNewFileOpen(true),
       "new-drawing": () => void createUntitledDrawing(),
-      "new-folder": () => requestExplorerCreate("folder"),
+      "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
       "quick-open": () => setQuickOpenOpen(true),
       "open-workspace": () => void openWorkspaceFolder(),
@@ -4034,6 +4423,9 @@ export function DesktopWorkspaceShell(props: {
       "previous-tab": () => showAdjacentTab(-1),
       "new-editor-group-right": () => openEditorGroupRight(),
       "toggle-markdown-source": () => toggleSource(wbRef.current.activeEditorGroup),
+      "share-file": () => {
+        if (activeSharePath) onSharePath(activeSharePath);
+      },
       "toggle-about": () => mutateWb(toggleAbout),
       "show-explorer": () => mutateWb((state) => showView(state, "explorer")),
       "show-chats": () => mutateWb((state) => showView(state, "chats")),
@@ -4067,6 +4459,8 @@ export function DesktopWorkspaceShell(props: {
     }),
     [
       commandContext,
+      activeSharePath,
+      onSharePath,
       toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
@@ -4074,7 +4468,8 @@ export function DesktopWorkspaceShell(props: {
       showAdjacentTab,
       importFiles,
       mutateWb,
-      requestExplorerCreate,
+      openNewPage,
+      requestExplorerFolder,
       checkForDesktopUpdates,
       installDesktopUpdate,
       openCloud,
@@ -4089,6 +4484,22 @@ export function DesktopWorkspaceShell(props: {
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
     [commandContext, commandHandlers],
   );
+  // The start surface's tiles: each kind's existing create action, where the
+  // workspace allows it. An app is a folder, so it needs folder creation.
+  const startActions = useMemo(
+    () => ({
+      ...(isCommandAvailable("new-file", commandContext) ? { markdown: commandHandlers["new-file"] } : {}),
+      ...(isCommandAvailable("new-collection", commandContext) ? { collection: commandHandlers["new-collection"] } : {}),
+      ...(isCommandAvailable("new-drawing", commandContext) ? { drawing: createUntitledDrawing } : {}),
+      ...(isCommandAvailable("new-folder", commandContext) ? { app: createFirstApp } : {}),
+    }),
+    [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
+  );
+  // Files dropped on the start surface land at the workspace root.
+  const importDroppedFiles = useCallback((dropped: File[]) => {
+    const paths = bridge().getDroppedFilePaths(dropped);
+    if (paths.length > 0) void importFiles("start-surface", paths);
+  }, [importFiles]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -4585,6 +4996,8 @@ export function DesktopWorkspaceShell(props: {
   // or, for a shared view, the registry capability and the share's live
   // state — never from the renderer's own capability read.
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
+  // History stopped recording, so the panel says so in place of taking in changes.
+  const historyPaused = isHistoryPaused(syncStatus);
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -4616,6 +5029,7 @@ export function DesktopWorkspaceShell(props: {
             reportShellError("Could not refresh history.", error),
           )
         }
+        paused={historyPaused}
       />
     ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
       <HistoryHiddenState
@@ -4627,30 +5041,22 @@ export function DesktopWorkspaceShell(props: {
           )
         }
       />
-    ) : engineHistoryReadState === "failed" ||
-      engineHistoryReadState === "updating" ? (
+    ) : engineHistoryReadState === "updating" ? (
+      // The next capture's activity reads again, so the line asks nothing.
+      <div className="flex flex-1 items-center justify-center px-4">
+        {historyPaused ? <HistoryPaused testId="history-paused" /> : <HistoryUpdating testId="history-updating" />}
+      </div>
+    ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
       // both say a panel could not load beside a Try again — so it takes
       // their look, not the empty-state recipe next door. One line, and a
       // Next that works on this surface: the read this panel runs itself.
       <div
-        data-testid={
-          engineHistoryReadState === "updating"
-            ? "history-updating"
-            : "history-load-failed"
-        }
+        data-testid="history-load-failed"
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span
-          className={
-            engineHistoryReadState === "updating"
-              ? "text-xs text-muted"
-              : "text-xs text-danger"
-          }
-        >
-          {engineHistoryReadState === "updating"
-            ? "Recent changes are still being added to History."
-            : "dohc could not load this workspace's history."}
+        <span className="text-xs text-danger">
+          dohc could not load this workspace's history.
         </span>
         <button
           type="button"
@@ -4708,7 +5114,8 @@ export function DesktopWorkspaceShell(props: {
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
         onOpenEditorsHeightChange={onOpenEditorsHeightChange}
-        createRequest={createRequest}
+        newFolderRequest={newFolderRequest}
+        onNewPage={openNewPage}
         revealPaths={explorerReveal?.workspaceId === workspaceId ? explorerReveal.paths : null}
         onRevealed={clearExplorerReveal}
         onOpenFile={openFile}
@@ -4892,6 +5299,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.stays ? { stays: true } : {}),
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
+        ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
@@ -5421,6 +5829,7 @@ export function DesktopWorkspaceShell(props: {
             <NoticeCenter
               workspaceId={workspaceId}
               syncStatus={syncStatus}
+              failedSaves={failedSaves}
               agentActive={agentActive}
               conflictSummaries={conflictSummaries}
               onOpenHistory={openHistoryView}
@@ -5447,7 +5856,7 @@ export function DesktopWorkspaceShell(props: {
               {...(shareView
                 ? {}
                 : {
-                    onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
+                    onOpenLiveDocuments: () => openLiveDocuments(workspaceId),
                   })}
               {...crashReportNotice}
               automationHolds={automationHolds}
@@ -5873,11 +6282,32 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               )
             );
+                case "newPage": return (
+              <NewPage
+                key={groupTab.id}
+                draft={newPageDrafts.current.get(groupTab.path)?.draft ?? ""}
+                onDraftChange={(draft) => newPageDraftChanged(groupTab.path, draft)}
+                body={newPageDrafts.current.get(groupTab.path)?.body ?? ""}
+                onBodyChange={(body) => {
+                  const pending = newPageDrafts.current.get(groupTab.path);
+                  if (pending) pending.body = body;
+                }}
+                onLeaveTitle={() => void writeNewPage(groupTab.path, true)}
+                file={null}
+                handedOff={false}
+                onHandedOff={() => undefined}
+              />
+            );
                 case "removed":
                 case undefined:
-                case "file": return tabPath && tab && editorCallbacks ? (
+                case "file": {
+                  // A new page's file renders inside the page's host until the
+                  // tab closes, so the switch from page to file keeps it.
+                  const born = tabPath ? bornPages.get(tabPath) : undefined;
+                  const fileView: NewPageFile = (onEditorReady) => tabPath && tab && editorCallbacks ? (
               <FileInspector
                 key={tabPath}
+                onEditorReady={onEditorReady}
                 workspaceId={workspaceId}
                 path={tabPath}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
@@ -5930,11 +6360,33 @@ export function DesktopWorkspaceShell(props: {
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}
-                onNewFile={isCommandAvailable("new-file", commandContext) ? commandHandlers["new-file"] : undefined}
-                onOpenPalette={() => setPaletteOpen(true)}
-                onOpenQuickOpen={() => setQuickOpenOpen(true)}
+                create={startActions}
+                recent={wb.recentFiles}
+                files={fileListingCommit ? files : null}
+                onOpen={openFile}
+                onDropFiles={isCommandAvailable("import-files", commandContext) ? importDroppedFiles : undefined}
               />
             );
+                  return born && tabPath ? (
+              <NewPage
+                key={born.id}
+                draft={bornDrafts.current.get(tabPath)?.draft ?? ""}
+                onDraftChange={(draft) => {
+                  const page = bornDrafts.current.get(tabPath);
+                  if (page) page.draft = draft;
+                }}
+                body={bornDrafts.current.get(tabPath)?.body ?? ""}
+                onBodyChange={(body) => {
+                  const page = bornDrafts.current.get(tabPath);
+                  if (page) page.body = body;
+                }}
+                onLeaveTitle={() => undefined}
+                file={fileView}
+                handedOff={born.handedOff}
+                onHandedOff={(taken) => pageHandedOff(tabPath, taken)}
+              />
+            ) : fileView(undefined);
+                }
               }
               const unhandled: never = groupTab;
               return unhandled;
@@ -5979,7 +6431,7 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
-            openMoment={openMomentDiffTab}
+              openMoment={openMomentDiffTab}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
             openChatMention={openChatMention}
@@ -6503,7 +6955,7 @@ export function DesktopWorkspaceShell(props: {
               ? {
                   onOpenLiveDocuments: () => {
                     closeSettings();
-                    setLiveDocumentsWorkspaceId(workspaceId);
+                    openLiveDocuments(workspaceId);
                   },
                 }
               : {})}
@@ -6519,6 +6971,10 @@ export function DesktopWorkspaceShell(props: {
           loadRefusals={loadLiveRefusals}
           retryRefusal={retryLiveShare}
           onError={reportLiveDocumentsError}
+          onStopped={liveDocumentStopped}
+          saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
+          readKeptEdits={readKeptEdits}
+          {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}
           onClose={() => setLiveDocumentsWorkspaceId(null)}
         />
       ) : null}
@@ -6547,6 +7003,8 @@ export function DesktopWorkspaceShell(props: {
               target={shareTarget}
               onClose={() => setShareTarget(null)}
               shareRemovals={shareRemovals}
+              accessContext={accessContext}
+              server={cloudStatus?.workspaceServerUrl ?? null}
             />
           </Suspense>
         </Overlay>

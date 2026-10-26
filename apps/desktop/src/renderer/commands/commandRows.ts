@@ -6,6 +6,8 @@ export interface CommandContext {
   // The share view this workspace is, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
   activeDocumentKind: string | null;
+  // Whether the active editor's file has a Share button.
+  activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
 }
 
@@ -15,6 +17,7 @@ export const COMMAND_AVAILABILITY = {
   folderCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).folder,
   collectionCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
+  activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,
   pinnedApp: (context: CommandContext, id: PinnedAppCommandId) =>
     context.pinnedApps.some((app) => pinnedAppCommandId(app.root) === id),
@@ -28,6 +31,7 @@ interface StaticRow {
 
 export const COMMAND_ROWS = {
   "new-file": { label: "New file", availability: "workspaceWritable" },
+  "new-file-at-path": { label: "New file…", availability: "workspaceWritable" },
   "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
   "new-folder": { label: "New folder", availability: "folderCreatable", capabilityId: "folder.create" },
   "new-collection": { label: "New collection", availability: "collectionCreatable" },
@@ -41,6 +45,7 @@ export const COMMAND_ROWS = {
   "previous-tab": { label: "Show previous tab", availability: "always" },
   "new-editor-group-right": { label: "New editor group right", availability: "always" },
   "toggle-markdown-source": { label: "Toggle markdown source view", availability: "activeMarkdown" },
+  "share-file": { label: "Share…", availability: "activeShareable" },
   "toggle-about": { label: "Toggle About", availability: "always" },
   "show-explorer": { label: "View: Explorer", availability: "always" },
   "show-chats": { label: "View: Chats", availability: "localWorkspace" },

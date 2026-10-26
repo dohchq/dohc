@@ -954,7 +954,7 @@ fn link_drain_holds_pause_the_actor_and_last_release_resumes_it() {
     for n in 0..32 {
         actor
             .capture_ingest_with_search_policy_blocking(
-                dohc_engine_domain::CaptureIngest {
+                &dohc_engine_domain::CaptureIngest {
                     workspace_id: "ws".into(),
                     version_id: "main".into(),
                     path: format!("note-{n}.md"),
@@ -983,7 +983,7 @@ fn link_drain_holds_pause_the_actor_and_last_release_resumes_it() {
     // A foreground command provides an actor barrier, with the outer hold live.
     actor
         .capture_ingest_with_search_policy_blocking(
-            dohc_engine_domain::CaptureIngest {
+            &dohc_engine_domain::CaptureIngest {
                 workspace_id: "ws".into(),
                 version_id: "main".into(),
                 path: "target.md".into(),

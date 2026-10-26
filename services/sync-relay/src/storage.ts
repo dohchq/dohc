@@ -15,6 +15,7 @@ import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
+import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -419,6 +420,45 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
+  recordServiceKeptEdits(input: Parameters<typeof serviceKeptEditsStorage.recordServiceKeptEdits>[1]) {
+    return serviceKeptEditsStorage.recordServiceKeptEdits(this, input);
+  }
+  forgetServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.forgetServiceKeptEdits(this, queue);
+  }
+  releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}) {
+    return serviceKeptEditsStorage.releaseServiceKeptEdits(this, document);
+  }
+  listServiceKeptEdits(workspaceId: string, after?: number) {
+    return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId, after);
+  }
+  readServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.readServiceKeptEdits(this, queue);
+  }
+  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.readServiceKeptEditsRefusal(this, input);
+  }
+  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number) {
+    return serviceKeptEditsStorage.serviceKeptEditsOf(this, document, after);
+  }
+  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
+  }
+  endServiceKeptEditsRetry(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, queue);
+  }
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}) {
+    return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);
+  }
+  observeServiceKeptEditsCheckpoint(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue, frozenCheckpoint: string | null) {
+    return serviceKeptEditsStorage.observeServiceKeptEditsCheckpoint(this, queue, frozenCheckpoint);
+  }
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document, identity);
+  }
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsStoreHeld(this, workspaceId, identity);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);

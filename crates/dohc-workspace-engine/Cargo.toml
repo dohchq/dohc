@@ -67,6 +67,7 @@ harness = ["dohc-engine-runtime/fault-injection"]
 [dev-dependencies]
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 # `test-util` gives the driver-loop tests paused virtual time, so they can
 # assert what the supervision loop actually WAITS on (a 30s terminal probe
 # costs the suite nothing) instead of asserting on the tracker beside it.

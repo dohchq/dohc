@@ -1,4 +1,5 @@
 use crate::EngineService;
+use crate::lock;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
@@ -631,11 +632,16 @@ impl EngineService {
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
 
         if open.capture_enabled {
+            let capture_stopped = || {
+                lock(&open.capture)
+                    .as_ref()
+                    .is_some_and(|driver| driver.is_finished())
+            };
             let mut flush = self
                 .capture_flush_once(ctx, &open, "history.page capture flush", None)
                 .await?;
             for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
-                if flush.settled {
+                if flush.settled || capture_stopped() {
                     break;
                 }
                 let cancellation = OperationCancellation::new(ctx);
@@ -650,7 +656,9 @@ impl EngineService {
                     .capture_flush_once(ctx, &open, "history.page capture flush", None)
                     .await?;
             }
-            if !flush.settled {
+            // A stopped task cannot flush. Keep recorded History readable;
+            // watcher.status reports that recording has paused.
+            if !flush.settled && !capture_stopped() {
                 return Err(WireError::new(
                     ErrorCode::Overloaded,
                     "History is still updating. Try again.",

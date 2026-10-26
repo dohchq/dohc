@@ -29,7 +29,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     pinned: [],
     openEditorsHeight: 180,
     onOpenEditorsHeightChange: vi.fn(),
-    createRequest: null,
+    newFolderRequest: null,
+    onNewPage: vi.fn(),
     onOpenFile: vi.fn(),
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
@@ -272,18 +273,17 @@ describe("Explorer kind glyphs", () => {
     expect(glyph.classList.contains("text-subtle")).toBe(false);
   });
 
-  it("shows the kind of the name being typed when creating and renaming", async () => {
-    render(<Explorer {...explorerProps({ files: [file("plan.md")] })} />);
+  it("opens a new page in the selected folder, with no row until its file exists", () => {
+    const props = explorerProps({ files: [file("Trip/plan.md")], folders: ["Trip"], expandedFolders: ["Trip"] });
+    render(<Explorer {...props} />);
+    fireEvent.click(treeRow("Trip/plan.md"));
     fireEvent.click(screen.getByRole("button", { name: "New file" }));
-    const input = await screen.findByTestId("tree-edit-input");
-    // An empty draft shows the Markdown default, as does a name without an extension.
-    expect(editRowGlyph().classList.contains("lucide-file-text")).toBe(true);
-    fireEvent.change(input, { target: { value: "budget.csv" } });
-    expect(editRowGlyph().classList.contains("lucide-file-spreadsheet")).toBe(true);
-    fireEvent.change(input, { target: { value: "budget" } });
-    expect(editRowGlyph().classList.contains("lucide-file-text")).toBe(true);
-    fireEvent.keyDown(input, { key: "Escape" });
+    expect(props.onNewPage).toHaveBeenCalledWith("Trip");
+    expect(screen.queryByTestId("tree-edit-input")).toBeNull();
+  });
 
+  it("shows the kind of the name being typed when renaming", async () => {
+    render(<Explorer {...explorerProps({ files: [file("plan.md")] })} />);
     fireEvent.click(treeRow("plan.md"));
     fireEvent.keyDown(treeRow("plan.md"), { key: "F2" });
     const rename = await screen.findByTestId("tree-edit-input");

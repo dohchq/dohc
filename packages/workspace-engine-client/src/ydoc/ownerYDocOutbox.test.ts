@@ -72,6 +72,45 @@ describe("OwnerYDocOutbox append boundary", () => {
   });
 });
 
+describe("OwnerYDocOutbox Try again", () => {
+  const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 3 };
+
+  it("asks the engine for one more attempt at the binding generation the owner saw", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: { retryDeliveryId: "delivery-1" } };
+    } };
+    expect(await outbox(client).retry({ outboxId: "outbox", binding })).toEqual({ retryDeliveryId: "delivery-1" });
+    expect(requests).toMatchObject([{ workspace: WORKSPACE, method: "ydoc.ownerOutbox.retry", params: { outboxId: "outbox", binding } }]);
+  });
+
+  it("refuses a malformed binding before the engine and a reply without its delivery", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: {} };
+    } };
+    await expect(outbox(client).retry({ outboxId: "outbox", binding: { ...binding, restoreFenceGeneration: -1 } })).rejects.toThrow();
+    expect(requests).toEqual([]);
+    await expect(outbox(client).retry({ outboxId: "outbox", binding })).rejects.toThrow("retryDeliveryId");
+  });
+
+  it("records a refusal with the head it refused and its key, and other quarantines without one", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: { quarantined: true } };
+    } };
+    await outbox(client).quarantine({ outboxId: "outbox", reason: "invalid-update", refusal: { deliveryId: "delivery-1", key: "refusal-1" } });
+    await outbox(client).quarantine({ outboxId: "outbox", reason: "binding-changed", observedBinding: binding });
+    expect(requests.map(request => request.params)).toEqual([
+      { outboxId: "outbox", reason: "invalid-update", refusal: { deliveryId: "delivery-1", key: "refusal-1" } },
+      { outboxId: "outbox", reason: "binding-changed", observedBinding: binding },
+    ]);
+  });
+});
+
 describe("OwnerYDocOutbox receipt boundary", () => {
   it("forwards minimum and maximum safe receipt coordinates unchanged", async () => {
     const client = new RecordingRequester();
@@ -209,8 +248,9 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
         byteLength: 3,
         createdAtMs: 1,
       }],
-      quarantineReason: null,
+      quarantineReason: null as string | null,
       observedBinding: null,
+      retryDeliveryId: null as string | null,
     };
   }
 
@@ -220,6 +260,7 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const snapshot = "a".repeat(64);
     const parts = [
       { part: "header", sequence: 0, bytes: Buffer.from(JSON.stringify({
+        frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
         ...header, baseByteLength: base.length, pendingEntryCount: entries.length,
         nextSequence: Math.max(0, ...entries.map((entry) => entry.sequence)) + 1,
         firstEntryCursor: entries[0] ? {snapshot,part: "entryHeader",sequence: entries[0].sequence,offset: 0} : null,
@@ -283,6 +324,13 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     }});
     return {requests,read: () => client.readDeliveryHead("outbox-1",binding)};
   }
+
+  it("reads the head its owner asked to try again, and refuses a header without that field", async () => {
+    const granted = { ...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", retryDeliveryId: "delivery-1" };
+    expect(await read(granted)).toMatchObject({ state: "quarantined", quarantineReason: "invalid-update", retryDeliveryId: "delivery-1" });
+    const { retryDeliveryId: _absent, ...missing } = pendingResult();
+    await expect(read(missing as ReturnType<typeof pendingResult>)).rejects.toThrow("retryDeliveryId");
+  });
 
   it("preserves non-empty base and update bytes with matching accounting", async () => {
     const pending = await read(pendingResult());
@@ -368,6 +416,105 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(read(result)).rejects.toThrow(TypeError);
   });
 
+  function nativeSourceOf(result: ReturnType<typeof pendingResult>, origin: Record<string, unknown>) {
+    return {binding: result.binding, adoptionId: "adoption-1", nativeSequence: 4, updateDigest: result.entries[0]!.updateDigest, origin};
+  }
+
+  it.each([["human", "local-person"], ["agent", "trip-agent"], ["automation", "automation-1"]])(
+    "reads the %s a native entry's journal recorded", async (actorKind, actorOriginId) => {
+      const result = pendingResult();
+      const nativeSource = nativeSourceOf(result, {kind: "nativeUpdate", actorOriginId, actorKind,
+        onBehalfOf: actorKind === "human" ? null : "local-person", chainDepth: actorKind === "human" ? 0 : 1, recordedAtMs: 7});
+      Object.assign(result.entries[0]!, {nativeSource});
+      expect((await read(result)).entries[0]?.nativeSource).toEqual(nativeSource);
+    });
+
+  it("reads an adoption seed's source and leaves an entry without one absent", async () => {
+    const result = pendingResult();
+    result.entries.push({...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3"});
+    result.pendingBytes = 6;
+    const nativeSource = nativeSourceOf(result, {kind: "adoptionSeed"});
+    Object.assign(result.entries[0]!, {nativeSource});
+    const pending = await read(result);
+    expect(pending.entries[0]?.nativeSource).toEqual(nativeSource);
+    expect(pending.entries[1]).not.toHaveProperty("nativeSource");
+  });
+
+  it.each([
+    {kind: "nativeUpdate"},
+    {kind: "foreign"},
+    {kind: "adoptionSeed", note: 1},
+    {kind: "nativeUpdate", actorOriginId: "", actorKind: null, onBehalfOf: null, chainDepth: null, recordedAtMs: 1},
+  ])("refuses a malformed native origin %j", async origin => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, {nativeSource: nativeSourceOf(result, origin)});
+    await expect(read(result)).rejects.toThrow(TypeError);
+  });
+
+  it("refuses a native source recorded for other bytes", async () => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, {nativeSource: {...nativeSourceOf(result, {kind: "adoptionSeed"}), updateDigest: "f".repeat(64)}});
+    await expect(read(result)).rejects.toThrow("Invalid native source.");
+  });
+
+  function checkpointPages(checkpoint: Buffer) {
+    const snapshot = "a".repeat(64);
+    const offsets = [0, 4].filter(offset => offset < checkpoint.length);
+    return offsets.map((offset, index) => ({kind: "page", snapshot, part: "checkpoint", sequence: 0, offset, totalBytes: checkpoint.length,
+      digest: sha(checkpoint), bytesBase64: checkpoint.subarray(offset, offset + 4).toString("base64"),
+      nextCursor: offsets[index + 1] === undefined ? null : {snapshot, part: "checkpoint", sequence: 0, offset: offsets[index + 1]!}}));
+  }
+
+  function cursorReader(responses: ReturnType<typeof pages>) {
+    const parts: string[] = [];
+    const client = outbox({async sendRequest(request) {
+      const cursor = (request.params as {cursor?: {part: string; sequence: number; offset: number}}).cursor;
+      const page = cursor === undefined ? responses[0] : responses.find(page => page.part === cursor.part && page.sequence === cursor.sequence && page.offset === cursor.offset);
+      if (!page) throw new Error("Cursor is outside the fixture.");
+      parts.push(page.part);
+      return {id: request.id, result: page};
+    }});
+    return {client, parts};
+  }
+
+  it("reads a recovery's checkpoint after the whole queue, and none for a queue without a binding", async () => {
+    const checkpoint = Buffer.from([9, 8, 7, 6, 5, 4]);
+    const bound = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", checkpointDigest: sha(checkpoint)};
+    const recovering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
+    const recovery = await recovering.client.readRecovery("outbox-1");
+    expect(recovery.checkpoint).toEqual(new Uint8Array(checkpoint));
+    // A confirmation of this copy names what it read.
+    expect(recovery.checkpointDigest).toBe(sha(checkpoint));
+    expect(recovery.entries[0]?.update).toEqual(new Uint8Array([2, 3, 4]));
+    expect(recovering.parts.slice(-2)).toEqual(["checkpoint", "checkpoint"]);
+    expect(recovering.parts.indexOf("checkpoint")).toBeGreaterThan(recovering.parts.lastIndexOf("update"));
+    const withoutBinding = {...pendingResult(), checkpointDigest: null};
+    const unbound = cursorReader(pages(withoutBinding, 5));
+    expect(await unbound.client.readRecovery("outbox-1")).toMatchObject({checkpoint: null, checkpointDigest: null});
+    expect(unbound.parts).not.toContain("checkpoint");
+    // Delivery never reads it.
+    const delivering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
+    expect(await delivering.client.readPending("outbox-1")).not.toHaveProperty("checkpoint");
+    expect(delivering.parts).not.toContain("checkpoint");
+  });
+
+  it("reads a checkpoint that changed since the header, or between its pages, as a changed read", async () => {
+    const checkpoint = Buffer.from([9, 8, 7, 6, 5, 4]), successor = Buffer.from([1, 2, 3, 4, 5, 6, 7]);
+    const bound = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", checkpointDigest: sha(checkpoint)};
+    const [first] = checkpointPages(checkpoint), [, second] = checkpointPages(successor);
+    const betweenPages = cursorReader([...pages(bound, 5), first!, second!]);
+    await expect(betweenPages.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    const sinceHeader = cursorReader([...pages(bound, 5), ...checkpointPages(successor)]);
+    await expect(sinceHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    // A header read over several pages names the checkpoint's digest, so an acceptance changes it too.
+    const [header] = pages(bound, 5), advanced = {...bound, checkpointDigest: sha(successor)};
+    const duringHeader = cursorReader([header!, ...pages(advanced, 5).slice(1), ...checkpointPages(successor)]);
+    await expect(duringHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    const presenceOnly = {...bound, checkpointDigest: "present"};
+    const malformed = cursorReader([...pages(presenceOnly, 5), ...checkpointPages(checkpoint)]);
+    await expect(malformed.client.readRecovery("outbox-1")).rejects.toThrow("checkpointDigest must be a SHA-256 digest.");
+  });
+
   it("discards a changed snapshot and does not automatically retry", async () => {
     const responses = pages(pendingResult());
     const last = responses.length - 1;
@@ -425,6 +572,27 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(head.entry).toMatchObject({sequence: 3,update: new Uint8Array([2,3,4])});
     expect(head).not.toHaveProperty("baseUpdate");
     expect(run.requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader","update"]);
+  });
+
+  it("reports whether a delivery head is a seed frozen at its generation, with the checkpoint a copy reads, and refuses a header without them", async () => {
+    const frozen = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64),
+      recoveryCheckpointDigest: "c".repeat(64) as string | null};
+    frozen.binding.lineageClaimId = frozen.baseUpdateDigest;
+    expect(await deliveryReader(pages(frozen, 4096), frozen.binding).read())
+      .toMatchObject({frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64), recoveryCheckpointDigest: "c".repeat(64)});
+    // An earlier generation's refused seed freezes nothing, and a copy must still hold its checkpoint.
+    const earlier = {...frozen, frozenAtRefusedSeed: false};
+    expect(await deliveryReader(pages(earlier, 4096), earlier.binding).read())
+      .toMatchObject({frozenAtRefusedSeed: false, recoveryCheckpointDigest: "c".repeat(64)});
+    // A plain read of the queue carries none of them.
+    const plain = await read(frozen);
+    expect(plain).not.toHaveProperty("frozenAtRefusedSeed");
+    expect(plain).not.toHaveProperty("checkpointDigest");
+    expect(plain).not.toHaveProperty("recoveryCheckpointDigest");
+    for (const damage of [{frozenAtRefusedSeed: "yes"}, {checkpointDigest: "c"}, {recoveryCheckpointDigest: "d".repeat(64)}, {recoveryCheckpointDigest: undefined}]) {
+      const damaged = {...frozen, ...damage};
+      await expect(deliveryReader(pages(damaged, 4096), damaged.binding).read()).rejects.toThrow();
+    }
   });
 
   it.each(["binding","base-digest","base-length","cursor-snapshot","cursor-sequence","missing-cursor","update-hash","changed"])(

@@ -24,6 +24,7 @@ import {
 } from "../testing/realDaemonWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
+  OwnerKnownRefusals,
   OwnerYDocOutboxDrainer,
   type FreshOwnerAuthority,
   type OwnerYDocDelivery,
@@ -107,7 +108,7 @@ it("maps an interrupted outbox snapshot to caller-scheduled retry without author
   const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", {
     async freshOwnerAuthority() { calls.push("authority"); return { kind: "retry" }; },
     async deliver() { calls.push("delivery"); return { kind: "retry" }; },
-  });
+  }, new OwnerKnownRefusals());
   try {
     await expect(drainer.drainOnce()).resolves.toBe("retry");
     expect(methods).toEqual(["ydoc.ownerOutbox.readPending"]);
@@ -149,7 +150,7 @@ it.each([
         },
         baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "a".repeat(64),
         state: "active", pendingBytes: 1, oldestEntryAtMs: 0,
-        quarantineReason: null, observedBinding: null,
+        quarantineReason: null, observedBinding: null, retryDeliveryId: null,
         entry: { sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
           update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 },
       };
@@ -179,7 +180,7 @@ it.each([
         : { kind: "receipt", receipt: { deliveryId: "delivery-1", updateDigest: "b".repeat(64),
           journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1) } };
     },
-  });
+  }, new OwnerKnownRefusals());
   const draining = drainer.drainOnce();
   try {
     await reached;
@@ -300,7 +301,7 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
               journalCursor: envelope.sequence, acceptingHostEpoch: parseHostEpoch(1),
             } };
           },
-        });
+        }, new OwnerKnownRefusals());
         try {
           for (let index = 0; index < 7; index += 1) {
             await expect(drainer.drainOnce()).resolves.toBe("acknowledged");
@@ -451,7 +452,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
             await release.promise;
             return { kind: "receipt", receipt };
           },
-        });
+        }, new OwnerKnownRefusals());
         draining = drainer.drainOnce();
         await Promise.race([
           reached.promise,
@@ -598,10 +599,12 @@ it.skipIf(engine.missing)(
           engineBinding.workspace,
         );
         const host = new FakeOwnerHost();
+        const refusals = new OwnerKnownRefusals();
         const firstDrainer = new OwnerYDocOutboxDrainer(
           outbox,
           appendResult.outboxId,
           host,
+          refusals,
         );
         expect(await firstDrainer.drainOnce()).toBe("retry");
         firstDrainer.dispose();
@@ -610,6 +613,7 @@ it.skipIf(engine.missing)(
           outbox,
           appendResult.outboxId,
           host,
+          refusals,
         );
         expect(await secondDrainer.drainOnce()).toBe("acknowledged");
 

@@ -16,7 +16,7 @@ import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
-import { createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
+import { AutomationStoreNotOpenedError, createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import {
   LiveDocumentMutationError,
@@ -874,6 +874,12 @@ describe("stop and restore in main", () => {
     const target = kind === "person" ? {kind, userId: "user_ana"} : {kind, grantId: "grant-link"};
     await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Access stopped. dohc could not read unfinished Stop and restore progress.");
     expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
+  });
+  it("shows no unfinished progress while the workspace is still opening, and still reports a broken run store", async () => {
+    const opening = fixture({runStoreError: new AutomationStoreNotOpenedError("dohc has not finished opening this workspace. Try again when it opens.")});
+    expect(await opening.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+    const broken = fixture({runStoreError: new Error("Unreadable progress")});
+    await expect(broken.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).rejects.toThrow("Unreadable progress");
   });
   it("starts fresh when new access exists after an unfinished restore's files were undone", async () => {
     const root = await createTestScratch("dohc-restore-new-access-");

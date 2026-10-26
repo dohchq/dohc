@@ -133,7 +133,7 @@ describe("shell tab surfaces", () => {
           activeTab: path,
           detail: "active tab matched site tab format but groupSiteRoot parsed to null",
         }));
-        expect(await pane.findByText("Select a file, or create one")).toBeTruthy();
+        expect(await pane.findByTestId("start-surface")).toBeTruthy();
         expect(pane.queryByTestId(editorTabTestId(path))).toBeNull();
       } else if (fallback === "collection error") {
         expect(await pane.findByText("dohc could not open this collection")).toBeTruthy();
@@ -157,7 +157,7 @@ describe("shell tab surfaces", () => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     const pane = within(screen.getByTestId("editor-group-primary"));
-    expect(pane.getByText("Select a file, or create one")).toBeTruthy();
+    expect(pane.getByTestId("start-surface")).toBeTruthy();
     expect(pane.queryByTestId("file-inspector")).toBeNull();
   });
 

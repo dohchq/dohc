@@ -76,7 +76,7 @@ function applyLook(look: LookSettings): void {
 export function applyLookSettings(settings: DesktopUserSettings): void {
   lookRevision += 1;
   applyLook(settings);
-  setChosenColors(settings.appearance);
+  setChosenColors(settings);
 }
 
 /**

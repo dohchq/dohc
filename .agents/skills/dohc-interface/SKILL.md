@@ -97,6 +97,7 @@ Check that the action exists on that surface before you name it.
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
 - Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- When more can load, show the loaded count as a lower bound, `49+`, read aloud as "49 or more files". Never show a loaded count as the total.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
@@ -127,6 +128,11 @@ Existing strings do not all follow these rules, and some surfaces use two words 
 The editor's link picker says `page links` in its accessible name and `No files match` in its empty state.
 Settle the word across every surface before you change any string.
 A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
+When a list waits on a cause, say what the list will show once the cause is fixed.
+Do not reuse another surface's question.
+Signed out, the Sharing view's **Shared with me** says `Connect a server to get what others share with you.`
+About's Access asks who has access, so it keeps `Connect your server to check who has access.`
+Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
 
 ## Where messages go
@@ -140,6 +146,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | A control's own input is wrong | Inline, beside the control |
 
 - Use these places. Do not add a new one for a new message.
+- Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
@@ -148,6 +155,8 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
+- If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
@@ -159,7 +168,7 @@ The look in one line: warm paper, quiet graphite, one sans for every word of the
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
@@ -199,6 +208,9 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
 Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
 Never uppercase a label.
+
+Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
+`PathLine` in `ui/PathLine.tsx` draws it.
 
 ### Radius and elevation
 
@@ -271,7 +283,7 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way. The command palette's `focus-within:border-ink` is one example. Say why in a comment.
+- Keep the global `:focus-visible` ring. Do not add `outline-none`, with two exceptions, each explained in a comment. Where a ring would clip, opt out only if the frame shows focus another way, as the command palette's `focus-within:border-ink` does. A dialog's panel never wears the ring: it holds focus only until Tab reaches its controls, which show their own.
 - Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
 
 ## Before you finish
@@ -279,6 +291,7 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+   Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
 5. Does each string do one job, and does every error and empty state give a Next?
 6. Does every noun match the surrounding UI?

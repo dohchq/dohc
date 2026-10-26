@@ -1,7 +1,8 @@
 /// <reference types="vitest/config" />
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+import { githubStars } from "./github-stars.ts";
 
 // The demo renders the desktop's styles inside a shadow root, where `:root`
 // matches nothing. Its tokens also apply to the shadow host.
@@ -12,8 +13,20 @@ const shadowHostTokens = {
   },
 };
 
+// Fills each page's star count from one request per build.
+const githubStarCount = (): Plugin => {
+  let stars: Promise<string | null> | undefined;
+  return {
+    name: "github-star-count",
+    async transformIndexHtml(html) {
+      const count = await (stars ??= githubStars());
+      return count ? html.replaceAll('<span class="nav-github-stars"></span>', `<span class="nav-github-stars">${count}</span>`) : html;
+    },
+  };
+};
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), githubStarCount()],
   css: { postcss: { plugins: [shadowHostTokens] } },
   build: {
     rolldownOptions: {
