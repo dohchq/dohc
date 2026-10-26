@@ -97,6 +97,7 @@ Check that the action exists on that surface before you name it.
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
 - Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- When more can load, show the loaded count as a lower bound, `49+`, read aloud as "49 or more files". Never show a loaded count as the total.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
