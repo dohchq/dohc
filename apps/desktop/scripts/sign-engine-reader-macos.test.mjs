@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmod, cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
 import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mjs";
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
+import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 import signReader from "./sign-engine-reader-macos.mjs";
 
 const require = createRequire(import.meta.url);
@@ -25,10 +26,17 @@ async function removeLayout(path) {
   await rm(path, { recursive: true, force: true });
 }
 
-test("packaged macOS reader signing", { timeout: 180000 }, async t => {
+test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-signing-")), source = join(root, "source");
   t.after(async () => { await removeLayout(source); await rm(root, { recursive: true, force: true }); });
   const staged = await stageEngineReader({ resources: source, platform: "darwin", arch: "arm64" });
+  const sourceCompiler = join(source, "app-compiler");
+  await mkdir(sourceCompiler);
+  await copyFile(staged.node, join(sourceCompiler, "node"));
+  const upstreamCompilerManifest = { platform: "darwin", arch: "arm64", nodeVersion: NODE_VERSION,
+    nodeSha256: PINNED_NODE["darwin-arm64"].sha256,
+    files: { node: PINNED_NODE["darwin-arm64"].sha256, "unchanged-asset": "unchanged digest" } };
+  await writeFile(join(sourceCompiler, "manifest.json"), JSON.stringify(upstreamCompilerManifest));
   const sourceBase = join(source, "engine-reader");
   const stale = ["b".repeat(64), ".staging-leaked", ".selection-leaked.json"];
   for (const name of stale.slice(0, 2)) {
@@ -82,19 +90,23 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
     const f = await fixture(sub);
     for (const arch of [1, 0]) await assert.rejects(f.prepare(arch), /architecture/);
   });
-  for (const scenario of ["compiler signing", "transient timestamp failures", "permanent signing failure", "verification failure", "ad hoc signing", "hard-linked source"]) {
+  for (const scenario of ["compiler signing", "transient timestamp failures", "permanent signing failure", "verification failure", "ad hoc signing", "hard-linked source", "compiler signing failure", "compiler verification failure", "outer reader mutation", "outer compiler mutation"]) {
     await t.test(`handles ${scenario}`, async sub => {
       const f = await fixture(sub);
       const sourceManifest = await readFile(staged.manifest), sourceSelection = await readFile(join(sourceBase, "selection.json"));
       const sourceNodeHash = createHash("sha256").update(await readFile(staged.node)).digest("hex");
+      const sourceCompilerManifest = await readFile(join(sourceCompiler, "manifest.json"));
+      const sourceCompilerNodeHash = createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex");
+      const compilerNode = join(f.resources, "app-compiler/node");
       if (scenario === "hard-linked source") {
-        for (const [sourcePath, target] of [[staged.node, f.original.node], [staged.manifest, f.original.manifest], [join(sourceBase, "selection.json"), join(f.resources, "engine-reader/selection.json")]]) {
+        for (const [sourcePath, target] of [[staged.node, f.original.node], [staged.manifest, f.original.manifest], [join(sourceBase, "selection.json"), join(f.resources, "engine-reader/selection.json")], [join(sourceCompiler, "node"), compilerNode], [join(sourceCompiler, "manifest.json"), join(f.resources, "app-compiler/manifest.json")]]) {
           await rm(target);
           await link(sourcePath, target);
         }
       }
       await f.prepare();
-      let attempts = 0, verifications = 0, sealed = false;
+      let attempts = 0, verifications = 0, sealed = false, outerCalls = 0;
+      const attemptsByNode = new Map();
       const waits = [];
       const options = { app: f.app, platform: "darwin", identity: scenario === "ad hoc signing" ? "-" : "synthetic-app-identity", keychain: "/synthetic.keychain",
         ignore: file => file.endsWith("already-ignored") };
@@ -110,23 +122,34 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
           assert.equal(command, "/usr/bin/codesign");
           if (args.includes("--sign")) {
             attempts++;
-            if (scenario === "permanent signing failure" || scenario === "transient timestamp failures" && attempts < 3) throw Error("timestamp server unavailable");
+            const node = args.at(-1);
+            assert.ok([f.original.node, compilerNode].includes(node));
+            attemptsByNode.set(node, (attemptsByNode.get(node) ?? 0) + 1);
+            if (scenario === "permanent signing failure" || scenario === "compiler signing failure" && node === compilerNode ||
+                scenario === "transient timestamp failures" && attemptsByNode.get(node) < 3) throw Error("timestamp server unavailable");
             assert.equal(args[args.indexOf("--sign") + 1], options.identity);
             assert.equal(args[args.indexOf("--options") + 1], "runtime");
             assert.equal(args[args.indexOf("--keychain") + 1], options.keychain);
             assert.ok(args.includes(options.identity === "-" ? "--timestamp=none" : "--timestamp"));
             const plist = await readFile(args[args.indexOf("--entitlements") + 1], "utf8");
             assert.deepEqual([...plist.matchAll(/<key>([^<]+)<[/]key>/g)].map(match => match[1]), ["com.apple.security.cs.allow-jit"]);
-            await writeFile(f.original.node, Buffer.concat([await readFile(f.original.node), Buffer.from("synthetic signature")]));
+            await writeFile(node, Buffer.concat([await readFile(node), Buffer.from("synthetic signature")]));
           } else {
             verifications++;
-            assert.deepEqual(args, ["--verify", "--strict", f.original.node]);
-            if (scenario === "verification failure") throw Error("invalid code signature");
+            const node = args.at(-1);
+            assert.ok([f.original.node, compilerNode].includes(node));
+            assert.deepEqual(args, ["--verify", "--strict", node]);
+            if (scenario === "verification failure" || scenario === "compiler verification failure" && node === compilerNode) throw Error("invalid code signature");
           }
         },
         signApp: async signedOptions => {
           sealed = true;
-          assert.equal(verifications, 1);
+          outerCalls++;
+          assert.equal(verifications, 2);
+          const compilerManifest = JSON.parse(await readFile(join(f.resources, "app-compiler/manifest.json"), "utf8"));
+          assert.deepEqual(compilerManifest, { ...upstreamCompilerManifest,
+            files: { ...upstreamCompilerManifest.files, node: createHash("sha256").update(await readFile(compilerNode)).digest("hex") } });
+          assert.notEqual(compilerManifest.files.node, upstreamCompilerManifest.files.node);
           const final = JSON.parse(installedReaderConfig(f.resources, "darwin", "arm64"));
           const finalManifest = JSON.parse(await readFile(final.manifest, "utf8"));
           assert.notEqual(final.node, f.original.node);
@@ -135,7 +158,7 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
           assert.equal(buildSha256, createHash("sha256").update(JSON.stringify(identity)).digest("hex"));
           assert.equal(dirname(final.node), join(f.resources, "engine-reader", buildSha256));
           assert.ok(signedOptions.ignore(final.node));
-          assert.equal(signedOptions.ignore(join(f.resources, "app-compiler/node")), false);
+          assert.ok(signedOptions.ignore(compilerNode));
           assert.ok(signedOptions.ignore("already-ignored"));
           assert.equal(signedOptions.ignore(join(f.resources, "workspace-engine/dohc-workspace-engine")), false);
           assert.equal(signedOptions.optionsForFile, options.optionsForFile);
@@ -148,26 +171,37 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
             assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path), mode);
             if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
           }
+          if (scenario === "outer reader mutation" || scenario === "outer compiler mutation") {
+            const node = scenario === "outer reader mutation" ? final.node : compilerNode;
+            await chmod(node, 0o755);
+            await writeFile(node, "outer signing changed the runtime");
+          }
         },
       });
-      if (scenario === "permanent signing failure") {
+      if (scenario === "permanent signing failure" || scenario === "compiler signing failure") {
         await assert.rejects(operation, /timestamp server unavailable/);
-        assert.equal(attempts, 3);
-        assert.equal(verifications, 0);
+        assert.equal(attempts, scenario === "compiler signing failure" ? 4 : 3);
+        assert.equal(verifications, scenario === "compiler signing failure" ? 1 : 0);
         assert.equal(sealed, false);
         assert.deepEqual(waits, [5000, 10000]);
-      } else if (scenario === "verification failure") {
+      } else if (scenario === "verification failure" || scenario === "compiler verification failure") {
         await assert.rejects(operation, /invalid code signature/);
-        assert.equal(attempts, 1);
-        assert.equal(verifications, 1);
+        assert.equal(attempts, scenario === "compiler verification failure" ? 2 : 1);
+        assert.equal(verifications, scenario === "compiler verification failure" ? 2 : 1);
         assert.equal(sealed, false);
         assert.deepEqual(waits, []);
+      } else if (scenario === "outer reader mutation" || scenario === "outer compiler mutation") {
+        await assert.rejects(operation, /Signing changed the pinned/);
+        assert.equal(sealed, true);
       } else {
         await operation;
         assert.equal(sealed, true);
-        assert.equal(attempts, scenario === "transient timestamp failures" ? 3 : 1);
-        assert.deepEqual(waits, scenario === "transient timestamp failures" ? [5000, 10000] : []);
+        assert.equal(attempts, scenario === "transient timestamp failures" ? 6 : 2);
+        assert.deepEqual(waits, scenario === "transient timestamp failures" ? [5000, 10000, 5000, 10000] : []);
       }
+      assert.equal(outerCalls, sealed ? 1 : 0);
+      assert.deepEqual(await readFile(join(sourceCompiler, "manifest.json")), sourceCompilerManifest);
+      assert.equal(createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex"), sourceCompilerNodeHash);
       await requireEngineReader(source, "darwin", "arm64");
       if (sealed) await rm(f.app, { recursive: true, force: true });
     });

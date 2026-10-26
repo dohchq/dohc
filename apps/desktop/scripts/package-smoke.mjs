@@ -95,10 +95,10 @@ export async function probeAgentLaunchers(resources) {
     const competing = join(scratch, "competing");
     await mkdir(competing);
     await copyFile(process.execPath, join(competing, process.platform === "win32" ? "node.exe" : "node"));
-    const args = ["", "two words", "IcÃ© é›ª"];
+    const args = ["", "two words", "Icé 雪"];
     const bundled = agentRuntimeTarget(process.platform, process.arch) === "bundled";
     const input = Buffer.from([0, 10, 13, 255, 65]);
-    for (const label of ["Ice Test", "IcÃ©"]) {
+    for (const label of ["Ice Test", "Icé"]) {
       const copied = join(scratch, label, "resources");
       const cwd = join(scratch, label, "workspace", label);
       await mkdir(cwd, { recursive: true });
@@ -263,7 +263,7 @@ export function staticPackageSmoke() {
     }
 
     // Fuse hardening intent: electron-builder >=24.12 flips these itself via
-    // @electron/fuses at package time â€” no afterPack hook needed.
+    // @electron/fuses at package time — no afterPack hook needed.
     const FUSE_EXPECTATIONS = {
       runAsNode: false,
       enableCookieEncryption: true,

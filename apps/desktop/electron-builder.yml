@@ -83,6 +83,7 @@ extraResources:
     filter:
       - "dohc"
       - "dohc.cmd"
+      - "dohc.mjs"
       # The dohc-mcp stdio server chat session configs point the user's AI
       # tool at (resolveDohcMcpCommand); staged by build-cli-bin.mjs.
       - "dohc-mcp"
