@@ -29,7 +29,12 @@ export function makeDebugHome(directory, platform = process.platform, temp = tmp
   if (!base) throw new Error(`The temp folder ${temp} is too long for the desktop's CLI socket. Set TMPDIR to a shorter folder.`);
   const link = mkdtempSync(join(base, LINK_PREFIX));
   const home = join(link, "home");
-  symlinkSync(files, home, "dir");
+  try {
+    symlinkSync(files, home, "dir");
+  } catch (error) {
+    rmSync(link, { recursive: true, force: true });
+    throw error;
+  }
   return { files, home, link };
 }
 

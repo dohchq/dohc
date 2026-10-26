@@ -75,6 +75,7 @@ if (process.argv[2] === "fixture") {
     app.emit("close");
   };
   globalThis.debugFixtureElectron = { launch: async (options) => {
+    await hold("launch");
     assert.ok(options.args.includes("--dohc-isolated-test"), "debug must preserve the installed protocol handler");
     const profile = options.args.find((arg) => arg.startsWith("--user-data-dir=")).slice("--user-data-dir=".length);
     assert.ok(isAbsolute(profile), "debug needs an absolute isolated profile");
@@ -184,6 +185,7 @@ if (process.argv[2] === "fixture") {
   }
   if (process.platform !== "win32") for (const signal of ["SIGINT", "SIGTERM"]) {
     test(`debug ${signal} during startup leaves no link to the session's home`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase: "startup" }));
+    test(`debug ${signal} during launch closes the app, keeps the evidence and removes the link`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase: "launch" }));
   }
   for (const signal of ["SIGINT", "SIGTERM"]) for (const phase of ["cleanup", "evidence"]) {
     test(`debug repeated ${signal} during ${phase} (${process.platform === "win32" ? "synthetic Windows events" : "native POSIX signals"})`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase }));

@@ -44,6 +44,8 @@ const profile = join(directory, "profile");
 const workspace = join(directory, "workspace");
 let session;
 let leaveStartup;
+let launching;
+let interrupted = false;
 let app;
 let processHandle;
 let stop;
@@ -65,6 +67,11 @@ try {
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
   const commit = git(["rev-parse", "HEAD"]);
+  // Once Electron may be starting, a signal waits for the launch and then
+  // stops the session the usual way, which closes the app before the link goes.
+  launching = () => { interrupted = true; };
+  process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup);
+  process.on("SIGINT", launching); process.on("SIGTERM", launching);
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--dohc-isolated-test", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
   processHandle = app.process();
@@ -74,9 +81,9 @@ try {
       done();
     };
     app.once("close", stop); processHandle.once("exit", stop);
-    process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup);
+    process.off("SIGINT", launching); process.off("SIGTERM", launching);
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
-    if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
+    if (interrupted || processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
   app.process().stdout?.setEncoding("utf8").on("data", (text) => record("main.stdout", text));
@@ -123,7 +130,7 @@ finally {
       await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
       console.log(`[debug] Evidence retained at ${directory}`);
     } finally {
-      if (leaveStartup) { process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup); }
+      for (const handler of [leaveStartup, launching]) if (handler) { process.off("SIGINT", handler); process.off("SIGTERM", handler); }
       // The app may still use the link if its process did not exit.
       if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
         if (session?.link) console.error(`[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`);
