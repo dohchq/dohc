@@ -37,7 +37,7 @@ describe("ChatsView My agent", () => {
     await waitFor(() => expect(listeners.size).toBe(1));
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), channel({
-      id: "new-agent", kind: "agent", name: "My agent", slug: "agent",
+      id: "new-agent", kind: "agent", agentId: "default", name: "My agent", slug: "agent",
     })], fileThreads: [] });
     await act(async () => { for (const listener of listeners) listener({ workspaceId: "workspace-b" }); });
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2);
@@ -77,6 +77,7 @@ describe("ChatsView My agent", () => {
           name: "agent-internal",
           slug: "agent",
           kind: "agent",
+          agentId: "default",
           unreadCount: 2,
         }),
       ],
@@ -109,6 +110,7 @@ describe("ChatsView My agent", () => {
           name: "agent-internal",
           slug: "agent",
           kind: "agent",
+          agentId: "default",
         }),
       ],
       fileThreads: [],
