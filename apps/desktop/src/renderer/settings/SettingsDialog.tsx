@@ -34,6 +34,7 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
@@ -351,7 +352,7 @@ export function SettingsDialog(props: {
   }, [markSaved, markSaving, props.onError, userResult]);
 
   // Moves agents to the front of the file. A later save outranks it, as saves do.
-  const orderAgents = useCallback(async (order: readonly string[]): Promise<boolean> => {
+  const orderAgents = useCallback(async (order: readonly string[], failure?: string): Promise<boolean> => {
     const requestId = userSaveRequestRef.next();
     markSaving();
     setError(null);
@@ -365,7 +366,7 @@ export function SettingsDialog(props: {
       if (!userSaveRequestRef.isCurrent(requestId)) return false;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      props.onError?.(failure ? withErrorWords(failure, cause) : ipcErrorMessage(cause, "dohc could not save your settings."), cause);
       return false;
     }
   }, [markSaved, markSaving, props.onError]);

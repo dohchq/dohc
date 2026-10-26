@@ -1190,6 +1190,36 @@ describe("SettingsDialog", () => {
     expect(await screen.findByRole("button", { name: "Codex actions" })).toBeTruthy();
   });
 
+  it("names the agent Undo brought back when its place didn't come back", async () => {
+    const user = userEvent.setup();
+    let file: DesktopUserSettings = { ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex" }), default: testAgent({ name: "Nova" }) } };
+    const read = async (): Promise<DesktopUserSettingsResult> => ({ settings: file, source: "stored" });
+    vi.stubGlobal("dohcDesktop", {
+      ...bridge,
+      getUserSettings: read,
+      setUserSettings: async ({ settings, base }: { settings: DesktopUserSettings; base: DesktopUserSettings }) => {
+        file = overlaySettings({ ...file }, base, settings) as DesktopUserSettings;
+        return read();
+      },
+      orderAgents: async () => {
+        throw new Error("Error invoking remote method 'desktop:order-agents': Error: dohc did not save settings because dohc-settings.json kept changing. Try again.");
+      },
+    });
+    const onError = vi.fn();
+    const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Codex actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+
+    await act(async () => onNotice.mock.calls[0]![1]!());
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc brought back Codex but could not put it back in its place. dohc did not save settings because dohc-settings.json kept changing. Try again.",
+      expect.any(Error),
+    ));
+    expect(Object.keys(file.agents)).toEqual(["default", "codex"]);
+  });
+
   it("doesn't replace an agent that came back before Undo", async () => {
     const user = userEvent.setup();
     let file: DesktopUserSettings = { ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex" }), default: testAgent({ name: "Nova" }) } };

@@ -348,7 +348,8 @@ export function AgentList(props: {
   // Answers whether the settings saved; a failed save says why in Notices.
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;
   // Moves these entries to the front of the file; answers whether it saved.
-  onOrder: (order: readonly string[]) => Promise<boolean>;
+  // A failed move says `failure` when given, with why.
+  onOrder: (order: readonly string[], failure?: string) => Promise<boolean>;
   onOpenSettingsFile: () => void;
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
   onNotice?: (message: string, undo?: () => void) => void;
@@ -488,7 +489,7 @@ export function AgentList(props: {
         else onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
         return;
       }
-      await onOrder(order);
+      await onOrder(order, `dohc brought back ${agent.name} but could not put it back in its place.`);
     })());
   };
 

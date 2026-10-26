@@ -17,7 +17,7 @@ export function AgentsMcpSettings(props: {
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;
-  onOrder: (order: readonly string[]) => Promise<boolean>;
+  onOrder: (order: readonly string[], failure?: string) => Promise<boolean>;
   onNotice?: (message: string, undo?: () => void) => void;
   onOpenSettingsFile: () => void;
   sharedView?: boolean;
