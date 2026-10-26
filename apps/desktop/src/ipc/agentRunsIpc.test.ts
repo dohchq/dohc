@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
+import { stoppedRunOperations } from "./bridgeContract";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
@@ -153,10 +154,12 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
 
 type Harness = Awaited<ReturnType<typeof harness>>;
 
+const { retryStoppedRun } = stoppedRunOperations;
+
 const channels = [
   CHANNELS.chatRunRecordsForThread,
   CHANNELS.detectAgentTools, CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
-  CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.retryStoppedRun,
+  CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, retryStoppedRun.channel,
   CHANNELS.runnerSelfTest,
 ];
 const threadPayload = { workspaceId: "workspace-a", threadId: "thread-1" };
@@ -176,15 +179,15 @@ describe("agent run IPC registrations", () => {
   it.each([
     CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus,
     CHANNELS.getMcpConfig, CHANNELS.runnerSelfTest, CHANNELS.chatRunRecordsForThread,
-    CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.retryStoppedRun,
+    CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, retryStoppedRun.channel,
   ])("binds %s to the sender before calling services", async channel => {
     const h = await harness();
     const end = vi.spyOn(h.integration, "endAgentRun");
     const status = vi.spyOn(h.integration, "getAgentRunStatus");
     const input = { workspaceId: "workspace-a",
-      ...(channel === CHANNELS.endAgentRun || channel === CHANNELS.retryStoppedRun ? { runId: "run-1" } : {}),
+      ...(channel === CHANNELS.endAgentRun || channel === retryStoppedRun.channel ? { runId: "run-1" } : {}),
       ...(channel === CHANNELS.chatRunRecordsForThread || channel === CHANNELS.chatDispatchStateForThread || channel === CHANNELS.resumeThreadDispatch
-        || channel === CHANNELS.retryStoppedRun
+        || channel === retryStoppedRun.channel
         ? { threadId: "thread-1" } : {}) };
     if (channel === CHANNELS.endAgentRun) await h.invoke(CHANNELS.startAgentRun);
     await h.invoke(channel, input);
@@ -192,7 +195,9 @@ describe("agent run IPC registrations", () => {
       h.runnable, h.idle, h.start, end, status, h.shareAccess, h.config,
       h.writable, h.activity, ...Object.values(h.dispatch)];
     services.forEach(service => service.mockClear());
-    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow(
+      channel === retryStoppedRun.channel ? retryStoppedRun.inactiveMessage : "no longer active",
+    );
     services.forEach(service => expect(service).not.toHaveBeenCalled());
   });
   it("releases admission before a held runner self-test so retirement can finish", async () => {
@@ -341,10 +346,10 @@ describe("agent run IPC registrations", () => {
     expect(h.records).toHaveBeenCalledWith("workspace-a", "thread-1", { limit: 200 });
   });
 
-  it.each([CHANNELS.chatRunRecordsForThread, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.retryStoppedRun])("propagates capture refusal before %s store work", async (channel) => {
+  it.each([CHANNELS.chatRunRecordsForThread, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, retryStoppedRun.channel])("propagates capture refusal before %s store work", async (channel) => {
     const h = await harness();
     h.requireCapture.mockRejectedValue(new Error("capture refused"));
-    await expect(h.invoke(channel, channel === CHANNELS.retryStoppedRun ? { ...threadPayload, runId: "run-1" } : threadPayload)).rejects.toThrow("capture refused");
+    await expect(h.invoke(channel, channel === retryStoppedRun.channel ? { ...threadPayload, runId: "run-1" } : threadPayload)).rejects.toThrow("capture refused");
     expect(h.ensureOpen).not.toHaveBeenCalled();
     expect(h.records).not.toHaveBeenCalled();
     expect(h.writable).not.toHaveBeenCalled();
@@ -438,10 +443,10 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     const retry = { ...threadPayload, runId: "run-1" };
     h.writable.mockImplementationOnce(() => { throw new Error("read-only"); });
-    await expect(h.invoke(CHANNELS.retryStoppedRun, retry)).rejects.toThrow("read-only");
+    await expect(h.invoke(retryStoppedRun.channel, retry)).rejects.toThrow("read-only");
     expect(h.dispatch.retryStoppedRun).not.toHaveBeenCalled();
     h.events.length = 0;
-    await expect(h.invoke(CHANNELS.retryStoppedRun, retry)).resolves.toEqual({ queued: true });
+    await expect(h.invoke(retryStoppedRun.channel, retry)).resolves.toEqual({ queued: true });
     expect(h.events).toEqual(["capture", "writable", "retry"]);
     expect(h.dispatch.retryStoppedRun).toHaveBeenCalledWith("workspace-a", "thread-1", "run-1");
   });

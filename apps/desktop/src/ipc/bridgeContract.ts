@@ -5845,6 +5845,15 @@ export type RetryStoppedRunPayload = z.infer<typeof RetryStoppedRunPayload>;
 // False when the run can't be tried again any more, as after a second press.
 export const RetryStoppedRunResult = z.object({ queued: z.boolean() }).strict();
 export type RetryStoppedRunResult = z.infer<typeof RetryStoppedRunResult>;
+export const stoppedRunOperations = {
+  retryStoppedRun: {
+    capabilityId: "agent.run.retry",
+    scope: "workspace",
+    channel: "desktop:retry-stopped-run",
+    payload: RetryStoppedRunPayload, result: RetryStoppedRunResult,
+    guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
+  },
+} as const satisfies OperationTable;
 
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
@@ -7247,6 +7256,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
+    OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
@@ -7431,7 +7441,6 @@ export interface DohcDesktopBridge
   chatDispatchStateForThread(
     payload: ChatDispatchStateForThreadPayload,
   ): Promise<ChatDispatchStateForThreadResult>;
-  retryStoppedRun(payload: RetryStoppedRunPayload): Promise<RetryStoppedRunResult>;
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
