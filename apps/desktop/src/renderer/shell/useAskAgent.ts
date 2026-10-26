@@ -20,6 +20,8 @@ export function useAskAgent(input: {
   reportShellError: (message: string, error: unknown, retry: () => void) => void;
 }): AskAgent | undefined {
   const { workspaceId, openChat, onOpenChat, onSetUp, reportShellError } = input;
+  // The first agent answers a request, as it does a chat that names none.
+  const agentId = input.agentSetup?.agents[0]?.id;
   const requests = useRequestSequence([workspaceId]);
   const ask = useCallback(
     async function ask(request: AgentRequest): Promise<void> {
@@ -31,7 +33,7 @@ export function useAskAgent(input: {
           bridge().listChatChannels({ workspaceId }),
         ]);
         if (!requests.isCurrent(token)) return;
-        const channel = channels.find((entry) => entry.kind === "agent");
+        const channel = channels.find((entry) => entry.kind === "agent" && entry.agentId === agentId);
         if (!channel) {
           const message =
             "dohc could not find your agent's chat. Check your agent in Settings, then try again.";
@@ -47,7 +49,7 @@ export function useAskAgent(input: {
         if (requests.isCurrent(token)) reportShellError("dohc could not open your agent's chat.", error, retry);
       }
     },
-    [onOpenChat, openChat, reportShellError, requests, workspaceId],
+    [agentId, onOpenChat, openChat, reportShellError, requests, workspaceId],
   );
   const ready = input.agentSetup ? agentIsSetUp(input.agentSetup) : null;
   return useMemo(

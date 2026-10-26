@@ -256,8 +256,8 @@ export function DemoSidebar(props: {
             {
               id: "agent:default",
               kind: "agent",
-              handle: "agent",
-              label: "Your agent",
+              handle: "Nova",
+              label: "Nova",
               description: "your agent",
             },
             {

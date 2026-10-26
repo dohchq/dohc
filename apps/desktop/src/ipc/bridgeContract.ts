@@ -2297,6 +2297,8 @@ export const ChatChannelRecord = z.object({
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
+  // The agent whose chat this is, on an agent's chat only.
+  agentId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional(),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
   purpose: z.string().max(200).optional(),

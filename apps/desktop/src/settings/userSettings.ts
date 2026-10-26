@@ -135,6 +135,11 @@ export function agentHandle(name: string): string {
   return name.replace(/\s/gu, "");
 }
 
+// The @ roster's id for one of your agents.
+export function agentMentionId(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
 /**
  * The agents dohc can start that a message names, in any case, outside
  * code. A message wakes each one it names, so only your own messages read
