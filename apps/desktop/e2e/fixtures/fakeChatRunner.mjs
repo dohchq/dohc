@@ -10,12 +10,19 @@ import { fileURLToPath } from "node:url";
 // delivery.
 const mode = process.argv[2];
 const profileTool = mode?.startsWith("profile-") ? mode.slice("profile-".length) : null;
+// What each fake tool answers to detection's version and sign-in checks.
+const PROBE_ANSWERS = {
+  claude: { version: "2.1.278 (Claude Code)", auth: '{"loggedIn":true}' },
+  codex: { version: "codex-cli 0.155.1", auth: "Logged in using ChatGPT" },
+  opencode: { version: "1.18.31", auth: "0 credentials" },
+  cursor: { version: "2026.10.01-a1b2c3d", auth: '{"isAuthenticated":false}' },
+};
 if (profileTool && process.argv[3] === "--version") {
-  console.log(profileTool === "claude" ? "2.1.278 (Claude Code)" : "codex-cli 0.155.1");
+  console.log(PROBE_ANSWERS[profileTool].version);
   process.exit(0);
 }
-if (profileTool && (process.argv[3] === "auth" || process.argv[3] === "login")) {
-  console.log(profileTool === "claude" ? '{"loggedIn":true}' : "Logged in using ChatGPT");
+if (profileTool && ["auth", "login", "status"].includes(process.argv[3])) {
+  console.log(PROBE_ANSWERS[profileTool].auth);
   process.exit(0);
 }
 const threadId = process.env.DOHC_CHAT_THREAD;

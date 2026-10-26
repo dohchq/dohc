@@ -38,7 +38,7 @@ import type { AboutConversation } from "./aboutConversation";
 import { accessReasonForLane, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryPaused, HistoryUpdating, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -829,18 +829,19 @@ export type AboutFile =
   | { status: "failed"; retry: () => void }
   | { status: "ready"; objectId: string | null };
 
-// `held` is History holding the file's changes back, a state of the surface
-// drawn in place (HistoryPolicyStates.tsx): its rules can't be read, or the
-// workspace is still updating. Nothing failed, so it files no row.
+// `held` is History holding the file's changes back because its rules can't
+// be read, a state of the surface drawn in place (HistoryPolicyStates.tsx).
+// `updating` is History still taking in recent changes, read again soon at
+// first. Nothing failed in either, so neither files a row.
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
   | { status: "untracked" }
+  | { status: "updating" }
   | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
 const HISTORY_ROWS = 5;
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 
 // A change with no one author, or several, keeps the file mark here.
 const FILE_MARK = <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
@@ -851,6 +852,8 @@ export function AboutHistory(props: {
   file: AboutFile;
   // Changes when the workspace's history grows, so the rows follow edits.
   revision: number;
+  // History stopped recording, so its answers may be missing changes.
+  paused: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -864,8 +867,13 @@ export function AboutHistory(props: {
     props.notices,
   );
   const { begin, cancel } = read;
-  const load = useCallback(async () => {
+  // History can finish taking in changes without adding one, so no newer
+  // revision is sure to come: an updating answer schedules the next read.
+  // Any read that starts first replaces it.
+  const nextRead = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const load = useCallback(async (updatingReads = 0) => {
     if (objectId === null) return;
+    clearTimeout(nextRead.current);
     const request = begin();
     const failed = { status: "failed", retry: () => void load() } as const;
     try {
@@ -874,11 +882,13 @@ export function AboutHistory(props: {
         request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
       }
-      request.settle({
-        status: "held",
-        words: response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable),
-        retry: failed.retry,
-      });
+      if (response.status === "updating") {
+        if (!request.current()) return;
+        request.settle({ status: "updating" });
+        nextRead.current = setTimeout(() => void load(updatingReads + 1), gatherDelay(updatingReads + 1));
+        return;
+      }
+      request.settle({ status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
     } catch (error) {
       request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
@@ -886,7 +896,10 @@ export function AboutHistory(props: {
   useEffect(() => {
     if (!props.expanded || objectId === null) return;
     void load();
-    return cancel;
+    return () => {
+      cancel();
+      clearTimeout(nextRead.current);
+    };
   }, [cancel, load, objectId, props.expanded, props.revision]);
 
   const view: HistoryView =
@@ -894,17 +907,24 @@ export function AboutHistory(props: {
     : file.status === "failed" ? { status: "failed", retry: file.retry }
     : file.objectId === null ? { status: "untracked" }
     : read.view;
-  return <AboutHistoryView view={view} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />;
+  return (
+    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />
+  );
 }
 
 // The History section for an answer already in hand. The states page draws it.
 export function AboutHistoryView(props: {
   view: HistoryView;
+  // History stopped recording: the line replaces taking in changes and heads
+  // any rows, which may be missing changes.
+  paused?: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
+  // Its words start where a file row's name does.
+  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="py-1 pl-1.5 pr-2" /> : null;
   return (
     <AboutSection
       id="history"
@@ -920,15 +940,18 @@ export function AboutHistoryView(props: {
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
+      ) : view.status === "updating" ? (
+        paused ?? <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
       ) : view.status === "held" ? (
         // The words end in "try again", so the control they name is here.
         <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>
           {view.words}
         </AboutNote>
       ) : view.moments.length === 0 ? (
-        <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
+        paused ?? <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
       ) : (
         <ul className="m-0 list-none p-0">
+          {paused ? <li>{paused}</li> : null}
           {view.moments.map((moment) => {
             const when = formatChatTime(moment.recordedAtMs);
             const source = engineMomentSourceLabel(moment);

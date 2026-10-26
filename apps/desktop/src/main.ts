@@ -41,6 +41,7 @@ import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/priv
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerWorkspaceFolderNameIpc } from "./ipc/workspaceFolderNameIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -6343,6 +6344,7 @@ const workspaceChatLinks = createChatLinksReader({
 });
 
 function registerIpcHandlers(): void {
+  registerWorkspaceFolderNameIpc(operationBoundary, workspaceRootApproval.usableRoot);
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
@@ -7065,7 +7067,7 @@ function registerIpcHandlers(): void {
   });
 
   const buttonsIpc = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
     // A file is a record of the nearest Collection folder above it, when
@@ -7189,7 +7191,7 @@ function registerIpcHandlers(): void {
     CloudSessionCredentials
   >({
     hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, init),

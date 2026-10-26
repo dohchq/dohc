@@ -7120,6 +7120,22 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+// New workspace's name for its folder in a location dohc handed out: the
+// name, or "name 2", "name 3" when a folder there already has it.
+const FOLDER_NAME = z.string().min(1).max(255)
+  .refine((name) => name !== "." && name !== ".." && !/[\\/]/.test(name), "Expected one folder name.");
+
+export const workspaceFolderNameOperations = {
+  suggestWorkspaceFolderName: {
+    capabilityId: "workspace.name.suggest",
+    scope: "device",
+    channel: "desktop:suggest-workspace-folder-name",
+    payload: z.object({ rootPath: PATH_STRING, name: FOLDER_NAME }).strict(),
+    result: FOLDER_NAME,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const SystemReducedMotionResult = z.boolean();
 
 export const systemMotionOperations = {
@@ -7189,6 +7205,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
