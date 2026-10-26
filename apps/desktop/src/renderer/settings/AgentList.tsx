@@ -288,7 +288,7 @@ const TILE_STATE: Record<ToolTileState["status"], { text: string; className: str
   "not-found": { text: "Not found", className: "text-muted" },
 };
 
-function AddTile(props: { title: string; logo: ReactNode; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
+function AddTile(props: { title: string; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
   return (
     <button
       type="button"
@@ -297,7 +297,6 @@ function AddTile(props: { title: string; logo: ReactNode; state: ReactNode; disa
       onClick={props.onAdd}
       className="flex h-[52px] min-w-0 items-center gap-3 rounded-lg border border-line bg-bg px-3 text-left transition-colors hover:bg-hover disabled:cursor-default disabled:hover:bg-bg"
     >
-      <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-panel-2 text-[12px] font-bold text-ink">{props.logo}</span>
       <span className="min-w-0">
         <span className="block truncate text-[13px] font-medium text-ink">{props.title}</span>
         {props.state}
@@ -525,7 +524,6 @@ export function AgentList(props: {
               <AddTile
                 key={tool}
                 title={`Add ${name}`}
-                logo={tool === "claude" ? "C" : "X"}
                 disabled={found?.status !== "ready" || adding || checking !== null}
                 hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
                 state={found ? (
@@ -545,7 +543,6 @@ export function AgentList(props: {
           })}
           <AddTile
             title="Add one you run"
-            logo={<Plug size={14} />}
             disabled={adding}
             state={<span className={`${TILE_LINE} text-muted`}>Through MCP</span>}
             onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
