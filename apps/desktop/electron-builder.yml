@@ -184,6 +184,13 @@ linux:
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true
+  # GLib launchers request an activation token only with StartupNotify;
+  # GNOME on Wayland needs that token to raise a running window. On X11,
+  # Electron never ends a second launch's startup sequence, so the busy
+  # cursor stays until the desktop's timeout, about 15 s on GNOME.
+  desktop:
+    entry:
+      StartupNotify: "true"
 appImage:
   # electron-builder's default AppImage desktop entry passes --no-sandbox.
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
