@@ -372,6 +372,9 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
+// The commands that still run under the opening cover.
+const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
+
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
 function scheduleMarkdownEditorPreload(): () => void {
@@ -1309,10 +1312,11 @@ export function DesktopWorkspaceShell(props: {
   // Restore per-workspace workbench state from .dohc/local/ui-state.json. The shell
   // renders at once under the opening cover (launch budgets key off shell
   // visibility); the cover lifts in the commit that applies the stored state,
-  // or the defaults when it is missing or unreadable. The stored state
+  // or the defaults when there is none or the read fails. The stored state
   // replaces whatever changed under the cover, and file opens wait for it, so
-  // nothing done under the cover loses the saved tabs. Writes stay off until
-  // the load settles so a default-state write can never clobber the stored one.
+  // nothing done under the cover loses the saved tabs. Writes start once the
+  // read answers, and never after a failed read, which can't say what is
+  // saved, so a default-state write can never clobber the stored one.
   const uiStateLoaded = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
@@ -1328,7 +1332,8 @@ export function DesktopWorkspaceShell(props: {
   const workbenchRestored =
     restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
   // A file open waits for the saved layout. While the opening cover shows, a
-  // command does nothing and is not replayed.
+  // command other than Settings does nothing and is not replayed. Settings
+  // opens from every entry, as its shortcut does, and doesn't change the layout.
   const workbenchRestoredRef = useRef(false);
   const heldFileOpens = useRef<[string, HeadingTarget?, Omit<ScrollTarget, "path">?][]>([]);
   const openingCoverShown = useRef(false);
@@ -1511,7 +1516,6 @@ export function DesktopWorkspaceShell(props: {
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
-        uiStateLoaded.current = true;
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
@@ -1561,7 +1565,7 @@ export function DesktopWorkspaceShell(props: {
   // Durability at the edges: the debounce above silently drops changes made
   // within 500ms of quitting or switching workspaces — flush the latest state
   // fire-and-forget on beforeunload and on unmount (workspace switch remounts
-  // the shell via key={workspaceId}). Gated on the load having resolved so a
+  // the shell via key={workspaceId}). Gated on the read having answered so a
   // default snapshot can never clobber stored state.
   useEffect(() => {
     const flush = () => {
@@ -1609,10 +1613,10 @@ export function DesktopWorkspaceShell(props: {
       activeTabPath(next) !== activeTabPath(current)
     ) {
       // This commits through the direct setter, on purpose: reconciling is not
-      // a user action and must not set the touched flag. But it moves the
-      // active tab exactly as mutateWb does, so it owes the same invalidation
-      // — otherwise an in-flight DM navigation still passes its isCurrent()
-      // check and lands its destination on top of the tab we just activated.
+      // a user action. But it moves the active tab exactly as mutateWb does, so
+      // it owes the same invalidation — otherwise an in-flight DM navigation
+      // still passes its isCurrent() check and lands its destination on top of
+      // the tab we just activated.
       invalidateDmNavigation(dmNavigationRequest);
     }
     // Activating a neighbour remounts the keyed inspector — that is an open
@@ -4486,7 +4490,7 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
   const runCommand = useCallback((id: CommandId) => {
-    if (!openingCoverShown.current) commandHandlers[id]();
+    if (!openingCoverShown.current || SETTINGS_COMMANDS.has(id)) commandHandlers[id]();
   }, [commandHandlers]);
   const commands = useMemo<Command[]>(
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),

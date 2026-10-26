@@ -262,7 +262,7 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
     expect(await existingLocalStateFolder(workspace.rootPath, "automations")).toMatch(/automations$/);
 
-    await sessions.closeWorkspaceBinding(workspace);
+    await sessions.closeWorkspace(workspace);
     expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
   });
 
@@ -325,16 +325,53 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await readOwnedLocalState(workspace.rootPath, settings)).toBe("{}");
   });
 
-  it("reads no saved layout before an open or once it closes", async () => {
+  // A refused read, unlike "no saved layout", keeps the window from saving
+  // its defaults over the file.
+  it("refuses a saved-layout read before an open or once it closes", async () => {
     const { sessions, workspace, open } = await windowsEngine();
     const local = join(workspace.rootPath, ".dohc", "local");
     await mkdir(local, { recursive: true });
     await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
-    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
     await open();
     expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
-    await sessions.closeWorkspaceBinding(workspace);
-    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+    await sessions.closeWorkspace(workspace);
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
+  });
+
+  it("reads the saved layout across a close that keeps the workspace, as the sync client's rebind does", async () => {
+    const { sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    const saved = JSON.stringify({ sidebarOpen: true });
+    await writeFile(join(local, "ui-state.json"), saved);
+    await open();
+    const asked = vi.spyOn(sessions, "localStateOpenAt");
+    const closing = sessions.closeWorkspaceBinding(workspace);
+    const reading = readUiStateFile(workspace.rootPath);
+    await vi.waitFor(() => expect(asked).toHaveBeenCalled());
+    await closing;
+    await open();
+    expect(await reading).toEqual({ sidebarOpen: true });
+    expect(await readFile(join(local, "ui-state.json"), "utf8")).toBe(saved);
+  });
+
+  it("refuses a saved-layout read whose wait ends while the open is still under way", async () => {
+    const { daemon, sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    const held = Promise.withResolvers<void>();
+    daemon.hold = held.promise;
+    const opening = open();
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    // As when the wait runs past two open deadlines.
+    const waits = vi.spyOn(sessions, "openInProgress").mockReturnValue(Promise.resolve());
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
+    waits.mockRestore();
+    held.resolve();
+    await opening;
+    expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
   });
 
   it("says a settings read before an open read no file, not that the file is unusable", async () => {

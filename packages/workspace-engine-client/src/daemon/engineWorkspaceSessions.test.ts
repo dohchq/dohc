@@ -344,6 +344,74 @@ it("gives nothing to wait on once another run has opened the workspace", async (
   await waited;
 });
 
+it("waits for an open under way while the daemon relaunches", async () => {
+  const workspace = await tempWorkspace();
+  const relaunched = new MockClient("relaunched", { localStateReady: true });
+  let client: MockClient | null = new MockClient("first", { localStateReady: true });
+  const paused = deferred<void>(), resume = deferred<void>();
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => {
+      if (client === null) throw new EngineDaemonUnavailableError("Daemon is relaunching.");
+      return client;
+    },
+  }, { sleep: async () => { paused.resolve(); await resume.promise; }, workspaceOpenDeadlineMs: 60_000 });
+  await sessions.run(workspace, async () => undefined);
+  client = null;
+  const reopening = sessions.run(workspace, async () => undefined);
+  await paused.promise;
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  client = relaunched;
+  resume.resolve();
+  await waited;
+  expect(sessions.currentBinding(workspace)?.client).toBe(relaunched);
+  await reopening;
+  await sessions.closeAll();
+});
+
+it("counts a close that keeps the workspace as an open under way until its reopen", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("rebind", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  // As the sync client rebinds: it closes the binding, then runs at once.
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  let over = false;
+  void waited!.then(() => { over = true; });
+  await closing;
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const reopening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(2));
+  expect(over).toBe(false);
+  held.resolve();
+  await waited;
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+  await reopening;
+  await sessions.closeAll();
+});
+
+it("gives nothing to wait on after a rebuild ends a close that kept the workspace", async () => {
+  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebind") };
+  const client = new MockClient("rebind", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  await sessions.closeWorkspaceBinding(workspace);
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  sessions.beginRebuild(workspace);
+  await waited;
+  sessions.endRebuild(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });

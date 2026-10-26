@@ -112,6 +112,9 @@ interface SessionEntry {
   openWaiters: Set<() => void>;
   closing: Promise<void> | null;
   retiring: boolean;
+  // From a close that keeps the workspace until a run starts opening it
+  // again, as the sync client closes a binding to reopen it at once.
+  reopening: boolean;
   activeRuns: number;
   idleWaiters: Set<() => void>;
   captureWaitController: AbortController;
@@ -512,19 +515,24 @@ export class EngineWorkspaceSessions {
    * The open of this workspace already under way, or null when none is, or
    * the session is closing or rebuilding. An open is under way from a run's
    * first attempt to its last, including a wait for a busy store and the
-   * pause before a retry. Settles when the open does, with its binding
+   * pause before a retry. A close that keeps the workspace, such as the sync
+   * client's rebind, counts as an open under way once no run is active, until
+   * the next open starts. Settles when the open does, with its binding
    * published, when its last attempt fails, or when the workspace starts
-   * closing or rebuilding. It also settles if an attempt's preparation
-   * outlasts the open deadline, if its daemon request outlasts that deadline
-   * from when it started, or after two deadlines in all. Null once the
-   * workspace is open. Never opens, and never counts as a run, so a caller
-   * inside a run can wait on it: a close waits for runs.
+   * closing for good or rebuilding. It also settles if an attempt's
+   * preparation outlasts the open deadline, if its daemon request outlasts
+   * that deadline from when it started, or after two deadlines in all. Null
+   * once the workspace is open. Never opens, and never counts as a run, so a
+   * caller inside a run can wait on it. A close waits for runs, so while one
+   * does there is nothing to wait on.
    */
   openInProgress(workspace: EngineWorkspace, until = this.now() + 2 * this.workspaceOpenDeadlineMs): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || (!entry.opening && entry.openingRuns === 0) ||
-      entry.closing || entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
-      this.currentBinding(workspace) || this.now() >= until) return null;
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry ||
+      (!entry.opening && entry.openingRuns === 0 && !entry.reopening) ||
+      (entry.closing && entry.activeRuns > 0) ||
+      entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
+      (this.hasAvailableClient() && this.currentBinding(workspace)) || this.now() >= until) return null;
     const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
     return new Promise<boolean>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1022,7 +1030,9 @@ export class EngineWorkspaceSessions {
   beginRebuild(workspace: AttachedEngineWorkspace): void {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
     this.rebuildingWorkspaces.add(key);
-    if (entry) this.wakeOpenWaiters(entry);
+    if (!entry) return;
+    entry.reopening = false;
+    this.wakeOpenWaiters(entry);
   }
 
   endRebuild(workspace: AttachedEngineWorkspace): void {
@@ -1067,6 +1077,7 @@ export class EngineWorkspaceSessions {
       }
 
       entry.retiring = retire;
+      entry.reopening = !retire;
       const closing = this.closeEntry(entry);
       entry.closing = closing;
       this.wakeOpenWaiters(entry);
@@ -1130,6 +1141,7 @@ export class EngineWorkspaceSessions {
         openWaiters: new Set(),
         closing: null,
         retiring: false,
+        reopening: false,
         activeRuns: 0,
         idleWaiters: new Set(),
         captureWaitController: new AbortController(),
@@ -1201,6 +1213,7 @@ export class EngineWorkspaceSessions {
     storeBusy: StoreBusyRetryState,
   ): Promise<EngineWorkspaceBinding> {
     entry.openingRuns += 1;
+    if (!entry.closing) entry.reopening = false;
     try {
       return await this.openWithRetries(workspace, entry, options, rebindStarted, storeBusy);
     } finally {

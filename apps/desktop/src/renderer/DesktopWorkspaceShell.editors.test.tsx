@@ -1516,6 +1516,22 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.exportWorkspaceZip).not.toHaveBeenCalled();
   });
 
+  it("opens Settings from the menu under the cover, as its shortcut does", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    act(() => bridge.emitMenuCommand("settings"));
+    await waitFor(() => expect(document.querySelector("[data-dohc-modal='true']")).not.toBeNull());
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
   it("keeps the saved tabs when the rail is used under the cover", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
