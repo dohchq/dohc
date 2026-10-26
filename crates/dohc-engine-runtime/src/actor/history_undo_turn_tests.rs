@@ -1070,6 +1070,35 @@ async fn abort_mid_turn_resumes_and_rename_is_placed_before_the_next_inverse() {
     assert_eq!(replay.moments, result.moments);
     close(supervisor).await;
 }
+#[tokio::test]
+async fn running_checkpoint_does_not_exhaust_the_pinned_wal_budget() {
+    use dohc_engine_storage::CheckpointWait;
+
+    let token = crate::CancellationToken::new();
+    let mut since = Some(Instant::now() - Duration::from_secs(2));
+    ActorHandle::wait_undo_checkpoint(&token, &mut since, Arc::new(|| CheckpointWait::Running))
+        .await
+        .unwrap();
+    assert!(since.is_none(), "checkpoint I/O is not a pinned WAL");
+
+    since = Some(Instant::now() - Duration::from_secs(2));
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(
+            &token,
+            &mut since,
+            Arc::new(|| CheckpointWait::Finished)
+        )
+        .await,
+        Err(RuntimeError::Storage(StorageError::FileLocked))
+    ));
+    token.cancel();
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(&token, &mut since, Arc::new(|| CheckpointWait::Running))
+            .await,
+        Err(RuntimeError::Cancelled)
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
     let (root, supervisor, actor) = setup(3);
