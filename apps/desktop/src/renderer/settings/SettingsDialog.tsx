@@ -1180,6 +1180,9 @@ export function SettingsDialog(props: {
 
   const visibleSections = query.trim() ? filteredSections : SETTINGS_SECTIONS;
 
+  // Toasts don't move Settings. The panel gives back the room Overlay leaves
+  // for them, and its content leaves that room instead, so the last controls
+  // scroll clear of the toasts.
   return (
     <div
       ref={dialogRef}
@@ -1189,7 +1192,7 @@ export function SettingsDialog(props: {
       tabIndex={-1}
       data-testid={desktopPins.settingsDialog}
       data-active-section={activeSection}
-      className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
+      className="dohc-elevated relative -mb-[var(--dohc-toast-room,0px)] flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
     >
       <SettingsNav
         workspacePath={props.workspacePath}
@@ -1218,7 +1221,7 @@ export function SettingsDialog(props: {
         ) : null}
 
         {/* The right padding keeps the first row clear of the close button. */}
-        <section className="min-h-0 flex-1 overflow-auto py-7 pl-8 pr-12 max-[720px]:px-4 max-[720px]:py-4">
+        <section className="min-h-0 flex-1 overflow-auto pt-7 pb-[calc(var(--dohc-toast-room,0px)+1.75rem)] pl-8 pr-12 scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
           <div className="max-w-[640px]">
             {/* Only Sharing matched: no section's heading stands over its results. */}
             <h3
