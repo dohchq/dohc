@@ -31,7 +31,6 @@ export type OpenOnSwitch = string | { automationControls: string; sharedFile?: s
 const nothingToReread = () => undefined;
 
 const AGENT_RUN_RETRY_FAILED = "dohc could not start your agent's run again.";
-const AGENT_RUN_DONE_RETRYING = "dohc can't run this request again. Ask your agent again in its conversation.";
 const NO_STOPPED_RUNS: ReadonlyMap<string, ChatDispatchStoppedRun> = new Map();
 
 // The run an agent run's notice names, when this computer ran it in this
@@ -293,7 +292,9 @@ export function useSentNoticeProps(input: {
 
   const retryAutomationNotice = noticeRetry.retry;
   // Try again on a stopped agent run puts its request back in line, then
-  // reads again whether the notice still offers it.
+  // reads again whether the notice still offers it. Main queues nothing when
+  // the request is already back in line, as after a second press or a Try
+  // again in the conversation, so the read just takes the button away.
   const retrySentNotice = useCallback(
     (notice: NoticeRow) => {
       const run = agentRunOfNotice(notice, workspaceId);
@@ -304,10 +305,8 @@ export function useSentNoticeProps(input: {
       const epoch = workspace.current();
       const attempt = () => {
         void bridge().retryStoppedRun({ workspaceId, ...run }).then(
-          ({ queued }) => {
-            if (!workspace.isCurrent(epoch)) return;
-            if (!queued) reportShellError(AGENT_RUN_DONE_RETRYING, new Error(AGENT_RUN_DONE_RETRYING));
-            setStoppedRunsRevision((revision) => revision + 1);
+          () => {
+            if (workspace.isCurrent(epoch)) setStoppedRunsRevision((revision) => revision + 1);
           },
           (error: unknown) => {
             if (workspace.isCurrent(epoch)) reportShellError(AGENT_RUN_RETRY_FAILED, error, attempt);

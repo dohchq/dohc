@@ -101,8 +101,8 @@ export interface SentNotice {
   // Open has somewhere to go, or something to say about why it cannot.
   openable: boolean;
   // Try again has a run to start again: a failed run on the owner's
-  // self-hosted server in this workspace, or an agent run that dohc's restart
-  // or quit stopped.
+  // self-hosted server in this workspace, or an agent run on this computer
+  // that dohc's restart or quit stopped.
   retryable: boolean;
 }
 

@@ -480,18 +480,33 @@ describe("Try again on an agent run dohc's restart or quit stopped", () => {
     expect(reportShellError).not.toHaveBeenCalled();
   });
 
-  it("says to ask the agent again once the run can't be tried again any more", async () => {
+  it("takes Try again away, saying nothing, when the conversation already put the request back in line", async () => {
     states["thread-1"] = stopped("run-1");
-    retryStoppedRun.mockResolvedValue({ queued: false });
     const run = stoppedRun("thread-1", "run-1");
     const { result, reportShellError } = setup([run], [workspace("notes")]);
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
-    states["thread-1"] = stopped("run-1", false);
+    // Try again in the conversation, which this notice doesn't hear about.
+    states["thread-1"] = { ...IDLE, pendingCount: 1 };
+    retryStoppedRun.mockResolvedValue({ queued: false });
     await act(async () => result.current.onRetrySentNotice(run));
-    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith(
-      "dohc can't run this request again. Ask your agent again in its conversation.", expect.any(Error),
-    ));
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("says nothing about a second press while the first is still on its way", async () => {
+    states["thread-1"] = stopped("run-1");
+    const run = stoppedRun("thread-1", "run-1");
+    const { result, reportShellError } = setup([run], [workspace("notes")]);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    states["thread-1"] = { ...IDLE, pendingCount: 1 };
+    retryStoppedRun.mockResolvedValueOnce({ queued: true }).mockResolvedValueOnce({ queued: false });
+    await act(async () => {
+      result.current.onRetrySentNotice(run);
+      result.current.onRetrySentNotice(run);
+    });
+    expect(retryStoppedRun).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
+    expect(reportShellError).not.toHaveBeenCalled();
   });
 
   it("reports a Try again that fails, with a Try again that asks again", async () => {
