@@ -477,7 +477,8 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 // Toasts sit above every dialog and its scrim (z-30, warning z-50), so a
 // failure in a dialog is seen where it happens. A dialog keeps its actions
 // clear of them with scroll room (Overlay), and F6 reaches them from the
-// dialog's focus trap (modalFocus). Their rows stay in Notices.
+// dialog's focus trap (modalFocus). Their rows stay in Notices, which opens
+// on the same layer.
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
   rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
@@ -802,11 +803,12 @@ export function NoticeCenter(props: {
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
-  useFocusReturn(open, centerRef, () => toggleRef.current);
-  // A toast removed under focus hands it back to the open dialog, if there is
-  // one, at the control F6 left from: the toggle sits behind the dialog,
-  // outside its focus trap.
-  useFocusSurface(toastsRef, () => modalReturnTarget() ?? toggleRef.current);
+  // The panel or a toast removed under focus hands it back to the open dialog,
+  // if there is one, at the control F6 left from: the toggle sits behind the
+  // dialog, outside its focus trap.
+  const returnTarget = () => modalReturnTarget() ?? toggleRef.current;
+  useFocusReturn(open, centerRef, returnTarget);
+  useFocusSurface(toastsRef, returnTarget);
   // How far the toasts reach up from the window's bottom edge: the room an
   // open dialog leaves below its content (Overlay). None while none show.
   useLayoutEffect(() => {
@@ -915,7 +917,7 @@ export function NoticeCenter(props: {
       }
       if (controller.signal.aborted) return;
       if (note === null) {
-        toggleRef.current?.focus({ preventScroll: true });
+        (modalReturnTarget() ?? toggleRef.current)?.focus({ preventScroll: true });
         setOpen(false);
         return;
       }
@@ -1656,7 +1658,7 @@ export function NoticeCenter(props: {
     next?.focus();
   };
   const runLocalAction = (action: NoticeAction) => {
-    toggleRef.current?.focus({ preventScroll: true });
+    returnTarget()?.focus({ preventScroll: true });
     action.onClick();
     setOpen(false);
   };
@@ -1973,7 +1975,7 @@ export function NoticeCenter(props: {
         </div>
       ))}
 
-      {open ? (
+      {open ? inToastLayer(host, (
         <div
           ref={centerRef}
           data-focus-surface="notices"
@@ -1991,7 +1993,7 @@ export function NoticeCenter(props: {
             event.stopPropagation();
             setOpen(false);
           }}
-          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-20 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
+          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-60 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />
@@ -2226,7 +2228,7 @@ export function NoticeCenter(props: {
             </div>
           )}
         </div>
-      ) : null}
+      )) : null}
 
       <button
         ref={toggleRef}

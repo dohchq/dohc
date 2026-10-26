@@ -705,6 +705,70 @@ describe("notice center", () => {
     await waitFor(() => expect(document.activeElement).toBe(restore));
   });
 
+  // Notices opens above every dialog, as the toasts do. Over a dialog, Escape
+  // closes Notices, not the dialog, and focus goes back to the dialog, not to
+  // the Notices button behind it. Tab stays in Notices meanwhile.
+  describe("over a dialog", () => {
+    const error = {
+      id: "shell-error-1",
+      message: "Could not refresh history. The engine did not answer.",
+      details: "Error: Could not refresh history.",
+      atMs: 1_000,
+      canRetry: true,
+      seen: false,
+    };
+    const props = { workspaceErrors: [error], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() };
+
+    it("opens on the toasts' layer and closes on Escape without closing the dialog", async () => {
+      const onClose = vi.fn();
+      render(
+        <>
+          {noticeElement(props)}
+          <Overlay onClose={onClose}>
+            <button type="button">Close</button>
+          </Overlay>
+        </>,
+      );
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const panel = screen.getByTestId("notice-center");
+      expect(panel.className).toContain("z-60");
+      expect(panel.className).not.toContain("z-20");
+      await waitFor(() => expect(document.activeElement).toBe(panel));
+
+      fireEvent.keyDown(panel, { key: "Escape" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      await waitFor(() => expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull());
+    });
+
+    it("keeps Tab in Notices", async () => {
+      render(
+        <>
+          {noticeElement(props)}
+          <Overlay onClose={() => undefined}>
+            <button type="button">Close</button>
+          </Overlay>
+        </>,
+      );
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const panel = screen.getByTestId("notice-center");
+      const controls = [...panel.querySelectorAll<HTMLElement>("button:not([disabled])")];
+      const last = controls[controls.length - 1]!;
+      last.focus();
+      fireEvent.keyDown(last, { key: "Tab" });
+      expect(document.activeElement).toBe(controls[0]);
+      expect(panel.contains(document.activeElement)).toBe(true);
+    });
+
+    it("lifts a corner-hosted panel out of its host, as its toasts are", async () => {
+      const { container } = render(noticeElement({ ...props, host: "corner" }));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const panel = screen.getByTestId("notice-center");
+      expect(panel.parentElement).toBe(document.body);
+      expect(container.contains(panel)).toBe(false);
+    });
+  });
+
   // A dialog opened over the one F6 left takes focus when the toast goes:
   // the older dialog sits behind it, outside the trap on top.
   it("hands focus to a newer dialog opened over the one F6 left", async () => {
