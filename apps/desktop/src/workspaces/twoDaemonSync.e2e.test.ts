@@ -1,5 +1,8 @@
 import { parseHostEpoch } from "@dohc/live-session-contract";
 import { createHash, randomUUID } from "node:crypto";
+import { fork } from "node:child_process";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { once } from "node:events";
 import { restoreDirectWrites } from "./stopAndRestore";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
@@ -36,6 +39,8 @@ import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   createWorkspaceEngineCapture,
+  createDefaultDiskWriter,
+  type EngineDiskWriter,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -100,6 +105,7 @@ interface LiveDaemonCapture {
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  capturedContents(path: string): Promise<Buffer | null>;
   close(): Promise<void>;
 }
 
@@ -118,12 +124,14 @@ async function openLiveDaemonCapture(input: {
   rootPath: string;
   relay: { baseUrl: string; token: string };
   settleDebounceMs?: number;
+  diskWriter?: EngineDiskWriter;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0,
     allowInsecureLoopbackForTests: new URL(input.relay.baseUrl).protocol === "http:" });
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
+    ...(input.diskWriter ? { diskWriter: input.diskWriter } : {}),
     ...(input.settleDebounceMs === undefined
       ? {}
       : { settleDebounceMs: input.settleDebounceMs }),
@@ -136,6 +144,7 @@ async function openLiveDaemonCapture(input: {
     capture,
     chats: workspace.chats,
     relay,
+    capturedContents: path => readCapturedContents(workspace, input.workspaceId, path),
     queryCollectionRecords: query => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
       new VersionedLiveAdapter(client, handle, { workspaceId: input.workspaceId }).queryCollectionRecords(query)),
     refusalNotices: () => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
@@ -159,6 +168,7 @@ async function openJoinedDaemonCapture(input: {
   relay: { baseUrl: string; token: string };
   passphrase?: string;
   holdEditorResync?: boolean;
+  diskWriter?: EngineDiskWriter;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0,
     allowInsecureLoopbackForTests: new URL(input.relay.baseUrl).protocol === "http:" });
@@ -196,11 +206,13 @@ async function openJoinedDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
+    ...(input.diskWriter ? { diskWriter: input.diskWriter } : {}),
   });
   return {
     capture,
     chats: workspace.chats,
     relay,
+    capturedContents: path => readCapturedContents(workspace, input.workspaceId, path),
     queryCollectionRecords: query => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
       new VersionedLiveAdapter(client, handle, { workspaceId: input.workspaceId }).queryCollectionRecords(query)),
     refusalNotices: () => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
@@ -218,6 +230,23 @@ async function openJoinedDaemonCapture(input: {
   };
 }
 
+async function readCapturedContents(workspace: Awaited<ReturnType<typeof openLiveDaemonWorkspace>>, workspaceId: string, path: string) {
+  return workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) => {
+    const adapter = new VersionedLiveAdapter(client, handle, { workspaceId });
+    if (classifyEngineFilePath(path).kind === "secret") {
+      const secret = await adapter.materializeSecretFile({ workspaceId, versionId: "main", path });
+      return secret.present ? Buffer.from(secret.text) : null;
+    }
+    const head = await adapter.readTextFile({ workspaceId, versionId: "main", path });
+    if (!head) return null;
+    if (head.contentKind === "binary") {
+      const bytes = await adapter.readBinaryFile({ workspaceId, versionId: "main", path });
+      return bytes === null ? null : Buffer.from(bytes);
+    }
+    return head.text === null ? null : Buffer.from(head.text);
+  });
+}
+
 async function writeAndCapture(
   daemon: LiveDaemonCapture,
   rootPath: string,
@@ -232,6 +261,10 @@ async function writeAndCapture(
   await writeFile(absolute, contents);
   daemon.capture.observeFileEvents([{ path, operation: "update" }]);
   await waitForPathMoments(daemon.capture, path, before + 1);
+  await expect.poll(() => daemon.capturedContents(path), {
+    message: `capture must record the expected contents of ${path}`,
+    timeout: REAL_DAEMON_DEADLINE_MS,
+  }).toEqual(Buffer.from(contents));
 }
 
 async function openIndependentPlaintextLineage(
@@ -1914,19 +1947,19 @@ it.skipIf(engine.missing)(
       expect(conflict).toBeDefined();
       expect(conflict?.current.text).toBe("edit from A\n");
       expect(conflict?.incoming.text).toBe("edit from B\n");
-      expect(await readFile(join(rootA, path), "utf8")).toBe("edit from A\n");
+      expect(await readFile(join(rootA, path), "utf8"), "A keeps its local edit before conflict resolution").toBe("edit from A\n");
 
       await daemonA.capture.resolveConflict(conflict!.id, {
         kind: "apply-incoming",
       });
-      expect(await readFile(join(rootA, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootA, path), "utf8"), "A applies B's incoming edit").toBe("edit from B\n");
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
       await daemonB.capture.runRelaySync((materializePage) =>
         daemonB!.relay.pull(materializePage),
       );
-      expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootB, path), "utf8"), "B keeps the resolved edit after pulling").toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 
       await daemonB.close();
@@ -1935,7 +1968,7 @@ it.skipIf(engine.missing)(
         rootPath: rootB,
         relay: { baseUrl: relay.baseUrl, token },
       });
-      expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootB, path), "utf8"), "B keeps the resolved edit after reopening").toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
     } finally {
       await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
@@ -1944,6 +1977,193 @@ it.skipIf(engine.missing)(
   },
   90_000,
 );
+
+it.skipIf(engine.missing)("capture ignores a crashed sibling and records only whole replacements", async () => {
+  const root = await createTestScratch("dohc-whole-capture-");
+  const path = "note.txt";
+  const target = join(root, path);
+  const previous = "previous\n";
+  const next = "next\n".repeat(100_000);
+  const daemon = await openLiveDaemonCapture({ workspaceId: "whole-replace", rootPath: root, relay: { baseUrl: "http://127.0.0.1:1", token: "test:whole-replace" } });
+  let daemonClosed = false;
+  let child: ReturnType<typeof fork> | undefined;
+  try {
+    await writeAndCapture(daemon, root, path, previous);
+    const temporary = join(root, ".dohc-write-crashed");
+    const childPath = join(root, ".dohc-write-child.mjs");
+    await writeFile(childPath, `
+      import { open } from 'node:fs/promises';
+      import { atomicReplaceFile } from ${JSON.stringify(new URL("../atomicReplaceFile.ts", import.meta.url).href)};
+      await atomicReplaceFile(${JSON.stringify(target)}, async temporary => {
+        const handle = await open(temporary, 'wx');
+        await handle.writeFile(${JSON.stringify(next)}); await handle.sync(); await handle.close();
+        process.send('staged'); await new Promise(() => {});
+      }, { temporary: ${JSON.stringify(temporary)} });
+    `);
+    child = fork(childPath, [], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    await once(child, "message");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+    expect(await readFile(target, "utf8")).toBe(previous);
+    expect(await readFile(temporary, "utf8")).toBe(next);
+    await daemon.capture.resyncFileObservation();
+    await daemon.capture.flush();
+    expect((await daemon.capture.listMoments({ limit: 100 })).moments.map(moment => moment.path)).toEqual([path]);
+    const staged = deferred<void>();
+    const release = deferred<void>();
+    const writer = createDefaultDiskWriter(root, { rename: async (from, to) => {
+      staged.resolve();
+      await release.promise;
+      await rename(from, to);
+    } });
+    const writing = writer.writeTextFile(target, next);
+    try {
+      await staged.promise;
+      await daemon.capture.resyncFileObservation();
+      await daemon.capture.flush();
+      expect(await daemon.capturedContents(path)).toEqual(Buffer.from(previous));
+      expect(await readFile(target, "utf8")).toBe(previous);
+    } finally { release.resolve(); await writing; }
+    await waitForPathMoments(daemon.capture, path, 2);
+    expect((await daemon.capturedContents(path))?.equals(Buffer.from(next))).toBe(true);
+    const moments = (await daemon.capture.listMoments({ limit: 100 })).moments;
+    expect(moments.every(moment => moment.path === path)).toBe(true);
+    for (const summary of moments) {
+      const detail = await daemon.capture.readMoment(summary.id);
+      expect(detail && !detail.protected && [previous, next].includes(detail.moment.payload.after.text), `whole contents for ${summary.id}`).toBe(true);
+    }
+    expect(await readFile(target, "utf8")).toBe(next);
+    expect(await readFile(temporary, "utf8")).toBe(next);
+    await daemon.close();
+    daemonClosed = true;
+    const reopened = await openLiveDaemonCapture({ workspaceId: "whole-replace", rootPath: root, relay: { baseUrl: "http://127.0.0.1:1", token: "test:whole-replace" } });
+    try {
+      await reopened.capture.flush();
+      expect(await readFile(temporary, "utf8")).toBe(next);
+      expect((await reopened.capture.listMoments({ limit: 100 })).moments.every(moment => moment.path === path)).toBe(true);
+    } finally { await reopened.close(); }
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await once(child, "exit"); }
+    if (!daemonClosed) await daemon.close();
+  }
+}, 90_000);
+
+it.skipIf(engine.missing).each(["before-rename", "after-rename"] as const)(
+  "replays an interrupted protected restore on reopen (%s)", async interruption => {
+    const workspaceId = `atomic-secret-${interruption}`;
+    const root = await createTestScratch("dohc-secret-replay-");
+    const path = ".env";
+    const relay = { baseUrl: "http://127.0.0.1:1", token: `test:${workspaceId}` };
+    let interrupt = false;
+    let daemon: LiveDaemonCapture | undefined;
+    const writer = createDefaultDiskWriter(root, { rename: async (from, to) => {
+      if (interrupt && interruption === "before-rename") throw new Error("interrupted before rename");
+      await rename(from, to);
+      if (interrupt) throw new Error("interrupted after rename");
+    } });
+    try {
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay, diskWriter: writer });
+      await writeAndCapture(daemon, root, path, "VALUE=previous\n");
+      await writeAndCapture(daemon, root, path, "VALUE=current\n");
+      const changed = (await daemon.capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === path)!;
+      interrupt = true;
+      await expect(daemon.capture.restoreFileToBeforeMoment(changed.id, { kind: "human", humanId: "synthetic-person" })).rejects.toThrow(`interrupted ${interruption.replace("-", " ")}`);
+      expect(await readFile(join(root, path), "utf8")).toBe(interruption === "before-rename" ? "VALUE=current\n" : "VALUE=previous\n");
+      await daemon.close(); daemon = undefined;
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay });
+      await daemon.capture.flush();
+      expect(await readFile(join(root, path), "utf8")).toBe("VALUE=previous\n");
+      expect((await daemon.capture.listKeptCopies()).keptCopies).toEqual([]);
+      expect((await readdir(root)).filter(name => name !== ".dohc")).toEqual([path]);
+    } finally { await daemon?.close(); }
+  }, 90_000,
+);
+
+it.skipIf(engine.missing).each(["before-rename", "after-rename"] as const)(
+  "replays an interrupted conflict choice on reopen (%s)", async interruption => {
+    const workspaceId = `atomic-conflict-${interruption}`;
+    const token = `test:${workspaceId}`;
+    const path = "note.txt";
+    const rootA = await createTestScratch("dohc-conflict-replay-a-");
+    const rootB = await createTestScratch("dohc-conflict-replay-b-");
+    const relayRoot = await createTestScratch("dohc-conflict-replay-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    let a: LiveDaemonCapture | undefined;
+    let b: LiveDaemonCapture | undefined;
+    let interrupt = false;
+    const writer = createDefaultDiskWriter(rootA, { rename: async (from, to) => {
+      if (interrupt && interruption === "before-rename") throw new Error("interrupted before rename");
+      await rename(from, to);
+      if (interrupt) throw new Error("interrupted after rename");
+    } });
+    try {
+      a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: { baseUrl: relay.baseUrl, token }, diskWriter: writer });
+      await a.relay.claim();
+      await writeAndCapture(a, rootA, path, "base\n");
+      await pushUntilDrained(a.relay);
+      b = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: { baseUrl: relay.baseUrl, token } });
+      await pullAndExpect(b, rootB, path, "base\n");
+      await writeAndCapture(a, rootA, path, "local\n");
+      await writeAndCapture(b, rootB, path, "incoming\n");
+      await pushUntilDrained(a.relay); await pushUntilDrained(b.relay);
+      await a.capture.runRelaySync(page => a!.relay.pull(page));
+      const conflict = (await a.capture.listOpenConflictsPage()).conflicts.find(entry => entry.path === path)!;
+      expect(conflict).toBeDefined();
+      interrupt = true;
+      await expect(a.capture.resolveConflict(conflict.id, { kind: "apply-incoming" })).rejects.toThrow(`interrupted ${interruption.replace("-", " ")}`);
+      expect(await readFile(join(rootA, path), "utf8")).toBe(interruption === "before-rename" ? "local\n" : "incoming\n");
+      await a.close(); a = undefined;
+      a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: { baseUrl: relay.baseUrl, token } });
+      await a.capture.flush();
+      expect(await readFile(join(rootA, path), "utf8")).toBe("incoming\n");
+      expect(await a.capture.countOpenConflicts()).toBe(0);
+      expect((await a.capture.listKeptCopies()).keptCopies).toEqual([]);
+      expect((await readdir(rootA)).filter(name => name !== ".dohc")).toEqual([path]);
+    } finally {
+      await Promise.allSettled([a?.close(), b?.close()]);
+      await relay.stop();
+    }
+  }, 90_000,
+);
+
+it.skipIf(engine.missing)("pulls a relay page again after a blocked replacement is released", async () => {
+  const workspaceId = "atomic-relay-replay";
+  const token = `test:${workspaceId}`;
+  const path = "note.txt";
+  const rootA = await createTestScratch("dohc-relay-replay-a-");
+  const rootB = await createTestScratch("dohc-relay-replay-b-");
+  const relayRoot = await createTestScratch("dohc-relay-replay-relay-");
+  const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+  let a: LiveDaemonCapture | undefined;
+  let b: LiveDaemonCapture | undefined;
+  let blocked = false;
+  const replace = vi.fn(async (from: string, to: string) => {
+    if (blocked) throw Object.assign(new Error("held open"), { code: "EPERM" });
+    await rename(from, to);
+  });
+  try {
+    a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: { baseUrl: relay.baseUrl, token } });
+    await a.relay.claim();
+    await writeAndCapture(a, rootA, path, "previous\n");
+    await pushUntilDrained(a.relay);
+    b = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: { baseUrl: relay.baseUrl, token },
+      diskWriter: createDefaultDiskWriter(rootB, { rename: replace, platform: "win32", wait: async () => {} }) });
+    await pullAndExpect(b, rootB, path, "previous\n");
+    await writeAndCapture(a, rootA, path, "next\n");
+    await pushUntilDrained(a.relay);
+    blocked = true; replace.mockClear();
+    await expect(b.capture.runRelaySync(page => b!.relay.pull(page))).rejects.toThrow("Could not update note.txt on disk: held open");
+    expect(replace).toHaveBeenCalledTimes(6);
+    expect(await readFile(join(rootB, path), "utf8")).toBe("previous\n");
+    expect((await readdir(rootB)).filter(name => name.startsWith(".dohc-write-"))).toEqual([]);
+    blocked = false;
+    const retry = await b.capture.runRelaySync(page => b!.relay.pull(page));
+    expect(retry.fastForwardedPaths.some(change => change.path === path)).toBe(true);
+    expect(await readFile(join(rootB, path), "utf8")).toBe("next\n");
+  } finally {
+    await Promise.allSettled([a?.close(), b?.close()]); await relay.stop();
+  }
+}, 90_000);
 
 it.skipIf(engine.missing)(
   "syncs a captured secret file between two real daemons through one real relay",

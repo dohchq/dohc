@@ -1,4 +1,8 @@
 import { readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { fork } from "node:child_process";
+import { once } from "node:events";
+import { writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { atomicReplaceFile, atomicReplaceFileSync } from "./atomicReplaceFile";
@@ -133,6 +137,58 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
 });
 
 describe("durable asynchronous replacement", () => {
+  it("keeps the old file whole across a process death before rename, then retries", async () => {
+    const directory = await createTestScratch("atomic-replace-crash-");
+    const destination = join(directory, "note.txt");
+    const temporary = join(directory, ".dohc-write-crashed");
+    const childPath = join(directory, "crash.mjs");
+    writeFileSync(destination, "previous");
+    const moduleUrl = new URL("./atomicReplaceFile.ts", import.meta.url).href;
+    await writeFile(childPath, `
+      import { open } from 'node:fs/promises';
+      import { atomicReplaceFile } from ${JSON.stringify(moduleUrl)};
+      await atomicReplaceFile(${JSON.stringify(destination)}, async temporary => {
+        const file = await open(temporary, 'wx');
+        await file.writeFile('next'); await file.sync(); await file.close();
+        process.send({ temporary });
+        await new Promise(() => {});
+      }, { temporary: ${JSON.stringify(temporary)} });
+    `);
+    const child = fork(pathToFileURL(childPath), [], { stdio: ["ignore", "ignore", "pipe", "ipc"], execArgv: [] });
+    try {
+      const [message] = await once(child, "message");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      expect(message.temporary).toBe(temporary);
+      expect(readFileSync(destination, "utf8")).toBe("previous");
+      expect(readFileSync(temporary, "utf8")).toBe("next");
+      await atomicReplaceFile(destination, async next => { await writeFile(next, "next"); }, {
+        temporary: join(directory, ".dohc-write-retry"),
+      });
+      expect(readFileSync(destination, "utf8")).toBe("next");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await once(child, "exit");
+      }
+    }
+  });
+
+  it("removes a caller-named sibling after a blocked rename", async () => {
+    const directory = await createTestScratch("atomic-replace-named-");
+    const destination = join(directory, "note.txt");
+    const temporary = join(directory, ".dohc-write-blocked");
+    writeFileSync(destination, "previous");
+    await expect(atomicReplaceFile(destination, async path => {
+      expect(path).toBe(temporary);
+      await writeFile(path, "next");
+    }, { temporary, platform: "win32", wait: async () => {}, rename: async () => {
+      throw Object.assign(new Error("held open"), { code: "EPERM" });
+    } })).rejects.toThrow("held open");
+    expect(readdirSync(directory)).toEqual(["note.txt"]);
+    expect(readFileSync(destination, "utf8")).toBe("previous");
+  });
+
   it.each(["linux", "darwin", "win32"] as const)("syncs the directory after rename on %s only", async (platform) => {
     const destination = join(await createTestScratch("durable-replace-"), "state.json");
     const events: string[] = [];

@@ -10,7 +10,9 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -3134,6 +3136,101 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     return { root, loopback, engine, draftId };
   }
 
+  it("stages at most eight writes before placing a relay page in its original order", async () => {
+    const root = await createTestScratch("dohc-page-staging-");
+    const loopback = new VersionedLoopbackEngine();
+    const changes: RelayMaterializedPath[] = Array.from({ length: 12 }, (_, i) => ({
+      versionId: "main", path: `file-${i}.txt`, operation: "write", contentKind: "text",
+    }));
+    for (const change of changes) loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: change.path, text: change.path, origin: "sync" });
+    changes.splice(2, 0, { versionId: "main", path: "file-0.txt", operation: "delete", contentKind: "text" });
+    changes.push(changes[0]!);
+    const events: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const firstWave = deferred<void>();
+    const writer: EngineDiskWriter = {
+      writeTextFile: async () => { throw new Error("must stage"); },
+      writeBinaryFile: async () => { throw new Error("must stage"); },
+      deletePath: async path => { events.push(`delete:${path}`); },
+      stageFile: async path => {
+        active += 1;
+        peak = Math.max(peak, active);
+        events.push(`stage:${path}`);
+        if (active === 8) firstWave.resolve();
+        await firstWave.promise;
+        active -= 1;
+        return {
+          commit: async () => { events.push(`place:${path}`); },
+          dispose: async () => {},
+        };
+      },
+    };
+    const engine = liveCapture(root, loopback, { diskWriter: writer });
+    try {
+      await engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: changes }));
+      expect(peak).toBe(8);
+      const stageCount = changes.filter(change => change.operation === "write").length;
+      expect(events.slice(0, stageCount).every(event => event.startsWith("stage:"))).toBe(true);
+      expect(events.slice(stageCount)).toEqual(changes.map(change => `${change.operation === "delete" ? "delete" : "place"}:${join(root, change.path)}`));
+    } finally { await engine.stop(); }
+  });
+
+  it("drains and removes in-flight staging after a failure without placing or committing the page", async () => {
+    const root = await createTestScratch("dohc-page-staging-failure-");
+    const loopback = new VersionedLoopbackEngine();
+    const changes: RelayMaterializedPath[] = Array.from({ length: 12 }, (_, i) => ({
+      versionId: "main", path: `file-${i}.txt`, operation: "write", contentKind: "text",
+    }));
+    for (const change of changes) loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: change.path, text: change.path, origin: "sync" });
+    const staged: string[] = [];
+    const disposed: string[] = [];
+    const commit = vi.fn(async () => {});
+    const writer: EngineDiskWriter = {
+      writeTextFile: async () => {}, writeBinaryFile: async () => {}, deletePath: async () => {},
+      stageFile: async path => {
+        if (path.endsWith("file-1.txt")) throw new Error("disk full");
+        await Promise.resolve();
+        staged.push(path);
+        return { commit, dispose: async () => { disposed.push(path); } };
+      },
+    };
+    const cursor = vi.fn(async () => {});
+    const engine = liveCapture(root, loopback, { diskWriter: writer });
+    try {
+      await expect(engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: changes }, cursor))).rejects.toThrow("Could not update file-1.txt on disk: disk full");
+      expect(staged.length).toBeGreaterThan(0);
+      expect(disposed.sort()).toEqual(staged.sort());
+      expect(commit).not.toHaveBeenCalled();
+      expect(cursor).not.toHaveBeenCalled();
+    } finally { await engine.stop(); }
+  });
+
+  it("does not commit a relay page blocked at rename and replays it after release", async () => {
+    const root = await createTestScratch("dohc-page-blocked-");
+    const loopback = new VersionedLoopbackEngine();
+    const path = "note.txt";
+    await write(root, path, "previous");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "next", origin: "sync" });
+    let blocked = true;
+    const writer = createDefaultDiskWriter(root, { platform: "win32", wait: async () => {}, rename: async (from, to) => {
+      if (blocked) throw Object.assign(new Error("held open"), { code: "EPERM" });
+      await rename(from, to);
+    } });
+    const cursor = vi.fn(async () => {});
+    const engine = liveCapture(root, loopback, { diskWriter: writer });
+    const pull = () => engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: [{ versionId: "main", path, operation: "write", contentKind: "text" }] }, cursor));
+    try {
+      await expect(pull()).rejects.toThrow("Could not update note.txt on disk: held open");
+      expect(cursor).not.toHaveBeenCalled();
+      expect(await readFile(join(root, path), "utf8")).toBe("previous");
+      blocked = false;
+      await pull();
+      expect(cursor).toHaveBeenCalledOnce();
+      expect(await readFile(join(root, path), "utf8")).toBe("next");
+    } finally { await engine.stop(); }
+  });
+
   it("initializes the main version before the first relay task", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
@@ -3696,6 +3793,95 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
 });
 
 describe("createDefaultDiskWriter symlink containment", () => {
+  it.skipIf(process.platform === "win32")("preserves ordinary POSIX file permissions and restricts protected staging", async () => {
+    const root = await createTestScratch("dohc-write-mode-");
+    const ordinary = join(root, "note.txt");
+    const secret = join(root, ".env");
+    await writeFile(ordinary, "previous");
+    await chmod(ordinary, 0o640);
+    await writeFile(secret, "VALUE=previous\n");
+    await chmod(secret, 0o644);
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(ordinary, "next");
+    await writer.writeTextFile(secret, "VALUE=next\n");
+    expect((await stat(ordinary)).mode & 0o777).toBe(0o640);
+    expect((await stat(secret)).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform !== "win32")("keeps a file whole while a real Windows handle denies delete sharing", async () => {
+    const root = await createTestScratch("dohc-windows-held-file-");
+    const target = join(root, "note.txt");
+    await writeFile(target, "previous");
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$handle = [System.IO.File]::Open($env:DOHC_LOCK_TARGET, 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); [Console]::ReadLine() | Out-Null; $handle.Dispose();"],
+    { env: { ...process.env, DOHC_LOCK_TARGET: target }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const exited = once(child, "exit");
+    try {
+      const [ready] = await once(child.stdout, "data");
+      expect(String(ready).trim()).toBe("held");
+      const writer = createDefaultDiskWriter(root);
+      await expect(writer.writeTextFile(target, "next")).rejects.toThrow();
+      expect(await readFile(target, "utf8")).toBe("previous");
+      expect(await readdir(root)).toEqual(["note.txt"]);
+      child.stdin.end("\n"); await exited;
+      await writer.writeTextFile(target, "next");
+      expect(await readFile(target, "utf8")).toBe("next");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited; }
+    }
+  });
+
+  it.each(["text", "binary"])("stages and flushes %s without changing the target until placement", async kind => {
+    const root = await createTestScratch("dohc-staged-write-");
+    const target = join(root, "note.txt");
+    await writeFile(target, "previous");
+    const writer = createDefaultDiskWriter(root);
+    const data = kind === "text" ? "next" : Buffer.from([0, 255, 128, 1]);
+    const staged = await writer.stageFile!(target, data);
+    try {
+      expect(await readFile(target, "utf8")).toBe("previous");
+      const temporary = (await readdir(root)).find(name => name.startsWith(".dohc-write-"));
+      expect(temporary).toBeDefined();
+      expect(await readFile(join(root, temporary!))).toEqual(Buffer.from(data));
+      await staged.commit();
+      expect(await readFile(target)).toEqual(Buffer.from(data));
+      expect(await readdir(root)).toEqual(["note.txt"]);
+    } finally { await staged.dispose(); }
+  });
+
+  it("keeps a blocked target whole and cleans staging before a later retry", async () => {
+    const root = await createTestScratch("dohc-blocked-write-");
+    const target = join(root, "note.txt");
+    await writeFile(target, "previous");
+    let blocked = true;
+    const replace = vi.fn(async (source: string, destination: string) => {
+      expect(await readFile(destination, "utf8")).toBe("previous");
+      if (blocked) throw Object.assign(new Error("held open"), { code: "EPERM" });
+      await rename(source, destination);
+    });
+    const writer = createDefaultDiskWriter(root, { rename: replace, platform: "win32", wait: async () => {} });
+    await expect(writer.writeTextFile(target, "next")).rejects.toThrow("held open");
+    expect(replace).toHaveBeenCalledTimes(6);
+    expect(await readFile(target, "utf8")).toBe("previous");
+    expect(await readdir(root)).toEqual(["note.txt"]);
+    blocked = false;
+    await writer.writeTextFile(target, "next");
+    expect(await readFile(target, "utf8")).toBe("next");
+  });
+
+  it("stages no temporary through an escaping folder or linked target", async () => {
+    const root = await createTestScratch("dohc-staged-contained-");
+    const outside = await createTestScratch("dohc-staged-outside-");
+    await writeFile(join(outside, "note.txt"), "outside");
+    await symlink(outside, join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
+    await symlink(join(outside, "note.txt"), join(root, "leaf.txt"));
+    const writer = createDefaultDiskWriter(root);
+    await expect(writer.stageFile!(join(root, "escape", "new.txt"), "next")).rejects.toThrow();
+    await expect(writer.stageFile!(join(root, "leaf.txt"), "next")).rejects.toThrow();
+    expect(await readdir(outside)).toEqual(["note.txt"]);
+    expect((await readdir(root)).filter(name => name.startsWith(".dohc-write-"))).toEqual([]);
+  });
+
   // The engine's own materialization writes (switch/merge/restore) must stay
   // inside the workspace even against adversarial symlinks on disk.
   it("refuses to write through a symlink leaf", async () => {

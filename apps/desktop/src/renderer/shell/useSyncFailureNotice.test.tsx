@@ -75,6 +75,17 @@ function renderNotice(
 }
 
 describe("useSyncFailureNotice", () => {
+  it("shows a blocked materialization in a toast and Notices with a working retry", async () => {
+    const detail = "Error: Could not update note.txt on disk: held open";
+    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+    expect(view.toasts()).toHaveLength(1);
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]!.details).toEqual([["Detail", detail]]);
+    act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
+    await waitFor(() => expect(view.rows()).toEqual([]));
+    expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "person");
+  });
+
   it("shows the claim refusal and keeps the existing Try again action", async () => {
     const message = "Another account already claimed this workspace.";
     const view = renderNotice({ failure: { cause: "claim-refused", detail: message, sinceMs: 1, attempts: 1 } });

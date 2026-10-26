@@ -92,7 +92,8 @@ import {
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -888,6 +889,12 @@ export interface EngineDiskWriter {
   writeTextFile(absolutePath: string, text: string): Promise<void>;
   writeBinaryFile(absolutePath: string, bytes: Uint8Array): Promise<void>;
   deletePath(absolutePath: string): Promise<void>;
+  stageFile?(absolutePath: string, data: string | Uint8Array): Promise<StagedEngineFile>;
+}
+
+interface StagedEngineFile {
+  commit(): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 const ENGINE_MAIN_VERSION_ID = "main";
@@ -1681,7 +1688,10 @@ function assertEngineWritablePath(
 // Exported for direct regression tests of the containment invariants below;
 // production code always goes through WorkspaceEngineCaptureOptions.diskWriter
 // defaulting.
-export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
+export function createDefaultDiskWriter(
+  rootPath: string,
+  dependencies: Pick<NonNullable<Parameters<typeof atomicReplaceFile>[2]>, "rename" | "platform" | "wait"> = {},
+): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
   //   1. Before mkdir, the nearest existing ancestor must resolve inside the
@@ -1721,12 +1731,13 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       candidate = parent;
     }
   }
-  async function assertLeafNotSymlink(absolutePath: string): Promise<void> {
+  async function assertLeafNotSymlink(absolutePath: string): Promise<number | undefined> {
     try {
       const info = await lstat(absolutePath);
       if (info.isSymbolicLink()) {
         throw new Error(`Engine refused to write through a symlink: ${absolutePath}`);
       }
+      return info.mode;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ENOTDIR") return;
@@ -1757,14 +1768,10 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     });
     return resolvedAbsolute;
   }
-  // Text and bytes take the same four checks in the same order, so they take
-  // one path through them. writeFile defaults a string to UTF-8 and ignores
-  // the encoding for a Uint8Array, so one call serves both. Two copies of a
-  // security sequence can drift; one cannot.
-  async function writeEngineFile(
+  async function stageFile(
     absolutePath: string,
     data: string | Uint8Array,
-  ): Promise<void> {
+  ): Promise<StagedEngineFile> {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
@@ -1772,10 +1779,48 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
-    await assertLeafNotSymlink(target);
-    await writeFile(target, data);
+    const previousMode = await assertLeafNotSymlink(target);
+    const temporary = join(dir, `.dohc-write-${process.pid}-${randomUUID()}`);
+    let placed = false;
+    const dispose = () => placed ? Promise.resolve() : rm(temporary, { force: true });
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(data);
+        if (process.platform !== "win32" && !isSecretPath(relative(rootPath, target).replaceAll("\\", "/"))) {
+          await handle.chmod(previousMode === undefined ? 0o666 & ~process.umask() : previousMode & 0o777);
+        }
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+      await handle.close();
+      return {
+        commit: async () => {
+          await atomicReplaceFile(target, async () => {
+            await assertContainedDir(dir);
+            await assertLeafNotSymlink(target);
+          }, { ...dependencies, temporary, syncDirectory: true });
+          placed = true;
+        },
+        dispose,
+      };
+    } catch (error) {
+      await dispose().catch(() => undefined);
+      throw error;
+    }
+  }
+  async function writeEngineFile(absolutePath: string, data: string | Uint8Array): Promise<void> {
+    const staged = await stageFile(absolutePath, data);
+    try {
+      await staged.commit();
+    } finally {
+      await staged.dispose().catch(() => undefined);
+    }
   }
   return {
+    stageFile,
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
@@ -4002,30 +4047,60 @@ export function createWorkspaceEngineCapture(
     operations: readonly MaterializeOperation[],
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<void> {
+    const staged = new Map<number, StagedEngineFile>();
+    const updateError = (operation: MaterializeOperation, error: unknown) => new Error(
+      `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
+      { cause: error },
+    );
     for (const operation of operations) {
       assertEngineWritablePath(operation.path, policy, {
         ...(operation.kind !== "write-binary" && operation.protected ? { protected: true } : {}),
       });
-      const absolute = join(rootPath, operation.path);
-      const cancel =
-        operation.kind === "delete"
-          ? registerExpectedEngineEvents([{ path: operation.path }])
-          : () => undefined;
-      try {
-        if (operation.kind === "write") {
-          await diskWriter.writeTextFile(absolute, operation.text);
-        } else if (operation.kind === "write-binary") {
-          await diskWriter.writeBinaryFile(absolute, operation.bytes);
-        } else {
-          await diskWriter.deletePath(absolute);
-        }
-      } catch (error) {
-        cancel();
-        throw new Error(
-          `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
-          { cause: error },
-        );
+    }
+    try {
+      if (diskWriter.stageFile) {
+        let next = 0;
+        let failure: Error | undefined;
+        const stage = async () => {
+          while (!failure && next < operations.length) {
+            const index = next++;
+            const operation = operations[index]!;
+            if (operation.kind === "delete") continue;
+            try {
+              staged.set(index, await diskWriter.stageFile!(join(rootPath, operation.path),
+                operation.kind === "write" ? operation.text : operation.bytes));
+            } catch (error) {
+              failure ??= updateError(operation, error);
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(8, operations.length) }, stage));
+        if (failure) throw failure;
       }
+      for (const [index, operation] of operations.entries()) {
+        const absolute = join(rootPath, operation.path);
+        const cancel =
+          operation.kind === "delete"
+            ? registerExpectedEngineEvents([{ path: operation.path }])
+            : () => undefined;
+        try {
+          const prepared = staged.get(index);
+          if (prepared) {
+            await prepared.commit();
+          } else if (operation.kind === "write") {
+            await diskWriter.writeTextFile(absolute, operation.text);
+          } else if (operation.kind === "write-binary") {
+            await diskWriter.writeBinaryFile(absolute, operation.bytes);
+          } else {
+            await diskWriter.deletePath(absolute);
+          }
+        } catch (error) {
+          cancel();
+          throw updateError(operation, error);
+        }
+      }
+    } finally {
+      await Promise.all(Array.from(staged.values(), file => file.dispose().catch(() => undefined)));
     }
   }
 
