@@ -28,6 +28,7 @@ There is no build for Intel Macs.
 On macOS, move dohc to Applications before saving an MCP configuration.
 On Linux, dohc keeps the AppImage's MCP launcher at a stable path.
 If you move or rename an installed app, create its MCP configuration again.
+After dohc updates, restart your agent or reconnect its dohc server.
 
 Every release target compiles Collection actions. App publishing and local app
 launch need the installed app compiler. It ships for Windows x64, Apple silicon
