@@ -978,8 +978,14 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError],
   );
-  const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
+  const {
+    chatCollaboration,
+    refreshCloudStatus,
+    readCloudStatusAgainIfBusy,
+    workspaceSynced,
+    cloudStatus,
+    cloudStatusUnreadable,
+  } = useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
   const { start: startAccountDeletion, reviewing: reviewingAccountDeletion, attach: attachAccountDeletion } =
     props.accountDeletion;
   // Closing Settings reads the status again, as the old Cloud dialog did on
@@ -1960,8 +1966,11 @@ export function DesktopWorkspaceShell(props: {
       latestMomentRequest.current = token;
       if (!shareView) latestMomentLane.settle(
         token,
-        readNewestMomentOrder(workspaceId, () =>
-          latestMomentRequest.current === token && !workspaceAdmission.superseded),
+        readNewestMomentOrder(
+          workspaceId,
+          () => latestMomentRequest.current === token && !workspaceAdmission.superseded,
+          () => syncStatusLane.latest()?.historyCaptureFailed === true,
+        ),
         (order) => order ?? latestMomentLane.latest(),
         (error) =>
           reportLaneFailure("dohc could not check whether open files changed.", error, askAgain),
@@ -3938,6 +3947,7 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) => {
         if (!workspaceAdmission.superseded) reportShellError("Could not refresh history.", error);
       });
+      readCloudStatusAgainIfBusy();
       if (!shareView || shareViewReadsCollections) void refreshCollections();
       if (!shareView) {
         void refreshDatasets().catch(error => {
@@ -3987,6 +3997,7 @@ export function DesktopWorkspaceShell(props: {
     captureRecoveries,
     hasCommittedListing,
     invalidateVisibility,
+    readCloudStatusAgainIfBusy,
   ]);
 
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
