@@ -5952,5 +5952,9 @@ fn received_and_parked_messages_wake_no_agent_here() {
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
         ))
     }).unwrap();
-    assert_eq!(counts, (2, 0), "only the sender's computer records a request");
+    assert_eq!(
+        counts,
+        (2, 0),
+        "only the sender's computer records a request"
+    );
 }

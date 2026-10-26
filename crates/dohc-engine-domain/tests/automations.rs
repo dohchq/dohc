@@ -2073,7 +2073,14 @@ fn ask_agent(
         .start_channel_thread(&request, &NO_FAULTS)
         .expect("message");
     chats
-        .enqueue_dispatch(WS, message_id, "default", &request.thread_id, now_ms, &NO_FAULTS)
+        .enqueue_dispatch(
+            WS,
+            message_id,
+            "default",
+            &request.thread_id,
+            now_ms,
+            &NO_FAULTS,
+        )
         .expect("queue the agent");
     chats
         .claim_next_pending(
@@ -2228,7 +2235,14 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     }
     for (message_id, now_ms) in [("m-first", 12), ("m-deep", 13), ("m-shallow", 14)] {
         chats
-            .enqueue_dispatch(WS, message_id, "default", &thread.thread_id, now_ms, &NO_FAULTS)
+            .enqueue_dispatch(
+                WS,
+                message_id,
+                "default",
+                &thread.thread_id,
+                now_ms,
+                &NO_FAULTS,
+            )
             .expect("queue");
     }
     let claim = chats

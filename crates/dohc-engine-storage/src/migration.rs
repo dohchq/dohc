@@ -6651,7 +6651,13 @@ mod tests {
             )
             .unwrap()
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .unwrap()
             .collect::<Result<_, _>>()
@@ -6659,14 +6665,22 @@ mod tests {
         assert_eq!(
             ledger,
             vec![
-                ("m1".into(), "default".into(), "failed".into(), Some("run-1".into()), 1),
+                (
+                    "m1".into(),
+                    "default".into(),
+                    "failed".into(),
+                    Some("run-1".into()),
+                    1
+                ),
                 ("m2".into(), "default".into(), "pending".into(), None, 0),
             ]
         );
         let run_agent: String = conn
-            .query_row("SELECT agent_id FROM agent_run_records WHERE run_id = 'run-1'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT agent_id FROM agent_run_records WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(run_agent, "default");
         conn.execute(

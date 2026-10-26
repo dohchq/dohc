@@ -10,16 +10,16 @@ use dohc_engine_domain::chats::{
     is_agent_id, replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
-    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
-    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
-    attachment_id_for, channel_slug_for_name, encode_poll_options, has_projection_control_char,
-    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_agent_owner_name,
-    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
-    normalize_display_name, normalize_feed_identity, normalize_poll_options,
-    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path, validate_replicated_link_author,
+    AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
+    ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
+    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
+    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, normalize_agent_owner_name, normalize_author_user_id,
+    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path, validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -1366,10 +1366,14 @@ fn resolve_or_create_placeholder(
         .as_deref()
         .and_then(agent_id_for_channel_wire_id);
     let default_agent_slug = agent_channel_slug(DEFAULT_AGENT_ID);
-    if payload.channel_slug.as_deref().is_some_and(|slug| match agent_id {
-        Some(agent_id) => slug != agent_channel_slug(agent_id),
-        None => slug == default_agent_slug,
-    }) {
+    if payload
+        .channel_slug
+        .as_deref()
+        .is_some_and(|slug| match agent_id {
+            Some(agent_id) => slug != agent_channel_slug(agent_id),
+            None => slug == default_agent_slug,
+        })
+    {
         return Err(SyncError::InvalidInput {
             reason: "reserved agent-channel invariant violated",
         });
@@ -1440,9 +1444,7 @@ fn resolve_or_create_placeholder(
             .map_err(SyncError::corrupt)?
     {
         if kind != "agent" {
-            return Err(local_corruption(
-                "reserved agent-channel owner is corrupt",
-            ));
+            return Err(local_corruption("reserved agent-channel owner is corrupt"));
         }
         tx.execute(
             "INSERT OR IGNORE INTO chat_channel_wire_ids \
@@ -1466,11 +1468,7 @@ fn resolve_or_create_placeholder(
     let allocation_identity = payload.channel_wire_id.as_deref().unwrap_or(&channel_id);
     let (slug, name, kind) = match agent_id {
         // Only the default agent's chat can hold its slug, so it is free.
-        Some(DEFAULT_AGENT_ID) => (
-            default_agent_slug,
-            AGENT_CHANNEL_NAME.to_owned(),
-            "agent",
-        ),
+        Some(DEFAULT_AGENT_ID) => (default_agent_slug, AGENT_CHANNEL_NAME.to_owned(), "agent"),
         Some(agent_id) => (
             allocate_channel_slug(
                 tx,

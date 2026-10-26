@@ -2301,7 +2301,9 @@ impl<'a> LinkedChatStore<'a> {
             // Persist the validated kind (`channel` or `dm`) — not hardcoded:
             // DM privacy depends on the stored kind (`list_personal_feed`
             // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, None, now_ms)?;
+            insert_channel(
+                tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, None, now_ms,
+            )?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
             journal_local_op_in_tx(
@@ -6137,7 +6139,17 @@ fn create_well_known_channel(
     now_ms: i64,
 ) -> Result<ChatChannel, DomainError> {
     let group = ChannelGroup::default();
-    insert_channel(tx, workspace_id, channel_id, name, slug, kind, &group, agent_id, now_ms)?;
+    insert_channel(
+        tx,
+        workspace_id,
+        channel_id,
+        name,
+        slug,
+        kind,
+        &group,
+        agent_id,
+        now_ms,
+    )?;
     record_channel_wire_id(tx, workspace_id, wire_id, channel_id)?;
     journal_local_op_in_tx(
         tx,

@@ -656,7 +656,14 @@ fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
         .expect("remove the table only the full replay query reads");
 
     let changed = LinkedChatStore::new(&mut store)
-        .fail_pending_for_thread(WS, "no-pending-thread", "default", "not needed", 2, &NO_FAULTS)
+        .fail_pending_for_thread(
+            WS,
+            "no-pending-thread",
+            "default",
+            "not needed",
+            2,
+            &NO_FAULTS,
+        )
         .expect("empty pending set must bypass the full replay query");
     assert_eq!(changed, 0);
 }

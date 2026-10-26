@@ -797,7 +797,11 @@ fn mention_backfill_completes_before_first_read() {
     let mentions = LinkedChatStore::new(&mut store)
         .list_mentions_for_handle(WS, "agent", false, None, 10)
         .expect("read");
-    assert_eq!(mentions.len(), 1, "reading before the backfill misses this row.");
+    assert_eq!(
+        mentions.len(),
+        1,
+        "reading before the backfill misses this row."
+    );
 }
 
 #[test]
@@ -930,7 +934,13 @@ fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
                 )
                 .map_err(StorageError::corrupt_public)?;
             stmt.query_map([WS], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .map_err(StorageError::corrupt_public)?
             .collect::<Result<_, _>>()
@@ -1103,7 +1113,10 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .expect("claim")
         .expect("first agent");
     assert_eq!(
-        (first.dispatch.agent_id.as_str(), first.run.agent_id.as_str()),
+        (
+            first.dispatch.agent_id.as_str(),
+            first.run.agent_id.as_str()
+        ),
         ("default", "default")
     );
     assert!(
@@ -1121,7 +1134,10 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .expect("claim")
         .expect("second agent");
     assert_eq!(
-        (second.dispatch.trigger_message_id.as_str(), second.run.agent_id.as_str()),
+        (
+            second.dispatch.trigger_message_id.as_str(),
+            second.run.agent_id.as_str()
+        ),
         ("both", "research"),
         "covering the first agent's run must not take the other agent's request."
     );

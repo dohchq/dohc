@@ -367,7 +367,14 @@ fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
         let mut chats = LinkedChatStore::new(&mut store);
         for refused in [
             chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
-            chats.ensure_agent_channel("ws", "agent-local", "default", "My agent", 2_000, &NoFaults),
+            chats.ensure_agent_channel(
+                "ws",
+                "agent-local",
+                "default",
+                "My agent",
+                2_000,
+                &NoFaults,
+            ),
         ] {
             assert!(matches!(
                 refused,

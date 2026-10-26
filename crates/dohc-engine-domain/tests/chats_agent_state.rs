@@ -949,7 +949,11 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
     assert_eq!(
         recoveries
             .iter()
-            .map(|row| (row.run.run_id.as_str(), row.run.agent_id.as_str(), row.attempt_count))
+            .map(|row| (
+                row.run.run_id.as_str(),
+                row.run.agent_id.as_str(),
+                row.attempt_count
+            ))
             .collect::<Vec<_>>(),
         vec![("run", "default", 1)]
     );
