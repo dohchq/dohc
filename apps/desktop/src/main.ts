@@ -41,6 +41,7 @@ import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/priv
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerWorkspaceFolderNameIpc } from "./ipc/workspaceFolderNameIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -6343,6 +6344,7 @@ const workspaceChatLinks = createChatLinksReader({
 });
 
 function registerIpcHandlers(): void {
+  registerWorkspaceFolderNameIpc(operationBoundary, workspaceRootApproval.usableRoot);
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
