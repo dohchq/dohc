@@ -1815,7 +1815,6 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
 pub(in crate::actor) fn enable_work_probe(store: &EngineStore) {
     store
         .read_with(|conn| {
-            dohc_engine_storage::capture_phase::enable_for_current_thread();
             conn.execute_batch(INVERSE_PROBE).unwrap();
             conn.trace_v2(
                 rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
