@@ -8,6 +8,7 @@ import {
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
+import { normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -85,7 +86,7 @@ export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
 // Names that differ only in case or spaces look the same in a chat.
-const nameKey = (name: string) => name.replace(/\s/gu, "").toLowerCase();
+const nameKey = (name: string) => agentHandle(name).toLowerCase();
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
@@ -127,6 +128,23 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
   return agents.find((agent) => agent.name === name)
     ?? agents.find((agent) => agent.id === DEFAULT_AGENT_ID && agent.nameBeforeMigration === name)
     ?? null;
+}
+
+// A message names one of your agents with @ and its name without spaces.
+export function agentHandle(name: string): string {
+  return name.replace(/\s/gu, "");
+}
+
+/**
+ * The agents dohc can start that a message names, in any case, outside
+ * code. A message wakes each one it names, so only your own messages read
+ * your agents' names.
+ */
+export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
+  const named = new Set(scanMentionTokens(body, { ignoreCode: true }).map(({ handle }) => normalizeHandle(handle)));
+  return listAgents(settings)
+    .filter((agent) => agent.launch && named.has(normalizeHandle(agentHandle(agent.name))))
+    .map(({ id }) => id);
 }
 
 /** The command that starts the first agent, or "" when there is none. */

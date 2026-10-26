@@ -66,7 +66,7 @@ export function renderShowMarkdown(result: ShowResult): string {
 export function renderGroups(result: GroupsResult): string {
   return result.groups
     .map((group) => {
-      const name = group.kind === "agent" ? "my-agent" : lineSafe(group.name);
+      const name = group.kind === "agent" ? lineSafe(group.slug) : lineSafe(group.name);
       return `${name} · #${group.slug} · ${group.kind} · ${group.id}`;
     })
     .join("\n");

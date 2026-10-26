@@ -916,10 +916,12 @@ export function createWorkspaceActivity(
     return state.agentRun?.run.depth ?? 0;
   }
 
-  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
-  // the CLI drops any name a write claims and the run stays one actor.
-  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
-    return state.agentRun?.run.dispatch !== undefined;
+  // The agent of a run dohc dispatched while it holds the slot, or null. The
+  // CLI writes as that agent whatever name a write claims, so the run stays
+  // one actor.
+  function dispatchedAgent(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch !== undefined ? run.agentId : null;
   }
 
   // The agent run holding the slot, as a local app's invocation is
@@ -1004,7 +1006,7 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
-    dispatchedAgentRun,
+    dispatchedAgent,
     agentRun,
     agentRunState,
     engineCaptureFor,
