@@ -316,9 +316,33 @@ it("marks the agent automations wake, and moves another one there with Undo", as
   await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
   expect(onOrder).toHaveBeenCalledWith(["codex"]);
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Codex.", expect.any(Function)));
+  const { default: claude, codex, terminal } = SETTINGS.agents;
+  bridgeMock.getUserSettings.mockResolvedValueOnce({
+    settings: { ...SETTINGS, agents: { codex: codex!, default: claude!, terminal: terminal! } }, source: "stored",
+    agentProblems: [{ ...BROKEN, position: 2 }],
+  });
   onNotice.mock.calls[0]![1]!();
-  // Undo puts back the whole order, the broken entry's place too.
-  expect(onOrder).toHaveBeenLastCalledWith(["default", "codex-two", "codex", "terminal"]);
+  // Undo puts Codex back after the broken entry it followed.
+  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["default", "codex-two", "codex", "terminal"], "dohc could not move Codex back."));
+});
+
+// The order since the choice stays: Undo moves only the agent it chose.
+it("keeps a later automations choice when an earlier one is undone", async () => {
+  const claude = testAgent({ name: "Claude Code" });
+  const codex = testAgent({ name: "Codex", hue: "blue" });
+  const gemini = testAgent({ name: "Gemini", hue: "teal" });
+  const { onOrder, onNotice, rerender } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Codex.", expect.any(Function)));
+  rerender({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
+  await userEvent.click(screen.getByRole("button", { name: "Gemini actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Gemini.", expect.any(Function)));
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, codex, default: claude } }, source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  // Gemini still wakes automations; Codex goes back after Claude Code.
+  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "default", "codex"], "dohc could not move Codex back."));
 });
 
 it("shows no automations chip while only one agent can be started", () => {

@@ -51,6 +51,17 @@ export function agentListRows(settings: Pick<DesktopUserSettings, "agents">, pro
 
 const rowId = (row: AgentListRow) => (row.kind === "agent" ? row.agent.id : row.problem.id);
 
+/**
+ * `order` with `id` back where it was: after the entry it followed, or in
+ * front of the one after it when that entry is gone, or first.
+ */
+function placeBack(order: readonly string[], id: string, before: string | undefined, after: string | undefined): string[] {
+  const rest = order.filter((entry) => entry !== id);
+  const at = before !== undefined && rest.includes(before) ? rest.indexOf(before) + 1
+    : after !== undefined && rest.includes(after) ? rest.indexOf(after) : 0;
+  return [...rest.slice(0, at), id, ...rest.slice(at)];
+}
+
 /** A problem sentence, with each key in backticks set in monospace. */
 export function ProblemText(props: { text: string }) {
   return <>{props.text.split("`").map((part, index) =>
@@ -448,10 +459,31 @@ export function AgentList(props: {
     if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
   };
 
-  // Automations wake the first agent dohc can start, so this one moves to the top.
+  const neighbours = (id: string) => {
+    const at = fileOrder.indexOf(id);
+    return [fileOrder[at - 1], fileOrder[at + 1]] as const;
+  };
+
+  // Automations wake the first agent dohc can start, so this one moves to the
+  // top. Undo moves only this agent back, in the order the file has then.
   const wakeForAutomations = async (agent: Agent) => {
-    const previous = fileOrder;
-    if (await onOrder([agent.id])) onNotice?.(`Automations now wake ${agent.name}.`, () => void onOrder(previous));
+    const [before, after] = neighbours(agent.id);
+    if (!(await onOrder([agent.id]))) return;
+    onNotice?.(`Automations now wake ${agent.name}.`, () => void (async () => {
+      let file: DesktopUserSettingsResult;
+      try {
+        file = await bridge().getUserSettings();
+      } catch (cause) {
+        onError?.(ipcErrorMessage(cause, `dohc could not move ${agent.name} back.`), cause);
+        return;
+      }
+      const order = agentListRows(file.settings, file.agentProblems).map(rowId);
+      if (!order.includes(agent.id)) {
+        onError?.(`Undo didn't move ${agent.name} because it isn't in your settings anymore.`);
+        return;
+      }
+      await onOrder(placeBack(order, agent.id, before, after), `dohc could not move ${agent.name} back.`);
+    })());
   };
 
   // Undo puts the agent back under the name and settings it had, after the
