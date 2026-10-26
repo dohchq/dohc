@@ -26,10 +26,12 @@ import {
 } from "./helpers/workspace";
 
 // Open externally on files someone shared with the person, through a real
-// relay and the real app. The system's opener is replaced by a recorder, so
-// no file ever reaches the OS. The first two cases run without a live host,
-// so the note shows its saved file. The last runs the self-hosted stack, so
-// the note is open in a live editing session.
+// relay and the real app. Each file opens as a marked, read-only copy in the
+// profile's opened folder, whatever the share's access, and its original
+// stays unmarked and unchanged. The system's opener is replaced by a
+// recorder, so no file ever reaches the OS. The first two cases run without
+// a live host, so the note shows its saved file. The last runs the
+// self-hosted stack, so the note is open in a live editing session.
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
@@ -42,7 +44,7 @@ const DATA_TEXT = "data bytes\n";
 const MARKS = process.platform === "win32" || process.platform === "darwin";
 
 type Bridge = Pick<DohcDesktopBridge,
-  | "getWorkspaceRegistry" | "openFileExternally" | "refreshSharedView" | "submitShareChanges" | "onWorkspaceActivity"
+  | "getWorkspaceRegistry" | "openFileExternally" | "refreshSharedView" | "submitShareChanges"
   | "createRelayShare" | "listOwnerLiveDocuments" | "listShareProposals" | "listNotices" | "getSyncStatus">;
 type Received = { temp: TempWorkspace; app: ElectronApplication; page: Page };
 type LiveDelivery = Awaited<ReturnType<Bridge["getSyncStatus"]>>["ownerLiveDelivery"];
@@ -116,19 +118,22 @@ function unconfirmedChanges(page: Page) {
   });
 }
 
-// Every path the window hears changed from now on, from file observation or capture.
-async function recordObservedPaths(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const observed: string[] = [];
-    Reflect.set(window, "observedPaths", observed);
-    (window as unknown as { dohcDesktop: Bridge }).dohcDesktop
-      .onWorkspaceActivity((event) => observed.push(...(event.paths ?? [])));
-  });
-}
-
-async function unobserved(page: Page, paths: string[]): Promise<string[]> {
-  const observed = await page.evaluate(() => [...(Reflect.get(window, "observedPaths") as string[])]);
-  return paths.filter((path) => !observed.includes(path));
+// Each opened path is a marked, read-only copy of its original, in order, in
+// the profile's opened folder. Each original is unmarked and unchanged.
+async function expectCopies(opened: string[], homeDir: string, originals: { path: string; text: string }[]): Promise<void> {
+  expect(opened).toHaveLength(originals.length);
+  const folder = await realpath(join(homeDir, "opened"));
+  for (const [index, original] of originals.entries()) {
+    const copy = opened[index]!;
+    const inCopies = relative(folder, await realpath(copy));
+    expect(inCopies.startsWith("..") || isAbsolute(inCopies), `${copy} is in the profile's opened folder`).toBe(false);
+    expect(basename(copy)).toBe(basename(original.path));
+    expect(await readFile(copy, "utf8")).toBe(original.text);
+    expect(await hasMark(copy)).toBe(MARKS);
+    expect((await stat(copy)).mode & 0o222).toBe(0);
+    expect(await hasMark(original.path)).toBe(false);
+    expect(await readFile(original.path, "utf8")).toBe(original.text);
+  }
 }
 
 // History moments for both files, and the changes this workspace's journal holds to send.
@@ -191,10 +196,6 @@ async function expectNoNewNotices(page: Page, side: string, baseline: NoticesRow
   expect.soft(added, `Notices on the ${side}'s side holds no new row`).toEqual([]);
 }
 
-function samePath(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
 async function withReceivedShare(access: "edit" | "view", run: (received: Received) => Promise<void>): Promise<void> {
   const temp = await createTempWorkspace();
   const workspaceId = `open-externally-${access}-e2e`;
@@ -238,7 +239,7 @@ async function withReceivedShare(access: "edit" | "view", run: (received: Receiv
   }
 }
 
-test("a file from another person opens in place, and the mark changes nothing in dohc @open-externally-marks", async () => {
+test("a file from another person that the person can edit opens as a marked, read-only copy, and changes nothing in dohc @open-externally-marks", async () => {
   test.setTimeout(300_000);
   await withReceivedShare("edit", async ({ temp, app, page }) => {
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
@@ -253,12 +254,25 @@ test("a file from another person opens in place, and the mark changes nothing in
     expect(before?.moments.length, "History holds both files").toBeGreaterThan(0);
     const notices = await noticesRows(page);
 
-    for (const path of [NOTE, DATA]) await openExternally(page, path);
-    const originals = await Promise.all([NOTE, DATA].map((path) => realpath(join(temp.rootPath, path))));
-    expect((await systemOpens(app)).map(samePath)).toEqual(originals.map(samePath));
-    for (const original of originals) expect(await hasMark(original)).toBe(MARKS);
-    expect(await readFile(originals[0]!, "utf8")).toBe(NOTE_TEXT);
-    expect(await readFile(originals[1]!, "utf8")).toBe(DATA_TEXT);
+    await openExternally(page, NOTE);
+    // The data file's view can't preview it, so it offers Open externally,
+    // with "Read-only copy" after it on the same line.
+    await explorerRow(page, DATA).click();
+    const control = page.getByTestId("view-binary").getByRole("button", { name: "Open externally", exact: true });
+    const words = page.getByTestId("view-binary").getByText("Read-only copy", { exact: true });
+    await expect(words).toBeVisible();
+    await expect(control).toHaveAccessibleDescription("Read-only copy");
+    const [controlBox, wordsBox] = [await control.boundingBox(), await words.boundingBox()];
+    expect(Math.abs(wordsBox!.x - (controlBox!.x + controlBox!.width) - 8), "the words follow the control, 8 px away").toBeLessThan(1);
+    expect(Math.abs(wordsBox!.y + wordsBox!.height / 2 - (controlBox!.y + controlBox!.height / 2)), "on the same line").toBeLessThan(2);
+    await control.click();
+    await expect.poll(async () => (await systemOpens(app)).length).toBe(2);
+    await expectCopies(await systemOpens(app), temp.homeDir, [
+      { path: await realpath(join(temp.rootPath, NOTE)), text: NOTE_TEXT },
+      { path: await realpath(join(temp.rootPath, DATA)), text: DATA_TEXT },
+    ]);
+    await explorerRow(page, NOTE).click();
+    await expect(note).toContainText("The first draft.");
 
     expect(await refresh(page)).toMatchObject({ ok: true, changedPaths: 0 });
     expect(engineCounts(temp.rootPath)).toEqual(before);
@@ -288,7 +302,7 @@ test("a file from another person that the person can only view opens as a marked
   });
 });
 
-test("a file from another person opens in place during a live editing session, and the mark changes nothing in dohc @open-externally-marks", async ({ browser }, testInfo) => {
+test("a file from another person opens as a marked, read-only copy during a live editing session, and changes nothing in dohc @open-externally-marks", async ({ browser }, testInfo) => {
   test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
   test.setTimeout(600_000);
   const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
@@ -406,19 +420,14 @@ test("a file from another person opens in place during a live editing session, a
     const notices = { recipient: await noticesRows(page), owner: await noticesRows(ownerPage) };
     delivery.baseline = await liveDelivery();
 
-    await recordObservedPaths(page);
     for (const path of [NOTE, DATA]) await openExternally(page, path);
-    const originals = await Promise.all([NOTE, DATA].map((path) => realpath(join(recipientTemp.rootPath, path))));
-    expect((await systemOpens(recipient.app)).map(samePath)).toEqual(originals.map(samePath));
+    await expectCopies(await systemOpens(recipient.app), recipientTemp.homeDir, [
+      { path: await realpath(join(recipientTemp.rootPath, NOTE)), text: NOTE_TEXT },
+      { path: await realpath(join(recipientTemp.rootPath, DATA)), text: DATA_TEXT },
+    ]);
     expect(await systemOpens(owner.app)).toEqual([]);
-    for (const original of originals) expect(await hasMark(original)).toBe(MARKS);
-    expect(await readFile(originals[0]!, "utf8")).toBe(NOTE_TEXT);
-    expect(await readFile(originals[1]!, "utf8")).toBe(DATA_TEXT);
 
-    // dohc has observed both marked files. Then everything Send changes runs, short of sending.
-    if (MARKS) {
-      await expect.poll(() => unobserved(page, [NOTE, DATA]), { message: "dohc observed both marked files.", timeout: 60_000 }).toEqual([]);
-    }
+    // Everything Send changes runs, short of sending.
     expect(await refresh(page)).toMatchObject({ ok: true, changedPaths: 0 });
     expect(await settle(page)).toMatchObject({ ok: true, capturedLocalChanges: 0, submitted: 0 });
 

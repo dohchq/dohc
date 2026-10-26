@@ -201,8 +201,6 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewFileReadRequest,
   ): Promise<ShareViewFileReadOutcome>;
-  /** Whether a save to this tracked file reaches the share, by the same check as `change`. False when unsure. */
-  mayEditExternally(target: ShareViewFilesTarget, path: string): Promise<boolean>;
   lookup(target: ShareViewFilesTarget, paths: readonly string[]): Promise<WorkspacePathListing>;
   list(
     target: ShareViewFilesTarget,
@@ -1242,24 +1240,6 @@ export function createShareViewFiles(
           ...workspaceTextReadResultFromBytes(bytes),
         };
       });
-    },
-
-    async mayEditExternally(requested, path) {
-      try {
-        return await withCurrentTarget(requested, async (target) => {
-          assertMayEdit(target, [path]);
-          // A file placed in the folder by hand isn't tracked, so its save never reaches the share.
-          // assertMayEdit has validated the path.
-          const tracked = normalizedWritePath(path)!;
-          return withStore(target, async (store) => {
-            const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
-            const [file] = await resolveEngineFileTargets(store, target.storeWorkspaceId, [{ path: tracked }], undefined, main.id);
-            return file?.status === "found" && file.path === tracked;
-          });
-        });
-      } catch {
-        return false;
-      }
     },
 
     async lookup(requested, paths) {

@@ -269,13 +269,6 @@ function mutableTextStore(input?: {
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       return snapshots().find((row) => row.path === path) ?? null;
     }),
-    resolveFiles: vi.fn(async ({ targets }: { targets: Array<{ path: string }> }) => ({
-      versionId: "main",
-      results: targets.map(({ path }) => {
-        const row = rows.get(path);
-        return row ? { status: "found", objectId: row.objectId, path } : { status: "absent" };
-      }),
-    })),
     readBinaryFile: vi.fn(async () => null),
     writeTextFile: vi.fn(
       async ({ path, text, metadata }: { path: string; text: string; metadata?: { origin: string } }) => {
@@ -2476,7 +2469,7 @@ describe("ShareViewFiles", () => {
     ["an ended view", (rootPath: string) => ({ ...target(rootPath), ended: true }), false],
     ["a path outside the grant", (rootPath: string) => ({ ...target(rootPath), grantedSelector: { ...editGrant, paths: ["other"] } }), false],
     ["a mount", (rootPath: string) => ({ ...mountTarget(rootPath), grantedSelector: editGrant }), false],
-  ] as const)("answers whether a file may be edited elsewhere the same way a save does, for %s", async (_case, resolve, editable) => {
+  ] as const)("saves a received file only with an edit grant for its path, for %s", async (_case, resolve, editable) => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "notes"), { recursive: true });
     const canonical = "canonical\n";
@@ -2487,7 +2480,6 @@ describe("ShareViewFiles", () => {
       ? { kind: "mount", workspaceId: resolved.workspaceId, shareId: "share-a" }
       : { kind: "standalone", workspaceId: resolved.workspaceId };
 
-    const asked = await files.mayEditExternally(requested, "notes/a.md");
     const saved = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
       files.change(lease, requested, {
         kind: "save",
@@ -2500,23 +2492,7 @@ describe("ShareViewFiles", () => {
       throw error;
     });
 
-    expect(asked).toBe(editable);
     expect(saved).toBe(editable);
-  });
-
-  it("answers that a file may not be edited elsewhere when the share's store doesn't track it", async () => {
-    const rootPath = await workspaceRoot();
-    await writeFile(join(rootPath, "placed.md"), "placed by hand\n", "utf8");
-    const store = mutableTextStore({ initial: [{ path: "notes/a.md", text: "canonical\n" }] });
-    let opened = store;
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => opened });
-    const requested: ShareViewFilesTarget = { kind: "standalone", workspaceId: "workspace-a" };
-
-    await expect(files.mayEditExternally(requested, "notes/a.md")).resolves.toBe(true);
-    await expect(files.mayEditExternally(requested, "placed.md")).resolves.toBe(false);
-    opened = { ...store, ensureMainVersion: async () => { throw new Error("engine stopped"); } };
-    await expect(files.mayEditExternally(requested, "notes/a.md")).resolves.toBe(false);
-    expect(store.writeTextFile).not.toHaveBeenCalled();
   });
 
   it("keeps a mount store warm across canonical reads and listings", async () => {

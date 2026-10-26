@@ -164,7 +164,6 @@ function harness() {
 
   const files: ShareViewFiles = {
     lookup: vi.fn(async () => ({ files: [], folders: [] })),
-    mayEditExternally: vi.fn(async () => false),
     linksEdges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})),
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),

@@ -8,7 +8,6 @@ import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
 import {
   fileOrigin,
   markAsDownloaded,
-  markInPlace,
   markedCopyOf,
   removeEarlierMarkedCopies,
   removeMarkedCopies,
@@ -149,15 +148,17 @@ describe("marked copies", () => {
     const scratch = await createTestScratch("marked-copy-unclear-");
     await writeFile(join(scratch, "notes.bin"), "bytes");
     await expect(fileOrigin({ workspaceId: "own", rootPath: scratch }, [], join(scratch, "notes.bin"))).resolves.toBe("own");
-    await expect(fileOrigin({ workspaceId: "own", rootPath: `${scratch}\0` }, [], join(scratch, "notes.bin"))).resolves.toBe("other");
+    await expect(fileOrigin({ workspaceId: "own", rootPath: `${scratch}\0` }, [], join(scratch, "notes.bin"))).resolves.toBe("received");
   });
 
-  it("knows the current shared view's own registry entry when its root is written another way", async () => {
+  it("counts every file of the current shared view as another person's", async () => {
     const scratch = await createTestScratch("marked-copy-self-");
     await writeFile(join(scratch, "notes.md"), "bytes");
     const shareView = {} as NonNullable<RegistryEntry["shareView"]>;
-    const saved = { workspaceId: "view", rootPath: scratch.replaceAll("\\", "/"), shareView };
-    await expect(fileOrigin({ ...saved, rootPath: scratch }, [saved], join(scratch, "notes.md"))).resolves.toBe("shared view");
+    const saved = { workspaceId: "view", rootPath: scratch, shareView };
+    const resolve = vi.fn(async (path: string) => realpath(path));
+    await expect(fileOrigin(saved, [saved], join(scratch, "notes.md"), resolve)).resolves.toBe("received");
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it("counts a file as another person's when a registered workspace that could hold it fails to resolve", async () => {
@@ -171,7 +172,7 @@ describe("marked copies", () => {
       return realpath(path);
     });
     await expect(fileOrigin({ workspaceId: "own", rootPath: scratch },
-      [{ workspaceId: "inner", rootPath: join(scratch, "inner") }], file, resolve)).resolves.toBe("other");
+      [{ workspaceId: "inner", rootPath: join(scratch, "inner") }], file, resolve)).resolves.toBe("received");
     expect(resolve).toHaveBeenCalledWith(join(scratch, "inner", "shared-with-me"));
   });
 
@@ -220,19 +221,6 @@ describe("marked copies", () => {
     expect(await readdir(dirname(current.folder))).toEqual([basename(earlier.folder)]);
     await removeEarlierMarkedCopies(unmarked(profile));
     expect(await readdir(dirname(current.folder))).toEqual([]);
-  });
-
-  it("marks a file in place, and reports a failed mark with the same error", async () => {
-    const scratch = await createTestScratch("marked-copy-in-place-");
-    const file = join(scratch, "notes.md");
-    await writeFile(file, "bytes");
-    const mark = vi.fn(async (_path: string) => undefined);
-    await markInPlace({ ...systemMarkedCopies(join(scratch, "profile")), mark }, file);
-    expect(mark).toHaveBeenCalledExactlyOnceWith(file);
-    const failure = await markInPlace({ ...systemMarkedCopies(join(scratch, "profile")), mark: async () => { throw refusedMark; } }, file)
-      .catch((error: unknown) => error);
-    expect(failure).toMatchObject({ name: "MarkedCopyError" });
-    expect(shown(failure, "win32").message).toBe("dohc could not open this file externally.");
   });
 
   it.skipIf(process.platform !== "win32")("writes the Internet zone mark", async () => {

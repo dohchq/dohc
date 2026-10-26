@@ -8,13 +8,12 @@ import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 
-// Files from other people open with the system's download mark, so the system
-// checks them the way it checks a download. A file the person can edit under
-// the share's grant is marked where it is. Every other one opens as a marked,
-// read-only copy, so the other app asks before saving it anywhere. The copies
-// live in the profile folder, which only one running dohc uses. Each copy gets
-// a fresh folder inside this run's folder. Quit removes this run's folder, and
-// the next start removes what earlier runs left.
+// Files from other people open as a read-only copy with the system's download
+// mark, so the system checks them the way it checks a download, and the other
+// app asks before saving it anywhere. The copies live in the profile folder,
+// which only one running dohc uses. Each copy gets a fresh folder inside this
+// run's folder. Quit removes this run's folder, and the next start removes
+// what earlier runs left.
 
 export interface MarkedCopies {
   /** This run's folder, inside the profile's `opened` folder. Only copies live here. */
@@ -66,11 +65,11 @@ export async function markAsDownloaded(path: string, platform: NodeJS.Platform):
 type SharedPlaces = Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">;
 
 /**
- * Where a file came from. "own": the person's own work. "shared view": the
- * current standalone shared view, and no other shared place. "other": the
- * real shared-with-me of the current workspace or of any registered workspace,
- * or the real root of another registered shared view, since one can sit inside
- * another. When dohc cannot tell, it is "other".
+ * Where a file came from. "own": the person's own work. "received": a received
+ * share's file. That is any file of the current standalone shared view, or of
+ * the real shared-with-me of the current workspace or of any registered
+ * workspace, or of the real root of another registered shared view, since one
+ * can sit inside another. When dohc cannot tell, it is "received".
  *
  * Registered roots are saved as real paths, so only entries whose saved place
  * could hold the file are resolved.
@@ -80,7 +79,8 @@ export async function fileOrigin(
   registered: readonly SharedPlaces[],
   realTarget: string,
   resolve: (path: string) => Promise<string> = realpath,
-): Promise<"own" | "shared view" | "other"> {
+): Promise<"own" | "received"> {
+  if (shareViewIsPresent(workspace.shareView)) return "received";
   const target = fileSystemCase(realTarget);
   const holds = async (place: string) => {
     try {
@@ -97,23 +97,13 @@ export async function fileOrigin(
     holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER)),
     ...elsewhere.map(holds),
   ]);
-  if (answers.includes(true)) return "other";
-  return shareViewIsPresent(workspace.shareView) ? "shared view" : "own";
+  return answers.includes(true) ? "received" : "own";
 }
 
 // Windows and macOS's default volumes ignore case. Folding on a volume that
 // keeps case only makes more files open as copies.
 function fileSystemCase(path: string): string {
   return process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
-}
-
-/** Marks a file the person can edit where it is. Opens nothing; throws when the mark fails. */
-export async function markInPlace(copies: MarkedCopies, path: string): Promise<void> {
-  try {
-    await copies.mark(path);
-  } catch (error) {
-    throw new MarkedCopyError(error);
-  }
 }
 
 /** Copies the file into a fresh folder, marks the copy and makes it read-only. Opens nothing; throws when any step fails. */

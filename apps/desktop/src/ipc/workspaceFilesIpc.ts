@@ -45,7 +45,7 @@ import {
   ZIP_TOO_LARGE_REFUSAL,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
-import { fileOrigin, markInPlace, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
+import { fileOrigin, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
 import { buildStoreZip, type ZipEntry } from "../workspaces/zipWriter";
 
@@ -97,7 +97,7 @@ export function createWorkspaceFilesIpc<
     path: string,
   ): Promise<ReadWorkspaceTextResult>;
   assertWritableWorkspace(workspace: Workspace): void;
-  shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change" | "mayEditExternally">;
+  shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change">;
   listWorkspaces(): Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">[];
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   renderHtmlToPdf(html: string): Promise<Uint8Array>;
@@ -607,33 +607,32 @@ export function createWorkspaceFilesIpc<
       // Resolve+contain first: only a real file inside the workspace can be
       // handed to the OS opener — never an arbitrary path or URL. window.open
       // remains fully denied; this is the only sanctioned external-open path.
-      // A file from another person reaches the opener marked: in place when
-      // the person can edit it under the share's grant, otherwise as a
-      // read-only copy.
+      // A file from another person reaches the opener as a marked, read-only
+      // copy.
       await ensureOwnedProjectionCurrent(
         operation.workspace,
         input.relativePath,
       );
-      const { realTarget, resolvedPath } = await resolveWorkspaceFile(
-        operation.workspace.rootPath,
-        input.relativePath,
-        "read",
-      );
-      const origin = await fileOrigin(operation.workspace, listWorkspaces(), realTarget);
-      let opened = realTarget;
-      if (origin === "shared view" && await shareViewFiles.mayEditExternally(
-        { kind: "standalone", workspaceId: operation.workspace.workspaceId },
-        resolvedPath,
-      ).catch(() => false)) {
-        await markInPlace(markedCopies, realTarget);
-      } else if (origin !== "own") {
-        opened = await markedCopyOf(markedCopies, realTarget);
-      }
+      const { realTarget, readOnlyCopy } = await externalOpen(operation.workspace, input.relativePath);
+      const opened = readOnlyCopy ? await markedCopyOf(markedCopies, realTarget) : realTarget;
       operation.assertCurrent();
       const error = await shell.openPath(opened);
       if (error) throw new Error(error);
     },
+
+    // The file view's "Read-only copy", by the same rule as the open. It
+    // writes nothing: a file not yet on disk refuses, and the view shows no words.
+    readExternalOpen: async (input, { operation }) => {
+      const { readOnlyCopy } = await externalOpen(operation.workspace, input.relativePath);
+      return { readOnlyCopy };
+    },
   } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;
+
+  // Every file that isn't the person's own opens as a copy.
+  async function externalOpen(workspace: Workspace, relativePath: string) {
+    const { realTarget } = await resolveWorkspaceFile(workspace.rootPath, relativePath, "read");
+    return { realTarget, readOnlyCopy: await fileOrigin(workspace, listWorkspaces(), realTarget) !== "own" };
+  }
 }
 
 export function registerWorkspaceHeadingsIpcHandlers<

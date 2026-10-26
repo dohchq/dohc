@@ -13,6 +13,7 @@ import {
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
+  OpenExternallyControl,
   openExternally,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
@@ -251,13 +252,18 @@ function TruncatedNotice(props: { workspaceId: string; path: string; onError?: R
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       <span>Showing the start of a large file.</span>
-      <button
-        type="button"
-        onClick={() => openExternally(props)}
-        className="text-subtle hover:text-ink"
-      >
-        Open the full file externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open the full file externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }

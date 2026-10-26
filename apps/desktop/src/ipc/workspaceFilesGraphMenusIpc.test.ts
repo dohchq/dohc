@@ -73,11 +73,9 @@ async function harness() {
   };
   const trusted = (event: Event) => { if (!event.trusted) throw new Error("untrusted"); };
   const change = vi.fn<ShareViewFiles["change"]>(async () => { throw new Error("share mutation refused"); });
-  const mayEditExternally = vi.fn<ShareViewFiles["mayEditExternally"]>(async () => false);
-  const shareFiles: Pick<ShareViewFiles, "change" | "list" | "read" | "mayEditExternally"> = {
+  const shareFiles: Pick<ShareViewFiles, "change" | "list" | "read"> = {
     change, list: async () => { throw new Error("unexpected shared listing"); },
     read: async () => { throw new Error("unexpected shared read"); },
-    mayEditExternally,
   };
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
     historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
@@ -156,7 +154,7 @@ async function harness() {
     return handler({ sender: { id: 1 }, trusted: isTrusted }, payload);
   };
   return {
-    workspace, registered, lookup, listings, handlers, invoke, change, mayEditExternally, openDialog, saveDialog, listing, readText, repair,
+    workspace, registered, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
     openPath, markedCopies, reveal, renderPdf, notify, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
@@ -272,7 +270,7 @@ describe("registered workspace file handlers", () => {
       workspaceFileOperations.duplicateWorkspaceFile.channel, workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
-      workspaceFileOperations.openFileExternally.channel,
+      workspaceFileOperations.openFileExternally.channel, workspaceFileOperations.readExternalOpen.channel,
       CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
     ]);
     for (const channel of h.handlers.keys()) {
@@ -290,6 +288,7 @@ describe("registered workspace file handlers", () => {
     ["listWorkspaceFiles", {}, "File listing stopped because this window changed workspaces."],
     ["readWorkspaceText", { relativePath: "notes.md" }, "File read stopped because this window changed workspaces."],
     ["openFileExternally", { relativePath: "notes.md" }, "External file open stopped because this window changed workspaces."],
+    ["readExternalOpen", { relativePath: "notes.md" }, "External file open stopped because this window changed workspaces."],
   ] as const)("refuses a foreign workspace selector for %s", async (name, fields, message) => {
     const h = await harness();
     await expect(h.invoke(workspaceFileOperations[name].channel, { ...fields, workspaceId: "foreign" }))
@@ -493,55 +492,22 @@ describe("opening a file externally", () => {
     await expectMarkedCopy(h, original);
   });
 
-  it("opens a file the person can't edit in a standalone shared view as a marked copy", async () => {
+  it("opens a file in a standalone shared view as a marked copy", async () => {
     const h = await harness();
     const original = await sharedViewFile(h);
-    await open(h, "notes.md");
-    expect(h.mayEditExternally).toHaveBeenCalledExactlyOnceWith({ kind: "standalone", workspaceId: "workspace" }, "notes.md");
-    await expectMarkedCopy(h, original);
-  });
-
-  it("opens a file as a marked copy when dohc can't tell whether the person can edit it", async () => {
-    const h = await harness();
-    const original = await sharedViewFile(h);
-    h.mayEditExternally.mockRejectedValueOnce(new Error("workspace closed"));
     await open(h, "notes.md");
     await expectMarkedCopy(h, original);
-  });
-
-  it("marks a file the person can edit in a standalone shared view in place, and opens it", async () => {
-    const h = await harness();
-    const original = await sharedViewFile(h);
-    h.mayEditExternally.mockResolvedValueOnce(true);
-    await open(h, "notes.md");
-    const real = await realpath(original);
-    expect(h.markedCopies.mark).toHaveBeenCalledExactlyOnceWith(real);
-    expect(h.openPath).toHaveBeenCalledExactlyOnceWith(real);
-    expect(h.markedCopies.copy).not.toHaveBeenCalled();
-    expect((await stat(original)).mode & 0o200).not.toBe(0);
-  });
-
-  it("opens nothing when the mark on a file the person can edit fails", async () => {
-    const h = await harness();
-    await sharedViewFile(h);
-    h.mayEditExternally.mockResolvedValueOnce(true);
-    h.markedCopies.mark.mockRejectedValueOnce(new Error("mark refused"));
-    await expect(open(h, "notes.md")).rejects.toThrow("mark refused");
-    expect(h.openPath).not.toHaveBeenCalled();
-    expect(h.markedCopies.copy).not.toHaveBeenCalled();
   });
 
   it("opens a file of a shared view nested in a standalone shared view as a marked copy", async () => {
     const h = await harness();
     h.workspace.shareView = {} as NonNullable<Workspace["shareView"]>;
-    h.mayEditExternally.mockResolvedValue(true);
     const view = join(h.workspace.rootPath, "view");
     h.registered.push({ workspaceId: "view", rootPath: view, shareView: {} as NonNullable<Workspace["shareView"]> });
     const original = join(view, "notes.md");
     await mkdir(view);
     await writeFile(original, bytes);
     await open(h, "view/notes.md");
-    expect(h.mayEditExternally).not.toHaveBeenCalled();
     await expectMarkedCopy(h, original);
   });
 
@@ -577,7 +543,7 @@ describe("opening a file externally", () => {
     await expectMarkedCopy(h, original);
   });
 
-  it("opens the person's own file in place, with no copy and no mark", async () => {
+  it("opens the person's own file itself, with no copy and no mark", async () => {
     const h = await harness();
     const original = join(h.workspace.rootPath, "notes.bin");
     await writeFile(original, bytes);
@@ -585,7 +551,25 @@ describe("opening a file externally", () => {
     expect(h.openPath).toHaveBeenCalledExactlyOnceWith(await realpath(original));
     expect(h.markedCopies.copy).not.toHaveBeenCalled();
     expect(h.markedCopies.mark).not.toHaveBeenCalled();
-    expect(h.mayEditExternally).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the person's own file", "notes.bin", null, false],
+    ["a share mount's file", "shared-with-me/alex/notes.bin", null, true],
+    ["a standalone shared view's file", "notes.bin", "view", true],
+  ] as const)("answers whether %s opens as a copy the way the open does, and writes nothing", async (_case, relativePath, view, readOnlyCopy) => {
+    const h = await harness();
+    if (view) h.workspace.shareView = {} as NonNullable<Workspace["shareView"]>;
+    const original = join(h.workspace.rootPath, relativePath);
+    await mkdir(dirname(original), { recursive: true });
+    await writeFile(original, bytes);
+    await expect(h.invoke(workspaceFileOperations.readExternalOpen.channel, { workspaceId: "workspace", relativePath }))
+      .resolves.toEqual({ readOnlyCopy });
+    expect(h.repair).not.toHaveBeenCalled();
+    expect(h.markedCopies.copy).not.toHaveBeenCalled();
+    expect(h.openPath).not.toHaveBeenCalled();
+    await open(h, relativePath);
+    expect(h.markedCopies.copy).toHaveBeenCalledTimes(readOnlyCopy ? 1 : 0);
   });
 
   it.each(["copy", "mark"] as const)("opens nothing when the %s fails", async (step) => {
