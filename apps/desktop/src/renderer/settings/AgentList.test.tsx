@@ -272,12 +272,21 @@ it("adds an agent you run, off, and opens it on its name", async () => {
   expect(screen.getByRole("textbox", { name: "Name of Agent" })).toBeTruthy();
 });
 
-it("says so when dohc could not look for tools, and stops looking", async () => {
+it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {
   bridgeMock.detectAgentTools.mockRejectedValueOnce(new Error("probe failed"));
   const { onError } = renderList();
-  await vi.waitFor(() => expect(onError).toHaveBeenCalled());
-  expect(within(tile("Add Codex")).queryByLabelText("Looking for Codex")).toBeNull();
-  expect(tile("Add Codex").disabled).toBe(true);
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("probe failed", expect.any(Error), expect.any(Function)));
+  for (const name of ["Add Claude Code", "Add Codex"]) {
+    expect(within(tile(name)).queryByLabelText(/^Looking for/)).toBeNull();
+    expect(within(tile(name)).getByText("Couldn't check")).toBeTruthy();
+    expect(tile(name).disabled).toBe(true);
+  }
+  const retry = onError.mock.calls[0]![2] as () => Promise<void>;
+  await act(() => retry());
+  expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(2);
+  expect(within(tile("Add Codex")).getByText("Ready")).toBeTruthy();
+  expect(tile("Add Codex").disabled).toBe(false);
+  expect(within(tile("Add Claude Code")).getByText("Not found")).toBeTruthy();
 });
 
 it("marks the agent automations wake, and moves another one there with Undo", async () => {

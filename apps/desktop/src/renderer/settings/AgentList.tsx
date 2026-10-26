@@ -374,17 +374,22 @@ export function AgentList(props: {
   const toolRequests = useRequestSequence([workspaceId]);
   const reportError = useRef(onError);
   reportError.current = onError;
-  useEffect(() => {
+  // Try again on a failed look's toast looks again and refills the tiles.
+  const detectTools = useCallback(async (): Promise<void> => {
     const token = toolRequests.next();
     setDetection(null);
-    void bridge().detectAgentTools({ workspaceId }).then((found) => {
+    try {
+      const found = await bridge().detectAgentTools({ workspaceId });
       if (toolRequests.isCurrent(token)) setDetection(found);
-    }, (cause: unknown) => {
+    } catch (cause) {
       if (!toolRequests.isCurrent(token)) return;
       setDetection("failed");
-      reportError.current?.(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."), cause);
-    });
+      reportError.current?.(ipcErrorMessage(cause, "dohc could not detect agent tools."), cause, detectTools);
+    }
   }, [toolRequests, workspaceId]);
+  useEffect(() => {
+    void detectTools();
+  }, [detectTools]);
 
   const rows = agentListRows(settings, props.agentProblems);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
@@ -555,7 +560,9 @@ export function AgentList(props: {
                   <span className={`${TILE_LINE} ${TILE_STATE[found.status].className}`}>
                     {found.status === "ready" ? <Check size={12} aria-hidden /> : null}{TILE_STATE[found.status].text}
                   </span>
-                ) : detection === "failed" ? null : (
+                ) : detection === "failed" ? (
+                  <span className={`${TILE_LINE} text-muted`}>Couldn't check</span>
+                ) : (
                   <span className={`${TILE_LINE} text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
                 )}
                 onAdd={() => {
