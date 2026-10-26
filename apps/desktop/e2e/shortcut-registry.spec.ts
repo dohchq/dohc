@@ -62,10 +62,10 @@ test("shell shortcut ownership runs actions without native menu messages", async
 
     await focusShell();
     await page.keyboard.press(mod + "+n");
-    await expect(page.getByRole("textbox", { name: "File name" })).toBeVisible();
+    await expect(page.getByLabel("Page title")).toBeFocused();
     await assertNoNativeCommand();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("textbox", { name: "File name" })).toHaveCount(0);
+    await page.keyboard.press(mod + "+w");
+    await expect(page.getByTestId("new-page")).toHaveCount(0);
 
     if (process.platform === "darwin") {
       // macOS keeps Control chords for text editing, so none runs a shell command.
@@ -77,7 +77,7 @@ test("shell shortcut ownership runs actions without native menu messages", async
       await expect(page.getByTestId("side-panel")).toBeVisible();
       await expect(page.getByTestId("command-palette")).toHaveCount(0);
       await expect(page.getByTestId("quick-open")).toHaveCount(0);
-      await expect(page.getByRole("textbox", { name: "File name" })).toHaveCount(0);
+      await expect(page.getByTestId("new-page")).toHaveCount(0);
       await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
     }
   } finally {

@@ -5,14 +5,15 @@ import { parseTab, TAB_KINDS } from "./workbenchState";
 
 // An open tab's mark, wherever the tab is listed: the strip, its overflow
 // menu and Explorer's open editors. A file draws its listed kind, or its
-// page emoji; every other tab draws its object's glyph. Primitives, so a
+// page emoji; a new page draws a page; every other tab draws its object's
+// glyph. Primitives, so a
 // memoized row compares them by value.
 export type TabMark = { glyph: FileDisplayKind | ObjectKind; icon: string | undefined };
 
 export function tabMark(path: string, files: ReadonlyMap<string, WorkspaceFileEntry> | undefined): TabMark {
   const tab = parseTab(path);
-  const object = TAB_KINDS[tab.kind].glyph(tab);
-  if (object) return { glyph: object, icon: undefined };
+  const glyph = TAB_KINDS[tab.kind].glyph(tab);
+  if (glyph) return { glyph, icon: undefined };
   const entry = files?.get(path);
   return { glyph: listedFileKind(path, entry?.kind).displayKind, icon: entry?.icon };
 }
