@@ -339,6 +339,7 @@ type ChatDispatchFailPendingParams = ChatsJsonObject & {
   reason: string;
 };
 type ChatDispatchLatestRunParams = ChatThreadParams & { agentId?: string };
+type ChatDispatchRecoveriesParams = ChatPageParams & { threadId?: string };
 type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
   messageId: string;
   runId: string;
@@ -435,7 +436,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatDispatchSetPausedParams;
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatDispatchRunParams;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: ChatDispatchRequeueParams;
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatPageParams;
+  [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatDispatchRecoveriesParams;
   [CHATS_METHOD.dispatchComplete]: ChatDispatchCompleteParams;
   [CHATS_METHOD.dispatchFail]: ChatDispatchFailParams;
 };

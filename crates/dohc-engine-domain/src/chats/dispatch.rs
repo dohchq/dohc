@@ -886,28 +886,43 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// The workspace's runs a quit or restart stopped whose requests are still
+    /// failed, or only those in one thread when `thread_id` is given.
     pub fn list_app_quit_recoveries(
         &self,
         workspace_id: &str,
+        thread_id: Option<&str>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, DomainError> {
         validate_chat_page_limit(limit)?;
+        let thread_id = thread_id
+            .map(|thread_id| normalize_dispatch_id(thread_id, "Thread id is invalid."))
+            .transpose()?;
         let (has_after, after_started_at_ms, after_run_id) = chat_after(after);
+        // SQLite uses the thread index only for a plain equality, so a
+        // thread's read gets its own statement rather than `?2 IS NULL OR`.
+        let thread_filter = if thread_id.is_some() {
+            "r.thread_id = ?2"
+        } else {
+            "?2 IS NULL"
+        };
         self.store.read_with(|conn| {
             let duplicate: i64 = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
                      JOIN chat_dispatch_ledger l ON l.workspace_id = r.workspace_id \
                        AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                        AND l.run_id = r.run_id \
-                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                     WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
                        AND l.state = 'failed' \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
-                         WHERE all_runs.run_id = r.run_id) <> 1)",
-                    params![workspace_id],
+                         WHERE all_runs.run_id = r.run_id) <> 1)"
+                    ),
+                    params![workspace_id, thread_id],
                     |row| row.get(0),
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -915,7 +930,7 @@ impl<'a> LinkedChatStore<'a> {
                 return Err(dispatch_corrupt());
             }
             let mut stmt = conn
-                .prepare_cached(
+                .prepare_cached(&format!(
                     "SELECT r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, \
                             r.command, r.started_at_ms, r.ended_at_ms, r.exit_code, \
                             r.failure_reason, r.log_path, r.failure_handled, r.agent_id, \
@@ -924,19 +939,20 @@ impl<'a> LinkedChatStore<'a> {
                        ON l.workspace_id = r.workspace_id \
                       AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                       AND l.run_id = r.run_id \
-                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                     WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
                        AND l.state = 'failed' \
-                       AND (?2 = 0 OR r.started_at_ms > ?3 \
-                         OR (r.started_at_ms = ?3 AND r.run_id > ?4)) \
-                     ORDER BY r.started_at_ms, r.run_id LIMIT ?5",
-                )
+                       AND (?3 = 0 OR r.started_at_ms > ?4 \
+                         OR (r.started_at_ms = ?4 AND r.run_id > ?5)) \
+                     ORDER BY r.started_at_ms, r.run_id LIMIT ?6"
+                ))
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
                     params![
                         workspace_id,
+                        thread_id,
                         has_after,
                         after_started_at_ms,
                         after_run_id,

@@ -608,8 +608,8 @@ function allowedKeys(method: string): readonly string[] {
       return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
-    case CHATS_METHOD.dispatchListAppQuitRecoveries:
       return ["pageLimit", "cursor"];
+    case CHATS_METHOD.dispatchListAppQuitRecoveries: return ["threadId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
       return ["runId", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
@@ -2990,6 +2990,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
+    const threadId = optionalString(params, "threadId");
     const rows = [...state.runs.values()]
       .filter((run) => {
         const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
@@ -2998,6 +2999,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           run.failureReason === "app restart during run";
         return (
           run.workspaceId === workspace &&
+          (threadId === undefined || run.threadId === threadId) &&
           run.endedAtMs !== undefined &&
           recoverableFailure &&
           dispatch?.state === "failed" &&
@@ -3009,7 +3011,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run,
         attemptCount: state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
       }));
-    const result = page(rows, params, `${workspace}\0appQuitRecoveries`);
+    const result = page(rows, params, `${workspace}\0appQuitRecoveries\0${threadId ?? ""}`);
     return jsonResult({ recoveries: result.values, nextCursor: result.nextCursor });
   }
 

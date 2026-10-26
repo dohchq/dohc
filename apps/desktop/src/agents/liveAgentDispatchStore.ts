@@ -35,7 +35,8 @@ export interface LiveAgentDispatchStoreHandle {
     agentId: string;
     runId: string;
   }): Promise<boolean>;
-  listAppQuitRecoveries(workspaceId: string): Promise<ChatDispatchRecovery[]>;
+  /** Stopped runs in the workspace, or only in one thread. */
+  listAppQuitRecoveries(workspaceId: string, threadId?: string): Promise<ChatDispatchRecovery[]>;
   close(): Promise<void>;
 }
 
@@ -444,7 +445,7 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       );
     },
-    listAppQuitRecoveries: async (workspaceId) => {
+    listAppQuitRecoveries: async (workspaceId, threadId) => {
       assertWorkspaceId(workspaceId);
       return await invoke(
         async (adapter) => {
@@ -454,6 +455,7 @@ export function createLiveAgentDispatchStore(
             const page: ChatRecoveriesPage = await adapter.request(
               CHATS_METHOD.dispatchListAppQuitRecoveries,
               {
+                ...(threadId !== undefined ? { threadId } : {}),
                 pageLimit: 500,
                 ...(cursor !== undefined ? { cursor } : {}),
               },

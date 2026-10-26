@@ -190,6 +190,7 @@ interface Fixture {
     workspaceId: string;
     attachmentId?: symbol;
     triggerMessageId: string;
+    agentId: string;
     runId: string;
   }>;
   runActivity: { acquires: number; releases: number };
@@ -653,8 +654,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       if (error) throw error;
       return requeueRaw(input);
     },
-    listAppQuitRecoveries: (dispatchWorkspace) =>
-      listRecoveriesRaw(dispatchWorkspace.workspaceId),
+    listAppQuitRecoveries: (dispatchWorkspace, threadId) =>
+      listRecoveriesRaw(dispatchWorkspace.workspaceId, threadId),
     spawnRunner,
     killProcessGroup,
     platform: options.platform ?? "linux",
@@ -2784,6 +2785,33 @@ describe("chatDispatchService", () => {
       });
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
       expect(fixture.requeues).toEqual([expect.objectContaining({ agentId: "default", runId: run.runId })]);
+    });
+
+    it("offers it on a run with an attempt left over another agent's run that has used both", async () => {
+      const fixture = await createFixture({
+        restricted: true,
+        agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+      });
+      const run = await stoppedRun(fixture, "quit");
+      await activate(fixture);
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: run.messageId, threadId: run.threadId, agentId: "codex",
+      });
+      const quitCodex = async () => {
+        const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "node codex.mjs" });
+        if (codex?.run.agentId !== "codex") throw new Error("Expected Codex's run.");
+        await fixture.dispatch.failRun({ runId: codex.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
+        return codex.run.runId;
+      };
+      const firstCodexRun = await quitCodex();
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, firstCodexRun)).resolves.toBe(true);
+      await quitCodex();
+
+      expect(await stateOf(fixture, run.threadId)).toEqual({
+        runId: run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: true,
+      });
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+      expect(fixture.requeues.map(({ agentId }) => agentId)).toEqual(["codex", "default"]);
     });
 
     it("leaves the request stopped and says why when its agent is off", async () => {

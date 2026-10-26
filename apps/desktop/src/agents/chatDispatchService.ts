@@ -190,6 +190,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   hasPendingRunMessageLink?(workspace: ChatDispatchWorkspace, runId: string): boolean;
   listAppQuitRecoveries?(
     workspace: ChatDispatchWorkspace,
+    threadId?: string,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
   nowMs?: () => number;
   createId?: () => string;
@@ -1529,22 +1530,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   // The one place that decides which run Try again can run again: the
   // conversation's newest run that a quit or restart stopped, while it is
   // still its agent's latest run there and its request is still stopped.
-  // Another agent's run in the conversation doesn't hide it. Once the request
-  // is back in line, the conversation shows it waiting instead. Runs live in
-  // this computer's engine, so another computer's runs never show here.
+  // Another agent's run in the conversation doesn't hide it, and neither
+  // does a run that has used both its attempts. Once the request is back in
+  // line, the conversation shows it waiting instead. Runs live in this
+  // computer's engine, so another computer's runs never show here.
   async function stoppedRunForThread(
     workspace: ChatDispatchWorkspace,
     threadId: string,
   ): Promise<{ stopped: ChatDispatchStoppedRun; agentId: string } | null> {
-    const recoveries = (await options.listAppQuitRecoveries?.(workspace)) ?? [];
+    const recoveries = (await options.listAppQuitRecoveries?.(workspace, threadId)) ?? [];
     const dispatch = options.dispatchStoreFor(workspace);
+    let exhausted: { stopped: ChatDispatchStoppedRun; agentId: string } | null = null;
     for (const { run, attemptCount } of recoveries.toReversed()) {
-      if (run.threadId !== threadId) continue;
       const ending = savedRunOutcome(run);
       if (ending !== "restarted" && ending !== "quit") continue;
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
-      return {
+      const found = {
         stopped: {
           runId: run.runId,
           triggerMessageId: run.triggerMessageId,
@@ -1553,8 +1555,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         },
         agentId: run.agentId,
       };
+      if (found.stopped.retryable) return found;
+      exhausted ??= found;
     }
-    return null;
+    return exhausted;
   }
 
   // Try again on a stopped run puts its request back in line. False when

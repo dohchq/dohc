@@ -842,13 +842,42 @@ fn app_quit_failure_remains_durably_recoverable_after_handling() {
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         (rows.len(), rows[0].attempt_count),
         (1, 1),
         "A crash after marking the failure handled but before requeue must leave the app-quit run recoverable."
     );
+}
+
+#[test]
+fn app_quit_recoveries_for_a_thread_skip_other_threads() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger-1", "thread", "run-1", 20);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-1", "app-quit", Some(143), 21, &NO_FAULTS)
+        .expect("fail run-1");
+    claimed_run(&mut store, "trigger-2", "other-thread", "run-2", 30);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-2", "app-quit", Some(143), 31, &NO_FAULTS)
+        .expect("fail run-2");
+    let chats = LinkedChatStore::new(&mut store);
+    let runs = |thread_id| {
+        chats
+            .list_app_quit_recoveries(WS, thread_id, None, 10)
+            .expect("recoveries")
+            .into_iter()
+            .map(|recovery| recovery.run.run_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(runs(None), ["run-1", "run-2"]);
+    assert_eq!(
+        runs(Some("thread")),
+        ["run-1"],
+        "drop the thread filter -> a thread lists another thread's stopped runs."
+    );
+    assert_eq!(runs(Some("absent")), Vec::<String>::new());
 }
 
 #[test]
@@ -862,7 +891,7 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
         .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         rows.first()
@@ -992,7 +1021,7 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
     let mut store = EngineStore::open(&db, 1).expect("migrate");
     let mut chats = LinkedChatStore::new(&mut store);
     let recoveries = chats
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         recoveries
