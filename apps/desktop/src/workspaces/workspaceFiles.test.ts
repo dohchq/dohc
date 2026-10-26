@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
 import { existsSync, type Stats } from "node:fs";
 import { classifyPath, hasEngineIgnoredSegment } from "@dohc/workspace-core";
 import {
@@ -19,7 +20,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
@@ -39,6 +40,7 @@ import {
   listFiles,
   movePath,
   nameSkip,
+  prepareWorkspaceMove,
   prepareWorkspaceDelete,
   screenDroppedPaths,
 } from "./workspaceFiles";
@@ -572,6 +574,143 @@ describe("createFolder", () => {
 });
 
 describe("movePath", () => {
+  it("refuses a case-only rename when the disk silently keeps the old capitals", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const noOp = vi.spyOn(fsPromises, "rename").mockResolvedValue(undefined);
+    try {
+      await expect(movePath(root, "docs/plans", "docs/Plans")).rejects.toThrow(
+        "dohc did not rename docs/plans to docs/Plans. This disk kept the name plans. Rename it to another name first, then to Plans.",
+      );
+      expect(await readdir(join(root, "docs"))).toEqual(["plans"]);
+      expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      noOp.mockRestore();
+    }
+  });
+
+  it("prepares and commits an ordinary move without listing folders", async () => {
+    await mkdir(join(root, "docs", "drafts"), { recursive: true });
+    await writeFile(join(root, "docs", "drafts", "a.md"), "body");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    try {
+      await prepareWorkspaceMove(root, "docs/drafts/a.md", "archive/deep/a.md");
+      await expect(movePath(root, "docs/drafts/a.md", "archive/deep/a.md")).resolves.toBe("archive/deep/a.md");
+      expect(listing).not.toHaveBeenCalled();
+      expect(await readFile(join(root, "archive", "deep", "a.md"), "utf8")).toBe("body");
+    } finally {
+      listing.mockRestore();
+    }
+  });
+
+  it("uses equal realpaths without listing folders until checking the renamed leaf", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let listingsBeforeRename: number | undefined;
+    const renaming = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      listingsBeforeRename = listing.mock.calls.length;
+      return originalRename(from, to);
+    });
+    try {
+      await prepareWorkspaceMove(root, "docs/plans", "docs/Plans");
+      await expect(movePath(root, "docs/plans", "docs/Plans")).resolves.toBe("docs/Plans");
+      expect(listingsBeforeRename).toBe(0);
+      expect(listing).toHaveBeenCalledTimes(2);
+      expect(await readFile(join(root, "docs", "Plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      renaming.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  for (const stage of ["prepare", "commit"] as const) {
+    it(`maps an unknown destination identity to the move refusal during ${stage}`, async (context) => {
+      await mkdir(join(root, "docs", "plans"), { recursive: true });
+      await writeFile(join(root, "docs", "plans", "a.md"), "body");
+      if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+      const original = fsPromises.realpath.bind(fsPromises);
+      const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+        const resolved = await original(path);
+        return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+      });
+      const listing = vi.spyOn(fsPromises, "readdir");
+      if (stage === "prepare") listing.mockResolvedValue([]);
+      else fsHooks.afterMkdir = async (path) => {
+        if (path === join(root, "docs")) listing.mockResolvedValue([]);
+      };
+      try {
+        const operation = stage === "prepare" ? prepareWorkspaceMove : movePath;
+        await expect(operation(root, "docs/plans", "docs/Plans")).rejects.toThrow(
+          "dohc did not move docs/plans to docs/Plans. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
+        );
+        expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
+      } finally {
+        listing.mockRestore();
+        lookup.mockRestore();
+      }
+    });
+  }
+
+  it("maps an unknown case-alias descendant identity to the move refusal", async (context) => {
+    await mkdir(join(root, "Team", "leads"), { recursive: true });
+    await writeFile(join(root, "Team", "leads", "a.md"), "body");
+    if (!(await lstat(join(root, "team")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    const listing = vi.spyOn(fsPromises, "readdir").mockResolvedValue([]);
+    try {
+      await expect(prepareWorkspaceMove(root, "Team", "team/leads/sub")).rejects.toThrow(
+        "dohc did not move Team to team/leads/sub. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
+      );
+      expect(await readFile(join(root, "Team", "leads", "a.md"), "utf8")).toBe("body");
+    } finally {
+      listing.mockRestore();
+      lookup.mockRestore();
+    }
+  });
+
+  it("renames a case-only folder when realpath keeps lookup case", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    try {
+      await expect(movePath(root, "docs/plans", "docs/Plans")).resolves.toBe("docs/Plans");
+      expect(await readdir(join(root, "docs"))).toEqual(["Plans"]);
+      expect(await readFile(join(root, "docs", "Plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it("refuses a case-alias descendant when realpath keeps lookup case", async (context) => {
+    await mkdir(join(root, "Team", "leads"), { recursive: true });
+    await writeFile(join(root, "Team", "leads", "a.md"), "body");
+    if (!(await lstat(join(root, "team")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const original = fsPromises.realpath.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    try {
+      await expect(movePath(root, "Team", "team/leads/sub")).rejects.toThrow("Cannot move a path into itself");
+      expect(await readFile(join(root, "Team", "leads", "a.md"), "utf8")).toBe("body");
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   it("renames a file in place (one engine for rename and move)", async () => {
     await writeFile(join(root, "draft.md"), "body");
     const path = await movePath(root, "draft.md", "final.md");

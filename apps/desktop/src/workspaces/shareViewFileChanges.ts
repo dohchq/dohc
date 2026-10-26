@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, readdir, realpath, type FileHandle } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   validateUserMaterializePath,
   validateUserWritePath,
@@ -43,6 +43,7 @@ import { readDiskContent, readOpenedDiskContent, type DiskTextState } from "./wo
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
+import { diskSpelling } from "./diskSpelling";
 
 // Internal file-change primitives for ShareViewFiles. Authority, lifecycle, and
 // workspace scheduling belong to that owner. This module handles only the
@@ -411,7 +412,7 @@ async function applyShareViewPathMove(
   // Every destination, before any of them is applied. A collision found half
   // way through would otherwise leave the files before it already moved.
   for (const move of moves) {
-    if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
+    if (held.has(move.to) || (!renamesInPlace && (await projectionHolds(input.rootPath, move.to)))) {
       throw new Error(`Destination already exists: ${move.to}`);
     }
   }
@@ -1085,33 +1086,6 @@ async function projectionHolds(
 }
 
 /**
- * CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S.
- *
- * On a case-insensitive filesystem `docs/Plans` and `docs/plans` are one
- * directory, and `Note.md` and `note.md` are one file. Every seam here that
- * asks "is this the same entry?" or "is this name taken?" asks through this one
- * probe, because a string comparison answers those questions wrongly on exactly
- * the platform dohc ships on first — and two of the places that asked with
- * strings answered by destroying data.
- *
- * Both ends must resolve for them to BE the same entry. This helper serves only
- * per-file collision checks after the destination was proven occupied. A
- * missing or unreadable endpoint therefore returns false and keeps the
- * collision refusal closed.
- */
-async function sameProjectionEntry(
-  rootPath: string,
-  left: string,
-  right: string,
-): Promise<boolean> {
-  const [leftReal, rightReal] = await Promise.all([
-    realpath(join(rootPath, left)).catch(() => null),
-    realpath(join(rootPath, right)).catch(() => null),
-  ]);
-  return leftReal !== null && rightReal !== null && leftReal === rightReal;
-}
-
-/**
  * Resolve one physical identity snapshot for the whole top-level move.
  *
  * Relative path spelling cannot answer this on a case-insensitive filesystem
@@ -1130,9 +1104,8 @@ async function preflightProjectionMoveIdentity(
     input.rootPath,
     from,
   );
-  let source: string;
   try {
-    source = await realpath(sourceTarget);
+    await realpath(sourceTarget);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
@@ -1142,41 +1115,41 @@ async function preflightProjectionMoveIdentity(
     }
     throw error;
   }
+  const identityUnavailable = () => new Error(
+    `dohc did not rename ${from} to ${to}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
+  );
+  const source = await diskSpelling(input.rootPath, sourceTarget).catch(() => null);
+  if (source === null) throw identityUnavailable();
 
   const destinationTarget = await input.projection.resolvedTarget(
     input.rootPath,
     to,
   );
-  let destination: string;
-  try {
-    destination = await realpath(destinationTarget);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    // resolvedTarget already canonicalized every existing ancestor. The
-    // unresolved tail can therefore participate directly in containment.
-    destination = destinationTarget;
+  let ancestor = destinationTarget;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      await realpath(ancestor);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw identityUnavailable();
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
   }
+  // resolvedTarget resolves links in the existing ancestors, but Linux can
+  // keep their lookup case. Only the missing tail keeps its given spelling.
+  const storedAncestor = await diskSpelling(input.rootPath, ancestor).catch(() => null);
+  if (storedAncestor === null) throw identityUnavailable();
+  const destination = join(storedAncestor, ...missing);
   const renamesInPlace = source === destination;
   if (!renamesInPlace && isInside(source, destination)) {
     throw new Error(`Cannot move a path into itself: ${from}`);
   }
   return { renamesInPlace };
-}
-
-/**
- * Would this move land on something the projection already holds?
- *
- * The case-only carve-out `movePath` makes, for the same reason: the
- * destination "exists" because it IS the source, and refusing there would block
- * a rename the user plainly meant.
- */
-async function projectionOccupies(
-  rootPath: string,
-  move: { from: string; to: string },
-): Promise<boolean> {
-  if (!(await projectionHolds(rootPath, move.to))) return false;
-  return !(await sameProjectionEntry(rootPath, move.from, move.to));
 }
 
 /** Every path the share view's store holds, with the kind its projection needs. */
