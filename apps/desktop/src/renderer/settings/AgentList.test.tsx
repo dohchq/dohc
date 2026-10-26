@@ -156,6 +156,16 @@ it("checks the agent again from the failed check's toast", async () => {
   ]);
 });
 
+it("checks again from the toast when the check couldn't start", async () => {
+  bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
+  const { onError } = renderList();
+  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not check Codex.", expect.any(Error), expect.any(Function)));
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
+  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+});
+
 it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {
   renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents, off: testAgent({ name: "Codex off", enabled: false }) } } });
   await userEvent.click(screen.getByRole("button", { name: "Pause all" }));

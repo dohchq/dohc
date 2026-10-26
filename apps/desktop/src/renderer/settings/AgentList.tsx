@@ -430,7 +430,7 @@ export function AgentList(props: {
         : { status: "failed" };
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
-      onError?.(ipcErrorMessage(cause, "dohc could not check this agent."), cause);
+      onError?.(ipcErrorMessage(cause, `dohc could not check ${agent.name}.`), cause, () => check(agent));
       next = { status: "failed" };
     }
     setChecks((current) => ({ ...current, [agent.id]: next }));
