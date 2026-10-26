@@ -63,6 +63,9 @@ import {
   readDocument,
   readWorkspaceFile,
   saveKeptCopy,
+  saveRecoveryCopy,
+  retryKeptEdits,
+  stopAgain,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -172,7 +175,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 
   register(
     "dohc_workspace_status",
-    { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
+    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
@@ -234,6 +237,36 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_save_recovery_copy",
+    {
+      description:
+        "Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer, or on the server for a document it hosts (`storedOn`); dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. For edits the server keeps, dohc then tells the server the copy is saved, and the `recovery` becomes `copied`. `keptEdits` is `kept` when the edits stay where `storedOn` says, `copied` when the server may now release them, and `ended` for edits a Stop could not write: dohc no longer keeps those, and the copy holds them. Accepts every `recovery`. Pass the `incident` from `keptEdits` to save exactly those kept edits; without it, dohc saves edits a Stop could not write first. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024).optional() },
+    },
+    async (args) => text(await saveRecoveryCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_retry_kept_edits",
+    {
+      description:
+        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
+    },
+    async (args) => text(await retryKeptEdits(ctx, args)),
+  );
+
+  register(
+    "dohc_stop_again",
+    {
+      description:
+        "Stop live editing again for a document whose Stop kept its edits, as Try again does on its row in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `not-written`, where dohc writes the kept edits into the file, or `stopping`, where it asks the server again to stop live editing. `keptEdits` is `recovered` once the file holds the edits, `kept` while dohc still keeps them, and `none` when it kept none. dohc refuses while the document is open in an editor. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
+    },
+    async (args) => text(await stopAgain(ctx, args)),
   );
 
   register(

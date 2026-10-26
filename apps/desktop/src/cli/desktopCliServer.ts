@@ -35,6 +35,9 @@ import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
+import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
+import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
+import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -69,6 +72,15 @@ interface DesktopCliServerDependencies<State> {
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
+  ownerLiveRecovery?: {
+    keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
+    /** With an incident, saves exactly that row's kept edits. */
+    save(workspace: RegistryEntry, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
+    /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
+    stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
+  };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -241,6 +253,24 @@ export function createDesktopCliServer<State>(
         });
       });
       return finish();
+    };
+    // Save recovery copy, Try again and Stop again under the admission the
+    // window's IPC uses: this attachment, the original workspace, and main's
+    // own record of the kept edits, found by path. The caller names nothing else.
+    const ownerLiveRecovery = dependencies.ownerLiveRecovery;
+    const withOwnerLiveRecovery = <Result>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<Result>) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        assertOriginalWorkspace(operation.workspace);
+        const result = await work(operation);
+        operation.assertCurrent();
+        return result;
+      });
+    const keptEditsAt = (workspaceId: string, path: string, incident: string) => {
+      const kept = ownerLiveRecovery?.keptEdits(workspaceId).find(row => row.path === path && row.incident === incident);
+      if (!kept) throw new Error(`dohc has no kept edits for ${path}. List kept edits again to check it.`);
+      return kept;
     };
     const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
@@ -462,6 +492,26 @@ export function createDesktopCliServer<State>(
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),
             },
+            ...(ownerLiveRecovery ? {
+              keptEdits: {
+                list: () => withOwnerLiveRecovery(async operation =>
+                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier }) =>
+                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}) }))),
+                saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
+                retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
+                  const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
+                }),
+                // Only a Stop that kept the edits runs again; any other Stop belongs to Live documents.
+                stopAgain: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
+                  const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  if (kept.recovery !== "not-written" && kept.recovery !== "stopping") {
+                    throw new Error(`No Stop of ${path} is waiting to run again. List kept edits again to check it.`);
+                  }
+                  return await ownerLiveRecovery.stopAgain(operation, { path, objectId: kept.objectId, recovery: kept.recovery });
+                }),
+              },
+            } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {

@@ -8,7 +8,8 @@ import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AboutFile, AccessContext } from "./About";
+import type { AboutFile } from "./About";
+import type { AccessContext } from "./accessReason";
 
 const messageRenderGate = vi.hoisted(() => ({
   current: null as { resume: Promise<void>; onRender: () => void } | null,
@@ -167,7 +168,7 @@ describe("LinkedChatsPanel with no file focused", () => {
         workspaceId="workspace-1"
         filePath={null}
         aboutTabOpen={aboutTabOpen}
-        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, paused: false, onOpenMoment: () => undefined } })}
         onError={() => undefined}
       />,
     );
@@ -752,7 +753,7 @@ describe("LinkedChatsPanel thread and file reads", () => {
         workspaceId="workspace-1"
         filePath="docs/plan.md"
         initialThread={searchThread}
-        history={{ revision: 0, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
         onError={() => undefined}
       />,
     );

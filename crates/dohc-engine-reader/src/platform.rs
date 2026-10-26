@@ -57,13 +57,85 @@ fn check_owner(metadata: &std::fs::Metadata, directory: bool) -> std::io::Result
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no pointer arguments or side effects.
     let owner = unsafe { libc::geteuid() };
-    let sticky_root = directory && metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
-    if !sticky_root
-        && (metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner))
-    {
+    let trusted_admin_gid = if cfg!(target_os = "macos") {
+        Some(80)
+    } else {
+        None
+    };
+    if !trusted_owner(
+        metadata.uid(),
+        metadata.gid(),
+        metadata.mode(),
+        directory,
+        owner,
+        trusted_admin_gid,
+    ) {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok(())
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn trusted_owner(
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    directory: bool,
+    effective_uid: u32,
+    trusted_admin_gid: Option<u32>,
+) -> bool {
+    let sticky_root = directory && uid == 0 && mode & 0o1000 != 0;
+    // macOS administrators can already become root; this adds no new writer.
+    let admin_root = directory
+        && uid == 0
+        && trusted_admin_gid == Some(gid)
+        && mode & 0o020 != 0
+        && mode & 0o002 == 0;
+    sticky_root || admin_root || (mode & 0o022 == 0 && (uid == 0 || uid == effective_uid))
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::trusted_owner;
+
+    #[test]
+    fn macos_applications_accepts_root_admin_group_writes() {
+        assert!(trusted_owner(0, 80, 0o775, true, 501, Some(80)));
+        assert!(trusted_owner(0, 80, 0o775, true, 502, Some(80)));
+    }
+
+    #[test]
+    fn admin_trust_does_not_extend_to_files_or_other_writers() {
+        for (uid, gid, mode, directory) in [
+            (0, 80, 0o775, false),
+            (0, 80, 0o777, true),
+            (0, 20, 0o775, true),
+            (502, 80, 0o755, true),
+            (502, 80, 0o444, false),
+            (501, 80, 0o775, true),
+        ] {
+            assert!(!trusted_owner(uid, gid, mode, directory, 501, Some(80)));
+        }
+    }
+
+    #[test]
+    fn linux_policy_without_admin_trust_is_unchanged() {
+        for uid in [0, 501, 502] {
+            for gid in [0, 80, 501] {
+                for mode in 0..=0o7777 {
+                    for directory in [false, true] {
+                        let sticky_root = directory && uid == 0 && mode & 0o1000 != 0;
+                        let original =
+                            sticky_root || (mode & 0o022 == 0 && (uid == 0 || uid == 501));
+                        assert_eq!(
+                            trusted_owner(uid, gid, mode, directory, 501, None),
+                            original
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 #[cfg(windows)]
 pub(super) fn asset_identity(file: &std::fs::File) -> std::io::Result<(u32, u32, u32)> {

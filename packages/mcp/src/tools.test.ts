@@ -513,25 +513,36 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("workspace_status reports whether Collection updates wait, as the engine answers", async () => {
+  it("workspace_status reports whether Collection updates wait and which documents have kept edits, as the desktop answers", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
+      const keptEdits = [{ path: "plan.md", reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused" }];
       // The desktop answers from the engine's pull token: set while a pull is
       // unfinished, cleared by its terminal commit or by abandoning it.
       for (const [pull, waiting] of [["unfinished", true], ["finished", false], ["abandoned", false]] as const) {
         const asked: string[] = [];
         const status = await workspaceStatus({ ...ctx, request: async (request) => {
           asked.push(request.verb);
-          if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
           expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
+          if (request.verb === "liveKeptEdits") return { ok: true, keptEdits };
+          if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
           return { ok: true, waiting };
         } });
-        expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting });
-        expect(asked).toEqual(["collectionsWaiting"]);
+        expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting, keptEdits });
+        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits"]);
       }
       const unanswered = await workspaceStatus({ ...ctx, request: async () => ({ ok: false, reason: "engine stopped" }) });
       expect(unanswered).toMatchObject({ synced: true });
       expect(unanswered).not.toHaveProperty("collectionsWaiting");
+      expect(unanswered).not.toHaveProperty("keptEdits");
+      // A share profile holds no kept edits of its own, so it does not ask.
+      const asked: string[] = [];
+      const shared = await workspaceStatus({ ...ctx, shareAccess: "edit", request: async (request) => {
+        asked.push(request.verb);
+        return { ok: true, waiting: false };
+      } });
+      expect(shared).not.toHaveProperty("keptEdits");
+      expect(asked).toEqual(["collectionsWaiting"]);
     });
   });
 

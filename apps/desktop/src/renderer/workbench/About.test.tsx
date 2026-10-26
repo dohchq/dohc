@@ -13,7 +13,8 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
+import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
 
 const bridgeMock = {
@@ -1327,6 +1328,7 @@ function HistorySection(props: {
   objectId?: string;
   file?: AboutFile;
   revision?: number;
+  paused?: boolean;
   onOpenMoment?: (id: string, path: string) => void;
 }) {
   const [open, setOpen] = useState(true);
@@ -1336,6 +1338,7 @@ function HistorySection(props: {
       path="docs/plan.md"
       file={props.file ?? { status: "ready", objectId: props.objectId ?? "object-1" }}
       revision={props.revision ?? 0}
+      paused={props.paused ?? false}
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       onOpenMoment={props.onOpenMoment ?? (() => undefined)}
@@ -1409,15 +1412,86 @@ describe("About History", () => {
     expect(notices.clear).toHaveBeenLastCalledWith("about-history:docs/plan.md");
   });
 
-  it("draws History still updating in the section, files no row, and reads again on Try again", async () => {
-    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockResolvedValue(page([moment()]));
+  // History can finish taking in changes without adding one, so no newer
+  // revision is sure to come: the section reads again by itself.
+  it("says History is still updating with no control, files no row, and reads again by itself", async () => {
+    const next = deferred<ListEngineMomentsResponse>();
+    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockImplementationOnce(() => next.promise);
     render(<HistorySection />);
-    const held = await screen.findByTestId("about-history-held");
-    expect(held.textContent).toContain("Workspace is still updating. Try again.");
+    const line = await screen.findByTestId("about-history-updating");
+    expect(line.textContent).toBe("Adding recent changes to History");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(notices.report).not.toHaveBeenCalled();
-    await userEvent.setup().click(within(held).getByText("Try again"));
+    await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("about-history-updating")).toBe(line);
+    await act(async () => {
+      next.resolve(page([moment()]));
+      await next.promise;
+    });
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+  });
+
+  // A paused History may be missing changes: its line replaces taking in
+  // changes, heads the rows a read still answers, and stands in for none.
+  it("says History is paused in place of updating, then above the rows a paused read answers", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockResolvedValue(page([moment()]));
+    const { rerender } = render(<HistorySection paused />);
+    const line = await screen.findByTestId("about-history-paused");
+    expect(line.textContent).toBe("History paused");
+    expect(screen.queryByTestId("about-history-updating")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    const [row] = await screen.findAllByTestId("about-history-open");
+    const heading = screen.getByTestId("about-history-paused");
+    expect(heading.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notices.report).not.toHaveBeenCalled();
+    // History recovers: the rows stay and the line goes.
+    rerender(<HistorySection paused={false} />);
+    expect(screen.queryByTestId("about-history-paused")).toBeNull();
+    expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+  });
+
+  it("keeps a real failure's Try again while History is paused", async () => {
+    bridgeMock.listEngineMoments.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue(page([moment()]));
+    render(<HistorySection paused />);
+    const failed = await screen.findByTestId("about-history-failed");
+    expect(screen.queryByTestId("about-history-paused")).toBeNull();
+    await userEvent.setup().click(within(failed).getByText("Try again"));
+    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(screen.getByTestId("about-history-paused")).toBeTruthy();
+  });
+
+  it("says History is paused, not that the file has no changes, when a paused read answers none", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue(page([]));
+    render(<HistorySection paused />);
+    expect(await screen.findByTestId("about-history-paused")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-empty")).toBeNull();
+  });
+
+  // A read History's growth starts replaces the one an updating answer
+  // scheduled, so that read's answer is the one that lands.
+  it("reads once when History grows before the read an updating answer scheduled", async () => {
+    vi.useFakeTimers();
+    try {
+      const grown = deferred<ListEngineMomentsResponse>();
+      bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockImplementationOnce(() => grown.promise);
+      const { rerender } = render(<HistorySection revision={1} />);
+      await settleAll();
+      expect(screen.getByTestId("about-history-updating")).toBeTruthy();
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+      rerender(<HistorySection revision={2} />);
+      await settleAll();
+      expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(8_000));
+      expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        grown.resolve(page([moment()]));
+        await grown.promise;
+      });
+      expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("draws History hidden by rules it can't read in the section, with no row", async () => {

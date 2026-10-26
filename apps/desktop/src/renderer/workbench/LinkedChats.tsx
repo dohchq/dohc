@@ -22,8 +22,8 @@ import {
   type AboutFile,
   type AboutNotices,
   type AboutSectionId,
-  type AccessContext,
 } from "./About";
+import type { AccessContext } from "./accessReason";
 import {
   ChatComposer,
   ChatMessageList,
@@ -124,6 +124,8 @@ export function LinkedChatsPanel(props: {
   // records none, so it passes nothing and About shows no History.
   history?: {
     revision: number;
+    // History stopped recording, so its section says so.
+    paused: boolean;
     onOpenMoment: (momentId: string, filePath: string) => void;
   };
   // The links into the file, read again as `revision` changes. Chats that
@@ -553,6 +555,7 @@ export function LinkedChatsPanel(props: {
             path={filePath}
             file={file}
             revision={props.history.revision}
+            paused={props.history.paused}
             expanded={sectionsOpen.history}
             onToggle={toggleSection("history")}
             onOpenMoment={props.history.onOpenMoment}

@@ -1,9 +1,10 @@
 import * as assets from "./workspaceAssets";
 import { withSharedWorkspaceOperation, withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import * as filesystem from "node:fs/promises";
+import * as storedNames from "./diskSpelling";
 import * as recovery from "./workspaceDeleteRecovery";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
@@ -90,6 +91,114 @@ async function queuedUndo(f: Awaited<ReturnType<typeof fixture>>, byAgent = fals
     release.resolve(); await holding;
     return { result: await undoing, follower: await follower };
   }
+it("finishes a case-only folder rename as true when the post-rename leaf uses NFD", async (context) => {
+  const f = await fixture();
+  const fromPath = "docs/résumé";
+  const toPath = "docs/Résumé";
+  await f.write(`${fromPath}/a.md`, "body");
+  if (!(await lstat(join(f.rootPath, toPath)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+  f.objects.set(`${fromPath}/a.md`, "object-a");
+  const finishRename = vi.fn(async (moved: boolean) => {
+    if (moved) {
+      f.objects.delete(`${fromPath}/a.md`);
+      f.objects.set(`${toPath}/a.md`, "object-a");
+    }
+  });
+  f.capture.beginFileRename = vi.fn(async () => finishRename);
+  const spelling = vi.spyOn(storedNames, "diskSpelling");
+  const originalRename = filesystem.rename.bind(filesystem);
+  vi.spyOn(filesystem, "rename").mockImplementation(async (from, to) => {
+    await originalRename(from, to);
+    if (String(from) === join(f.rootPath, fromPath) && String(to) === join(f.rootPath, toPath)) {
+      spelling.mockResolvedValueOnce(join(f.rootPath, toPath).normalize("NFD"));
+    }
+  });
+  await expect(moveWorkspacePathByHand(f.operation, { fromPath, toPath }, person, f.options)).resolves.toMatchObject({ path: toPath });
+  expect(finishRename.mock.calls).toEqual([[true]]);
+  expect(f.objects).toEqual(new Map([[`${toPath}/a.md`, "object-a"]]));
+  expect((await readdir(join(f.rootPath, "docs"))).map((name) => name.normalize("NFC"))).toEqual(["Résumé"]);
+  expect(await readFile(join(f.rootPath, toPath, "a.md"), "utf8")).toBe("body");
+});
+it("keeps disk and engine paths when a file renamed by hand silently keeps its old name", async (context) => {
+  const f = await fixture();
+  await f.write("notes.md", "body");
+  if (!(await lstat(join(f.rootPath, "Notes.md")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+  f.objects.set("notes.md", "object-a");
+  const engineCalls: unknown[][][] = [];
+  const actualCapture = f.capture.changePathsAs;
+  vi.spyOn(f.capture, "changePathsAs").mockImplementation(async (...args) => {
+    const work = args[2];
+    args[2] = async (engine) => {
+      for (const method of ["rename", "delete", "undoDelete", "moveFile"] as const) {
+        engineCalls.push(vi.spyOn(engine, method).mock.calls);
+      }
+      return work(engine);
+    };
+    return actualCapture(...args);
+  });
+  const noOp = vi.spyOn(filesystem, "rename").mockResolvedValue(undefined);
+  await expect(moveWorkspacePathByHand(f.operation, { fromPath: "notes.md", toPath: "Notes.md" }, person, f.options)).rejects.toThrow("This disk kept the name notes.md");
+  expect(noOp.mock.calls).toEqual([[join(f.rootPath, "notes.md"), join(f.rootPath, "Notes.md")]]);
+  expect(f.members).toEqual([]);
+  expect(engineCalls).toEqual([[], [], [], []]);
+  expect(f.objects).toEqual(new Map([["notes.md", "object-a"]]));
+  expect((await readdir(f.rootPath)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
+  expect(await readFile(join(f.rootPath, "notes.md"), "utf8")).toBe("body");
+});
+it("finishes a case-only folder rename as true when the post-rename spelling is unknown", async (context) => {
+  const f = await fixture();
+  await f.write("docs/plans/a.md", "body");
+  const plans = join(f.rootPath, "docs", "plans");
+  const renamed = join(f.rootPath, "docs", "Plans");
+  if (!(await lstat(renamed).then(() => true, () => false))) context.skip("this disk keeps case apart");
+  f.objects.set("docs/plans/a.md", "object-a");
+  const finishRename = vi.fn(async (moved: boolean) => {
+    if (moved) {
+      f.objects.delete("docs/plans/a.md");
+      f.objects.set("docs/Plans/a.md", "object-a");
+    }
+  });
+  f.capture.beginFileRename = vi.fn(async () => finishRename);
+  const listing = vi.spyOn(filesystem, "readdir");
+  const originalRename = filesystem.rename.bind(filesystem);
+  let postRenameListingFailed = false;
+  vi.spyOn(filesystem, "rename").mockImplementation(async (from, to) => {
+    await originalRename(from, to);
+    if (String(from) === plans && String(to) === renamed) {
+      listing.mockImplementationOnce(async () => {
+        postRenameListingFailed = true;
+        throw Object.assign(new Error("listing unavailable after rename"), { code: "EIO" });
+      });
+    }
+  });
+  await expect(moveWorkspacePathByHand(f.operation, { fromPath: "docs/plans", toPath: "docs/Plans" }, person, f.options)).resolves.toMatchObject({ path: "docs/Plans" });
+  expect(postRenameListingFailed).toBe(true);
+  expect(finishRename.mock.calls).toEqual([[true]]);
+  expect(f.objects).toEqual(new Map([["docs/Plans/a.md", "object-a"]]));
+  expect(await readdir(join(f.rootPath, "docs"))).toEqual(["Plans"]);
+  expect(await readFile(join(renamed, "a.md"), "utf8")).toBe("body");
+});
+it("finishes a silent case-only folder rename as false and keeps the engine paths", async (context) => {
+  const f = await fixture();
+  await f.write("docs/plans/a.md", "body");
+  if (!(await lstat(join(f.rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+  f.objects.set("docs/plans/a.md", "object-a");
+  const finishRename = vi.fn(async (moved: boolean) => {
+    if (moved) {
+      f.objects.delete("docs/plans/a.md");
+      f.objects.set("docs/Plans/a.md", "object-a");
+    }
+  });
+  const beginRename = vi.fn(async () => finishRename);
+  f.capture.beginFileRename = beginRename;
+  const noOp = vi.spyOn(filesystem, "rename").mockResolvedValue(undefined);
+  await expect(moveWorkspacePathByHand(f.operation, { fromPath: "docs/plans", toPath: "docs/Plans" }, person, f.options)).rejects.toThrow("This disk kept the name plans");
+  expect(finishRename.mock.calls).toEqual([[false]]);
+  expect(f.objects).toEqual(new Map([["docs/plans/a.md", "object-a"]]));
+  expect(await readdir(join(f.rootPath, "docs"))).toEqual(["plans"]);
+  expect(await readFile(join(f.rootPath, "docs", "plans", "a.md"), "utf8")).toBe("body");
+  noOp.mockRestore();
+});
 it("keeps a skipped rename at its current path and replays the remaining result", async () => {
   const f = await fixture(); await f.write("a.txt");
   await f.move("a.txt", "b.txt");

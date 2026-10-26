@@ -106,6 +106,9 @@ import {
 import {
   DROP_IMPORT_LIMITS,
   EXPLORER_MENU_COMMANDS,
+  IMPORT_SKIP_REASONS,
+  IMPORT_SKIPPED_PATH_MAX_CHARS,
+  IMPORT_SKIPS_LISTED,
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -412,14 +415,74 @@ export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
 });
 export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 
+// One document whose owner edits the server refused for good. The edits wait
+// in a queue on this computer, or on the server when the server hosts the
+// document, until the owner tries again or stops live editing. `incident`
+// changes with each refusal, so a repeated refusal is news.
+export const OwnerLiveQuarantine = z.object({
+  objectId: z.string().min(1).max(512),
+  path: SAFE_RELATIVE_PATH,
+  reason: z.string().min(1).max(128),
+  storedOn: z.enum(["this-computer", "server"]),
+  incident: z.string().min(1).max(1024),
+  // paused: waiting for the owner. retrying: the owner's Try again waits for
+  // delivery. stopping: a Stop waits for the server to stop live editing.
+  // stopped-kept: a Stop finished but kept the queue. not-written: a Stop took
+  // the edits into the document but could not write them to the file.
+  // copied: the server keeps them, and a recovery copy is on this computer.
+  // cannot-write: as not-written, but dohc can only save a recovery copy.
+  // unreadable: the engine on this computer refused to read the queue, for
+  // `reason`; only Try again, which reads it again, can act on it.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
+  // The server keeps them in an earlier copy of the workspace, copied or not, so Try again cannot reach them.
+  earlier: z.literal(true).optional(),
+}).strict();
+export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
+export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
+  objectId: OwnerLiveQuarantine.shape.objectId,
+  incident: OwnerLiveQuarantine.shape.incident,
+}).strict();
+export type RetryOwnerLiveQuarantinePayload = z.infer<typeof RetryOwnerLiveQuarantinePayload>;
+// With `incident`, Save writes exactly that row's kept edits; with a path
+// alone, the earliest a Stop still owes the file comes first.
+export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH,
+  incident: OwnerLiveQuarantine.shape.incident.optional()}).strict();
+export type SaveOwnerLiveRecoveryCopyPayload = z.infer<typeof SaveOwnerLiveRecoveryCopyPayload>;
+// The readable copy is null when the kept edits could not be read as a document;
+// the package next to it always holds their original bytes. `storedOn` is
+// where the kept edits came from. kept: they stay there. copied: the server
+// heard of the copy and may now release them. ended: a Stop's stored edits,
+// which dohc no longer keeps.
+export const SaveOwnerLiveRecoveryCopyResult = z.object({
+  copyPath: SAFE_RELATIVE_PATH.nullable(),
+  packagePath: SAFE_RELATIVE_PATH,
+  storedOn: OwnerLiveQuarantine.shape.storedOn,
+  keptEdits: z.enum(["kept", "copied", "ended"]),
+}).strict();
+export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
+  // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
+  quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
+  earlier: OwnerLiveQuarantine.shape.earlier,
+  storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
+  // Those kept edits' incident, which Save recovery copy names to save them.
+  incident: OwnerLiveQuarantine.shape.incident.optional(),
+  // The server's document at this path, whose kept edits the row shows and which its Stop and Try again name.
+  objectId: OwnerLiveQuarantine.shape.objectId,
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
+// What a Stop did with edits the server refused: wrote them into the file,
+// or kept them on this computer because it could not.
+export const StopOwnerLiveDocumentResult = z.object({
+  keptEdits: z.enum(["none", "recovered", "kept"]),
+}).strict();
+export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();
@@ -431,6 +494,14 @@ export const OwnerLiveDocumentsResult = z.object({
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
 export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
 export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
+// Stop again from a kept-edits row names that row's document, so it acts on no other.
+// `objectId` is the server's document a list row names: the Stop acts on it
+// alone, and on the server only when this computer no longer has it.
+export const StopOwnerLiveDocumentPayload = OwnerLiveDocumentActionPayload.extend({
+  objectId: OwnerLiveQuarantine.shape.objectId.optional(),
+  again: z.object({objectId: OwnerLiveQuarantine.shape.objectId, recovery: z.enum(["not-written", "stopping"])}).strict().optional(),
+}).strict();
+export type StopOwnerLiveDocumentPayload = z.infer<typeof StopOwnerLiveDocumentPayload>;
 
 const OWNER_LIVE_SHARE_ID = z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/);
 export const OwnerLiveRefusal = z.object({
@@ -944,21 +1015,32 @@ export type ImportWorkspaceFilesPayload = z.infer<
   typeof ImportWorkspaceFilesPayload
 >;
 
+export const SkippedImportSource = z.object({
+  // The path from what the person handed over, such as Trip/photos/key.txt
+  // for a file inside a dropped folder.
+  path: z.string().min(1).max(IMPORT_SKIPPED_PATH_MAX_CHARS),
+  reason: z.enum(IMPORT_SKIP_REASONS),
+});
+export type SkippedImportSource = z.infer<typeof SkippedImportSource>;
+
 export const ImportWorkspaceFilesResult = z.object({
   imported: z.array(PATH_STRING),
-  // Sources that did not land (invalid basename, screened-out drop source,
-  // collision budget exhausted) — surfaced so the import summary can say
-  // "2 skipped" instead of the batch silently shrinking.
+  // Sources that did not land, such as a link or a name that cannot be
+  // saved, so the import is never silently smaller than what was handed over.
   skipped: z.number().int().min(0),
+  // The first skipped sources and why each did not land, present only when
+  // the import skipped any.
+  skippedSources: z.array(SkippedImportSource).min(1).max(IMPORT_SKIPS_LISTED).optional(),
   // Some files landed before the import stopped: a copy failed, or the owner
   // lost a trustworthy completion result. This is not an ordinary skip: the
   // Explorer must refresh before the user decides what, if anything, to
   // retry, and importing the same sources again would copy the landed files
   // a second time.
   interrupted: z.literal(true).optional(),
-  // Folders the import created, present only when it created any. A drop of
-  // empty folders lands folders and no file, and the summary says so.
-  folders: z.number().int().min(1).optional(),
+  // Dropped folders that landed, by workspace path, present only when any
+  // did. A dropped empty folder lands no file, so the Explorer selects it
+  // from here.
+  folders: z.array(PATH_STRING).min(1).optional(),
   // An ordinary import stopped at a failed copy: the source file's name, and
   // either the filesystem's error code or a refusal dohc makes itself
   // (`refusal`), with raw text that only goes into copied details.
@@ -1336,6 +1418,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -3554,6 +3637,8 @@ export const CloudStatusResult = z.object({
   workspaceSyncOwned: z.boolean().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
+  // The server that remote syncs with, signed in or not, so Share can name it.
+  workspaceServerUrl: z.string().optional(),
   syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),
@@ -7035,6 +7120,22 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+// New workspace's name for its folder in a location dohc handed out: the
+// name, or "name 2", "name 3" when a folder there already has it.
+const FOLDER_NAME = z.string().min(1).max(255)
+  .refine((name) => name !== "." && name !== ".." && !/[\\/]/.test(name), "Expected one folder name.");
+
+export const workspaceFolderNameOperations = {
+  suggestWorkspaceFolderName: {
+    capabilityId: "workspace.name.suggest",
+    scope: "device",
+    channel: "desktop:suggest-workspace-folder-name",
+    payload: z.object({ rootPath: PATH_STRING, name: FOLDER_NAME }).strict(),
+    result: FOLDER_NAME,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const SystemReducedMotionResult = z.boolean();
 
 export const systemMotionOperations = {
@@ -7104,6 +7205,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,

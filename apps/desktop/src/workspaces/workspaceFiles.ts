@@ -5,6 +5,7 @@ import {
   sameFsEntry,
   entryCharBudget,
   hasEngineIgnoredSegment,
+  isReservedPath,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -19,11 +20,13 @@ import {
 // a pure string decision on fail-closed paths, called up to ~2,000 times per
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   open,
@@ -38,8 +41,16 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
-import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { isOsMetadataSegment } from "@dohc/workspace-contracts/path-floor";
+import {
+  DROP_IMPORT_LIMITS,
+  DROP_IMPORT_REFUSALS,
+  IMPORT_COLLISION_RENAMES,
+  IMPORT_SKIPS_LISTED,
+} from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
+import { diskSpelling } from "./diskSpelling";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { refuseOnlyInICloud } from "./workspaceICloudOnly";
@@ -70,7 +81,7 @@ export async function existingAncestor(path: string): Promise<string> {
     }
   }
 }
-import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
+import type { SkippedImportSource, WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 // Main-only listing metadata. Zod strips `contentIdentity` at the IPC boundary,
 // while main-process indexes can use it to avoid rereading unchanged Markdown.
@@ -346,28 +357,7 @@ export async function createFile(
   if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
     throw new Error(workspaceTextLimitReason(observedBytes));
   }
-  const absolute = join(rootPath, validated.normalized);
-  // Lexical validation can't see symlinks, and it read the path as SPELLED.
-  // Both questions get asked of the real path before mkdir, so a symlinked
-  // ancestor can neither have directories created through it nor name a
-  // reserved area under an ordinary name.
-  const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
-    rootPath,
-    absolutePath: absolute,
-    spelled: relativePath,
-    label: "File path",
-    access: "write",
-  });
-  const realRoot = await realpath(rootPath);
-  if (!isInside(realRoot, await existingAncestor(dirname(target)))) {
-    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
-  }
-  await mkdir(dirname(target), { recursive: true });
-  // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
-  // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
-  if (!isInside(realRoot, await realpath(dirname(target)))) {
-    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
-  }
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized);
   const handle = await open(target, "wx").catch((error: unknown) => {
     if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     return null;
@@ -383,9 +373,71 @@ export async function createFile(
   return validated.normalized;
 }
 
+/**
+ * Creates a new workspace file of any size and syncs it to disk before
+ * returning. It never replaces a file: an existing path refuses with EEXIST.
+ * The bytes reach the final name only complete, through a link from an
+ * ignored temporary sibling, so a crash never leaves a cut-off file there.
+ * A drive without hard links refuses: nothing is written to the final name.
+ */
+export async function createDurableFile(rootPath: string, relativePath: string, text: string,
+  operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {}): Promise<string> {
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (!validated.ok) {
+    throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const created: { directory?: string } = {};
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized, created);
+  const temporary = join(dirname(target), `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
+  const publish = operations.link ?? link;
+  const linkWhole = (source: string, destination: string) => publish(source, destination).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "EEXIST") throw error;
+    throw new Error("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.", { cause: error });
+  });
+  if (!await atomicCreateFile(target, text, 0o666, { ...operations, link: linkWhole, temporary })) {
+    throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), { code: "EEXIST" });
+  }
+  // The file's own folder is synced; each folder this create made needs its entry synced in its parent.
+  if (created.directory && process.platform !== "win32") {
+    const top = dirname(created.directory);
+    for (let folder = dirname(target); folder !== top && dirname(folder) !== folder; folder = dirname(folder)) {
+      const handle = await open(dirname(folder), "r");
+      try { await handle.sync(); } finally { await handle.close(); }
+    }
+  }
+  return validated.normalized;
+}
+
+async function newFileTarget(rootPath: string, relativePath: string, normalized: string, created?: { directory?: string }): Promise<string> {
+  const absolute = join(rootPath, normalized);
+  // Lexical validation can't see symlinks, and it read the path as SPELLED.
+  // Both questions get asked of the real path before mkdir, so a symlinked
+  // ancestor can neither have directories created through it nor name a
+  // reserved area under an ordinary name.
+  const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "File path",
+    access: "write",
+  });
+  const realRoot = await realpath(rootPath);
+  if (!isInside(realRoot, await existingAncestor(dirname(target)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
+  const directory = await mkdir(dirname(target), { recursive: true });
+  if (created && directory) created.directory = directory;
+  // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
+  // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
+  if (!isInside(realRoot, await realpath(dirname(target)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
+  return target;
+}
+
 // Import outcome: what landed (workspace-relative paths, destination prefix
-// included) plus how many sources could not land — callers surface both, so
-// an import is never silently smaller than what the user handed us.
+// included) plus which sources could not land and why — callers surface
+// both, so an import is never silently smaller than what the user handed us.
 //
 // `stop` means a copy failed and the import stopped there. `interrupted`
 // adds that some files landed first: importing the same sources again would
@@ -394,10 +446,29 @@ export async function createFile(
 export interface ImportCopyOutcome {
   imported: string[];
   skipped: number;
+  skippedSources?: SkippedImportSource[];
   interrupted?: true;
   stop?: ImportStop;
-  // Folders the import created, when it created any.
-  folders?: number;
+  // Dropped folders that landed, when any did.
+  folders?: string[];
+}
+
+export type ImportSkipReason = SkippedImportSource["reason"];
+
+// The sources an import leaves out. Each one counts, and the first
+// IMPORT_SKIPS_LISTED keep their path and reason.
+export class ImportSkips {
+  private count = 0;
+  private readonly listed: SkippedImportSource[] = [];
+
+  add(path: string, reason: ImportSkipReason): void {
+    this.count += 1;
+    if (this.listed.length < IMPORT_SKIPS_LISTED) this.listed.push({ path, reason });
+  }
+
+  outcome(): Pick<ImportCopyOutcome, "skipped" | "skippedSources"> {
+    return this.count === 0 ? { skipped: 0 } : { skipped: this.count, skippedSources: [...this.listed] };
+  }
 }
 
 // Which file stopped an import, and why. A filesystem failure carries its
@@ -457,10 +528,6 @@ export async function resolveImportDestination(
   return { absDir: realDir, relDir: validated.normalized };
 }
 
-// Collision budget: past this many "name (N).ext" variants the source counts
-// as skipped instead of probing forever.
-const MAX_COLLISION_RENAMES = 99;
-
 // "report.md" + attempt 2 -> "report (2).md", longest first. The naming rule
 // is shared with the trash, because it is the same rule: fit the component in
 // the platform's unit, and keep a shorter candidate for the composed-path
@@ -499,7 +566,7 @@ export async function importNameFor(
   taken: (candidate: string) => Promise<boolean>,
 ): Promise<string | null> {
   const maxEntryChars = entryCharBudget(absDir, process.platform);
-  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+  for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
     const candidates =
       attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const candidate of candidates) {
@@ -684,11 +751,12 @@ function ladderStopReason(name: string, stop: LadderStop): string {
 }
 
 // One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
-// through collision variants. Returns the basename that landed, or null when
-// the rename budget ran out. Non-EEXIST errors still throw — a permission or
-// IO failure is a real error, not a skip — with one exception: a name the
-// filesystem cannot hold (ENAMETOOLONG, e.g. an extension longer than the
-// variant budget) skips that source instead of aborting the whole batch.
+// through collision variants. Returns the basename that landed, or why the
+// source is skipped: "taken" when the rename budget ran out. Non-EEXIST
+// errors still throw — a permission or IO failure is a real error, not a
+// skip — with one exception: a name the filesystem cannot hold
+// (ENAMETOOLONG, e.g. an extension longer than the variant budget) skips
+// that source as "too-long" instead of aborting the whole batch.
 // A dropped folder lands through the same ladder with `place` making the
 // folder, so "Photos" collides into "Photos (2)" as a file would.
 async function copyWithoutOverwrite(
@@ -697,11 +765,11 @@ async function copyWithoutOverwrite(
   name: string,
   place: (target: string) => Promise<unknown> = (target) =>
     copyFile(source, target, constants.COPYFILE_EXCL),
-): Promise<string | null> {
+): Promise<string | { skip: "too-long" | "taken" }> {
   // One budget, used both to shape the candidates and to classify a failure.
   // Two copies of this fact can disagree, and did.
   const maxEntryChars = entryCharBudget(absDir, process.platform);
-  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+  for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
     // Longest first, exactly as the trash ladder does: a shorter name is used
     // only once the platform has actually refused the longer one for length.
     const candidates =
@@ -731,45 +799,47 @@ async function copyWithoutOverwrite(
         if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
         // source instead of aborting the batch.
-        if (rung === candidates.length - 1) return null;
+        if (rung === candidates.length - 1) return { skip: "too-long" };
       }
     }
   }
-  return null;
+  return { skip: "taken" };
 }
 
 // Imports copy external files by basename into a destination folder inside
 // the workspace (default: the root). Existing files are never overwritten;
 // a name collision retries as "name (2).ext" so imports are additive and
-// lossless — a source only counts as skipped when its basename is invalid or
-// the collision budget runs out. A dropped file or folder lands the same way,
-// and is copied only while it is still what the drag-in screen saw.
+// lossless — a source only counts as skipped when its basename cannot be
+// saved or the collision budget runs out. A dropped file or folder lands the
+// same way, and is copied only while it is still what the drag-in screen saw.
 // Trusts a path string: copyFile follows symlinks and this does no lstat.
 // Strings come only from the main-process file-dialog import (paths the user
 // picked in a native dialog). The UNtrusted entrypoint (renderer-supplied OS
 // drag-in) is importDroppedPaths, whose screen hands over DroppedSources —
 // never wire renderer input straight into here as strings.
+// `skips` holds what the drag-in screen already left out.
 export async function copyIntoWorkspace(
   rootPath: string,
   sources: readonly ImportSource[],
   targetDir?: string,
+  skips = new ImportSkips(),
 ): Promise<ImportCopyOutcome> {
   const { absDir, relDir } = await resolveImportDestination(rootPath, targetDir);
   const imported: string[] = [];
+  const folders: string[] = [];
   const landedPath = (path: string) => (relDir === "" ? path : `${relDir}/${path}`);
-  let skipped = 0;
-  let folders = 0;
-  const created = () => (folders > 0 ? { folders } : {});
+  const landedFolders = () => (folders.length > 0 ? { folders } : {});
   for (const source of sources) {
     const sourcePath = typeof source === "string" ? source : source.source;
     const name = basename(sourcePath);
-    if (!landsAsNamed(landedPath(name))) {
-      skipped += 1;
+    const unusable = nameSkip(landedPath(name));
+    if (unusable !== null) {
+      skips.add(name, unusable);
       continue;
     }
     // The file a failure names: the dropped item, or the entry inside it.
     let current = name;
-    let landed: string | null;
+    let landed: Awaited<ReturnType<typeof copyWithoutOverwrite>>;
     try {
       if (typeof source === "string") {
         landed = await copyWithoutOverwrite(sourcePath, absDir, name);
@@ -779,8 +849,8 @@ export async function copyIntoWorkspace(
       } else {
         await verifyDroppedFolder(sourcePath, source.identity);
         landed = await copyWithoutOverwrite(sourcePath, absDir, name, (target) => mkdir(target));
-        if (landed !== null) {
-          folders += 1;
+        if (typeof landed === "string") {
+          folders.push(landedPath(landed));
           // The folder is new, so nothing inside it can collide.
           for (const entry of source.entries) {
             current = `${landed}/${entry.path}`;
@@ -789,7 +859,6 @@ export async function copyIntoWorkspace(
               await verifyDroppedFolder(from, entry.identity);
               await assertRealParent(join(absDir, current));
               await mkdir(join(absDir, current));
-              folders += 1;
             } else {
               await copyDroppedFile(from, entry.identity, join(absDir, current), droppedEntryParent(source, entry));
               imported.push(landedPath(current));
@@ -817,29 +886,38 @@ export async function copyIntoWorkspace(
       };
       return {
         imported,
-        skipped,
+        ...skips.outcome(),
         // Folders that landed are progress too: the same drop again would
         // land beside them.
-        ...(imported.length > 0 || folders > 0 ? { interrupted: true as const } : {}),
+        ...(imported.length > 0 || folders.length > 0 ? { interrupted: true as const } : {}),
         stop,
-        ...created(),
+        ...landedFolders(),
       };
     }
-    if (landed === null) {
-      skipped += 1;
+    if (typeof landed !== "string") {
+      skips.add(name, landed.skip);
       continue;
     }
     if (typeof source === "string" || source.entries === null) imported.push(landedPath(landed));
   }
-  return { imported, skipped, ...created() };
+  return { imported, ...skips.outcome(), ...landedFolders() };
 }
 
-// A destination path the validator keeps as it is. A name it rewrites, such
-// as cfg%2fevil or cfg\evil into cfg/evil, would land somewhere other than
-// the folder dohc checked, through any link already there.
-export function landsAsNamed(path: string): boolean {
+// Why a destination path cannot land as named, or null when it can. A name
+// the validator rewrites, such as cfg%2fevil or cfg\evil into cfg/evil, would
+// land somewhere other than the folder dohc checked, through any link
+// already there. Callers check each name below a folder that already
+// passed, so a refusal is about the last name.
+export function nameSkip(path: string): ImportSkipReason | null {
   const validated = validateUserMaterializePath(path, { platform: process.platform });
-  return validated.ok && validated.normalized === path;
+  if (validated.ok) return validated.normalized === path ? null : "name";
+  if (validated.reason === "unsupported-name") return "windows-name";
+  if (validated.reason !== "reserved") return "name";
+  if (isReservedPath(path)) return "dohc-name";
+  // A name reserved only once rewritten, such as cfg%2f.git, is a spelling.
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  if (!hasEngineIgnoredSegment(name, process.platform)) return "name";
+  return isOsMetadataSegment(name) ? "system-file" : "left-out";
 }
 
 // An entry of a dropped folder: its path below the folder, and the identities
@@ -988,15 +1066,14 @@ export async function importDroppedPaths(
 ): Promise<ImportCopyOutcome> {
   const { relDir } = await resolveImportDestination(rootPath, targetDir);
   const screened = await screenDroppedPaths(absolutePaths, registeredRoots, relDir);
-  const outcome = await copyIntoWorkspace(rootPath, screened.usable, targetDir);
-  return { ...outcome, skipped: outcome.skipped + screened.refused };
+  return copyIntoWorkspace(rootPath, screened.usable, targetDir, screened.skips);
 }
 
 // The drag-in screen, exported because a share view's import needs the same
 // one before it writes its engine store — the destination differs, the trust
 // question does not. `relDir` is the validated destination folder, so each
-// name is checked where it will land. `refused` counts the sources it
-// dropped: the user handed them over and deserves to see they did not land,
+// name is checked where it will land. `skips` holds the sources it dropped
+// and why: the user handed them over and deserves to see they did not land,
 // same as a collision-budget skip inside the copy.
 //
 // TRUST DELTA vs copyIntoWorkspace's dialog path: these
@@ -1037,7 +1114,7 @@ export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
   relDir: string,
-): Promise<{ usable: DroppedSource[]; refused: number }> {
+): Promise<{ usable: DroppedSource[]; skips: ImportSkips }> {
   // Defense in depth beyond the zod cap (bridgeContract): the handler refuses
   // an over-long batch itself, so a code path that ever reaches here without
   // the schema (a future internal caller, a test) still cannot flood the import.
@@ -1053,7 +1130,7 @@ export async function screenDroppedPaths(
     }
   }
   const usable: DroppedSource[] = [];
-  let refused = 0;
+  const skips = new ImportSkips();
   // What the drop would land, and what its folders hold that it leaves out.
   // A drop over either cap is refused before anything is copied, never
   // imported in part.
@@ -1071,19 +1148,26 @@ export async function screenDroppedPaths(
   };
   const prefix = relDir === "" ? "" : `${relDir}/`;
   for (const source of absolutePaths) {
-    const screened = isAbsolute(source) ? await screenDroppedSource(source, realMetadataRoots) : null;
-    const destination = screened ? `${prefix}${basename(screened.source)}` : "";
-    if (screened === null || !landsAsNamed(destination)) {
-      refused += 1;
+    const name = basename(source) || source;
+    const screened = isAbsolute(source) ? await screenDroppedSource(source, realMetadataRoots) : "unreadable";
+    if (typeof screened === "string") {
+      skips.add(name, screened);
+      continue;
+    }
+    const destination = `${prefix}${basename(screened.source)}`;
+    const unusable = nameSkip(destination);
+    if (unusable !== null) {
+      skips.add(name, unusable);
       continue;
     }
     count.land();
     if (screened.entries !== null) {
-      refused += await screenDroppedFolder(screened.source, screened.identity, destination, "", screened.entries, count);
+      await screenDroppedFolder(screened.source, screened.identity, destination, "", screened.entries, count,
+        (path, reason) => skips.add(`${name}/${path}`, reason));
     }
     usable.push(screened);
   }
-  return { usable, refused };
+  return { usable, skips };
 }
 
 interface DropCount {
@@ -1091,11 +1175,11 @@ interface DropCount {
   leaveOut(): void;
 }
 
-// A dropped regular file or folder at its real path, or null for anything else.
+// A dropped regular file or folder at its real path, or why it is skipped.
 async function screenDroppedSource(
   source: string,
   realMetadataRoots: string[],
-): Promise<DroppedSource | null> {
+): Promise<DroppedSource | ImportSkipReason> {
   try {
     // lstat the original source (not realpath(source)): lstat does not follow
     // the final component, so a dropped symlink is observed AS a symlink and
@@ -1109,15 +1193,16 @@ async function screenDroppedSource(
     // even when an ancestor link was traversed.
     const linkStat = await lstat(source, { bigint: true });
     const folder = linkStat.isDirectory();
-    if (linkStat.isSymbolicLink() || (!linkStat.isFile() && !folder)) return null;
+    if (linkStat.isSymbolicLink()) return "link";
+    if (!linkStat.isFile() && !folder) return "not-a-file";
     const real = await realpath(source);
     if (!(await linksAreOwnedHere(source))) throw new ForeignDropLinkError(source);
     if ((await realpath(source)) !== real) throw new ImportPathChangedError(source);
-    if (realMetadataRoots.some((root) => isInside(root, real))) return null;
+    if (realMetadataRoots.some((root) => isInside(root, real))) return "workspace-data";
     return { source: real, identity: { dev: linkStat.dev, ino: linkStat.ino }, entries: folder ? [] : null };
   } catch (error) {
     if (error instanceof ForeignDropLinkError || error instanceof ImportPathChangedError) throw error;
-    return null;
+    return "unreadable";
   }
 }
 
@@ -1147,9 +1232,10 @@ async function linksAreOwnedHere(path: string): Promise<boolean> {
 // The folder's contents, as the workspace listing walks them: links are never
 // followed, and names the path floor excludes, such as .DS_Store and .git,
 // stay behind. Every entry left behind counts toward the drop's cap, but only
-// a link, a special file or a name that cannot land counts as skipped. Each
-// name is checked below `destination`, where it lands, so a nested
-// shared-with-me is an ordinary folder. Returns the skipped count.
+// a link, a special file, an unreadable entry or a name that cannot land goes
+// to `skip`, by its path below the folder. Each name is checked below
+// `destination`, where it lands, so a nested shared-with-me is an ordinary
+// folder.
 async function screenDroppedFolder(
   dir: string,
   identity: FsEntryIdentity,
@@ -1157,9 +1243,9 @@ async function screenDroppedFolder(
   prefix: string,
   entries: DroppedEntry[],
   count: DropCount,
-): Promise<number> {
+  skip: (path: string, reason: ImportSkipReason) => void,
+): Promise<void> {
   await verifyDroppedFolder(dir, identity);
-  let refused = 0;
   for await (const dirent of await opendir(dir)) {
     if (hasEngineIgnoredSegment(dirent.name, process.platform)) {
       count.leaveOut();
@@ -1170,20 +1256,27 @@ async function screenDroppedFolder(
     // The entry was seen through the folder the screen checked, not a link
     // swapped in for it.
     await verifyDroppedFolder(dir, identity);
-    const folder = info?.isDirectory() === true;
-    if (!info || info.isSymbolicLink() || (!info.isFile() && !folder) || !landsAsNamed(`${destination}/${path}`)) {
+    if (!info) {
       count.leaveOut();
-      refused += 1;
+      skip(path, "unreadable");
+      continue;
+    }
+    const folder = info.isDirectory();
+    const unusable = info.isSymbolicLink() ? "link"
+      : !info.isFile() && !folder ? "not-a-file"
+      : nameSkip(`${destination}/${path}`);
+    if (unusable !== null) {
+      count.leaveOut();
+      skip(path, unusable);
       continue;
     }
     count.land();
     const entry = { path, folder, identity: { dev: info.dev, ino: info.ino }, parent: identity };
     entries.push(entry);
     if (folder) {
-      refused += await screenDroppedFolder(join(dir, dirent.name), entry.identity, destination, path, entries, count);
+      await screenDroppedFolder(join(dir, dirent.name), entry.identity, destination, path, entries, count, skip);
     }
   }
-  return refused;
 }
 
 // Creates a folder with the createFile containment sandwich. Exclusive creates
@@ -1305,6 +1398,54 @@ interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
   realFrom: string;
 }
 
+function moveIdentityUnavailable(fromPath: string, toPath: string): Error {
+  return new Error(
+    `dohc did not move ${fromPath} to ${toPath}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
+  );
+}
+
+async function compareStoredMovePaths(
+  realRoot: string,
+  source: string,
+  destination: string,
+  paths: WorkspaceMovePaths,
+  relation: "same" | "inside",
+): Promise<boolean> {
+  const [storedSource, storedDestination] = await Promise.all([
+    diskSpelling(realRoot, source),
+    diskSpelling(realRoot, destination),
+  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (storedSource === null || (storedDestination === null && relation === "inside")) {
+    throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  }
+  if (storedDestination === null) return false;
+  return relation === "same" ? storedSource === storedDestination : isInside(storedSource, storedDestination);
+}
+
+async function movePathsNest(
+  realRoot: string,
+  source: string,
+  parent: string,
+  paths: WorkspaceMovePaths,
+): Promise<boolean> {
+  if (isInside(source, parent)) return true;
+  const sourceKey = pathCollisionKey(relative(realRoot, source).replaceAll("\\", "/"));
+  const parentKey = pathCollisionKey(relative(realRoot, parent).replaceAll("\\", "/"));
+  if (parentKey !== sourceKey && !parentKey.startsWith(`${sourceKey}/`)) return false;
+  // Only lookup-case aliases need a listing after realpath's containment check.
+  return compareStoredMovePaths(realRoot, source, parent, paths, "inside");
+}
+
+async function sameMoveEntry(
+  realRoot: string,
+  source: string,
+  destination: string,
+  paths: WorkspaceMovePaths,
+): Promise<boolean> {
+  if (source === destination) return true;
+  return compareStoredMovePaths(realRoot, source, destination, paths, "same");
+}
+
 async function inspectWorkspaceMove(
   rootPath: string,
   fromPath: string,
@@ -1356,14 +1497,14 @@ async function inspectWorkspaceMove(
   if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
-  if (isInside(realFrom, realDestAncestor)) {
+  if (await movePathsNest(realRoot, realFrom, realDestAncestor, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const destExists = await lstat(to).then(
     () => true,
     () => false,
   );
-  if (destExists && realFrom !== (await realpath(to))) {
+  if (destExists && !(await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }))) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
   return {
@@ -1443,23 +1584,25 @@ export async function movePath(
   // Descendant guard, case-fold safe. The lexical self/descendant refusal at
   // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
   // "foo/bar" slips past it and would move a folder into its own (same-inode)
-  // subtree — corrupting it. Compare real paths: if the destination's parent
+  // subtree — corrupting it. Compare resolved paths: if the destination's parent
   // resolves to the source itself or anywhere beneath it, refuse. (For a file
   // source this is always false — a file has no descendants.)
-  if (isInside(realFrom, realDestParent)) {
+  if (await movePathsNest(realRoot, realFrom, realDestParent, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const destExists = await lstat(to).then(
     () => true,
     () => false,
   );
+  let renamesInPlace = false;
   if (destExists) {
     // Case-only rename carve-out: on a case-insensitive filesystem the
     // destination "exists" because it IS the source under another case.
-    // Compare real paths (never strings) so a genuinely distinct file that
+    // Compare resolved paths so a genuinely distinct file that
     // case-collides still refuses — the carve-out must not reopen the
     // overwrite hole.
-    if (realFrom !== (await realpath(to))) {
+    renamesInPlace = await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+    if (!renamesInPlace) {
       throw new Error(`Destination already exists: ${toPath}`);
     }
   }
@@ -1469,6 +1612,12 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
+  if (renamesInPlace && from !== to) {
+    const spelling = await diskSpelling(rootPath, to).catch(() => null);
+    if (spelling !== null && basename(spelling).normalize("NFC") !== basename(to).normalize("NFC")) {
+      throw new Error(`dohc did not rename ${fromPath} to ${toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(toPath)}.`);
+    }
+  }
   return visibleResultPath;
 }
 
