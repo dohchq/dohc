@@ -2409,15 +2409,21 @@ impl<'a> LinkedChatStore<'a> {
         let slug = agent_channel_slug(agent_id);
         let wire = agent_channel_wire_id(agent_id);
         let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
-            if let Some(existing) = agent_channel(tx, &ws, agent_id)? {
+            if let Some(mut existing) = agent_channel(tx, &ws, agent_id)? {
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
+                // Sync or an upgrade may have left the chat on another slug.
+                if existing.slug != slug {
+                    free_agent_channel_slug(tx, &ws, &slug)?;
+                    tx.execute(
+                        "UPDATE chat_channels SET slug = ?3 WHERE workspace_id = ?1 AND channel_id = ?2",
+                        params![ws, existing.channel_id, slug],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    existing.slug = slug.clone();
+                }
                 return Ok::<_, DomainError>(existing);
             }
-            // A group an earlier build named like this agent's chat keeps its
-            // name and moves to a slug no agent chat can have, as sync does.
-            if let Some(group) = channel_by_slug(tx, &ws, &slug)? {
-                move_channel_off_slug(tx, &ws, &group.channel_id, &slug)?;
-            }
+            free_agent_channel_slug(tx, &ws, &slug)?;
             create_well_known_channel(
                 tx,
                 claims,
@@ -6305,6 +6311,27 @@ fn channel_by_slug(
     .transpose()
 }
 
+/// Free an agent's slug for its chat. A group an earlier build named like the
+/// agent's chat keeps its name and moves to a slug no agent chat can have.
+pub fn free_agent_channel_slug(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    slug: &str,
+) -> Result<(), DomainError> {
+    let holder: Option<String> = tx
+        .query_row(
+            "SELECT channel_id FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2 AND agent_id IS NULL",
+            params![workspace_id, slug],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match holder {
+        Some(group) => move_channel_off_slug(tx, workspace_id, &group, slug),
+        None => Ok(()),
+    }
+}
+
 fn move_channel_off_slug(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -7033,7 +7060,12 @@ fn ensure_thread_structure_exported(
                 reason: "chat channel identity cannot be replicated",
             });
         }
-        payload_object.insert("channelSlug".to_owned(), serde_json::json!(channel.slug));
+        // Peers know an agent's chat by its agent's slug, whatever it is here.
+        let channel_slug = match channel.agent_id.as_deref() {
+            Some(agent_id) => agent_channel_slug(agent_id),
+            None => channel.slug.clone(),
+        };
+        payload_object.insert("channelSlug".to_owned(), serde_json::json!(channel_slug));
         if let Some(channel_wire_id) = channel_wire_id {
             payload_object.insert(
                 "channelWireId".to_owned(),

@@ -6,8 +6,9 @@ use serde::{Deserialize, Deserializer};
 use dohc_engine_domain::chats::{
     DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
     agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
-    chat_thread_display_title, index_replicated_chat_message_search_rows, is_agent_channel_slug,
-    is_agent_id, replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row,
+    chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
+    is_agent_channel_slug, is_agent_id, replicated_source_origin, truncate_slug_base,
+    upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
@@ -1050,13 +1051,16 @@ fn apply_channel(
             )
             .map_err(SyncError::corrupt)?;
         if placeholder {
-            let slug = allocate_channel_slug(
-                tx,
-                &op.workspace_id,
-                &requested_slug,
-                &channel_id,
-                &wire_id,
-            )?;
+            let slug = match agent_id {
+                Some(agent_id) => agent_chat_slug(tx, &op.workspace_id, agent_id)?,
+                None => allocate_channel_slug(
+                    tx,
+                    &op.workspace_id,
+                    &requested_slug,
+                    &channel_id,
+                    &wire_id,
+                )?,
+            };
             debug_assert!(is_replicated_channel_slug(&slug));
             tx.execute(
                 "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6, \
@@ -1083,7 +1087,12 @@ fn apply_channel(
         }
         return Ok(());
     }
-    let slug = allocate_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id, &wire_id)?;
+    let slug = match agent_id {
+        Some(agent_id) => agent_chat_slug(tx, &op.workspace_id, agent_id)?,
+        None => {
+            allocate_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id, &wire_id)?
+        }
+    };
     debug_assert!(is_replicated_channel_slug(&slug));
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
@@ -1110,6 +1119,19 @@ fn apply_channel(
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+/// An agent's chat holds its agent's slug. A group there moves off it, as
+/// provisioning does.
+fn agent_chat_slug(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<String, SyncError> {
+    let slug = agent_channel_slug(agent_id);
+    free_agent_channel_slug(tx, workspace_id, &slug)
+        .map_err(|error| map_chat_rule(error, "chat channel slug is invalid"))?;
+    Ok(slug)
 }
 
 fn allocate_channel_slug(
@@ -1470,13 +1492,7 @@ fn resolve_or_create_placeholder(
         // Only the default agent's chat can hold its slug, so it is free.
         Some(DEFAULT_AGENT_ID) => (default_agent_slug, AGENT_CHANNEL_NAME.to_owned(), "agent"),
         Some(agent_id) => (
-            allocate_channel_slug(
-                tx,
-                &op.workspace_id,
-                &agent_channel_slug(agent_id),
-                &channel_id,
-                allocation_identity,
-            )?,
+            agent_chat_slug(tx, &op.workspace_id, agent_id)?,
             agent_id.to_owned(),
             "agent",
         ),
