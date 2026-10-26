@@ -434,6 +434,23 @@ function liveDeliveryCopy(
   };
 }
 
+// A retry dohc is still fixing by itself toasts and adds a row only once it
+// has lasted this long. The title bar shows it at once.
+const QUIET_RETRY_MS = 15_000;
+
+// Whether `key` has stayed the same, and not null, for `ms`. A key that
+// changes or clears starts the wait again.
+function useLasted(key: string | null, ms: number): boolean {
+  const [lasted, setLasted] = useState<string | null>(null);
+  if (lasted !== null && lasted !== key) setLasted(null);
+  useEffect(() => {
+    if (key === null || ms === 0) return;
+    const timer = setTimeout(() => setLasted(key), ms);
+    return () => clearTimeout(timer);
+  }, [key, ms]);
+  return key !== null && (ms === 0 || lasted === key);
+}
+
 // Owner live enrollment refusals: one workspace fact, however many shares it
 // covers. Only the list can name them, so the notice sends the user there.
 const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
@@ -955,13 +972,16 @@ export function NoticeCenter(props: {
   // failure, so the same failure in another workspace is still news. While
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
+  // A retry with no reason waits QUIET_RETRY_MS first; a named reason
+  // stays until someone acts, so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
   const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
+  const liveRetryLasted = useLasted(liveRetryKey, liveDeliveryReason ? 0 : QUIET_RETRY_MS);
   const serverNamed = syncNamesServer(props.syncStatus);
-  const liveDeliveryKey = serverNamed ? null : liveRetryKey;
+  const liveDeliveryKey = serverNamed || !liveRetryLasted ? null : liveRetryKey;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);

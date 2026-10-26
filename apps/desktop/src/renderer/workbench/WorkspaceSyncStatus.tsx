@@ -118,6 +118,8 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;
+  // A retry with no reason is dohc still dialling by itself, so it is a ring.
+  const liveDialling = liveDelivery === "retrying" && !syncStatus?.ownerLiveDeliveryReason;
   return (
     <>
       <span
@@ -142,12 +144,16 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
           // Shorten live delivery before local save status; retain its full tooltip.
           className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted"
         >
-          <span
-            aria-hidden
-            className={`inline-block size-1.5 shrink-0 rounded-full ${
-              liveDelivery === "active" ? "bg-success" : "bg-warning"
-            }`}
-          />
+          {liveDialling ? (
+            <Dot kind="working" />
+          ) : (
+            <span
+              aria-hidden
+              className={`inline-block size-1.5 shrink-0 rounded-full ${
+                liveDelivery === "active" ? "bg-success" : "bg-warning"
+              }`}
+            />
+          )}
           <span className="truncate">{liveLabel}</span>
         </span>
       ) : null}

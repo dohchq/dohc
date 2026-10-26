@@ -244,6 +244,20 @@ describe("sync status surface", () => {
     expect(live.textContent).not.toMatch(/synced|up to date/i);
   });
 
+  // A retry with no reason is dohc still dialling, so it takes the ring a sync
+  // pass uses. A named reason waits on someone and keeps the filled dot.
+  it("shows a live retry with no reason as a ring", () => {
+    const liveDot = () =>
+      screen.getByTestId("owner-live-delivery-status").querySelector("[data-dot]")?.getAttribute("data-dot");
+    const { rerender } = renderStatus({ syncStatus: liveDeliveryStatus("retrying") });
+    expect(liveDot()).toBe("working");
+
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("retrying", "document-unavailable")} failedSaves={0} />);
+    expect(liveDot()).toBeUndefined();
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
+    expect(liveDot()).toBeUndefined();
+  });
+
   it("says nothing about live delivery when the status reports none", () => {
     renderStatus({
       syncStatus: {

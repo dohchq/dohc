@@ -141,6 +141,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 
 - Use these places. Do not add a new one for a new message.
 - Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own.
+- A state dohc is still fixing by itself shows where it lives at once, as a ring, and toasts only once it has lasted 15 s.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
