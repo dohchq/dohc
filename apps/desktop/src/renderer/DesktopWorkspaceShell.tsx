@@ -5509,8 +5509,23 @@ export function DesktopWorkspaceShell(props: {
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
   useEffect(() => {
-    showOutsideCopies(syncStatus?.outsideWriteCopies ?? [], openFile);
+    if (syncStatus?.outsideWriteCopies === undefined) return;
+    showOutsideCopies(syncStatus.outsideWriteCopies, openFile);
   }, [syncStatus?.outsideWriteCopies, showOutsideCopies, openFile]);
+  const shownCopyReadError = useRef<string | null>(null);
+  useEffect(() => {
+    if (syncStatus?.outsideWriteCopyReadError === undefined) return;
+    const error = syncStatus.outsideWriteCopyReadError;
+    if (error === shownCopyReadError.current) return;
+    shownCopyReadError.current = error;
+    const identity = "outside-copy-records";
+    if (error === null) { clearIdentity(identity); return; }
+    reportShellFailure({
+      identity, title: "dohc could not read its copy records",
+      message: "Check that dohc can read .dohc/local/outside-write-copies, then choose Try again.",
+      details: [["Cause", error]], retry: () => void refreshKeptCopies(),
+    });
+  }, [syncStatus?.outsideWriteCopyReadError, reportShellFailure, clearIdentity, refreshKeptCopies]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),

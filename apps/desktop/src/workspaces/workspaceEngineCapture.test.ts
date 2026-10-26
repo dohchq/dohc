@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockDaemonSessions, mockLiveSessions } from "../testing/liveEngineSessions";
@@ -178,6 +179,9 @@ interface CaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onOutsideWriteCopies?: WorkspaceEngineCaptureOptions["onOutsideWriteCopies"];
+  onKeptFiles?: WorkspaceEngineCaptureOptions["onKeptFiles"];
+  onRetainedCopies?: WorkspaceEngineCaptureOptions["onRetainedCopies"];
+  onHeldFiles?: WorkspaceEngineCaptureOptions["onHeldFiles"];
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -2667,6 +2671,67 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  it.each(["malformed receipt", "file at receipt folder"])("isolates %s from health reports and native kept copies", async damage => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("copy-record-health-");
+    const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID };
+    await openedLocalState(workspace);
+    await write(root, "n.md", "outside");
+    const copies = outsideWriteCopies(workspace);
+    await copies.beforeWrite("n.md", null, () => undefined, async () => false);
+    const originalRows = await copies.list();
+    const folder = join(root, ".dohc/local/outside-write-copies");
+    const broken = damage === "malformed receipt" ? join(folder, "broken.json") : folder;
+    if (damage === "file at receipt folder") await rm(folder, { recursive: true });
+    await writeFile(broken, "invalid");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(workspace, sessions).store;
+    const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
+    const native = { keptCopies: [{ id: 1, path: "native.md", keptAtMs: 1 }], more: false };
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => ({ running: true, degraded: false, terminal: false,
+          deferredWrites: [], keptFiles: [["native.md", "saved-native.md"]], retainedCopies: { count: 2, bytes: 20 },
+          recoveryUnavailable: true, heldFiles: [] });
+        if (property === "listKeptCopies") return async () => native;
+        if (property === "listPendingCollectionAdoptions") return adoptions;
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const kept = vi.fn(), retained = vi.fn(), recovery = vi.fn(), held = vi.fn(), outside = vi.fn();
+    const outcomes = vi.fn(), errors = vi.fn();
+    const engine = capture(root, { store, rustEngineSessions: sessions, onKeptFiles: kept, onRetainedCopies: retained,
+      onRecoveryUnavailable: recovery, onHeldFiles: held, onOutsideWriteCopies: outside, onCaptureOutcome: outcomes, onError: errors });
+    try {
+      engine.start();
+      await engine.flush();
+      expect(kept).toHaveBeenCalledWith([["native.md", "saved-native.md"]]);
+      expect(retained).toHaveBeenCalledWith({ count: 2, bytes: 20 });
+      expect(recovery).toHaveBeenCalledWith(true);
+      expect(held).toHaveBeenCalledWith([]);
+      expect(adoptions).toHaveBeenCalled();
+      expect(outcomes).toHaveBeenLastCalledWith(null, null);
+      expect(errors).not.toHaveBeenCalled();
+      const rows = damage === "malformed receipt" ? originalRows : [];
+      expect(outside).toHaveBeenCalledExactlyOnceWith(rows, expect.stringContaining(broken));
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await engine.flush();
+      expect(outside).toHaveBeenCalledOnce();
+      expect(held).toHaveBeenCalledTimes(2);
+      await rm(broken);
+      if (damage === "file at receipt folder") await mkdir(folder);
+      await engine.listKeptCopies();
+      expect(outside).toHaveBeenLastCalledWith(rows, null);
+    } finally {
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it.each([false, true])("coalesces blocked capture health polls and resumes after failure=%s", async (failFirst) => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-engine-capture-");
@@ -3397,6 +3462,82 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  it.each(["resolveFiles", "listMoments", "getActiveVersion", "ensureMainVersion"])("stops a relay write with its ordinary History cause when %s fails", async method => {
+    const root = await createTestScratch("relay-history-failure-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "n.md", text: "OWNER-1", origin: "sync" });
+    await write(root, "n.md", "AGENT-1");
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const failure = new Error(`History ${method} failed`);
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === method) return async () => { throw failure; };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const engine = capture(root, { store, rustEngineSessions: sessions, onError: () => undefined });
+    const commit = vi.fn(async () => undefined);
+    try {
+      const run = engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: [{
+        versionId: "main", path: "n.md", operation: "write", contentKind: "text",
+      }] }, commit));
+      await expect(run).rejects.toThrow(failure.message);
+      await expect(run).rejects.not.toBeInstanceOf(OutsideWriteCopyError);
+      await expect(run).rejects.not.toThrow("Check that dohc can write");
+      expect(commit).not.toHaveBeenCalled();
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe("AGENT-1");
+      expect(existsSync(join(root, "n (kept copy).md"))).toBe(false);
+    } finally { await engine.stop(); await liveStore.close(); }
+  });
+
+  it("lets a pulled delete remove a symlink without copying or changing its target", async () => {
+    const root = await createTestScratch("relay-link-delete-");
+    await write(root, "target.md", "target bytes");
+    await symlink(join(root, "target.md"), join(root, "n.md"));
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const commit = vi.fn(async () => undefined);
+    try {
+      await engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: [{
+        versionId: "main", path: "n.md", operation: "delete", contentKind: "text",
+      }] }, commit));
+      expect(commit).toHaveBeenCalledOnce();
+      expect(existsSync(join(root, "n.md"))).toBe(false);
+      expect(await readFile(join(root, "target.md"), "utf8")).toBe("target bytes");
+      expect((await readdir(root)).filter(name => name.includes("kept copy"))).toEqual([]);
+    } finally { await engine.stop(); }
+  });
+
+  it.each([false, true])("reports a successful copy after the disk write even when the write fails=%s or reporting throws", async diskFails => {
+    const root = await createTestScratch("relay-copy-report-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    await write(root, "n.md", "AGENT-1");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "n.md", text: "OWNER-1", origin: "sync" });
+    const writer = createDefaultDiskWriter(root);
+    const steps: string[] = [];
+    const engine = liveCapture(root, loopback, {
+      diskWriter: { ...writer, writeTextFile: async (path, text) => {
+        steps.push("write");
+        expect(await readFile(join(root, "n (kept copy).md"), "utf8")).toBe("AGENT-1");
+        if (diskFails) throw new Error("disk write refused");
+        await writer.writeTextFile(path, text);
+      } },
+      onOutsideWriteCopies: () => { steps.push("report"); throw new Error("notice report refused"); },
+      onError: () => undefined,
+    });
+    try {
+      const run = engine.runRelaySync(page => page([{ versionId: "main", path: "n.md", operation: "write", contentKind: "text" }]));
+      if (diskFails) await expect(run).rejects.toThrow("disk write refused");
+      else await run;
+      expect(steps).toEqual(["write", "report"]);
+      expect(await readFile(join(root, "n.md"), "utf8")).toBe(diskFails ? "AGENT-1" : "OWNER-1");
+      expect(await outsideWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root }).list()).toHaveLength(1);
+    } finally { await engine.stop(); }
+  });
+
   it.each([false, true])("preserves the outside write before relay commit, copyFails=%s", async copyFails => {
     const root = await createTestScratch("relay-outside-copy-");
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
@@ -3878,7 +4019,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       engine.runRelaySync(async (materializePage) =>
         await deliverRelayPage(materializePage, pullResult(), commit),
       ),
-    ).rejects.toThrow("dohc could not keep a copy of notes/remote.md, so it left notes/remote.md as it was.");
+    ).rejects.toThrow("Could not update notes/remote.md on disk:");
     expect(commit).not.toHaveBeenCalled();
 
     // Unblock the path: the retry pass materializes and THEN commits.

@@ -104,12 +104,17 @@ describe("workspaceActivity capture hooks", () => {
     hooks.onRetainedCopies({ count: 3, bytes: 300 });
     expect(notify).toHaveBeenCalledOnce();
     hooks.onKeptFiles([["native.md", ".dohc-write-displaced/native.md"]]);
-    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]]);
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
     expect(activity.getStatus("activity-test").keptFiles).toEqual([["native.md", ".dohc-write-displaced/native.md"]]);
     expect(activity.getStatus("activity-test").outsideWriteCopies).toEqual([["n.md", "n (kept copy).md", "copy-n-1"]]);
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], "broken receipt");
+    expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBe("broken receipt");
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
+    expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBeNull();
     await activity.stopAll();
     hooks.onRetainedCopies({ count: 4, bytes: 400 });
-    expect(notify).toHaveBeenCalledTimes(3);
+    hooks.onOutsideWriteCopies?.([], "retired capture");
+    expect(notify).toHaveBeenCalledTimes(5);
   });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;

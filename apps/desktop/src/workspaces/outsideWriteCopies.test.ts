@@ -1,13 +1,20 @@
 import { createHash } from "node:crypto";
-import { link, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { link, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import * as files from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import * as durableFiles from "../atomicReplaceFile";
+import * as realPaths from "./workspaceRealPath";
 
 vi.mock("../atomicReplaceFile", { spy: true });
+vi.mock("node:fs/promises", { spy: true });
+vi.mock("./workspaceRealPath", { spy: true });
+afterEach(() => { vi.resetAllMocks(); vi.restoreAllMocks(); });
 
 async function setup() {
   const recorded = new Map<string, string>();
@@ -113,8 +120,159 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(error.message.split("\n")[0]).toBe("dohc could not keep a copy of n.md, so it left n.md as it was. Check that dohc can write to the workspace folder, then choose Try again.");
     expect(error.message).toContain(`Workspace folder: ${rootPath}\nCause: receipt flush failed`);
     expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("AGENT-1");
-    expect(await readFile(join(rootPath, "n (kept copy).md"), "utf8")).toBe("AGENT-1");
+    expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual([]);
     expect(await outsideWriteCopies({ workspaceId: "outside-copy", rootPath }).list()).toEqual([]);
+  });
+
+  it("removes the incomplete copy after a hash mismatch and reuses its name on retry", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "first outside edit");
+    await expect(copies.beforeWrite("n.md", null, () => {
+      writeFileSync(join(rootPath, "n.md"), "second outside edit");
+    }, isRecorded)).rejects.toThrow("n.md changed while dohc kept its copy.");
+    expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual([]);
+    expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("second outside edit");
+    expect(await copies.list()).toEqual([]);
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    expect((await copies.list())[0]?.[1]).toBe("n (kept copy).md");
+  });
+
+  it("skips malformed receipts while listing but still refuses an unrecordable copy", async () => {
+    const { rootPath, copies, workspace, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    const broken = join(rootPath, ".dohc/local/outside-write-copies/broken.json");
+    await writeFile(broken, "invalid");
+    const fresh = outsideWriteCopies(workspace);
+    const errors = vi.fn();
+    expect(await fresh.list(errors)).toEqual(await copies.list());
+    expect(errors).toHaveBeenCalledOnce();
+    expect(String(errors.mock.calls[0]?.[0])).toContain(broken);
+    await expect(fresh.beforeWrite("n.md", null, () => undefined, isRecorded)).rejects.toBeInstanceOf(OutsideWriteCopyError);
+    await rm(broken);
+    expect(await fresh.list(errors)).toHaveLength(1);
+    expect(errors).toHaveBeenCalledOnce();
+  });
+
+  it("retains a cached row and receipt when checking its file fails with ENOTDIR", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    const rows = await copies.list();
+    const { lstat } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const failure = Object.assign(new Error("cannot check copy"), { code: "ENOTDIR" });
+    vi.spyOn(files, "lstat").mockImplementation((...args) =>
+      String(args[0]) === join(rootPath, rows[0]![1]) ? Promise.reject(failure) : lstat(...args));
+    const errors = vi.fn();
+    expect(await copies.list(errors)).toEqual(rows);
+    expect(errors).toHaveBeenCalledWith(failure);
+    expect(await readdir(join(rootPath, ".dohc/local/outside-write-copies"))).toHaveLength(1);
+  });
+
+  it("serializes receipt pruning before a replacement and preserves an unrelated row", async () => {
+    const { rootPath, copies, workspace, isRecorded } = await setup();
+    for (const path of ["n.md", "other.md"]) {
+      await writeFile(join(rootPath, path), "outside");
+      await copies.beforeWrite(path, null, () => undefined, isRecorded);
+    }
+    const other = (await copies.list()).find(row => row[0] === "other.md");
+    await rm(join(rootPath, "n (kept copy).md"));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const { unlink } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.spyOn(files, "unlink").mockImplementationOnce(async path => {
+      entered.resolve();
+      await release.promise;
+      return unlink(path);
+    });
+    const listing = copies.list();
+    await entered.promise;
+    vi.mocked(realPaths.assertResolvedWorkspacePath).mockClear();
+    const admit = vi.fn();
+    const replacing = copies.beforeWrite("n.md", null, admit, isRecorded);
+    try {
+      await Promise.resolve();
+      expect(realPaths.assertResolvedWorkspacePath).not.toHaveBeenCalled();
+      expect(admit).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await Promise.all([listing, replacing]);
+    }
+    expect(await listing).toEqual([other]);
+    expect(await replacing).toBe(true);
+    const rows = await copies.list();
+    expect(rows).toHaveLength(2);
+    expect(rows).toContainEqual(other);
+    expect(rows.find(row => row[0] === "n.md")?.[1]).toBe("n (kept copy).md");
+    expect(await outsideWriteCopies(workspace).list()).toEqual(rows);
+  });
+
+  it.each(["directory", "symlink"])("makes no copy for a %s", async kind => {
+    const { rootPath, copies } = await setup();
+    if (kind === "directory") await mkdir(join(rootPath, "n.md"));
+    else {
+      await writeFile(join(rootPath, "target.md"), "target");
+      await symlink(join(rootPath, "target.md"), join(rootPath, "n.md"));
+    }
+    const isRecorded = vi.fn();
+    const admit = vi.fn();
+    expect(await copies.beforeWrite("n.md", null, admit, isRecorded)).toBe(false);
+    expect(isRecorded).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it.each(["a".repeat(250), "\u754c".repeat(process.platform === "win32" ? 90 : 80), "\u{1f30d}".repeat(60)])(
+    "shortens a long stem without cutting characters or its extension (%s)", async stem => {
+      const { rootPath, copies, isRecorded } = await setup();
+      const path = `${stem}.md`;
+      await writeFile(join(rootPath, path), "outside");
+      await copies.beforeWrite(path, null, () => undefined, isRecorded);
+      const copy = (await copies.list())[0]![1];
+      expect(copy.endsWith(" (kept copy).md")).toBe(true);
+      expect(Buffer.byteLength(copy)).toBeLessThanOrEqual(255);
+      expect(copy.length).toBeLessThanOrEqual(255);
+      expect(copy.isWellFormed()).toBe(true);
+      expect(stem.startsWith(copy.slice(0, -" (kept copy).md".length))).toBe(true);
+      expect(await readFile(join(rootPath, copy), "utf8")).toBe("outside");
+      await writeFile(join(rootPath, copy), "edited copy");
+      await copies.beforeWrite(path, null, () => undefined, isRecorded);
+      const next = (await copies.list())[0]![1];
+      expect(next.endsWith(" (kept copy 2).md")).toBe(true);
+      expect(Buffer.byteLength(next)).toBeLessThanOrEqual(255);
+      expect(next.length).toBeLessThanOrEqual(255);
+      expect(next.isWellFormed()).toBe(true);
+      expect(await readFile(join(rootPath, next), "utf8")).toBe("outside");
+      expect(await readFile(join(rootPath, copy), "utf8")).toBe("edited copy");
+    });
+
+  it("preserves a History lookup failure without copy-folder advice", async () => {
+    const { rootPath, copies } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    const failure = new Error("History store is corrupt");
+    await expect(copies.beforeWrite("n.md", null, () => undefined, async () => { throw failure; })).rejects.toBe(failure);
+    expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual([]);
+    expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("outside");
+  });
+
+  it("removes a partial copy after its write fails", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    const { open } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.spyOn(files, "open").mockImplementation(async (...args) => {
+      const file = await open(...args);
+      if (String(args[0]).endsWith("n (kept copy).md")) {
+        const writePartial = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementationOnce(async () => {
+          await writePartial("partial");
+          throw new Error("copy write failed");
+        });
+      }
+      return file;
+    });
+    await expect(copies.beforeWrite("n.md", null, () => undefined, isRecorded)).rejects.toThrow("copy write failed");
+    expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual([]);
+    expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("outside");
+    expect(await copies.list()).toEqual([]);
   });
 
   it("does not reuse a copy replaced with a hard link to the original", async () => {

@@ -857,7 +857,7 @@ export interface WorkspaceEngineCaptureOptions {
   // moment. Sticky: the drive does not change while the workspace is open.
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
-  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[]) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[], readError: string | null) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
@@ -1828,14 +1828,23 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
   const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
-  let reportedOutsideCopies = "[]";
+  let lastOutsideCopies: [string, string, string][] = [];
+  let reportedOutsideCopies = JSON.stringify([[], null]);
   const reportOutsideWriteCopies = async () => {
-    if (!options.onOutsideWriteCopies) return;
-    const copies = await outsideCopies.list();
-    const serialized = JSON.stringify(copies);
-    if (serialized === reportedOutsideCopies) return;
-    reportedOutsideCopies = serialized;
-    options.onOutsideWriteCopies?.(copies);
+    let readError: string | null = null;
+    const failed = (error: unknown) => {
+      readError ??= `${join(rootPath, ".dohc/local/outside-write-copies")}\n${errorMessage(error)}`;
+    };
+    try { lastOutsideCopies = await outsideCopies.list(failed); }
+    catch (error) { failed(error); }
+    const serialized = JSON.stringify([lastOutsideCopies, readError]);
+    if (serialized !== reportedOutsideCopies) {
+      try {
+        options.onOutsideWriteCopies?.(lastOutsideCopies, readError);
+        reportedOutsideCopies = serialized;
+      } catch (error) { onError("outside copy notices", error); }
+    }
+    return lastOutsideCopies;
   };
 
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
@@ -4088,15 +4097,14 @@ export function createWorkspaceEngineCapture(
         operation.kind === "delete"
           ? registerExpectedEngineEvents([{ path: operation.path }])
           : () => undefined;
+      let copied = false;
       try {
         // Protected materialization has its own secret policy and recovery.
         if (operation.kind === "write-binary" || !operation.protected) {
-          const copied = await outsideCopies.beforeWrite(operation.path,
+          copied = await outsideCopies.beforeWrite(operation.path,
             operation.kind === "delete" ? null : operation.kind === "write" ? Buffer.from(operation.text) : operation.bytes,
             path => assertEngineWritablePath(path, policy),
-            (path, sha256) => isRecorded(operation, path, sha256))
-            .catch(async (cause: unknown) => { throw await OutsideWriteCopyError.from(operation.path, cause, rootPath); });
-          if (copied) await reportOutsideWriteCopies();
+            (path, sha256) => isRecorded(operation, path, sha256));
         }
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
@@ -4112,6 +4120,8 @@ export function createWorkspaceEngineCapture(
           `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
           { cause: error },
         );
+      } finally {
+        if (copied) await reportOutsideWriteCopies();
       }
     }
   }
@@ -6862,7 +6872,7 @@ export function createWorkspaceEngineCapture(
     },
 
     async listKeptCopies() {
-      return { ...await (await engineStore()).listKeptCopies(), outsideWriteCopies: await outsideCopies.list() };
+      return { ...await (await engineStore()).listKeptCopies(), outsideWriteCopies: await reportOutsideWriteCopies() };
     },
 
     async saveKeptCopy(id) {
