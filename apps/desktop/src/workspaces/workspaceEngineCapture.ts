@@ -6812,12 +6812,11 @@ export function createWorkspaceEngineCapture(
             correlationId: `conflict-${conflictId}`,
           },
         });
-        // Materialize only when the resolution changed the active version's
-        // state (keep-current writes nothing; a resolution into a version
-        // that is not on disk changes nothing visible).
+        // A kept moment changes the shared head while retaining the disk bytes.
+        // Only materialize a choice that changes the active version's content.
         const activeVersionId = await activeVersionIdOf(engine);
         if (result.conflict.targetVersionId === activeVersionId) {
-          if (result.write) {
+          if (result.write && resolution.kind !== "keep-current") {
             await materialize(
               [await materializeWriteForSnapshot(engine, result.write.snapshot)],
               policy,

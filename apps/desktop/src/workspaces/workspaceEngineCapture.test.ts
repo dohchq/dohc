@@ -1380,6 +1380,30 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("does not rewrite kept text when the resolution returns its new shared moment", async () => {
+    const root = await createTestScratch("dohc-kept-text-no-rewrite-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions,
+    );
+    vi.spyOn(store, "resolveTextConflict").mockResolvedValue({
+      conflict: { id: "kept", path: "trip.txt", targetVersionId: "main", chosenFrom: "current" },
+      write: { snapshot: { versionId: "main", path: "trip.txt", text: "kept text" } },
+      delete: null,
+    } as unknown as Awaited<ReturnType<CaptureVersionedTextStore["resolveTextConflict"]>>);
+    vi.spyOn(store, "listTextConflicts").mockResolvedValue({ conflicts: [], nextAfterConflictId: null });
+    const diskWriter: EngineDiskWriter = {
+      writeTextFile: vi.fn(), writeBinaryFile: vi.fn(), deletePath: vi.fn(),
+    };
+    const engine = capture(root, { store, rustEngineSessions: sessions, diskWriter });
+    try {
+      await engine.resolveConflict("kept", { kind: "keep-current" });
+      expect(diskWriter.writeTextFile).not.toHaveBeenCalled();
+      expect(diskWriter.writeBinaryFile).not.toHaveBeenCalled();
+      expect(diskWriter.deletePath).not.toHaveBeenCalled();
+    } finally { await engine.stop(); }
+  });
+
   it("flushes daemon capture before reading conflicts for resolution", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
