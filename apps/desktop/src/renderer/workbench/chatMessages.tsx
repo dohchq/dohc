@@ -7,6 +7,7 @@ import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
 import { SmilePlus } from "lucide-react";
@@ -32,8 +33,11 @@ import {
   findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import type { ChatFileReferenceToken } from "./chatFileMentions";
+import {
+  extractChatFileReferenceTokens,
+  fileReferenceKey,
+  resolveFileMentionNavigationTargets,
+} from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same
@@ -46,86 +50,6 @@ export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
   return author.authorDisplayName;
-}
-
-interface FileMentionNavigationTarget {
-  path: string;
-  headingAnchor?: string;
-}
-
-function fileReferenceKey(reference: {
-  path: string;
-  headingAnchor?: string;
-}): string {
-  return `${reference.path}\u0000${reference.headingAnchor ?? ""}`;
-}
-
-function sameHeading(
-  token: Pick<ChatFileReferenceToken, "headingAnchor">,
-  attachment: Pick<ChatAttachmentRecord, "headingAnchor">,
-): boolean {
-  return (token.headingAnchor ?? "") === (attachment.headingAnchor ?? "");
-}
-
-// Body text is immutable display copy, while attachment pathHint is the
-// engine's authoritative, permission-checked navigation target. Most tokens
-// match it exactly. Hand-typed compatibility forms can have edge spaces that
-// main intentionally trims only after exact lookup. Reconcile unique
-// references in two passes so exact space-named files always
-// win, followed only by the explicit edge-space compatibility form. Never
-// bind by heading/order alone: CLI callers can attach an independent file that
-// happens to share a heading with a literal token in the message body.
-function resolveFileMentionNavigationTargets(
-  tokens: readonly ChatFileReferenceToken[],
-  attachments: readonly ChatAttachmentRecord[],
-): Map<string, FileMentionNavigationTarget> {
-  const references = Array.from(
-    new Map(tokens.map((token) => [fileReferenceKey(token), token])).values(),
-  );
-  const available = attachments.filter(
-    (attachment): attachment is ChatAttachmentRecord & { pathHint: string } =>
-      typeof attachment.pathHint === "string" && attachment.pathHint.length > 0,
-  );
-  const unused = new Set(available.map((_, index) => index));
-  const targets = new Map<string, FileMentionNavigationTarget>();
-
-  const assign = (
-    predicate: (
-      token: ChatFileReferenceToken,
-      attachment: ChatAttachmentRecord & { pathHint: string },
-    ) => boolean,
-  ) => {
-    for (const token of references) {
-      const key = fileReferenceKey(token);
-      if (targets.has(key)) continue;
-      const index = available.findIndex(
-        (attachment, at) => unused.has(at) && predicate(token, attachment),
-      );
-      if (index < 0) continue;
-      const attachment = available[index];
-      if (!attachment) continue;
-      unused.delete(index);
-      targets.set(key, {
-        path: attachment.pathHint,
-        ...(attachment.headingAnchor
-          ? { headingAnchor: attachment.headingAnchor }
-          : {}),
-      });
-    }
-  };
-
-  assign(
-    (token, attachment) =>
-      attachment.pathHint === token.path && sameHeading(token, attachment),
-  );
-  assign(
-    (token, attachment) =>
-      token.path.trim() !== token.path &&
-      attachment.pathHint === token.path.trim() &&
-      sameHeading(token, attachment),
-  );
-
-  return targets;
 }
 
 // Renders a message body with @-mention chips. A mention that resolves to a
@@ -794,18 +718,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 </time>
               </span>
             ) : null}
-            <p
-              data-testid={`${props.testIdPrefix}-message-body`}
-              className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
-            >
-              <MentionText
-                body={message.body}
-                candidates={candidates}
-                attachments={message.attachments}
-                testId={`${props.testIdPrefix}-message-body`}
-                onOpenPath={props.onOpenPath}
-              />
-            </p>
+            <ChatMarkdown
+              body={message.body}
+              candidates={candidates}
+              attachments={message.attachments}
+              testId={`${props.testIdPrefix}-message-body`}
+              onOpenPath={props.onOpenPath}
+            />
             {props.renderMessageFooter?.(message)}
             {props.reactionControls ? (
               <MessageReactions
