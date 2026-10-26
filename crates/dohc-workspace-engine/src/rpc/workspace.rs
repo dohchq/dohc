@@ -2322,6 +2322,7 @@ mod tests {
                 &RequestContext::unbounded(),
                 Some(first_handle.clone()),
                 json!({
+                    "agentId": "default",
                     "triggerMessageId": "trigger-survives",
                     "threadId": "thread-survives",
                     "nowMs": 10,

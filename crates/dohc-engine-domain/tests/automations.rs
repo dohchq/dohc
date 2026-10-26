@@ -2262,8 +2262,9 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     );
 
     // A restart interrupts the run, and every trigger it covered goes back to
-    // the queue. A person's later request that sorts first starts the next
-    // run, which still counts the wakes the interrupted run covered.
+    // the queue. The next run starts from the oldest request again, covers the
+    // person's later one, and still counts the wakes the interrupted run
+    // covered.
     chats
         .reclaim_running_dispatches(WS, 2, 16, &NO_FAULTS)
         .expect("reclaim");
@@ -2296,14 +2297,11 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
             &NO_FAULTS,
         )
         .expect("a person's request");
-    chats
-        .enqueue_dispatch(WS, "m-early", "default", &thread.thread_id, 11, &NO_FAULTS)
-        .expect("queue");
     let again = chats
         .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
         .expect("claim again")
         .expect("the requeued run");
-    assert_eq!(again.run.trigger_message_id, "m-early");
+    assert_eq!(again.run.trigger_message_id, "m-first");
     assert_eq!(again.chain_depth, 4);
 
     // A second restart gives back only what has attempts left.

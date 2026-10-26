@@ -3055,7 +3055,8 @@ fn dispatch_claim_is_single_writer_idempotent() {
     assert_eq!(claim.dispatch.state, "running");
     assert_eq!(claim.dispatch.run_id.as_deref(), Some("run-1"));
     assert_eq!(claim.dispatch.failure_reason, None);
-    assert_eq!(claim.dispatch.created_at_ms, 21);
+    // The message asked the agent in its own write, at its own time.
+    assert_eq!(claim.dispatch.created_at_ms, 20);
     assert_eq!(claim.dispatch.updated_at_ms, 22);
     assert_eq!(claim.run.workspace_id, WS);
     assert_eq!(claim.run.thread_id, "t1");

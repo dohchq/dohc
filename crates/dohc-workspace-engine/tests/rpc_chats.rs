@@ -1413,6 +1413,7 @@ async fn persisted_chat_identities_are_normalized() {
         &mut id,
         "chats.dispatch.enqueue",
         json!({
+            "agentId": "default",
             "triggerMessageId": "  trigger-round-7  ",
             "threadId": "  thread-round-7  ",
             "nowMs": 40,
@@ -1445,6 +1446,7 @@ async fn persisted_chat_identities_are_normalized() {
             &mut id,
             "chats.dispatch.enqueue",
             json!({
+                "agentId": "default",
                 "triggerMessageId": trigger_message_id,
                 "threadId": thread_id,
                 "nowMs": 42,
@@ -1480,7 +1482,12 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.channels.ensureAgent",
-        json!({ "channelId": "agent-round-8", "nowMs": 10 }),
+        json!({
+            "channelId": "agent-round-8",
+            "agentId": "default",
+            "name": "My agent",
+            "nowMs": 10,
+        }),
     )
     .await;
     call(
@@ -1505,6 +1512,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &mut id,
         "chats.dispatch.enqueue",
         json!({
+            "agentId": "default",
             "triggerMessageId": "message-round-8",
             "threadId": "thread-round-8",
             "nowMs": 21,
@@ -1640,7 +1648,12 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.channels.ensureAgent",
-        json!({ "channelId": "channel-agent", "nowMs": 12 }),
+        json!({
+            "channelId": "channel-agent",
+            "agentId": "default",
+            "name": "My agent",
+            "nowMs": 12,
+        }),
     )
     .await;
     assert_eq!(agent["kind"], json!("agent"));
@@ -2797,7 +2810,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(enqueued["enqueued"], json!(true));
@@ -2806,7 +2819,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(duplicate["enqueued"], json!(false));
@@ -2815,7 +2828,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-big", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-big", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(conflicting_thread.code, ErrorCode::Internal);
@@ -2928,7 +2941,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-002", "threadId": "thread-1", "nowMs": 2410 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-002", "threadId": "thread-1", "nowMs": 2410 }),
     )
     .await;
     call(
@@ -2969,7 +2982,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-003", "threadId": "thread-1", "nowMs": 2420 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-003", "threadId": "thread-1", "nowMs": 2420 }),
     )
     .await;
     call(
@@ -3284,7 +3297,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
     )
     .await;
     let claimed = call(
@@ -3309,7 +3322,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
     )
     .await;
     let whitespace = call(
@@ -3426,18 +3439,22 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
     // Reserved wire ids refuse on the ensure paths exactly like create.
     // Mutation check: drop the reserved guard from ensure_well_known_channel
     // — both refusals below fail.
-    for (method, reserved) in [
-        ("chats.channels.ensureGeneral", "channel_wire_general_v1"),
-        ("chats.channels.ensureAgent", "channel_wire_agent_v1"),
+    for (method, params) in [
+        (
+            "chats.channels.ensureGeneral",
+            json!({ "channelId": "channel_wire_general_v1", "nowMs": 10 }),
+        ),
+        (
+            "chats.channels.ensureAgent",
+            json!({
+                "channelId": "channel_wire_agent_v1",
+                "agentId": "default",
+                "name": "My agent",
+                "nowMs": 10,
+            }),
+        ),
     ] {
-        let error = call_error(
-            &transport,
-            &handle,
-            &mut id,
-            method,
-            json!({ "channelId": reserved, "nowMs": 10 }),
-        )
-        .await;
+        let error = call_error(&transport, &handle, &mut id, method, params).await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
@@ -3770,6 +3787,7 @@ async fn page_adapter_drains_without_overlap_or_omission() {
             &mut id,
             "chats.dispatch.enqueue",
             json!({
+                "agentId": "default",
                 "triggerMessageId": trigger,
                 "threadId": "thread",
                 "nowMs": created_at_ms,
@@ -4004,7 +4022,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
+        json!({ "agentId": "default", "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
     )
     .await;
     let paused = call(
