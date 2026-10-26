@@ -23,8 +23,6 @@ import {
   MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
-  firstAgent,
-  withAgent,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -41,7 +39,7 @@ import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
-import { ownPresentation, ownAgentPresentation } from "../workbench/actorPresentation";
+import { ownPresentation } from "../workbench/actorPresentation";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
@@ -577,7 +575,6 @@ export function SettingsDialog(props: {
   }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
-  const agent = firstAgent(userSettings);
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
@@ -731,17 +728,6 @@ export function SettingsDialog(props: {
                 onChange={(yourColor) => void saveAppearance({ yourColor })}
               />
             </SettingRow>
-            {agent ? (
-              <SettingRow title="Your agent's color" testId="settings-row-your-agent-color">
-                <ChatAvatar presentation={ownAgentPresentation} name={agent.name} kind="agent" size="comment" />
-                <HueControl
-                  label="Your agent's color"
-                  shape="agent"
-                  value={agent.hue}
-                  onChange={(hue) => void saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, hue })))}
-                />
-              </SettingRow>
-            ) : null}
             <SettingRow
               title="Editor font"
               modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}

@@ -199,6 +199,20 @@ it("shows how dohc starts an agent in its details", async () => {
   expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
 });
 
+// An agent's swatches are squares, olive first, and set only that agent's color.
+it("sets an agent's color in its details", async () => {
+  const { onSave } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const color = within(row("Codex")).getByRole("radiogroup", { name: "Color of Codex" });
+  const hues = within(color).getAllByRole("radio");
+  expect(hues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
+  for (const radio of hues) expect(radio.className).toContain("rounded-md");
+  expect(within(color).getByRole("radio", { name: "Blue" }).getAttribute("aria-checked")).toBe("true");
+  await userEvent.click(within(color).getByRole("radio", { name: "Plum" }));
+  expect(onSave.mock.lastCall![0]).toEqual({ ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, hue: "plum" } } });
+});
+
 const tile = (name: string) => screen.getByRole<HTMLButtonElement>("button", { name: new RegExp(`^${name}`) });
 
 it("says what each tool needs before it can be added", async () => {

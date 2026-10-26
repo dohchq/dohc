@@ -424,23 +424,12 @@ describe("SettingsDialog", () => {
     expect(saved()?.appearance.yourColor).toBe("teal");
     expect(within(yours).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
 
-    // A person's swatches are round with no olive; an agent's are squares, olive first.
+    // A person's swatches are round with no olive.
     const personHues = within(yours).getAllByRole("radio");
     expect(personHues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
     for (const radio of personHues) expect(radio.className).toContain("rounded-full");
-    const agent = screen.getByTestId("settings-row-your-agent-color");
-    const agentHues = within(agent).getAllByRole("radio");
-    expect(agentHues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
-    for (const radio of agentHues) expect(radio.className).toContain("rounded-md");
-    expect(within(agent).getByRole("radio", { name: "Olive" }).getAttribute("aria-checked")).toBe("true");
-    await user.click(within(agent).getByRole("radio", { name: "Plum" }));
-    expect(saved()?.agents.default?.hue).toBe("plum");
-    await user.click(within(agent).getByRole("radio", { name: "Olive" }));
-    expect(saved()?.agents.default?.hue).toBe("olive");
-    // Here the arrows choose as they move.
-    await user.keyboard("{ArrowRight}");
-    expect(saved()?.agents.default?.hue).toBe("rust");
-    expect(document.activeElement).toBe(within(agent).getByRole("radio", { name: "Rust" }));
+    // Each agent's color is in its Details, under Agents.
+    expect(screen.queryByText("Your agent's color")).toBeNull();
 
     // The picker saves once, when it closes, not on each step of a drag.
     const picker = within(screen.getByTestId("settings-row-accent")).getByLabelText("Accent color");
