@@ -217,7 +217,7 @@ describe("CLI socket server", () => {
   // reports it: this one for the fixture workspace, 0 for any other.
   let agentRunDepth: number;
   // Whether a run dohc dispatched holds the fixture workspace's run slot.
-  let dispatchedRun: boolean;
+  let dispatchedRun: string | null;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -424,7 +424,7 @@ describe("CLI socket server", () => {
       },
     };
     agentRunDepth = 0;
-    dispatchedRun = false;
+    dispatchedRun = null;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -449,6 +449,7 @@ describe("CLI socket server", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
+        agentIdsNamedIn: async () => [],
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -461,7 +462,7 @@ describe("CLI socket server", () => {
       }),
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
-      dispatchedAgentRun: (workspaceId) => workspaceId === WORKSPACE_ID && dispatchedRun,
+      dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
       agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
@@ -1162,9 +1163,9 @@ describe("CLI socket server", () => {
     agentRunDepth = 2;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
-    dispatchedRun = true;
+    dispatchedRun = "codex";
     await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
-    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2 });
     context.readOnly = true;
     await expect(invoke("stopSync", { cwd: workspaceRoot, actor: "agent" })).rejects.toThrow("owning workspace");
     expect(stop).toHaveBeenCalledTimes(4);
@@ -1621,7 +1622,7 @@ describe("CLI socket server", () => {
   it("refuses post and reply by engine id in a read-only channel before any row", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const existing = await store.startChannelThread({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
@@ -2594,7 +2595,7 @@ describe("CLI socket server", () => {
     };
     // An automation wakes an agent through dispatch.
     agentRunDepth = 3;
-    dispatchedRun = true;
+    dispatchedRun = "codex";
 
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
     await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
@@ -2608,15 +2609,15 @@ describe("CLI socket server", () => {
       .resolves.toMatchObject({ ok: false });
 
     // A name the client gives, as "Client" and "claude-code" do, gives way to the run's.
-    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
+    const woken = { kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 3 };
     const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
       woken,
       woken,
-      { actorOriginId: "dohc-mcp", attribution },
-      { actorOriginId: "dohc-mcp", attribution },
+      { actorOriginId: "codex", attribution },
+      { actorOriginId: "codex", attribution },
     ]);
   });
 
@@ -2720,12 +2721,12 @@ describe("CLI socket server", () => {
       };
     }
 
-    dispatchedRun = true;
+    dispatchedRun = "codex";
     const during = await writeAndReply();
     expect(during.reply).toEqual(during.file);
 
     // Outside a run, the client's writes keep the name it gave.
-    dispatchedRun = false;
+    dispatchedRun = null;
     expect((await writeAndReply()).file).toMatchObject({ kind: "agent", claimedName: "Codex" });
   });
 
@@ -3710,7 +3711,7 @@ describe("CLI socket server", () => {
 
   it("posts to the agent channel using the name returned by MCP discovery", async () => {
     if (!store) throw new Error("Store is not available");
-    const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const listed = await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     if (!listed.ok) throw new Error(listed.reason);
     const discovered = listed.groups.find((channel) => channel.id === agent.id);
@@ -3747,7 +3748,7 @@ describe("CLI socket server", () => {
 
   it("rejects post for DM streams while allowing agent-channel task posts", async () => {
     if (!store) throw new Error("Store is not available");
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const dm = await store.createChannel({
       workspaceId: WORKSPACE_ID,
       name: "Alice",
@@ -3792,7 +3793,7 @@ describe("CLI socket server", () => {
     await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: false });
     expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger" });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger", agentId: "default" });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected run");
     expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
@@ -3801,7 +3802,7 @@ describe("CLI socket server", () => {
     expect(await show()).toMatchObject({ dispatch, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch });
     expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2" });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2", agentId: "default" });
     const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!next) throw new Error("Expected next run");
     await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
@@ -3819,6 +3820,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-dispatch_trigger",
       threadId: "thread-dispatch",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3895,6 +3897,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-retry_trigger",
       threadId: "thread-retry",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3937,6 +3940,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-recovery_trigger",
       threadId: "thread-recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3988,6 +3992,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-restart_recovery_trigger",
       threadId: "thread-restart_recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -4078,6 +4083,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-mixed_restore_trigger",
       threadId: "thread-mixed_restore",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a run for mixed restore.");
@@ -4176,6 +4182,7 @@ describe("CLI socket server", () => {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: `message-bounded_${suffix}`,
         threadId: `thread-bounded_${suffix}`,
+        agentId: "default",
       });
       const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
       if (!claim) throw new Error("Expected a bounded-queue run.");
@@ -4225,6 +4232,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-foreground_budget_trigger",
       threadId: "thread-foreground_budget",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -4267,6 +4275,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-permanent_trigger",
       threadId: "thread-permanent",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4313,6 +4322,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_foreground_trigger",
       threadId: "thread-terminal_foreground",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4361,6 +4371,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_recovery_trigger",
       threadId: "thread-terminal_recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4422,6 +4433,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_transient_trigger",
       threadId: "thread-terminal_transient",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4473,6 +4485,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-plain_error_trigger",
       threadId: "thread-plain_error",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4512,6 +4525,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-deadline_trigger",
       threadId: "thread-deadline",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4860,12 +4874,19 @@ describe("CLI socket server", () => {
 
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
     if (!store) throw new Error("Store is not available");
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
     const agentDm = await post({
       actor: "human",
       group: "my-agent",
       title: "Work for my agent",
       body: "Please investigate this",
+    });
+    const codexDm = await post({
+      actor: "human",
+      group: "my-agent-codex",
+      title: "Work for Codex",
+      body: "Please review this",
     });
     const mention = await post({
       actor: "human",
@@ -4896,7 +4917,7 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot,
       actor: "agent",
     });
-    expect(agentInbox.threads.map((thread) => thread.id)).toContain(agentDm.threadId);
+    expect(agentInbox.threads.map((thread) => thread.id)).toEqual(expect.arrayContaining([agentDm.threadId, codexDm.threadId]));
     expect(agentInbox.threads.every((thread) => thread.group.kind === "agent")).toBe(true);
     expect(agentInbox.mentions).toEqual([
       expect.objectContaining({
@@ -4905,6 +4926,17 @@ describe("CLI socket server", () => {
         text: "Could @agent check the transport contract?",
       }),
     ]);
+
+    // A dispatched run sees only its own agent's chat. Each message naming
+    // that agent starts its own run, so the run lists no mentions.
+    dispatchedRun = "codex";
+    const runInbox = await invoke("inbox", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    });
+    expect(runInbox.threads.map((thread) => thread.id)).toEqual([codexDm.threadId]);
+    expect(runInbox.mentions).toEqual([]);
+    dispatchedRun = null;
 
     const humanInbox = await invoke("inbox", {
       cwd: workspaceRoot,

@@ -243,7 +243,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     // A Unix socket path must stay short (107 bytes on Linux, 103 on macOS), so the socket gets its own folder.
     server = await startCliServer({ stateDir: await createTestScratch("cli-"), listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
-      agentRunDepth: () => 0, dispatchedAgentRun: () => false, agentRunWorkspace: () => undefined });
+      agentRunDepth: () => 0, dispatchedAgent: () => null, agentRunWorkspace: () => undefined });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
     const request = async (verb: "fileMove" | "historyUndo", args: object) => {
       const socket = createConnection(server!.socketPath); socket.setEncoding("utf8");

@@ -121,6 +121,7 @@ describe("ChatsView My agent", () => {
         runnerConfigured: true,
         runnerEnabled: true,
         agentRunActive: false,
+        agents: [{ id: "default", name: "Nova", enabled: true }],
       },
       onSetupAgent,
       userSettings: DEFAULT_USER_SETTINGS,
@@ -224,6 +225,7 @@ describe("ChatsView My agent", () => {
         runnerConfigured: false,
         runnerEnabled: false,
         agentRunActive: true,
+        agents: [],
       },
       onSetupAgent: vi.fn(),
       userSettings: DEFAULT_USER_SETTINGS,
@@ -583,13 +585,13 @@ describe("ChatsView mentions", () => {
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
-    await user.type(composer, "@agent look");
+    await user.type(composer, "@Nova look");
 
     // Two Enter keydowns in the same tick (no await between): the synchronous
     // in-flight ref must swallow the second so only one send goes out.
     fireEvent.keyDown(composer, { key: "Enter" });
     fireEvent.keyDown(composer, { key: "Enter" });
-    resolveSend({ message: message({ id: "m-new", body: "@agent look" }) });
+    resolveSend({ message: message({ id: "m-new", body: "@Nova look" }) });
 
     await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
   });
@@ -673,12 +675,13 @@ describe("group details", () => {
 describe("ChatsView agent offer", () => {
   const ready = {
     workspaceId: "workspace-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+    agents: [{ id: "default", name: "Nova", enabled: true }],
   };
   const withAgent = (agentSetup = ready, onSetupAgent = vi.fn()) => ({
     mentionCandidates: mentionRoster, agentSetup, onSetupAgent, workspacePath: "C:\\people\\ice\\work",
   });
   async function pickAgent(user: ReturnType<typeof userEvent.setup>, prefix: string) {
-    await user.type(screen.getByTestId(`${prefix}-composer`), "@ag");
+    await user.type(screen.getByTestId(`${prefix}-composer`), "@No");
     await user.click(screen.getAllByTestId(`${prefix}-mention-option`)[0]!);
     return screen.getByTestId("composer-agent-offer");
   }
@@ -686,7 +689,7 @@ describe("ChatsView agent offer", () => {
   it("says a group's new post runs the agent, and leaves when the post starts", async () => {
     const user = userEvent.setup();
     bridgeMock.startChannelThread.mockResolvedValue({
-      thread: thread({ id: "thread-new" }), message: message({ threadId: "thread-new", body: "@agent check it" }), viewerAuthorId: "you",
+      thread: thread({ id: "thread-new" }), message: message({ threadId: "thread-new", body: "@Nova check it" }), viewerAuthorId: "you",
     });
     renderView(vi.fn(), vi.fn(), withAgent());
     await user.click(await screen.findByTestId("chats-channel"));
@@ -701,7 +704,7 @@ describe("ChatsView agent offer", () => {
   it("names dispatch's cause and opens Settings → Agents when no runner command is set", async () => {
     const user = userEvent.setup();
     const onSetupAgent = vi.fn();
-    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false }, onSetupAgent));
+    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false, agents: [] }, onSetupAgent));
     await user.click(await screen.findByTestId("chats-channel"));
     expect((await pickAgent(user, "chats-new-thread")).dataset.state).toBe("no-command");
     await user.click(screen.getByTestId("composer-agent-offer-setup"));

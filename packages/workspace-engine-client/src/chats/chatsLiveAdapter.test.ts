@@ -28,7 +28,7 @@ type ChatRequestCase = {
 
 const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.channelCreate, params: { channelId: "c", name: "C", kind: "channel" } },
-  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent" } },
+  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent", agentId: "default", name: "Nova" } },
   { method: CHATS_METHOD.channelEnsureGeneral, params: { channelId: "general" } },
   { method: CHATS_METHOD.channelFindBySlug, params: { slug: "general" } },
   { method: CHATS_METHOD.channelsList, params: {} },
@@ -139,9 +139,8 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   },
   {
     method: CHATS_METHOD.dispatchEnqueue,
-    params: { triggerMessageId: "m", threadId: "t" },
+    params: { triggerMessageId: "m", threadId: "t", agentId: "default" },
   },
-  { method: CHATS_METHOD.dispatchRecordEligibleTriggers, params: {} },
   { method: CHATS_METHOD.dispatchClaimNextPending, params: { runId: "r" } },
   { method: CHATS_METHOD.dispatchListPending, params: {} },
   { method: CHATS_METHOD.dispatchOpenRuns, params: {} },
@@ -155,7 +154,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.dispatchRecentCount, params: { threadId: "t", sinceMs: 0 } },
   {
     method: CHATS_METHOD.dispatchFailPendingForThread,
-    params: { threadId: "t", reason: "stop" },
+    params: { threadId: "t", agentId: "default", reason: "stop" },
   },
   {
     method: CHATS_METHOD.dispatchRecordRunMessage,
@@ -252,6 +251,7 @@ const bookmark = {
 const dispatch = {
   workspaceId: "workspace",
   triggerMessageId: "trigger",
+  agentId: "default",
   threadId: "thread",
   state: "pending",
   attemptCount: 0,
@@ -263,6 +263,7 @@ const run = {
   runId: "run",
   threadId: "thread",
   triggerMessageId: "trigger",
+  agentId: "default",
   command: "codex",
   startedAtMs: 3,
   failureHandled: false,

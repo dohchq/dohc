@@ -12,6 +12,7 @@ import {
   firstAgent,
   firstAgentCommand,
   firstAgentWithLaunch,
+  agentIdsNamedIn,
   newAgentHue,
   ownAgentNamed,
   withFirstAgent,
@@ -176,6 +177,20 @@ describe("desktop user settings model", () => {
       }).success, name).toBe(false);
     }
     expect(AgentsSettings.safeParse({ default: { ...agent, name: "Nova", nameBeforeMigration: "Nova" } }).success).toBe(true);
+  });
+
+  it("names each agent dohc can start that a message names, by its name without spaces, outside code", () => {
+    const { launch: _launch, ...unset } = testAgent({ name: "Scout", enabled: false });
+    const settings = { agents: {
+      default: testAgent({ name: "Nova" }),
+      "claude-code": testAgent({ name: "Claude Code" }),
+      codex: testAgent({ name: "Codex", enabled: false }),
+      scout: unset,
+    } };
+    expect(agentIdsNamedIn(settings, "@nova and @claudecode, then @CODEX")).toEqual(["default", "claude-code", "codex"]);
+    // An agent with no way to start, a name inside code, and @agent name nobody.
+    expect(agentIdsNamedIn(settings, "@Scout `@Nova` @agent")).toEqual([]);
+    expect(agentIdsNamedIn(settings, "Claude Code, please")).toEqual([]);
   });
 
   it("gives a new agent the first hue nobody uses, spread out from the ones before", () => {

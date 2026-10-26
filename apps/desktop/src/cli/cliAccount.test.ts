@@ -17,7 +17,7 @@ function options(serverAccount?: CliServerOptions["serverAccount"]) {
     // Account verbs never reach chat; the collaborator stays unused.
     chatWrites: {} as CliServerOptions["chatWrites"],
     localUserDisplayName: () => "Ice", localPersonId: () => "person", agentRunDepth: () => 0,
-    dispatchedAgentRun: () => false,
+    dispatchedAgent: () => null,
     agentRunWorkspace: () => undefined,
     ...(serverAccount ? { serverAccount } : {}),
   };

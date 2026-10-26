@@ -162,7 +162,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     findWorkspace: () => ({ ...workspace, remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" } }),
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,
-    localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
+    localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova", agentIdsNamedIn: async () => [],
     localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
     betweenDispatchScans: (_workspaceId, write) => write(),
@@ -433,7 +433,7 @@ describe("registered chat writes", () => {
 
   it("says when Restricted Mode holds the agent a sent message asks, and never fails the send over it", async () => {
     const test = fixture();
-    const send = { workspaceId: "workspace", threadId: "thread", body: "@agent plan the day" };
+    const send = { workspaceId: "workspace", threadId: "thread", body: "@Nova plan the day" };
     expect(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)).waitsForTrust).toBeUndefined();
     test.agentWaitsForTrust.mockResolvedValueOnce(true);
     const held = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
@@ -863,7 +863,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     }],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"sealed",
   });
   const options:CliServerOptions={
-    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,agentRunWorkspace:()=>undefined,
+    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,agentRunWorkspace:()=>undefined,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},

@@ -17,11 +17,12 @@ vi.mock("./ChatAvatar", async (importOriginal) => {
 });
 
 const candidates = [
-  { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Nova", description: "your agent" },
+  { id: "agent:default", kind: "agent" as const, handle: "Nova", label: "Nova", description: "your agent" },
   { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
 ];
 const ready: AgentSetupSummary = {
   workspaceId: "ws-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  agents: [{ id: "default", name: "Nova", enabled: true }],
 };
 
 function Composer(props: {
@@ -46,7 +47,7 @@ function Composer(props: {
 }
 
 async function pickAgent(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByTestId("chats-composer"), "@ag");
+  await user.type(screen.getByTestId("chats-composer"), "@No");
   await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
 }
 
@@ -95,7 +96,7 @@ describe("the agent offer", () => {
 
   it("floats over a stream composer's bars, not inside its box", () => {
     render(
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@agent " sending={false}
+      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@Nova " sending={false}
         placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={() => {}}
         onSend={() => {}} agentOffer={offer("runs")}
         above={<div data-testid="chats-replying-mode">Replying to Sam</div>} />,
@@ -111,11 +112,11 @@ describe("the agent offer", () => {
     expect(screen.getByTestId("composer-agent-offer").textContent).toContain("agent working");
   });
 
-  it("appears on a roster pick and never on a typed @agent", async () => {
+  it("appears on a roster pick and never on a typed @Nova", async () => {
     const user = userEvent.setup();
     render(<Composer />);
     const composer = screen.getByTestId("chats-composer");
-    await user.type(composer, "@agent check it");
+    await user.type(composer, "@Nova check it");
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
     await user.clear(composer);
     await pickAgent(user);
@@ -139,7 +140,7 @@ describe("the agent offer", () => {
     await pickAgent(user);
     const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
     composer.focus();
-    composer.setSelectionRange(0, 7);
+    composer.setSelectionRange(0, 6);
     await user.keyboard("{Backspace}");
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
   });
@@ -159,7 +160,7 @@ describe("the agent offer", () => {
     view.rerender(<Composer scope="ws-a:thread:two" />);
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
     view.rerender(<Composer scope="ws-a:thread:one" />);
-    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("@agent ");
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("@Nova ");
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
   });
 
