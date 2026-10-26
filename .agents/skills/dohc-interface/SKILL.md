@@ -290,6 +290,7 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+   Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
 5. Does each string do one job, and does every error and empty state give a Next?
 6. Does every noun match the surrounding UI?

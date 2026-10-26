@@ -18,7 +18,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("offers only the five working demo panels, then Notices", () => {
+it("offers only the five working demo panels, then Notices, each titled as in the app", () => {
   const { container } = render(<ProductDemo />);
   const rail = within(within(container).getByRole("navigation", { name: "Activity bar" }));
   expect(rail.getAllByRole("button").map((button) => button.getAttribute("aria-label")))
@@ -29,6 +29,7 @@ it("offers only the five working demo panels, then Notices", () => {
     const button = rail.getByRole("button", { name });
     fireEvent.click(button);
     expect(button.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-testid="side-panel"] > header > .dohc-section-label')?.textContent).toBe(name);
   }
 });
 

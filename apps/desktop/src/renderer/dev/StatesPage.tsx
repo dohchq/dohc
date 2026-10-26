@@ -2165,9 +2165,35 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="unknown: no cause dohc can name">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
         </Specimen>
-        <Specimen label="loading, then failed reads: words in Notices">
+        <Specimen label="History paused: the line heads the rows">
           <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }} paused expanded onToggle={noop}
+              onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="the first read: lines after 150 ms until it answers">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="while the workspace is read in: no deadline">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
+            <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <RetryRow testId="linked-chats-failed" onRetry={noop} />
+            </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
