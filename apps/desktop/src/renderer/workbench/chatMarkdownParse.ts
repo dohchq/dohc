@@ -29,6 +29,10 @@ export const CHAT_MARKDOWN_SYNC_LENGTH = 1024;
 // text too.
 export const CHAT_MARKDOWN_MAX_NODES = 16_000;
 export const CHAT_MARKDOWN_MAX_DEPTH = 64;
+// A tree holds a copy of each string a node repeats, such as a reference's
+// target, so a short body can build a large tree. One whose text and string
+// properties add up to more than this shows as text too.
+export const CHAT_MARKDOWN_MAX_CHARS = 2 * CHAT_MARKDOWN_MAX_LENGTH;
 
 export const SAFE_HREF = /^(?:https?:\/\/|mailto:)/iu;
 
@@ -175,16 +179,19 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
   const footnotes = new Set<string>();
   const notes: string[] = [];
 
-  const visit = (node: MdNodes, inLink: boolean) => {
+  // A footnote shows only when the text outside every footnote refers to it,
+  // and only its first definition shows.
+  const visit = (node: MdNodes, inLink: boolean, inNote: boolean) => {
     switch (node.type) {
       case "definition":
         hides = true;
         break;
       case "footnoteDefinition":
+        if (notes.includes(node.identifier)) hides = true;
         notes.push(node.identifier);
         break;
       case "footnoteReference":
-        footnotes.add(node.identifier);
+        if (!inNote) footnotes.add(node.identifier);
         break;
       case "link":
         if (node.title || !SAFE_HREF.test(node.url.trim())) hides = true;
@@ -205,13 +212,14 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
     if (!("children" in node)) return;
     const parent = node as MdParents;
     const link = inLink || node.type === "link" || node.type === "linkReference";
+    const note = inNote || node.type === "footnoteDefinition";
     const flow = FLOW_PARENTS.has(node.type);
     const children: MdNodes[] = [];
     for (const child of parent.children as MdNodes[]) {
       if (child.type === "html" && flow) children.push({ type: "paragraph", children: splitText(child.value) });
       else if (child.type === "text" || child.type === "html") children.push(...splitText(child.value));
       else {
-        visit(child, link);
+        visit(child, link, note);
         children.push(child);
       }
     }
@@ -240,7 +248,7 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
     return pieces;
   };
 
-  visit(tree, false);
+  visit(tree, false, false);
   if (notes.some((note) => !footnotes.has(note))) hides = true;
   return { hides };
 }
@@ -253,6 +261,8 @@ export interface ParsedChatMarkdown {
   copiesSource: boolean;
   nodes: number;
   depth: number;
+  // The length of every text value and string property in the tree.
+  chars: number;
 }
 
 // Parses a body with its chips. It can throw, as on a stack overflow; the
@@ -262,9 +272,16 @@ export function parseChatMarkdown(body: string, chips: readonly Chip[]): ParsedC
   const mdast = processor.parse(source);
   const { hides } = rewrite(mdast, texts);
   const tree = processor.runSync(mdast) as HastRoot;
-  const size = { nodes: 0, depth: 0 };
+  const size = { nodes: 0, depth: 0, chars: 0 };
   prune(tree, 1, size);
   return { tree, copiesSource: !hides, ...size };
+}
+
+// Whether a parsed tree is small enough to draw.
+export function withinChatMarkdownLimits(parsed: ParsedChatMarkdown): boolean {
+  return parsed.nodes <= CHAT_MARKDOWN_MAX_NODES &&
+    parsed.depth <= CHAT_MARKDOWN_MAX_DEPTH &&
+    parsed.chars <= CHAT_MARKDOWN_MAX_CHARS;
 }
 
 export interface ChatParseRequest {
@@ -279,7 +296,7 @@ export interface ChatParseRequest {
 export interface ChatParseAnswer {
   id: number;
   chips: Chip[];
-  parsed?: { tree: HastRoot; copiesSource: boolean };
+  parsed?: { tree: HastRoot; copiesSource: boolean; chars: number };
 }
 
 export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
@@ -288,17 +305,26 @@ export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
     chips = chatChips(request.body, request.candidates, request.attachments);
     if (request.body.length > CHAT_MARKDOWN_MAX_LENGTH) return { id: request.id, chips };
     const parsed = parseChatMarkdown(request.body, chips);
-    if (parsed.nodes > CHAT_MARKDOWN_MAX_NODES || parsed.depth > CHAT_MARKDOWN_MAX_DEPTH) return { id: request.id, chips };
-    return { id: request.id, chips, parsed: { tree: parsed.tree, copiesSource: parsed.copiesSource } };
+    if (!withinChatMarkdownLimits(parsed)) return { id: request.id, chips };
+    return { id: request.id, chips, parsed: { tree: parsed.tree, copiesSource: parsed.copiesSource, chars: parsed.chars } };
   } catch {
     return { id: request.id, chips };
   }
 }
 
-// Drops source positions, which the drawing does not use, and measures the tree.
-function prune(node: HastNodes, depth: number, size: { nodes: number; depth: number }) {
+// Drops source positions and titles, which the drawing does not use, and
+// measures the tree.
+function prune(node: HastNodes, depth: number, size: { nodes: number; depth: number; chars: number }) {
   delete node.position;
   size.nodes++;
   size.depth = Math.max(size.depth, depth);
+  if ("value" in node) size.chars += node.value.length;
+  if (node.type === "element") {
+    for (const value of Object.values(node.properties)) {
+      if (typeof value === "string") size.chars += value.length;
+      else if (Array.isArray(value)) for (const item of value) size.chars += String(item).length;
+    }
+    delete node.properties.title;
+  }
   if ("children" in node) for (const child of node.children) prune(child, depth + 1, size);
 }

@@ -20,7 +20,8 @@ import { activateReadOnlyLinkHref } from "../linkActivation";
 import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
-import { chatChips, fitsMainThread, parseChatMarkdown, SAFE_HREF, type Chip } from "./chatMarkdownParse";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { chatChips, fitsMainThread, parseChatMarkdown, SAFE_HREF, withinChatMarkdownLimits, type Chip } from "./chatMarkdownParse";
 import { parseChatInWorker } from "./chatMarkdownWorker";
 
 // A chat message's body, rendered as Markdown. Chat text comes from other
@@ -114,7 +115,7 @@ function CodeBlock(props: ExtraProps) {
       <pre className="m-0 overflow-x-auto whitespace-pre rounded-md border border-line bg-panel-2 px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">
         <code>{code}</code>
       </pre>
-      <div className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100">
+      <div data-chat-control className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100">
         <CopyButton iconOnly label="Copy code" getText={() => code} />
       </div>
     </div>
@@ -199,11 +200,13 @@ function drawTree(tree: HastRoot): ReactNode {
 }
 
 // The words of the body with its chips, as one paragraph with its line
-// breaks. `strip` drops Markdown syntax; a body without any skips it.
+// breaks. `strip` drops Markdown syntax; a body without any skips it. Before
+// its chips are known, page references still keep their names as typed.
 function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean }) {
+  const kept = props.chips.length > 0 || !props.strip ? props.chips : extractChatFileReferenceTokens(props.body);
   const { text, atoms } = props.strip
-    ? stripMarkdown(props.body, props.chips)
-    : { text: props.body, atoms: props.chips.map((chip, index) => ({ start: chip.start, end: chip.end, index })) };
+    ? stripMarkdown(props.body, kept)
+    : { text: props.body, atoms: kept.map((chip, index) => ({ start: chip.start, end: chip.end, index })) };
   const content: ReactNode[] = [];
   const pushText = (piece: string, key: number) =>
     piece.split(/\r?\n|\r/u).forEach((line, at) => {
@@ -213,7 +216,8 @@ function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean
   let cursor = 0;
   for (const atom of atoms) {
     pushText(text.slice(cursor, atom.start), cursor);
-    content.push(<ChipView key={`chip:${atom.start}`} index={atom.index}>{text.slice(atom.start, atom.end)}</ChipView>);
+    const words = text.slice(atom.start, atom.end);
+    content.push(props.chips[atom.index] ? <ChipView key={`chip:${atom.start}`} index={atom.index}>{words}</ChipView> : words);
     cursor = atom.end;
   }
   pushText(text.slice(cursor), cursor);
@@ -239,11 +243,12 @@ function copySource(event: ClipboardEvent<HTMLDivElement>, body: string, copiesS
 }
 
 // The first and last characters of the message's own text, leaving out
-// controls and live regions such as a code block's Copy and its "Copied".
+// controls and live regions such as a code block's Copy and its "Copied". A
+// page chip is a button, and its name is the message's text.
 function textEdges(root: HTMLElement) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
-      const control = node.parentElement?.closest("button, [aria-live], [role=status]");
+      const control = node.parentElement?.closest("[data-chat-control], [aria-live], [role=status]");
       if (control && root.contains(control)) return NodeFilter.FILTER_REJECT;
       return node.nodeValue?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
@@ -269,44 +274,54 @@ interface Drawn {
   content: ReactNode;
   chips: readonly Chip[];
   copiesSource: boolean;
+  // The text and string properties of its tree, which the cache counts.
+  chars: number;
 }
 
 const textOnly = (body: string, chips: readonly Chip[]): Drawn => ({
   content: <PlainText body={body} chips={chips} strip />,
   chips,
   copiesSource: false,
+  chars: 0,
 });
 
 // Drawn bodies of recent messages, so reopening a chat or scrolling back to a
 // message skips the parse, oldest dropped first past the size limit. The key
-// holds the body and what its chips depend on.
+// holds the body and what its chips depend on. An entry weighs its key and
+// the text its tree holds.
 export function createDrawnCache<Value>(maxChars: number) {
-  const entries = new Map<string, Value>();
+  const entries = new Map<string, { value: Value; weight: number }>();
   let chars = 0;
   return {
-    remember(key: string, value: Value) {
-      if (entries.delete(key)) chars -= key.length;
-      entries.set(key, value);
-      chars += key.length;
-      for (const [oldest] of entries) {
+    remember(key: string, value: Value, treeChars = 0) {
+      const known = entries.get(key);
+      if (known) {
+        entries.delete(key);
+        chars -= known.weight;
+      }
+      const weight = key.length + treeChars;
+      entries.set(key, { value, weight });
+      chars += weight;
+      for (const [oldest, entry] of entries) {
         if (chars <= maxChars) break;
         entries.delete(oldest);
-        chars -= oldest.length;
+        chars -= entry.weight;
       }
     },
     recall(key: string): Value | undefined {
-      const value = entries.get(key);
-      if (value !== undefined) {
+      const entry = entries.get(key);
+      if (entry !== undefined) {
         entries.delete(key);
-        entries.set(key, value);
+        entries.set(key, entry);
       }
-      return value;
+      return entry?.value;
     },
   };
 }
 
 const { remember, recall } = createDrawnCache<Drawn>(2_000_000);
-// Bodies the parser gave up on this session, by hash, so none is tried again.
+// Bodies the parser gave up on this session, by hash, so none is tried again
+// whatever its chips depend on.
 const gaveUp = new Set<number>();
 const parsing = new Map<string, Promise<Drawn>>();
 
@@ -325,15 +340,23 @@ function hash(text: string): number {
 }
 
 // Chips depend on the mention candidates and the attachments, so a body with
-// an "@" keys on them too, through a short id per distinct list.
+// an "@" keys on them too, through a short id per distinct list. Equal lists
+// share an id while the table holds them; past its size the table starts
+// again, and no id is reused, so a key never names another list's chips.
 const listIds = new WeakMap<object, string>();
 const contentIds = new Map<string, string>();
+const CONTENT_IDS_MAX = 64;
+let nextListId = 0;
 function listId(list: object, content: () => unknown): string {
   let id = listIds.get(list);
   if (id === undefined) {
     const text = JSON.stringify(content());
-    id = contentIds.get(text) ?? `${contentIds.size}`;
-    contentIds.set(text, id);
+    id = contentIds.get(text);
+    if (id === undefined) {
+      if (contentIds.size >= CONTENT_IDS_MAX) contentIds.clear();
+      id = `${nextListId++}`;
+      contentIds.set(text, id);
+    }
     listIds.set(list, id);
   }
   return id;
@@ -357,21 +380,26 @@ function drawNow(
   if (known) return known;
   if (!MARKDOWN_SYNTAX.test(body)) {
     const chips = chatChips(body, candidates, attachments);
-    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true };
+    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true, chars: 0 };
   }
   const sync = fitsMainThread(body);
-  if (gaveUp.has(hash(key))) return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
+  if (gaveUp.has(hash(body))) return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
   if (!sync) return null;
   const chips = chatChips(body, candidates, attachments);
-  let value: Drawn;
+  let value: Drawn | undefined;
   try {
     const parsed = parseChatMarkdown(body, chips);
-    value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource };
+    if (withinChatMarkdownLimits(parsed)) {
+      value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource, chars: parsed.chars };
+    }
   } catch {
-    gaveUp.add(hash(key));
+    value = undefined;
+  }
+  if (!value) {
+    gaveUp.add(hash(body));
     value = textOnly(body, chips);
   }
-  remember(key, value);
+  remember(key, value, value.chars);
   return value;
 }
 
@@ -388,16 +416,17 @@ function drawLater(
     let value: Drawn | undefined;
     if (answer?.parsed) {
       try {
-        value = { content: drawTree(answer.parsed.tree), chips: answer.chips, copiesSource: answer.parsed.copiesSource };
+        const { tree, copiesSource, chars } = answer.parsed;
+        value = { content: drawTree(tree), chips: answer.chips, copiesSource, chars };
       } catch {
         value = undefined;
       }
     }
     if (!value) {
-      gaveUp.add(hash(key));
+      gaveUp.add(hash(body));
       value = textOnly(body, answer?.chips ?? []);
     }
-    remember(key, value);
+    remember(key, value, value.chars);
     return value;
   });
   parsing.set(key, pending);

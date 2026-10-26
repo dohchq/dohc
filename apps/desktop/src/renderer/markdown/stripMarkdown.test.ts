@@ -26,6 +26,15 @@ describe("stripMarkdown", () => {
     expect(strip("\\*not bold\\* &amp; &#x41; &bogus; <https://example.com> <b>")).toBe(
       "*not bold* & A &bogus; https://example.com <b>",
     );
+    expect(strip("&constructor; &toString;")).toBe("&constructor; &toString;");
+    // A run with nothing to pair keeps its characters.
+    expect(strip("file_ and a* b and ~c and __init__")).toBe("file_ and a* b and ~c and init");
+  });
+
+  it("pairs emphasis across the lines of a paragraph, not across blocks", () => {
+    expect(strip("*one\ntwo* and ~~three\nfour~~")).toBe("one\ntwo and three\nfour");
+    expect(strip("- *one\n- two*")).toBe("• *one\n• two*");
+    expect(strip("*one\n\ntwo*")).toBe("*one\n\ntwo*");
   });
 
   it("drops reference definitions and table rules, and spaces table cells", () => {
@@ -61,6 +70,20 @@ describe("stripMarkdown", () => {
     expect(result.atoms).toEqual([]);
   });
 
+  it("ends a link's target at the parenthesis that balances its opener", () => {
+    expect(strip("See [the dish](https://en.wikipedia.org/wiki/Fish_(food)) today")).toBe("See the dish today");
+    expect(strip("See [a](https://x.com/\\)) and [b](https://x.com/\\() now")).toBe("See a and b now");
+    expect(strip("See [a](b (c) now")).toBe("See [a](b (c) now");
+  });
+
+  it("keeps an indented code block exactly", () => {
+    expect(strip("Run this:\n\n    notify **@sam** now\n\n\tand *this*\nthen **stop**")).toBe(
+      "Run this:\n\nnotify **@sam** now\n\nand *this*\nthen stop",
+    );
+    // An indented line inside a paragraph continues it.
+    expect(strip("text\n    more **words**")).toBe("text\nmore words");
+  });
+
   // The shapes that make Markdown parsers slow, at 50,000 characters. A strip
   // that rereads text would take seconds on several of them.
   const rep = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
@@ -68,6 +91,8 @@ describe("stripMarkdown", () => {
     nestedBrackets: rep("[", 25_000) + rep("]", 25_000),
     linkClosers: rep("a]", 50_000),
     linkOpeners: rep("[a](", 50_000),
+    balancedTargets: rep("[a](", 25_000) + rep(")", 25_000),
+    parens: rep("(", 25_000) + rep(")", 25_000),
     unclosedDestinations: rep("[a](b", 50_000),
     unclosedDestinationLines: rep("[a](b\n", 50_000),
     definitionLines: rep("[a\n", 50_000),

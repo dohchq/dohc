@@ -10,6 +10,8 @@
 // text; an atom inside syntax that the strip removes, like a link target, is
 // dropped.
 
+import { decodeNamedCharacterReference } from "decode-named-character-reference";
+
 export interface SourceRange {
   start: number;
   end: number;
@@ -54,7 +56,6 @@ const isAsciiPunctuation = (code: number) =>
 const isWhitespace = (code: number) => code <= SPACE || code === 0xa0 || code === 0x3000;
 const isWordCode = (code: number) => !isWhitespace(code) && !isAsciiPunctuation(code);
 
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0" };
 const ENTITY_MAX = 32;
 
 export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []): StrippedMarkdown {
@@ -83,6 +84,14 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   };
 
   let fence: { code: number; size: number } | null = null;
+  // An indented line opens a code block after a blank line, the start or a
+  // closed fence, and continues an open one.
+  let afterBlank = true;
+  let indented = false;
+  // Emphasis and strike runs that can still close, by character, while the
+  // paragraph they sit in continues.
+  const delimiters = new Map<number, Array<{ piece: number; size: number }>>();
+  let paragraph = false;
   let lineStart = 0;
   while (lineStart <= source.length) {
     let lineEnd = source.indexOf("\n", lineStart);
@@ -148,6 +157,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     const after = runEnd(at, end, open.code);
     if (after - at >= open.size && onlyOf(after, end, () => false, -1, 0)) {
       fence = null;
+      afterBlank = true;
       return false;
     }
     copy(start, end);
@@ -157,8 +167,20 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   // Strips one line outside a fence. Returns false for a line that holds only
   // syntax, so the line goes with its break.
   function stripLine(start: number, end: number): boolean {
+    const continues = paragraph;
+    paragraph = false;
+    if (onlyOf(start, end, () => false, -1, 0)) {
+      afterBlank = true;
+      return true;
+    }
+    const code = codeStart(start, end);
+    if (code >= 0 && (afterBlank || indented)) {
+      indented = true;
+      copy(code, end);
+      return true;
+    }
+    afterBlank = indented = false;
     let at = indentEnd(start, end);
-    if (at === end) return true;
     const first = source.charCodeAt(at);
     if (first === BACKTICK || first === TILDE) {
       const after = runEnd(at, end, first);
@@ -179,6 +201,9 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     }
 
     // Container and heading markers. Each pass takes at least one character.
+    // A list item or heading starts a new paragraph.
+    let opensBlock = false;
+    let heading = false;
     for (;;) {
       at = indentEnd(at, end);
       if (at >= end) return true;
@@ -190,6 +215,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       }
       if ((code === DASH || code === STAR || code === PLUS) && isBlank(next)) {
         pieces.push("• ");
+        opensBlock = true;
         at = skipTaskBox(at + 2, end);
         continue;
       }
@@ -200,6 +226,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
         const space = digits + 1 < end ? source.charCodeAt(digits + 1) : SPACE;
         if ((mark === DOT || mark === CLOSE_PAREN) && isBlank(space)) {
           pieces.push(`${source.slice(at, digits)}. `);
+          opensBlock = true;
           at = skipTaskBox(digits + 2, end);
           continue;
         }
@@ -207,6 +234,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       if (code === HASH) {
         const after = runEnd(at, end, HASH);
         if (after - at <= 6 && (after === end || isBlank(source.charCodeAt(after)))) {
+          opensBlock = heading = true;
           at = after;
           continue;
         }
@@ -224,8 +252,23 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       tableRow = true;
       at++;
     }
+    if (!continues || opensBlock || tableRow) delimiters.clear();
     stripInline(at, end, tableRow);
+    paragraph = !heading && !tableRow;
     return true;
+  }
+
+  // Where an indented code line's text starts, past four columns, or -1.
+  function codeStart(at: number, end: number): number {
+    let columns = 0;
+    for (let next = at; next < end; next++) {
+      const code = source.charCodeAt(next);
+      if (code === SPACE) columns++;
+      else if (code === TAB) columns += 4 - (columns % 4);
+      else return -1;
+      if (columns >= 4) return next + 1;
+    }
+    return -1;
   }
 
   function skipTaskBox(at: number, end: number): number {
@@ -250,11 +293,25 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       runsByLength.set(after - at, runs);
       at = after - 1;
     }
-    // The next ")" and "]" at or after a point. Each search starts past the
-    // last one found, so together they read the line once.
-    let paren = -1;
+    // The ")" that closes each "(" of the line, skipping escaped ones, so a
+    // link's target can hold balanced parentheses. Built when a link needs it.
+    let closers: Int32Array | undefined;
+    const closerOf = (open: number) => {
+      if (!closers) {
+        closers = new Int32Array(end - start).fill(-1);
+        const opens: number[] = [];
+        for (let at = start; at < end; at++) {
+          const code = source.charCodeAt(at);
+          if (code === BACKSLASH) at++;
+          else if (code === OPEN_PAREN) opens.push(at);
+          else if (code === CLOSE_PAREN && opens.length > 0) closers[opens.pop()! - start] = at;
+        }
+      }
+      return closers[open - start]!;
+    };
+    // The next "]" at or after a point. Each search starts past the last one
+    // found, so together they read the line once.
     let bracket = -1;
-    const nextOf = (code: number, from: number, last: number) => (last >= from ? last : find(code, from, end));
     // Pieces holding an unclosed "[" or "![", newest last.
     const openers: number[] = [];
     // The last non-blank character of a table row, whose pipe is dropped.
@@ -322,13 +379,22 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           const next = after < end ? source.charCodeAt(after) : SPACE;
           const left = !isWhitespace(next) && (!isAsciiPunctuation(next) || isWhitespace(before) || isAsciiPunctuation(before));
           const right = !isWhitespace(before) && (!isAsciiPunctuation(before) || isWhitespace(next) || isAsciiPunctuation(next));
-          const intraword = code === UNDERSCORE && isWordCode(before) && isWordCode(next);
-          const strike = code !== TILDE || after - at <= 2;
-          if ((left || right) && !intraword && strike) {
-            at = plain = after;
-            continue;
-          }
+          const size = after - at;
+          const strike = code !== TILDE || size <= 2;
+          const opens = strike && left && (code !== UNDERSCORE || !right || isAsciiPunctuation(before));
+          const closes = strike && right && (code !== UNDERSCORE || !left || isAsciiPunctuation(next));
+          // A run shows nothing only when it closes an earlier one in the
+          // paragraph, as the parser pairs them; strikes pair by length.
+          let open = delimiters.get(code);
+          const opener = open?.at(-1);
           pieces.push(source.slice(at, after));
+          if (closes && opener && (code !== TILDE || opener.size === size)) {
+            open!.pop();
+            pieces[opener.piece] = pieces[pieces.length - 1] = "";
+          } else if (opens) {
+            if (!open) delimiters.set(code, (open = []));
+            open.push({ piece: pieces.length - 1, size });
+          }
           at = plain = after;
           continue;
         }
@@ -347,15 +413,15 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           const opener = openers.pop();
           const next = at + 1 < end ? source.charCodeAt(at + 1) : -1;
           if (opener !== undefined && next === OPEN_PAREN) {
-            paren = nextOf(CLOSE_PAREN, at + 2, paren);
-            if (paren < end) {
+            const close = closerOf(at + 1);
+            if (close >= 0) {
               pieces[opener] = "";
-              at = plain = paren + 1;
+              at = plain = close + 1;
               continue;
             }
           }
           if (opener !== undefined && next === OPEN_BRACKET) {
-            bracket = nextOf(CLOSE_BRACKET, at + 2, bracket);
+            bracket = bracket >= at + 2 ? bracket : find(CLOSE_BRACKET, at + 2, end);
             if (bracket < end) {
               pieces[opener] = "";
               at = plain = bracket + 1;
@@ -415,7 +481,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 }
 
 function decodeEntity(name: string): string | undefined {
-  if (name.charCodeAt(0) !== HASH) return ENTITIES[name];
+  if (name.charCodeAt(0) !== HASH) return decodeNamedCharacterReference(name) || undefined;
   const hex = name[1] === "x" || name[1] === "X";
   const digits = name.slice(hex ? 2 : 1);
   if (!digits || digits.length > 7) return undefined;

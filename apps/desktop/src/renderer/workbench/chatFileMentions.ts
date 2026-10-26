@@ -1,7 +1,5 @@
 import type { ChatAttachmentRecord, ChatFileReferenceInput } from "../../ipc/bridgeContract";
-import { codeRanges } from "@dohc/workspace-contracts/chat-mentions";
-
-const FILE_REFERENCE_RE = /@\[([^\]\r\n#]+?)(?:#([^\]\r\n]+))?\]/gu;
+import { codeCover } from "@dohc/workspace-contracts/chat-mentions";
 
 function encodeReferenceComponent(value: string): string {
   // Keep ordinary paths human-readable while escaping the token grammar's
@@ -29,36 +27,63 @@ export interface ChatFileReferenceToken extends ChatFileReferenceInput {
   text: string;
 }
 
+// The tokens `@[path]` and `@[path#heading]` outside code, in order: a path
+// with no "#", then an optional "#" and a heading, neither empty, and no "]"
+// or line break before the closing "]". It reads one opener at a time from
+// the end of the last token, as a regular expression would, but every check
+// at an opener is a lookup into arrays built in one backward pass, so its
+// time grows linearly with the body.
 export function extractChatFileReferenceTokens(body: string): ChatFileReferenceToken[] {
   const tokens: ChatFileReferenceToken[] = [];
-  const inertRanges = codeRanges(body);
-  const inCode = (position: number) =>
-    inertRanges.some(([start, end]) => position >= start && position < end);
-  FILE_REFERENCE_RE.lastIndex = 0;
-  for (let match = FILE_REFERENCE_RE.exec(body); match; match = FILE_REFERENCE_RE.exec(body)) {
+  if (!body.includes("@[")) return tokens;
+  const length = body.length;
+  // From each index: the next "]" or line break, the next "#", and the next "@[".
+  const stopAt = new Int32Array(length + 1);
+  const hashAt = new Int32Array(length + 1);
+  const openerAt = new Int32Array(length + 1);
+  stopAt[length] = hashAt[length] = openerAt[length] = length;
+  for (let at = length - 1; at >= 0; at--) {
+    const char = body[at];
+    stopAt[at] = char === "]" || char === "\r" || char === "\n" ? at : stopAt[at + 1]!;
+    hashAt[at] = char === "#" ? at : hashAt[at + 1]!;
+    openerAt[at] = char === "@" && body[at + 1] === "[" ? at : openerAt[at + 1]!;
+  }
+  const inCode = codeCover(body);
+  for (let start = openerAt[0]!; start < length; ) {
+    const from = start + 2;
+    const stop = stopAt[from]!;
+    const hash = hashAt[from]!;
+    // The path runs to the first "#"; a heading after it is not empty.
+    const matched = stop < length && body[stop] === "]" && stop > from && hash > from && (hash >= stop || stop > hash + 1);
+    if (!matched) {
+      start = openerAt[start + 1]!;
+      continue;
+    }
+    const end = stop + 1;
+    const next = openerAt[end]!;
     // A nested opener means the whole same-line construct is malformed. Do
     // not reinterpret the inner-looking text as a second attachment token.
-    if (match[0].slice(2).includes("@[")) continue;
-    if (inCode(match.index)) continue;
-    const path = match[1] ? decodeReferenceComponent(match[1]) : undefined;
+    if (openerAt[from]! + 1 < stop || inCode(start)) {
+      start = next;
+      continue;
+    }
+    const path = decodeReferenceComponent(body.slice(from, Math.min(hash, stop)));
     // Edge spaces are legal filename bytes and the insertion formatter emits
     // them literally, so trim only to reject an empty/whitespace-only value.
-    if (!path || !path.trim()) continue;
-    const rawHeading = match[2];
-    const hasHeading = rawHeading !== undefined;
-    const headingAnchor = rawHeading !== undefined
-      ? decodeReferenceComponent(rawHeading.trim())
-      : undefined;
+    const rawHeading = hash < stop ? body.slice(hash + 1, stop) : undefined;
+    const headingAnchor = rawHeading !== undefined ? decodeReferenceComponent(rawHeading.trim()) : undefined;
     // Keep heading normalization unchanged, but reject an explicitly present
     // heading delimiter whose value is empty after normalization.
-    if (hasHeading && !headingAnchor) continue;
-    tokens.push({
-      path,
-      ...(headingAnchor ? { headingAnchor } : {}),
-      start: match.index,
-      end: match.index + match[0].length,
-      text: match[0],
-    });
+    if (path.trim() && (rawHeading === undefined || headingAnchor)) {
+      tokens.push({
+        path,
+        ...(headingAnchor ? { headingAnchor } : {}),
+        start,
+        end,
+        text: body.slice(start, end),
+      });
+    }
+    start = next;
   }
   return tokens;
 }
