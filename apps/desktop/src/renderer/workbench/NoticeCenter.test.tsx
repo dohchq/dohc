@@ -56,6 +56,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   pushUpdate = null;
@@ -67,6 +68,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       workspaceId={props.workspaceId ?? "ws-status-test"}
       {...(props.host ? { host: props.host } : {})}
       syncStatus={props.syncStatus ?? null}
+      {...(props.failedSaves !== undefined ? { failedSaves: props.failedSaves } : {})}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
@@ -1399,12 +1401,21 @@ describe("notice center", () => {
     ).toBeNull();
   });
 
+  // A retry with no reason raises its toast and row only once it has lasted 15 s.
+  const outlastQuietRetry = () => act(() => vi.advanceTimersByTime(15_000));
+  const serverUnreachable = {
+    state: "sync-failed" as const,
+    syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+  };
+
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
   // what it offers depends on whether anything can be dialled again.
   it("raises a toast and a notice with Copy while live delivery retries", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const onRetryLiveDelivery = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+    outlastQuietRetry();
 
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain("Live editing retrying");
@@ -1427,8 +1438,10 @@ describe("notice center", () => {
   });
 
   it("runs the shell's retry from the live delivery toast", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const onRetryLiveDelivery = vi.fn();
     renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+    outlastQuietRetry();
 
     await userEvent.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
@@ -1553,7 +1566,9 @@ describe("notice center", () => {
   });
 
   it("clears the live delivery toast and notice when delivery recovers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
 
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
@@ -1567,7 +1582,9 @@ describe("notice center", () => {
   // Status snapshots arrive on every workspace activity. A dismissed toast
   // must not come back because an equal snapshot was read again.
   it("does not raise the live delivery toast again for a repeated snapshot", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     await userEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
@@ -1582,32 +1599,169 @@ describe("notice center", () => {
 
   // A dismissal answers one workspace. The same failure in the next workspace
   // is news the user has not seen, so it must still be announced.
-  it("announces an identical live delivery failure in another workspace", async () => {
+  it("announces an identical live delivery failure in another workspace", () => {
+    vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
-    await userEvent.click(
+    outlastQuietRetry();
+    fireEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
 
+    // The other workspace's retry waits its own 15 s.
     rerender(
       noticeElement({
         workspaceId: "ws-status-other",
         syncStatus: liveDeliveryStatus("retrying"),
       }),
     );
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
   // Recovery forgets the dismissal, so the next failure is announced again.
   it("announces a new live delivery failure after a recovery", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     await userEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
 
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // Live editing needs the server. While the title bar names the server, the
+  // server's own toast and row report the outage, and live editing adds none.
+  it.each([
+    { label: "Server unreachable", server: serverUnreachable },
+    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
+  ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+
+    rerender(noticeElement({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+
+    // The server comes back: live editing prepares again, with no toast.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("preparing") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // Sync can come back before live editing tries again. Its ring shows once
+  // the server is back, and a retry that keeps failing toasts and adds its
+  // row 15 s after the ring returns.
+  it("announces a live retry that keeps failing 15 s after the server is back", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing retrying");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
+
+  // A healthy recovery tries again within about 10 s of the server coming
+  // back, so it never toasts or adds a row.
+  it("never announces a live retry that recovers within 15 s of the server coming back", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(10_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // A failed save or a required update takes the title bar's words from the
+  // server, so live editing reports its own state again.
+  it.each([
+    { label: "a file couldn't save", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
+  ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {
+    renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying", "document-unavailable"), ...status }, failedSaves });
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
+  });
+
+  // The server's report does not explain a named reason, so once the server
+  // is back it shows at once, with its toast.
+  it("announces a named live reason once the server is back", () => {
+    const paused = liveDeliveryStatus("retrying", "document-unavailable");
+    const { rerender } = renderNotices({ syncStatus: { ...paused, ...serverUnreachable } });
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    rerender(noticeElement({ syncStatus: paused }));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
+  });
+
+  // A retry dohc is still fixing by itself shows in the title bar at once,
+  // and adds a toast and a row only once it has lasted 15 s.
+  it("keeps a short live retry to the title bar", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    // It recovers in time, and the next retry waits its own 15 s.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
+
+  // A retry that turns active before its 15 s cancels the wait: no toast or
+  // row ever appears, however long live editing then stays active.
+  it("never announces a live retry that turns active before 15 s", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(14_999));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // A named reason stays until someone acts, so it does not wait.
+  it("shows a live retry at once when it gains a reason", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying", "document-unavailable") }));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
   });
 
   // Enrollment refusals are one boolean on the status: however many shares it
