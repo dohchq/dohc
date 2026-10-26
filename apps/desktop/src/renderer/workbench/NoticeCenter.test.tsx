@@ -1637,6 +1637,29 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
+  // Sync can come back before live editing tries again. The server's report
+  // already announced that retry, so it keeps its row but gets no toast.
+  it("does not announce a live retry the server's report covered", async () => {
+    const { rerender } = renderNotices({
+      syncStatus: {
+        ...liveDeliveryStatus("retrying"),
+        state: "sync-failed",
+        syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      },
+    });
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+
+    // Live editing tries again and recovers; a later failure is news.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
   // Enrollment refusals are one boolean on the status: however many shares it
   // covers, the user gets one announcement and one row, and the list is the
   // only surface that can name the files.

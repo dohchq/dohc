@@ -956,16 +956,23 @@ export function NoticeCenter(props: {
   // the title bar names the server, the server's own toast and row report
   // the outage, so live editing files nothing and its open toast closes.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
-  const liveDeliveryKey =
-    props.syncStatus?.ownerLiveDelivery === "retrying" && !syncNamesServer(props.syncStatus)
+  const liveRetryKey =
+    props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
+  const serverNamed = syncNamesServer(props.syncStatus);
+  const liveDeliveryKey = serverNamed ? null : liveRetryKey;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);
+  // The server's report announced this retry, so when the server is back
+  // and live editing has not tried again yet, the retry is not news.
+  if (serverNamed && liveRetryKey !== null && dismissedLiveDeliveryKey !== liveRetryKey) {
+    setDismissedLiveDeliveryKey(liveRetryKey);
+  }
   // Recovery forgets the dismissal, so the next failure is announced again
   // instead of staying silent behind an answer about an older one.
-  if (liveDeliveryKey === null && dismissedLiveDeliveryKey !== null) {
+  if (liveRetryKey === null && dismissedLiveDeliveryKey !== null) {
     setDismissedLiveDeliveryKey(null);
   }
   // Keyed, so an unchanged status keeps one copy object: the notice list and
