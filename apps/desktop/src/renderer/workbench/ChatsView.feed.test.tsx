@@ -7,7 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
 import { LinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
-import type { AboutNotices, AccessContext } from "./About";
+import type { AboutNotices } from "./About";
+import type { AccessContext } from "./accessReason";
 import {
   ChatsView,
   NOW,

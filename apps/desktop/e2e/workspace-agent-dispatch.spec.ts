@@ -169,6 +169,8 @@ test("My agent dispatches a fresh successful run for each human message", async 
     await expect(page.getByTestId("chats-run-popover")).toBeVisible();
     await expect(page.getByTestId("chats-run-command")).toHaveText(command);
     await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
+    // The command and log path wrap inside the popover, Copy included.
+    expect(await page.getByTestId("chats-run-popover").evaluate((popover) => popover.scrollWidth <= popover.clientWidth)).toBe(true);
 
     // A second committed human message is a second ledger trigger. The same
     // report text arriving again, attached to a distinct run chip, proves the

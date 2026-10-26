@@ -646,7 +646,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         const failures: unknown[] = [];
         do {
           const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
-          for (const draft of page.drafts) if (draft.pendingBytes > 0 && draft.state !== "quarantined") {
+          // A quarantined draft is listed only while its owner's Try again is pending; the drainer sends only that head.
+          for (const draft of page.drafts) if (draft.pendingBytes > 0) {
             try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) undelivered ??= draft.binding.currentPath;}
             catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
           }

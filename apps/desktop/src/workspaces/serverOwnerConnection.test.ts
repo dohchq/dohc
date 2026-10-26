@@ -3,6 +3,7 @@ import {createServerOwnerConnection} from "./serverOwnerConnection";
 import type {CloudCredentials} from "./cloudCredentialStore";
 import type {RegistryEntry} from "./registryStore";
 import {deferred} from "../testing/deferred";
+import {ServerKeptEditsConflict, ServerRecoveryCopyRefusedError} from "./ownerLiveQuarantine";
 
 function fixture() {
   let credentials: CloudCredentials | null = {serverUrl: "https://auth.test", relayUrl: "https://relay.test", userId: "owner", email: "owner@test", token: "secret"};
@@ -33,6 +34,50 @@ it("discovers only owned synced workspaces and sends credentials only to their p
   f.setCredentials(null);
   expect(f.connection.workspaceIds()).toEqual([]);
   await expect(session!.documents(new AbortController().signal)).rejects.toThrow("changed");
+});
+
+it("sends the owner's kept-edits actions to the owner route, and reads the list fresh after one changes it", async () => {
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  const signal = new AbortController().signal;
+  await session.documents(signal);
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true})));
+  const checkpointDigest = "c".repeat(64);
+  expect(await session.keptEdits({action: "copied", outboxId: "outbox", generation: 2, checkpointDigest}, signal)).toEqual({ok: true});
+  expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host/kept-edits", expect.objectContaining({method: "POST",
+    headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({action: "copied", outboxId: "outbox", generation: 2, checkpointDigest}), redirect: "error"}));
+  await session.documents(signal);
+  expect(f.fetch).toHaveBeenCalledTimes(3);
+  // A refusal that changed or is gone, and a Try again of edits an earlier copy keeps, answer as such; any other conflict keeps the server's words.
+  for (const [code, earlier] of [["kept-edits-changed", false], ["kept-edits-earlier", true]] as const) {
+    f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code, error: "x"}), {status: 409}));
+    const refused = session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal);
+    await expect(refused).rejects.toBeInstanceOf(ServerKeptEditsConflict);
+    await expect(refused).rejects.toMatchObject({earlier});
+  }
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "conflict", error: "Live editing is off for this document."}), {status: 409}));
+  await expect(session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal)).rejects.toThrow("Live editing is off for this document.");
+  // An earlier copy the server could not prepare says why, in the desktop's words; an unknown reason asks for a check.
+  for (const [reason, code, words] of [["disk-space", "disk-space", "Ask the server administrator to free disk space, then try again."],
+    ["newer-schema", "newer-schema", "Ask the server administrator to update dohc, then try again."],
+    ["busy", "busy", "The server is using the earlier workspace copy. Try again when it finishes."],
+    ["later", "server", "Ask the server administrator to check the server, then try again."]] as const) {
+    f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "kept-edits-unrecoverable", reason, error: "x"}), {status: 409}));
+    const refused = session.keptEdits({action: "page", outboxId: "outbox", generation: 2}, signal);
+    await expect(refused).rejects.toBeInstanceOf(ServerRecoveryCopyRefusedError);
+    await expect(refused).rejects.toMatchObject({code, message: words, name: "ServerRecoveryCopyRefusedError"});
+  }
+  // A page read names the previous page's cursor, and leaves the cached list alone.
+  const cursor = {snapshot: "s", part: "base", sequence: 0, offset: 0};
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, page: {kind: "readChanged"}})));
+  expect(await session.keptEdits({action: "page", outboxId: "outbox", generation: 2, cursor}, signal)).toEqual({ok: true, page: {kind: "readChanged"}});
+  expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host/kept-edits", expect.objectContaining({
+    body: JSON.stringify({action: "page", outboxId: "outbox", generation: 2, cursor})}));
+  // A later page of the list follows the cursor.
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, keptEdits: [], nextCursor: null})));
+  expect(await session.keptEditsPage(256, signal)).toEqual({ok: true, keptEdits: [], nextCursor: null});
+  expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host?kept=1&after=256", expect.objectContaining({headers: {authorization: "Bearer secret"}, redirect: "error"}));
+  f.fetch.mockResolvedValueOnce(new Response("{}", {status: 500}));
+  await expect(session.keptEditsPage(256, signal)).rejects.toThrow("discovery failed");
 });
 
 const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
@@ -152,11 +197,25 @@ it("rejects a late discovery response after disconnect or workspace rebinding", 
 });
 
 it("rejects discovery errors and bounds response bytes before parsing", async () => {
-  for (const response of [new Response("", {status: 403}), new Response("x".repeat(1_048_577))]) {
+  for (const [response, error] of [[new Response("", {status: 403}), "discovery failed"], [new Response("x".repeat(5 * 1024 * 1024)), "byte limit"]] as const) {
     const f = fixture(); f.fetch.mockResolvedValue(response);
     const session = await f.connection.connect(f.workspace, new AbortController().signal);
-    await expect(session!.documents(new AbortController().signal)).rejects.toThrow();
+    await expect(session!.documents(new AbortController().signal)).rejects.toThrow(error);
   }
+});
+
+// Proves: a full page of the edits the server kept fits its response limit
+// even when every row has the longest path, in characters UTF-8 spends three bytes on.
+it("reads a full page of kept edits whose paths are all as long as a path can be", async () => {
+  const keptEdits = Array.from({length: 256}, (_, index) => ({objectId: `object-${index}`, path: "界".repeat(4096), outboxId: "o".repeat(512),
+    reason: "invalid-update", generation: index + 1, store: "s".repeat(32), recovery: "paused"}));
+  const page = JSON.stringify({ok: true, keptEdits, nextCursor: null});
+  expect(Buffer.byteLength(page)).toBeGreaterThan(3 * 1024 * 1024);
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  f.fetch.mockResolvedValueOnce(new Response(page));
+  expect(await session.keptEditsPage(256, new AbortController().signal)).toEqual({ok: true, keptEdits, nextCursor: null});
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, documents: [], keptEdits, keptEditsCursor: 256})));
+  expect(await session.documents(new AbortController().signal)).toMatchObject({keptEdits: {length: 256}});
 });
 
 it("keeps the credential account when discovery contains a client-selected account", async () => {

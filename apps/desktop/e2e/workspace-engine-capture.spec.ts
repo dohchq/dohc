@@ -86,7 +86,7 @@ test("captures live edits and reconciles closed-period edits into the engine", a
     expect(offlineMoment?.text).toBe(
       "# Engine offline\n\nEdited while dohc was closed.\n",
     );
-    expect(offlineMoment?.summary).toBe("Reconciled offline edits");
+    expect(offlineMoment?.summary).toBe("Changed while dohc was closed");
 
     // Reconciliation is idempotent: the live file from session 1 must not
     // gain a second moment on relaunch (its content is unchanged).

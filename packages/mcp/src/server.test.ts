@@ -14,6 +14,10 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  // Refused live edits are kept only in the original workspace.
+  "dohc_save_recovery_copy",
+  "dohc_retry_kept_edits",
+  "dohc_stop_again",
   "dohc_delete_retained_copies",
   "dohc_publish_app",
   "dohc_write_file",
@@ -93,6 +97,27 @@ describe("share-level tool profiles", () => {
     const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
     expect(result.isError).not.toBe(true);
     expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
+  });
+
+  it("saves, tries again and stops again an owner's kept edits by path, refusing a path outside the workspace", async () => {
+    const root = await workspaceRoot();
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ root, home: base.home, request: async request => {
+      requests.push(request);
+      return request.verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+        : "incident" in request.args ? { ok: true, path: "plan.md" }
+        : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "this-computer", keptEdits: "kept" };
+    } });
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_retry_kept_edits", arguments: { path: "plan.md", incident: "outbox:delivery:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "plan.md", incident: "release:a:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "../other/plan.md" } })).isError).toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "../other/plan.md", incident: "release:a:0" } })).isError).toBe(true);
+    expect(requests).toEqual([
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "saveRecoveryCopy", args: { cwd: root, actor: "agent", path: "plan.md" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "retryKeptEdits", args: { cwd: root, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "stopAgain", args: { cwd: root, actor: "agent", path: "plan.md", incident: "release:a:0" } },
+    ]);
   });
 
   it("parses the --share-access flag", () => {

@@ -38,6 +38,8 @@ asar: true
 # A direct electron-builder invocation must not be able to silently omit the
 # engine sidecar. The hook throws before packaging if staging did not happen.
 beforePack: scripts/require-workspace-engine.mjs
+afterPack: scripts/prepare-engine-reader-macos.mjs
+afterSign: scripts/require-macos-signature.mjs
 extraResources:
   - from: scripts/compiler-node-LICENSE.txt
     to: engine-reader/node-LICENSE.txt
@@ -133,11 +135,36 @@ mac:
   # zip is required alongside dmg for macOS auto-updates (electron-updater).
   target: [dmg, zip]
   hardenedRuntime: true
+  # Sign Node, then pin its final bytes before the outer app is sealed.
+  sign: scripts/sign-engine-reader-macos.mjs
+  # Document types are set here, not in fileAssociations, which give each
+  # document the full app icon. With CFBundleTypeIconSystemGenerated, macOS
+  # draws a page with dohc's icon on it. dohc edits Markdown as its own
+  # documents, so it may be their default app, but it never claims to own the
+  # type. For text, CSV and JSON it stays an Open With choice and never
+  # replaces the app the person uses.
+  extendInfo:
+    CFBundleDocumentTypes:
+      - CFBundleTypeExtensions: [md, markdown]
+        CFBundleTypeName: dohc workspace document
+        CFBundleTypeRole: Editor
+        LSHandlerRank: Default
+        CFBundleTypeIconSystemGenerated: true
+      - CFBundleTypeExtensions: [txt, csv, json]
+        CFBundleTypeName: dohc workspace document
+        CFBundleTypeRole: Editor
+        LSHandlerRank: Alternate
+        CFBundleTypeIconSystemGenerated: true
 win:
   # Rendered from build/icon.svg by scripts/render-icon.mjs.
   icon: build/icon.ico
   signExts: ["!node.exe"]
   target: [nsis]
+  # The installer adds dohc to Open With for these types.
+  fileAssociations:
+    - ext: [md, markdown, txt, csv, json]
+      name: dohc workspace document
+      description: Open with dohc
 linux:
   # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
   # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
@@ -151,7 +178,7 @@ linux:
   target: [AppImage, deb]
   category: Office
   # A Linux desktop offers dohc under Open With only for the types its desktop
-  # entry names. These are the existing types of the associations below.
+  # entry names. These are the types dohc opens on macOS and Windows.
   mimeTypes: [text/markdown, text/plain, text/csv, application/json]
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
@@ -180,21 +207,6 @@ deb:
     - libsecret-1-0
     - libasound2t64 | libasound2
     - libgbm1
-
-# macOS ranks: dohc edits Markdown as its own documents, so it may be their
-# default app, but it never claims to own the type. For text, CSV and JSON it
-# stays an Open With choice and never replaces the app the person uses.
-fileAssociations:
-  - ext: [md, markdown]
-    name: dohc workspace document
-    description: Open with dohc
-    role: Editor
-    rank: Default
-  - ext: [txt, csv, json]
-    name: dohc workspace document
-    description: Open with dohc
-    role: Editor
-    rank: Alternate
 
 protocols:
   - name: dohc share link

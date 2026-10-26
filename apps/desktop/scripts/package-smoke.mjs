@@ -95,10 +95,10 @@ export async function probeAgentLaunchers(resources) {
     const competing = join(scratch, "competing");
     await mkdir(competing);
     await copyFile(process.execPath, join(competing, process.platform === "win32" ? "node.exe" : "node"));
-    const args = ["", "two words", "Icé 雪"];
+    const args = ["", "two words", "IcÃ© é›ª"];
     const bundled = agentRuntimeTarget(process.platform, process.arch) === "bundled";
     const input = Buffer.from([0, 10, 13, 255, 65]);
-    for (const label of ["Ice Test", "Icé"]) {
+    for (const label of ["Ice Test", "IcÃ©"]) {
       const copied = join(scratch, label, "resources");
       const cwd = join(scratch, label, "workspace", label);
       await mkdir(cwd, { recursive: true });
@@ -263,7 +263,7 @@ export function staticPackageSmoke() {
     }
 
     // Fuse hardening intent: electron-builder >=24.12 flips these itself via
-    // @electron/fuses at package time — no afterPack hook needed.
+    // @electron/fuses at package time â€” no afterPack hook needed.
     const FUSE_EXPECTATIONS = {
       runAsNode: false,
       enableCookieEncryption: true,
@@ -302,15 +302,20 @@ export function staticPackageSmoke() {
         `publish URL is release-ready (${publishConfig?.url ?? "missing"})`,
       );
     }
-    const fileExtensions = config.fileAssociations?.flatMap((entry) =>
-      Array.isArray(entry.ext) ? entry.ext : [entry.ext],
-    ) ?? [];
+    // fileAssociations would give each macOS document the full app icon.
+    check(!config.fileAssociations && !config.mac?.fileAssociations, "macOS document types come only from mac.extendInfo");
+    const macTypes = config.mac?.extendInfo?.CFBundleDocumentTypes ?? [];
+    check(
+      macTypes.length > 0 && macTypes.every((type) => type.CFBundleTypeIconSystemGenerated === true),
+      "macOS draws the icon of every dohc document type",
+    );
+    const windowsExtensions = config.win?.fileAssociations?.flatMap((entry) => [entry.ext].flat()) ?? [];
     // Markdown may make dohc its default app; text, CSV and JSON never do.
     const expectedRanks = { md: "Default", markdown: "Default", txt: "Alternate", csv: "Alternate", json: "Alternate" };
     for (const [ext, rank] of Object.entries(expectedRanks)) {
-      check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
-      const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
-      check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
+      check(windowsExtensions.includes(ext), `Windows Open with dohc includes .${ext}`);
+      const ranks = macTypes.filter((type) => type.CFBundleTypeExtensions?.includes(ext)).map((type) => type.LSHandlerRank);
+      check(ranks.length === 1 && ranks[0] === rank, `macOS .${ext} has one document type, ranked ${rank} (${ranks.join(", ") || "missing"})`);
     }
     // A Linux desktop entry names types, not extensions.
     for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
@@ -370,7 +375,6 @@ export function staticPackageSmoke() {
     process.exit(1);
   }
   console.log("\nPackage smoke passed.");
-
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

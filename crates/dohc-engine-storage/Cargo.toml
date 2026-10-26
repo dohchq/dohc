@@ -13,10 +13,13 @@ description = "SQLite storage for the workspace engine: one writable connection 
 # lane (provably zero overhead). Enabled by `dohc-engine-testkit` for the
 # in-process crash tier and by `cargo test --workspace` via feature unification.
 fault-injection = []
+# Builds stores an older build left, for other crates' tests.
+test-support = []
 
 [dependencies]
-# `hooks` counts open work and search changes; `functions` exposes the search counter.
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
+# `hooks` counts open work and search changes; `functions` exposes the search counter;
+# `backup` copies an earlier store for its recovery copy.
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions", "backup"] }
 sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a

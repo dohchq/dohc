@@ -767,6 +767,8 @@ fn append_inner(
         || bytes >= CHECKPOINT_BYTES
         || event.metadata.checkpoint_coverage.is_some()
     {
+        // Native application and adoption still answer a missing dependency
+        // as a conflict.
         let history = reconstruction
             .map(|policy| {
                 read_state(
@@ -775,6 +777,10 @@ fn append_inner(
                     event.metadata.accepted.receipt.journal_cursor,
                     policy,
                 )
+                .map_err(|error| match error {
+                    ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                    error => error,
+                })
             })
             .transpose()?;
         let doc = restored

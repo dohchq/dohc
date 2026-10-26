@@ -26,6 +26,15 @@ describe("ChatAvatar initials", () => {
     expect(screen.getByTitle(name, { normalizer: (value) => value }).textContent).toBe(initial);
   });
 
+  it("shows one initial at the strip size and two at the others", () => {
+    render(<ChatAvatar presentation={neutralPresentation} name="William White" kind="human" size="strip" />);
+    render(<ChatAvatar presentation={neutralPresentation} name="Wren Webb" kind="link" size="strip" />);
+    render(<ChatAvatar presentation={neutralPresentation} name="Walt Wise" kind="human" size="comment" />);
+    expect(screen.getByTitle("William White").textContent).toBe("W");
+    expect(screen.getByTitle("Wren Webb").textContent).toBe("W");
+    expect(screen.getByTitle("Walt Wise").textContent).toBe("WW");
+  });
+
   it("keeps an emoji code point intact when Segmenter is unavailable", async () => {
     vi.stubGlobal("Intl", { Segmenter: undefined });
     vi.resetModules();

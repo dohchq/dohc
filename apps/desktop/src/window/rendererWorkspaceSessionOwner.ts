@@ -164,6 +164,10 @@ export class RendererWorkspaceSessionOwner<
     return session?.isCurrent() ? session : undefined;
   }
 
+  currentDocumentId(sender: Sender): string | undefined {
+    return this.#statesBySender.get(sender)?.rendererDocumentId;
+  }
+
   /** How many sessions this renderer has been admitted. Read-only. */
   admittedCount(sender: Sender): number {
     return this.#statesBySender.get(sender)?.admitted ?? 0;

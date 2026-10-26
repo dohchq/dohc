@@ -59,6 +59,8 @@ describe("CLI, MCP, and app channel reference", () => {
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       // dohc_workspace_status reports it as its `collectionsWaiting` field.
       "collectionsWaiting",
+      // dohc document kept-edits prints it; dohc_workspace_status reports it as `keptEdits`.
+      "liveKeptEdits",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);

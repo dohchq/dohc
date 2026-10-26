@@ -55,6 +55,14 @@ it.each([[{pushed:0,hasMore:true}],[{pushed:1,hasMore:true}]])(
     expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
   });
 
+it("keeps a fence held back by an update awaiting its dependency pending, as for publication",async()=>{
+  const waiting={status:"pending",reason:"accepted-state-incomplete"};
+  const f=restore([waiting,waiting],async()=>({pushed:0}));
+  await expect(f.stopped).resolves.toEqual({kind:"pending",reason:"accepted-state-incomplete"});
+  expect(f.calls).toEqual(["liveApplication.fenceRestore","publish","liveApplication.fenceRestore"]);
+  expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
+});
+
 it("does not ask again for the fence after failed publication",async()=>{
   const f=restore([refused],async()=>{throw new Error("the relay stopped answering");});
   await expect(f.stopped).rejects.toThrow("stopped answering");
