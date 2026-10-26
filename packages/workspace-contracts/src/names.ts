@@ -1,11 +1,26 @@
 const encoder = new TextEncoder();
 export const nameByteLength = (value: string): number => encoder.encode(value).byteLength;
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+// Created on first use, since some renderers load this module without Intl.Segmenter.
+let graphemeSegmenter: Intl.Segmenter | undefined;
+
+function graphemes(value: string): Iterable<{ segment: string; index: number }> {
+  if (typeof Intl.Segmenter !== "function") return codePoints(value);
+  graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  return graphemeSegmenter.segment(value);
+}
+
+function* codePoints(value: string): Generator<{ segment: string; index: number }> {
+  let index = 0;
+  for (const segment of value) {
+    yield { segment, index };
+    index += segment.length;
+  }
+}
 
 export function truncateName(value: string, maxBytes: number): string {
   let bytes = 0;
-  for (const { segment, index } of graphemeSegmenter.segment(value)) {
+  for (const { segment, index } of graphemes(value)) {
     bytes += nameByteLength(segment);
     if (bytes > maxBytes) return value.slice(0, index);
   }
