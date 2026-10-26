@@ -486,12 +486,11 @@ export function AgentList(props: {
     })());
   };
 
-  // Undo puts the agent back under the name and settings it had, after the
-  // entry it followed, or first when that entry is gone. Every other entry
-  // keeps its place in the file as it is then. An agent in the file with its
-  // id by then stays.
+  // Undo puts the agent back under the name and settings it had, where it
+  // was (`placeBack`). Every other entry keeps its place in the file as it is
+  // then. An agent in the file with its id by then stays.
   const remove = async (agent: Agent) => {
-    const before = fileOrder[fileOrder.indexOf(agent.id) - 1];
+    const [before, after] = neighbours(agent.id);
     const { [agent.id]: entry, ...agents } = settings.agents;
     if (!entry) return;
     const saved = await onSave({ ...settings, agents });
@@ -518,8 +517,7 @@ export function AgentList(props: {
         keep(holder);
         return;
       }
-      const order = agentListRows(current, file.agentProblems).map(rowId);
-      order.splice(before === undefined ? 0 : order.indexOf(before) + 1, 0, agent.id);
+      const order = placeBack(agentListRows(current, file.agentProblems).map(rowId), agent.id, before, after);
       // Saved from the file just read, so main refuses it if the agent came back since.
       try {
         await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agent.id]: entry } }, base: current });

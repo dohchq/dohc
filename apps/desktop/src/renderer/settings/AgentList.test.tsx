@@ -363,7 +363,7 @@ it("puts a removed agent back after the one it followed, in the order the file h
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["codex", "terminal", "default"], "dohc brought back Claude in Terminal but could not put it back in its place."));
   expect(Object.keys(bridgeMock.setUserSettings.mock.lastCall![0].settings.agents)).toEqual(["codex", "default", "terminal"]);
 
-  // An agent whose entry before it is gone goes back first.
+  // An agent whose neighbours are both gone goes back first.
   cleanup();
   const second = renderList();
   await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
@@ -372,6 +372,25 @@ it("puts a removed agent back after the one it followed, in the order the file h
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude! } }, source: "stored" });
   second.onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(second.onOrder).toHaveBeenCalledWith(["terminal", "default"], expect.any(String)));
+});
+
+it("puts a removed first agent back in front of the one after it, so a later automations choice stays", async () => {
+  const codex = testAgent({ name: "Codex", hue: "blue" });
+  const claude = testAgent({ name: "Claude Code" });
+  const gemini = testAgent({ name: "Gemini", hue: "teal" });
+  const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+  // Gemini was then chosen for automations.
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, default: claude } }, source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex", "default"], expect.any(String)));
+
+  // With Claude Code gone too, Codex goes back first.
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["codex", "gemini"], expect.any(String)));
 });
 
 it("removes an agent, and Undo puts it back where it was", async () => {
