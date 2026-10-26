@@ -1,6 +1,6 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, LoaderCircle, MessageSquare, Reply, RotateCw, Sparkles, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, LoaderCircle, MessageSquare, Reply, RotateCw, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -99,9 +99,7 @@ function StoppedRunLine(props: {
       data-ending={props.stopped.ending}
       className={`flex items-center gap-2 text-[11px] text-subtle ${props.className}`}
     >
-      <span aria-hidden className="inline-grid size-[18px] shrink-0 place-items-center rounded border border-line text-agent">
-        <Sparkles size={10} strokeWidth={1.9} />
-      </span>
+      <span aria-hidden className="size-1.5 rounded-full bg-warning" />
       <span role="status">{props.stopped.ending === "quit" ? "Stopped when dohc quit" : "Stopped when dohc restarted"}</span>
       {props.onRetry ? (
         <SecondaryButton
