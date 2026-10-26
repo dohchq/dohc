@@ -6,7 +6,7 @@ import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
-  AgentColors, StoredUserSettingsResult, firstAgent, firstAgentWithLaunch, rendererUserSettingsResult,
+  AgentColors, StoredUserSettingsResult, firstAgent, rendererUserSettingsResult, runnableAgents,
   settingsDeepEqual,
   type DesktopUserSettings,
   type ThemeMode,
@@ -100,12 +100,12 @@ export function createSettingsIpc<
     if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
     await refreshDispatchTray();
-    const agent = firstAgentWithLaunch(result.settings);
-    if (!agent?.enabled) return;
-    // A scan finds messages that wait for the agent. Only a change to the
-    // agent that answers can make one due, so a zoom step does not scan
-    // every open workspace.
-    if (settingsDeepEqual(firstAgentWithLaunch(previous.settings), agent)) return;
+    const agents = runnableAgents(result.settings);
+    if (agents.length === 0) return;
+    // A scan gives each agent dohc starts its chat and finds the messages
+    // that wait for it. Only a change to those agents can make one due, so a
+    // zoom step does not scan every open workspace.
+    if (settingsDeepEqual(runnableAgents(previous.settings), agents)) return;
     for (const workspace of openDispatchWorkspaces()) {
       void chatDispatchService.scanWorkspace(workspace.workspaceId).then(() => {
         notifyRenderer({ workspaceId: workspace.workspaceId });

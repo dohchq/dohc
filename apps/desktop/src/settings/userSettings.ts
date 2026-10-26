@@ -113,6 +113,12 @@ export function firstAgent(settings: Pick<DesktopUserSettings, "agents">): Agent
 }
 
 export type AgentWithLaunch = Agent & { launch: AgentLaunch };
+/** The agents dohc starts: each one that is on and has a way to start. */
+export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch[] {
+  return listAgents(settings).flatMap((agent) =>
+    agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : []);
+}
+
 /** The first agent when dohc can start it, else null. */
 export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
   const agent = firstAgent(settings);

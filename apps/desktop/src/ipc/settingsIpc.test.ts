@@ -19,7 +19,7 @@ import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "..
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
-import { settingsWithAgent } from "../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
@@ -334,6 +334,21 @@ describe("registered settings IPC", () => {
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(3);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("scans when any agent dohc starts changes, not only the first", async () => {
+    const h = await harness();
+    const one = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: one, base: DEFAULT_USER_SETTINGS });
+    await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
+    h.scanWorkspace.mockClear();
+    const off = { ...one, agents: { ...one.agents, codex: testAgent({ name: "Codex", enabled: false }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: one });
+    // An agent that is off does not change what dohc starts.
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
+    await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
   });
 
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
