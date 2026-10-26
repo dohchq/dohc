@@ -333,6 +333,43 @@ describe("active file sharing", () => {
     });
   });
 
+  it("opens the same dialog from the palette's Share… for the active file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).getAllByRole("option").map((row) => row.textContent)).toEqual(["Share…"]);
+    await user.keyboard("{Enter}");
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+  });
+
+  // The palette hides Share… whenever the toolbar draws no Share file.
+  it.each<[string, Workspace | undefined, string[]]>([
+    ["no editor shows a file", undefined, []],
+    ["the workspace is a shared view", SHARE_VIEW, ["a.md"]],
+    ["the file is in a received share", undefined, ["shared-with-me/sam/a.md"]],
+  ])("offers no Share… when %s", async (_name, workspace, tabs) => {
+    const bridge = (workspace ? makeShareBridge : makeBridge)(Promise.resolve(storedStateWithTabs(tabs)));
+    const user = userEvent.setup();
+    renderShell(bridge, workspace);
+    if (workspace) await settleShareView();
+    if (tabs.length > 0) await screen.findByTestId("file-inspector");
+    expect(screen.queryByTestId("file-share")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).queryAllByRole("option")).toEqual([]);
+    expect(within(palette).getByText("No matching commands")).toBeTruthy();
+  });
+
   // Share reads the same facts as About's Access, and its one action opens
   // the place that fixes the cause, where About's would.
   it.each([

@@ -161,7 +161,7 @@ The look in one line: warm paper, quiet graphite, one sans for every word of the
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
@@ -201,6 +201,9 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
 Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
 Never uppercase a label.
+
+Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
+`PathLine` in `ui/PathLine.tsx` draws it.
 
 ### Radius and elevation
 

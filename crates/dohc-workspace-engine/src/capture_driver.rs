@@ -59,6 +59,10 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
     #[cfg(test)]
+    task_stop: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    task_stop_panics: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
     reconcile_refused: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     capture_batch_wait: Option<Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
@@ -631,6 +635,21 @@ impl CaptureApplyProbe {
             }
             *released = false;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_task_for_test(&self, panic: bool) {
+        self.task_stop_panics.store(panic, Ordering::Release);
+        self.task_stop.notify_one();
+    }
+
+    #[cfg(test)]
+    async fn stop_task_if_requested(&self) {
+        self.task_stop.notified().await;
+        assert!(
+            !self.task_stop_panics.load(Ordering::Acquire),
+            "capture task test panic"
+        );
     }
 
     fn fail_before_worker_if_armed(&self) -> bool {
@@ -1237,6 +1256,8 @@ impl CaptureDriver {
             }
         }));
         let drive_import_priority = Arc::clone(&import_priority);
+        #[cfg(test)]
+        let stop_probe = apply_probe.clone();
         let task = tokio::spawn(async move {
             let mut env = RealEnv {
                 observation,
@@ -1259,14 +1280,25 @@ impl CaptureDriver {
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
             };
-            drive_loop(
+            let run = drive_loop(
                 &mut env,
                 drive_cancel,
                 drive_status,
                 open_ready_tx,
                 flush_rx,
-            )
-            .await;
+            );
+            #[cfg(not(test))]
+            run.await;
+            #[cfg(test)]
+            tokio::select! {
+                () = run => {}
+                () = async {
+                    let Some(probe) = stop_probe else {
+                        return std::future::pending().await;
+                    };
+                    probe.stop_task_if_requested().await;
+                } => {}
+            }
         });
         CaptureDriver {
             cancel,
@@ -1341,6 +1373,25 @@ impl CaptureDriver {
 
     pub(crate) fn status(&self) -> &Arc<DriverStatus> {
         &self.status
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| task.is_finished())
+    }
+
+    /// A finished task cannot update its status or recover on a later tick.
+    pub(crate) fn status_snapshot(&self) -> StatusSnapshot {
+        let snapshot = self.status.snapshot();
+        if self.is_finished() {
+            StatusSnapshot {
+                running: false,
+                degraded: true,
+                terminal: true,
+                phase: CapturePhase::Degraded,
+            }
+        } else {
+            snapshot
+        }
     }
 
     /// Ask a running fresh import to capture `path` next. It does nothing

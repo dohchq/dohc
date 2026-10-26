@@ -581,6 +581,39 @@ describe("history page updating retries", () => {
     expect(listHistory).toHaveBeenCalledTimes(5);
   });
 
+  it("keeps saying History is updating through a refresh until a page or a failure replaces it", async () => {
+    vi.useFakeTimers();
+    const it0 = mount();
+    const ladder = async () => {
+      const issued = reads.length;
+      const refresh = it0.refresh();
+      for (const [attempt, delay] of [100, 250, 500, 1_000].entries()) {
+        await settle(reads[issued + attempt]!, UPDATING);
+        await advance(delay);
+      }
+      await settle(reads[issued + 4]!, UPDATING);
+      await refresh;
+    };
+    await ladder();
+    expect(it0.hook().readState).toBe("updating");
+
+    const failing = it0.refresh();
+    const failed = expect(failing).rejects.toThrow("engine stopped");
+    expect(it0.hook().readState).toBe("updating");
+    await fail(reads[5]!, "engine stopped");
+    await failed;
+    expect(it0.hook().readState).toBe("failed");
+
+    await ladder();
+    const paging = it0.refresh();
+    expect(it0.hook().readState).toBe("updating");
+    await settle(reads[11]!, page("ready"));
+    await paging;
+    expect(it0.ids()).toEqual(["ready"]);
+    // A page dropped later is not known yet, not still updating.
+    expect(it0.hook().readState).toBe("loading");
+  });
+
   it("commits the page an updating answer is followed by", async () => {
     vi.useFakeTimers();
     const it0 = mount();
