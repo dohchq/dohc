@@ -935,19 +935,19 @@ export function GraphView(props: {
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <GitFork size={13} aria-hidden className="text-subtle" />
-        <output data-testid="graph-doc-count" className="font-mono text-[11px] text-muted">
+        <output data-testid="graph-doc-count" className="text-[11px] text-muted">
           {graph.nodes.length} doc{graph.nodes.length === 1 ? "" : "s"}
         </output>
         <span aria-hidden className="text-subtle">
           ·
         </span>
-        <output data-testid="graph-link-count" className="font-mono text-[11px] text-muted">
+        <output data-testid="graph-link-count" className="text-[11px] text-muted">
           {graph.edges.length} link{graph.edges.length === 1 ? "" : "s"}
         </output>
         {notice ? (
           <span
             data-testid="graph-unresolved-count"
-            className="inline-flex items-center gap-1.5 font-mono text-[11px] text-subtle"
+            className="inline-flex items-center gap-1.5 text-[11px] text-subtle"
           >
             <ListFilter size={12} aria-hidden />
             {notice}
@@ -1035,14 +1035,14 @@ export function GraphView(props: {
                           : "text-muted hover:bg-hover hover:text-ink"
                       }`}
                     >
-                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 font-mono text-[10px] text-subtle">
+                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 text-[10px] font-semibold tabular-nums text-subtle">
                         {degree(node)}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] text-ink">
                           {node.title}
                         </span>
-                        <span className="block truncate font-mono text-[10px] text-subtle">
+                        <span className="block truncate text-[10px] text-subtle">
                           {node.kind === "heading"
                             ? node.filePath
                             : node.kind === "chat-thread"
@@ -1050,7 +1050,7 @@ export function GraphView(props: {
                               : node.path}
                         </span>
                       </span>
-                      <span className="font-mono text-[10px] text-subtle">
+                      <span className="text-[10px] tabular-nums text-subtle">
                         {node.incoming}/{node.outgoing}
                       </span>
                     </button>

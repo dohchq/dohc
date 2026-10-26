@@ -107,7 +107,7 @@ export function AgentBadge(props: {
             setOpen(false);
           }
         }}
-        className="inline-flex rounded font-mono text-[10px]"
+        className="inline-flex rounded"
       >
         <Sparkles size={12} strokeWidth={1.9} aria-hidden />
         <span className="sr-only">agent</span>
