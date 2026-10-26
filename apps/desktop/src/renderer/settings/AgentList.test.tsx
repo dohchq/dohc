@@ -138,13 +138,22 @@ it("checks the agent again from the failed check's toast", async () => {
   expect(bridgeMock.runnerSelfTest).toHaveBeenLastCalledWith({ workspaceId: "ws-1", agentId: "codex" });
   expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
 
-  // While another check runs, the toast's Try again waits for the row's.
+  // While Check can't start, Try again says why, and can be tried again.
   const running = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(running.promise);
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
   await act(() => retry());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
+  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
+    ["Cause", "A check is already running. Try again when it finishes."],
+  ]);
   await act(async () => running.resolve({ ok: true, detail: "self-test ok" }));
+  act(() => pausedListener?.({ paused: true }));
+  await act(() => retry());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
+  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
+    ["Cause", "Agents are paused. Resume them, then try again."],
+  ]);
 });
 
 it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {

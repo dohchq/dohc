@@ -393,12 +393,19 @@ export function AgentList(props: {
   const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
   const fileOrder = rows.map((row) => (row.kind === "agent" ? row.agent.id : row.problem.id));
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn);
-  // Try again on a failed check's toast runs only when Check could.
-  const checkable = useRef(false);
-  checkable.current = !paused && checking === null && checkNote === null;
+  // Why Check can't start now. Try again on a toast can come at such a time.
+  const checkBlocked = useRef<string | null>(null);
+  checkBlocked.current = checkNote
+    ?? (paused ? "Agents are paused. Resume them, then try again." : null)
+    ?? (checking !== null ? "A check is already running. Try again when it finishes." : null);
   const config = props.config;
 
   const check = useCallback(async (agent: Agent) => {
+    const blocked = checkBlocked.current;
+    if (blocked !== null) {
+      onError?.(`dohc could not check ${agent.name}.`, undefined, () => check(agent), [["Cause", blocked]]);
+      return;
+    }
     const token = requests.current();
     setChecking(agent.id);
     const started = performance.now();
@@ -408,9 +415,7 @@ export function AgentList(props: {
       if (!requests.isCurrent(token)) return;
       // The toast names the agent and checks it again; why, and its log, go in the details.
       if (!result.ok) {
-        onError?.(`${agent.name} didn't reply to the check.`, undefined, async () => {
-          if (checkable.current) await check(agent);
-        }, [
+        onError?.(`${agent.name} didn't reply to the check.`, undefined, () => check(agent), [
           ["Cause", result.detail],
           ...(result.logPath ? [["Log", result.logPath] as const] : []),
         ]);
