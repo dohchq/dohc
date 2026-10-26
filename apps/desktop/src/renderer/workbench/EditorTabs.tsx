@@ -973,7 +973,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           as they were after the tab row. Empty for a tab with none. When
           room runs out they give way before the tab names (a far higher
           shrink factor than the tab list's), and stop at their buttons and
-          the status's 25px minimum, their automatic minimum width. */}
+          the status's 28px minimum, their automatic minimum width. */}
       <div
         ref={props.actionsRef}
         data-testid="editor-tab-actions"

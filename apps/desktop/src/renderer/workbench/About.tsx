@@ -163,7 +163,7 @@ export function AboutSection(props: {
         >
           <Icon size={12} strokeWidth={1.9} aria-hidden />
           {props.label}
-          <span className="ml-auto flex items-center gap-2 font-mono text-[11px] font-normal normal-case tracking-normal">
+          <span className="ml-auto flex items-center gap-2 text-[11px] font-normal tabular-nums normal-case tracking-normal">
             {props.count !== undefined ? (
               <span data-testid={`about-${props.id}-count`}>{props.count}</span>
             ) : null}
@@ -713,7 +713,7 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-2">
           <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
-          <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">
+          <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
             {formatShortTime(mention.message.createdAtMs)}
           </time>
         </span>
@@ -973,7 +973,7 @@ export function AboutHistoryView(props: {
                   <MomentAuthor moment={moment} fallback={FILE_MARK} />
                   <span className="min-w-0 flex-1 truncate">{engineMomentSummary(moment)}</span>
                   <span className="sr-only">{source}</span>
-                  <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">
+                  <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
                     {formatShortTime(moment.recordedAtMs)}
                   </time>
                 </button>
@@ -1066,7 +1066,7 @@ function AccessRowView(props: { row: AccessRow }) {
       )}
       <span className="min-w-0 flex-1 truncate">{who}</span>
       {row.status !== "active" ? (
-        <span className="shrink-0 font-mono text-[11px] text-subtle">
+        <span className="shrink-0 text-[11px] text-subtle">
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
@@ -1186,7 +1186,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
           title={formatChatTime(answer.checkedAtMs).label}
-          className="shrink-0 font-mono text-[11px] text-subtle"
+          className="shrink-0 text-[11px] tabular-nums text-subtle"
         >
           {formatShortTime(answer.checkedAtMs)}
         </time>
