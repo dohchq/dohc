@@ -1,4 +1,4 @@
-import type { ChatDispatchNotice } from "../ipc/bridgeContract";
+import type { ChatDispatchNotice, ChatDispatchStoppedRun } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
@@ -209,15 +209,6 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
     post(input: PostNoticeInput): Promise<void>;
     owed: OwedRunNotices;
   };
-}
-
-// A conversation's latest run, when dohc's restart or quit stopped it.
-interface ChatDispatchStoppedRun {
-  runId: string;
-  triggerMessageId: string;
-  ending: "restarted" | "quit";
-  // Whether Try again can run its request once more.
-  retryable: boolean;
 }
 
 interface ChatDispatchThreadState {
