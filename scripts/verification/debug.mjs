@@ -43,6 +43,7 @@ const directory = join(repoRoot, ".agent-artifacts/debug", randomUUID());
 const profile = join(directory, "profile");
 const workspace = join(directory, "workspace");
 let session;
+let forgetLink;
 let leaveStartup;
 let launching;
 let interrupted = false;
@@ -53,12 +54,13 @@ const logs = [];
 try {
   await prepare();
   session = makeDebugHome(directory);
-  // Until the session's own handlers take over, a signal ends the launcher at
-  // once, as it always has, but leaves no link to the home behind.
-  leaveStartup = (signal) => {
-    removeDebugHome(session);
-    process.exit(signal === "SIGTERM" ? 143 : 130);
-  };
+  // Playwright's SIGINT handler, installed while Electron runs, ends the
+  // process with process.exit(130), and so does a signal before launch. The
+  // link goes with the process either way.
+  forgetLink = () => removeDebugHome(session);
+  process.once("exit", forgetLink);
+  // Until Electron starts launching, a signal ends the launcher at once, as it always has.
+  leaveStartup = (signal) => process.exit(signal === "SIGTERM" ? 143 : 130);
   process.once("SIGINT", leaveStartup); process.once("SIGTERM", leaveStartup);
   const { home } = session;
   for (const path of [profile, workspace]) await mkdir(path, { recursive: true });
@@ -132,6 +134,7 @@ finally {
     } finally {
       for (const handler of [leaveStartup, launching]) if (handler) { process.off("SIGINT", handler); process.off("SIGTERM", handler); }
       // The app may still use the link if its process did not exit.
+      if (forgetLink) process.off("exit", forgetLink);
       if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
         if (session?.link) console.error(`[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`);
       } else removeDebugHome(session);

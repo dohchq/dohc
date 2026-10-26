@@ -75,7 +75,9 @@ if (process.argv[2] === "fixture") {
     app.emit("close");
   };
   globalThis.debugFixtureElectron = { launch: async (options) => {
-    await hold("launch");
+    // Playwright's Electron launcher handles SIGINT for the app's life: it closes the app, then calls process.exit(130).
+    if (phase === "playwright") { process.once("SIGINT", () => process.exit(130)); await hold("playwright"); }
+    else await hold("launch");
     assert.ok(options.args.includes("--dohc-isolated-test"), "debug must preserve the installed protocol handler");
     const profile = options.args.find((arg) => arg.startsWith("--user-data-dir=")).slice("--user-data-dir=".length);
     assert.ok(isAbsolute(profile), "debug needs an absolute isolated profile");
@@ -145,8 +147,8 @@ if (process.argv[2] === "fixture") {
     try {
       const result = await closed;
       t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")), supervisorDisconnected: existsSync(join(root, "child-disconnected")) }));
-      if (phase === "startup") {
-        // A signal before the session's own handlers ends the launcher at once, without leaving its link behind.
+      if (phase === "startup" || phase === "playwright") {
+        // A signal that ends the launcher before its cleanup runs leaves no link to the session's home.
         assert.equal(result.code, signal === "SIGTERM" ? 143 : 130, output);
         assert.equal(protectedCleanup, true, "the launcher listens for the signal during startup");
         assert.deepEqual([...links()].filter((name) => !linksBefore.has(name)), [], "no link to the session's home remains");
@@ -186,6 +188,9 @@ if (process.argv[2] === "fixture") {
   if (process.platform !== "win32") for (const signal of ["SIGINT", "SIGTERM"]) {
     test(`debug ${signal} during startup leaves no link to the session's home`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase: "startup" }));
     test(`debug ${signal} during launch closes the app, keeps the evidence and removes the link`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase: "launch" }));
+  }
+  if (process.platform !== "win32") {
+    test("debug SIGINT under Playwright's own handler leaves no link to the session's home", { timeout: 30_000 }, async (t) => fixture(t, { signal: "SIGINT", phase: "playwright" }));
   }
   for (const signal of ["SIGINT", "SIGTERM"]) for (const phase of ["cleanup", "evidence"]) {
     test(`debug repeated ${signal} during ${phase} (${process.platform === "win32" ? "synthetic Windows events" : "native POSIX signals"})`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase }));
