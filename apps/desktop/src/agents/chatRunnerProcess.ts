@@ -5,6 +5,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
+import { codexConfigFiles, codexRunConfig } from "./codexRunConfig";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -243,6 +244,8 @@ export interface ChatRunnerProcessOptions {
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
   platform?: NodeJS.Platform;
   arch?: string;
+  // The person's Codex config files, which a Codex run reads (codexRunConfig.ts).
+  codexConfigFiles?: () => readonly string[] | null;
 }
 
 export function createChatRunnerProcess(
@@ -340,9 +343,19 @@ export function createChatRunnerProcess(
       resourcesPath: options.resourcesPath?.(),
     });
     const commandParts = input.profile
-      ? [input.profile.executable, ...agentProfileArguments(input.profile, replyServerArguments({
-        tool: input.profile.tool, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
-      }))]
+      ? [input.profile.executable, ...agentProfileArguments(input.profile, [
+        ...replyServerArguments({
+          tool: input.profile.tool, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
+        }),
+        ...(input.profile.tool === "codex"
+          ? codexRunConfig({
+            rootPath: input.rootPath,
+            runId: input.runId,
+            platform,
+            configFiles: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
+          })
+          : []),
+      ])]
       : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered

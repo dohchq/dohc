@@ -1,5 +1,6 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
 import { agentProfileArguments } from "./agentToolCatalog";
+import { codexRunConfig } from "./codexRunConfig";
 import {
   APP_QUIT_KILL_GRACE_MS,
   RUNNER_KILL_GRACE_MS,
@@ -674,6 +675,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     killProcessGroup,
     platform: options.platform ?? "linux",
     arch: options.arch,
+    // Never this computer's own Codex config.
+    codexConfigFiles: () => [],
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -3420,9 +3423,13 @@ describe("chatDispatchService", () => {
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
     if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
-    const instructionsFile = "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them.";
-    if (tool === "claude") expect(prompt).toContain(instructionsFile);
-    else expect(prompt).not.toContain("CLAUDE.md");
+    const instructionsFile = {
+      claude: "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them.",
+      codex: "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there.",
+    };
+    if (tool) expect(prompt).toContain(instructionsFile[tool]);
+    else expect(prompt).not.toContain("AGENTS");
+    if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3478,7 +3485,7 @@ describe("chatDispatchService", () => {
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
         "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
-      ].flatMap((entry) => ["--config", entry]) : ["--mcp-config", configPath]));
+      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, configFiles: [] })) : ["--mcp-config", configPath]));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
           mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },

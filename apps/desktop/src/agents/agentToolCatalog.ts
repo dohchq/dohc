@@ -52,13 +52,14 @@ export const AGENT_TOOLS = [
     permissions: "No launch profile yet" },
 ] as const;
 
-// replyServer holds the arguments that start the dohc MCP server a run replies through.
-export function agentProfileArguments(profile: AgentLaunchProfile, replyServer: readonly string[] = []): string[] {
+// runArguments holds what one run adds: the dohc MCP server it replies
+// through and, for Codex, its sandbox and trust (codexRunConfig.ts).
+export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...replyServer, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
-    : ["exec", "--config", "approval_policy=never", ...replyServer, "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
+    : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {

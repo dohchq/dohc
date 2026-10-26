@@ -340,6 +340,9 @@ importers:
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1(supports-color@7.2.0)
+      smol-toml:
+        specifier: ^1.7.1
+        version: 1.7.1
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
