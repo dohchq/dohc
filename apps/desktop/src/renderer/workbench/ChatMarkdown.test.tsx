@@ -616,6 +616,9 @@ describe("the waiting text", () => {
     "[plan](docs/(my draft).md) after",
     "See ![](https://example.com/plot.png).",
     "[![](https://example.com/plot.png)](https://example.com) and ![](<a b&amp;c\\_d.png>) and ![]( é.png )",
+    "&#x41z; &#0; &#128; &#xD800; &#xFFFE; &#1234567; &#x1234567; &#x10FFFF; &#X41; &amp; &bogus;",
+    "![](https://example.com/a&#x41z;b&#0;c&#128;d&#xD800;e&#xFFFE;f&#1234567;g&#x1234567;h&#x10FFFF;i&amp;j&bogus;k.png)",
+    "[]: b\n\n[ ]: c\n\nsee ![](<a and ![](d (e and ![](f(g h)) and [](i)",
   ]) {
     it(`matches the tree for ${JSON.stringify(body)}`, () => {
       const chips = chatChips(body, CANDIDATES, []);
@@ -624,12 +627,10 @@ describe("the waiting text", () => {
     });
   }
 
-  // 20,000 different bodies of one line from a small alphabet, so every
-  // emphasis and link rule meets every other, from a fixed seed.
-  it("matches the tree for 20,000 generated bodies", () => {
-    const alphabet = ["*", "*", "_", "_", "(", ")", "[", "]", '"', "<", ">", "\\", "`", "a", "b", " ", " "];
+  // Different bodies of one line from a small alphabet and a fixed seed, so
+  // every rule the alphabet reaches meets every other. Gives the mismatches.
+  const fuzz = (alphabet: string[], count: number, seed: number) => {
     // mulberry32
-    let seed = 20261027;
     const random = () => {
       seed = (seed + 0x6d2b79f5) | 0;
       let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -637,7 +638,7 @@ describe("the waiting text", () => {
       return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
     };
     const bodies = new Set<string>();
-    while (bodies.size < 20_000) {
+    while (bodies.size < count) {
       let body = "a";
       const size = 1 + Math.floor(random() * 24);
       for (let at = 0; at < size; at++) body += alphabet[Math.floor(random() * alphabet.length)];
@@ -648,7 +649,19 @@ describe("the waiting text", () => {
       const tree = words(shown(parseChatMarkdown(body, []).tree as Node)).join(" ");
       if (words(stripMarkdown(body).text).join(" ") !== tree) mismatches.push(body);
     }
-    expect(mismatches).toEqual([]);
+    return mismatches;
+  };
+
+  it("matches the tree for 20,000 generated bodies", () => {
+    const alphabet = ["*", "*", "_", "_", "(", ")", "[", "]", '"', "<", ">", "\\", "`", "a", "b", " ", " "];
+    expect(fuzz(alphabet, 20_000, 20261027)).toEqual([]);
+  });
+
+  // Character references, in text and in the address of an image without
+  // alt text.
+  it("matches the tree for 10,000 generated bodies with references", () => {
+    const alphabet = ["&", "&", "#", "#", ";", ";", "x", "X", "0", "1", "9", "f", "a", "![](", ")", "\\", " "];
+    expect(fuzz(alphabet, 10_000, 20261028)).toEqual([]);
   });
 });
 

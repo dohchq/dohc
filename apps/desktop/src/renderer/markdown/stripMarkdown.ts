@@ -19,6 +19,7 @@
 // dropped.
 
 import { decodeNamedCharacterReference } from "decode-named-character-reference";
+import { decodeNumericCharacterReference } from "micromark-util-decode-numeric-character-reference";
 import { normalizeUri } from "micromark-util-sanitize-uri";
 
 export interface SourceRange {
@@ -168,11 +169,8 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 
   forEachLine((start, end) => {
     const at = indentEnd(start, end);
-    if (source.charCodeAt(at) !== OPEN_BRACKET) return;
-    const close = find(CLOSE_BRACKET, at, end);
-    if (close + 1 < end && source.charCodeAt(close + 1) === COLON && close - at - 1 <= LABEL_MAX) {
-      defined.add(normalizeLabel(source.slice(at + 1, close)));
-    }
+    const close = definitionClose(at, end);
+    if (close >= 0) defined.add(normalizeLabel(source.slice(at + 1, close)));
   });
   forEachLine((start, end, last) => {
     const keepLine = fence ? stripFencedLine(start, end) : stripLine(start, end);
@@ -214,6 +212,15 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     let next = at;
     while (next < end && source.charCodeAt(next) === code) next++;
     return next;
+  }
+
+  // The "]" that ends a link reference definition's label at `at`, or -1. A
+  // blank label defines nothing.
+  function definitionClose(at: number, end: number): number {
+    if (at >= end || source.charCodeAt(at) !== OPEN_BRACKET) return -1;
+    const close = find(CLOSE_BRACKET, at, end);
+    if (close + 1 >= end || source.charCodeAt(close + 1) !== COLON || close - at - 1 > LABEL_MAX) return -1;
+    return normalizeLabel(source.slice(at + 1, close)) ? close : -1;
   }
 
   // The first `code` in [at, end), or `end`. It never reads past the line.
@@ -348,13 +355,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     let tableRow = false;
     if (at < end && source.charCodeAt(at) === PIPE) tableRow = true;
     // A link reference definition shows nothing.
-    const definition =
-      at < end &&
-      source.charCodeAt(at) === OPEN_BRACKET &&
-      (() => {
-        const close = find(CLOSE_BRACKET, at, end);
-        return close + 1 < end && source.charCodeAt(close + 1) === COLON;
-      })();
+    const definition = definitionClose(at, end) >= 0;
     if (!continues || opensBlock || quotes > paragraphQuotes || tableRow || definition || at >= end) {
       // The markers belong to this line, after the paragraph that ended.
       const own = pieces.splice(markers);
@@ -701,7 +702,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           pieces[bracket!.piece] = "";
           if (bracket!.link) inactiveBelow = brackets.length;
           // An image without alt text shows its address, as the chat draws it.
-          else if (bracket!.textStart === at && source.charCodeAt(at + 1) === OPEN_PAREN) {
+          else if (bracket!.textStart === at && after > at + 1 && source.charCodeAt(at + 1) === OPEN_PAREN) {
             const from = blanksEnd(at + 2, end);
             if (source.charCodeAt(from) !== CLOSE_PAREN) {
               const angled = source.charCodeAt(from) === LT;
@@ -789,12 +790,17 @@ function decodeText(text: string): string {
   return value + text.slice(plain);
 }
 
+// A numeric reference is "#" and up to 7 digits, or "#x" and up to 6 hex
+// digits, as in micromark.
 function decodeEntity(name: string): string | undefined {
   if (name.charCodeAt(0) !== HASH) return decodeNamedCharacterReference(name) || undefined;
   const hex = name[1] === "x" || name[1] === "X";
   const digits = name.slice(hex ? 2 : 1);
-  if (!digits || digits.length > 7) return undefined;
-  const value = Number.parseInt(digits, hex ? 16 : 10);
-  if (!Number.isFinite(value) || value <= 0 || value > 0x10ffff) return undefined;
-  return String.fromCodePoint(value);
+  if (!digits || digits.length > (hex ? 6 : 7)) return undefined;
+  for (let at = 0; at < digits.length; at++) {
+    const code = digits.charCodeAt(at);
+    const letter = code | 32;
+    if (!(code >= 48 && code <= 57) && !(hex && letter >= 97 && letter <= 102)) return undefined;
+  }
+  return decodeNumericCharacterReference(digits, hex ? 16 : 10);
 }
