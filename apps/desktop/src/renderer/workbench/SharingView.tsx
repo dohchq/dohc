@@ -66,7 +66,7 @@ const LANE = {
     scope: "for your account",
     empty: "No shares to your account.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
-    signedOut: "Connect a server to see what others share with you.",
+    signedOut: "Connect a server to get what others share with you.",
     failed: "dohc could not check the shares to your account.",
   },
 } as const;

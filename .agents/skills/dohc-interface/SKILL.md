@@ -129,7 +129,7 @@ Settle the word across every surface before you change any string.
 A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
 When a list waits on a cause, say what the list will show once the cause is fixed.
 Do not reuse another surface's question.
-Signed out, the Sharing view's **Shared with me** says `Connect a server to see what others share with you.`
+Signed out, the Sharing view's **Shared with me** says `Connect a server to get what others share with you.`
 About's Access asks who has access, so it keeps `Connect your server to check who has access.`
 Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.

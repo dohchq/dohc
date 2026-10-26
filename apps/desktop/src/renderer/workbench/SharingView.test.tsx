@@ -206,7 +206,7 @@ describe("the Sharing view's two lists", () => {
 
   // Shared with me lists what others share with the account, so it says what
   // signing in shows. Shared by me keeps About's words for who has access.
-  const SHARED_WITH_ME = "Connect a server to see what others share with you.";
+  const SHARED_WITH_ME = "Connect a server to get what others share with you.";
   it.each([
     ["signed out", "granted", SIGNED_OUT, "signed-out", "Connect your server to check who has access.", "Connect server", "connect"],
     ["signed out", "received", SIGNED_OUT, "signed-out", SHARED_WITH_ME, "Connect server", "connect"],
