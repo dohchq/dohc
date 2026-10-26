@@ -81,13 +81,16 @@ export function useSettingsFileNotices(input: {
   }, [readWorkspaceFile, workspaceIsReady]);
 
   // The engine's open of the workspace sends activity, so a read that came
-  // before it reads again then.
+  // before it reads again then. An open that came while that read was
+  // answering sent its activity already, so it also reads once more now.
   const notOpened = workspaceRead?.notOpened === true;
   useEffect(() => {
     if (!notOpened) return;
-    return bridge().onWorkspaceActivity((event) => {
+    const stop = bridge().onWorkspaceActivity((event) => {
       if (event.workspaceId === undefined || event.workspaceId === workspaceId) void readWorkspaceFile().catch(() => undefined);
     });
+    void readWorkspaceFile().catch(() => undefined);
+    return stop;
   }, [notOpened, readWorkspaceFile, workspaceId]);
 
   // Each row's two steps. Try again shows the row again when the file still

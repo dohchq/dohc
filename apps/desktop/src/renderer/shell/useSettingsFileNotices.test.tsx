@@ -137,10 +137,12 @@ describe("useSettingsFileNotices", () => {
       return errors;
     });
     await waitFor(() => expect(listeners.size).toBe(1));
+    // It reads once more as it starts listening, and the engine has still not opened it.
+    await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
     expect(result.current.shellErrors).toEqual([]);
 
     act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-b" })));
-    expect(getWorkspaceSettings).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
 
     getWorkspaceSettings.mockResolvedValue(ignored);
     act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
@@ -149,6 +151,35 @@ describe("useSettingsFileNotices", () => {
     ]));
     // Once a read gets the file, activity reads nothing more.
     expect(listeners.size).toBe(0);
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads again when the engine opened the workspace while the first read was answering", async () => {
+    const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+    }));
+    // The open's activity came before this refusal, so no activity follows it.
+    getWorkspaceSettings.mockResolvedValueOnce({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      notOpened: true,
+    });
+    vi.stubGlobal("dohcDesktop", { getWorkspaceSettings, onWorkspaceActivity: vi.fn(() => () => undefined) });
+    const { result } = renderHook(() => {
+      const errors = useShellError("ws-a");
+      useSettingsFileNotices({
+        workspaceId: "ws-a",
+        workspaceIsReady: true,
+        userSettings: user(),
+        show: errors.showSettingsFileNotice,
+        reportError: (message) => errors.reportShellFailure({ message }),
+      });
+      return errors;
+    });
+    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    ]));
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
