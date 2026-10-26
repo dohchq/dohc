@@ -1237,6 +1237,7 @@ function ExplorerMenuSpecimen(props: { name: string; glyph: ReactNode; scope: Ex
         <Menu
           label={props.name}
           at={at}
+          fromKeyboard
           open
           onOpenChange={(open) => {
             if (!open) setAt(null);
@@ -1261,7 +1262,11 @@ const UNDO_TOAST = {
   atMs: 0, canRetry: false, actionLabel: "Undo", seen: false,
 };
 const REFUSED_UNDO_TOAST = {
-  id: "refused-undo", message: undoRefusedNotice("rename", { code: "old-path-occupied", path: "docs/budget.md" }),
+  id: "refused-undo",
+  message: undoRefusedNotice(
+    { id: "budget", kind: "file", fromPath: "docs/budget.md", toPath: "docs/costs.md" },
+    { code: "old-path-occupied", path: "docs/budget.md" },
+  ),
   details: "Cause: UndoRefusedError: domain error: Undo refused: old path occupied: docs/budget.md",
   atMs: 0, canRetry: true, seen: false,
 };

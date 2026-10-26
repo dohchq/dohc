@@ -372,7 +372,7 @@ describe("Undo after a rename, a move or a delete", () => {
 
   // Main's text stays in the cause, for Copy.
   it.each([
-    [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. notes.md now occupies the old path. Move it first."],
+    [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. A new notes.md is in its place. Move or rename it, then try again."],
     [{ code: "unexplained" } as const, "Cannot undo the rename."],
   ])("words a refusal main named: %o", async (refusal, words) => {
     const reason = "domain error: Undo refused: old path occupied: notes.md";

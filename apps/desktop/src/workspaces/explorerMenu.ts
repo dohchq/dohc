@@ -77,7 +77,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
         ? [
             item("New file", "new-file"),
             ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
-            ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+            ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
             separator,
             item("Import files…", "import-files"),
           ]
@@ -95,7 +95,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
       ? [
           item("New file", "new-file"),
           ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
-          ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+          ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer
           // passes the folder as importWorkspaceFiles' targetDir, re-validated
           // main-side before any copy).

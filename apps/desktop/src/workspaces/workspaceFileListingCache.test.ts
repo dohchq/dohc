@@ -44,6 +44,37 @@ describe("WorkspaceFileListingCache", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it("walks again when a file changed during a walk is missing from it", async () => {
+    const cache = new WorkspaceFileListingCache("win32");
+    const first = deferred<WorkspacePathListing>();
+    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
+    const load = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(both);
+    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const walking = read();
+    // Written again behind the walk, before the next engine scan.
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    cache.invalidate({ workspaceId: "ws-a", paths: ["packing.md"], pathSetChanged: false });
+    const asked = read();
+    first.resolve(listing("plan.md"));
+    await expect(walking).resolves.toEqual(both);
+    await expect(asked).resolves.toEqual(both);
+    await expect(read()).resolves.toEqual({ ...both, cached: true });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a walk that holds a file changed during it", async () => {
+    const cache = new WorkspaceFileListingCache("win32");
+    const first = deferred<WorkspacePathListing>();
+    const load = vi.fn(() => first.promise);
+    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    const walking = read();
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "plan.md", kind: "changed" }]);
+    first.resolve(listing("plan.md"));
+    expect(Reflect.get((await walking).files[0]!, "contentIdentity")).toMatch(/^observation:/);
+    await read();
+    expect(load).toHaveBeenCalledOnce();
+  });
+
   it("does not overwrite newer content metadata with an older worker response", async () => {
     const first = deferred<readonly { path: string; kind: "file"; icon: string }[]>();
     const metadata = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([{ path: "note.md", kind: "file", icon: "newest" }]);

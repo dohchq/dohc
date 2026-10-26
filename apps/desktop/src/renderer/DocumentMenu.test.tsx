@@ -263,7 +263,10 @@ describe("DocumentMenu", () => {
     stubClipboard();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
-    // First item ("Copy as Markdown") holds focus by default.
+    // First item ("Copy as Markdown") holds focus by default. After a click,
+    // the first Down marks it.
+    expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
+    await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-export-markdown"));

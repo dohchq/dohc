@@ -35,11 +35,22 @@ describe("what a finished tree change says", () => {
     expect(undoneNotice([moved("a.md", "x/a.md"), moved("b.md", "x/b.md")])).toBe("Moved 2 items back");
   });
 
-  it("says why Undo was refused only when main named it", () => {
-    const occupied = { code: "old-path-occupied", path: "docs/budget.md" } as const;
-    expect(undoRefusedNotice("rename", occupied)).toBe("Cannot undo the rename. budget.md now occupies the old path. Move it first.");
-    expect(undoRefusedNotice("move", occupied)).toBe("Cannot undo the move. budget.md now occupies the old path. Move it first.");
-    expect(undoRefusedNotice("delete", occupied)).toBe("Cannot undo the delete. budget.md now occupies the old path. Move it first.");
-    expect(undoRefusedNotice("delete", { code: "unexplained" })).toBe("Cannot undo the delete.");
+  it("says what is in the way of an Undo and what to do, when main named it", () => {
+    const occupied = (path: string) => ({ code: "old-path-occupied", path }) as const;
+    expect(undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, occupied("docs/budget.md")))
+      .toBe("Cannot undo the rename. A new budget.md is in its place. Move or rename it, then try again.");
+    expect(undoRefusedNotice(moved("Trips/notes.md", "archive/notes.md").change, occupied("Trips/notes.md")))
+      .toBe("Cannot move notes.md back. Trips already has a notes.md. Move or rename that one, then try again.");
+    expect(undoRefusedNotice(moved("notes.md", "archive/notes.md").change, occupied("notes.md")))
+      .toBe("Cannot move notes.md back. Files already has a notes.md. Move or rename that one, then try again.");
+    expect(undoRefusedNotice(deleted("docs/packing.md").change, occupied("docs/packing.md")))
+      .toBe("Cannot restore packing.md. A new packing.md is in its place. Move or rename it, then try again.");
+  });
+
+  it("says only what cannot happen when main did not name the refusal", () => {
+    const unexplained = { code: "unexplained" } as const;
+    expect(undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, unexplained)).toBe("Cannot undo the rename.");
+    expect(undoRefusedNotice(moved("Trips/notes.md", "archive/notes.md").change, unexplained)).toBe("Cannot move notes.md back.");
+    expect(undoRefusedNotice(deleted("docs/packing.md").change, unexplained)).toBe("Cannot restore packing.md.");
   });
 });

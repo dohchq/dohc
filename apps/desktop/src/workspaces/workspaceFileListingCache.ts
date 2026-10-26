@@ -57,6 +57,12 @@ export class WorkspaceFileListingCache {
           for (const file of result.files.slice(offset, offset + 128)) entry.files.set(file.path, file);
           if (offset + 128 < result.files.length) await new Promise<void>(resolve => setImmediate(resolve));
         }
+        // A file removed and written again behind the walk reads as changed,
+        // and the walk lacks it. Its callers, who may have asked after that
+        // change, get a walk that started after it instead.
+        if (this.#listings.get(options.workspaceId) === entry && [...entry.changed].some(path => !entry.files.has(path))) {
+          return this.list({ ...options, allowCached: false });
+        }
         for (const path of entry.changed) {
           const file = entry.files.get(path);
           if (file) file.contentIdentity = `observation:${++this.revision}`;

@@ -235,6 +235,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
 - Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
+- A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill and the accent outline. A menu opened from the keyboard marks its first row that way at once.
 - In a panel, give the parent `px-1`.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.

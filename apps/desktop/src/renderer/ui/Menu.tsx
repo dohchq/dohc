@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -63,7 +64,7 @@ export type MenuTriggerProps = {
   ref: RefObject<HTMLButtonElement | null>;
   "aria-haspopup": "menu";
   "aria-expanded": boolean;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 };
 
@@ -183,18 +184,22 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus is the active row: the
-// fill and the accent outline, whether the keyboard or the pointer moved it,
-// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
-// row's. The list scrolls, so the outline sits inside the row, where the
-// scroller cannot clip it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row. A
+// menu opened with the pointer marks none: focus waits on the first row for
+// the keys, and the hover fill follows the pointer, as in a native menu. A
+// menu opened from the keyboard, or the first key that moves, marks the
+// focused row with the fill and the accent outline, as MENU_ACTIVE_OPTION
+// draws it, and the mark then follows focus wherever the pointer moves it.
+// The fill alone would match the current row's. The list scrolls, so the
+// outline sits inside the row, where the scroller cannot clip it on a row
+// scrolled to an edge.
+const MARKED = "focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2";
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
-  rest: { base: `${MENU_ROW_TONE.rest} focus:text-ink`, hover: "hover:bg-hover hover:text-ink" },
-  current: { base: MENU_ROW_TONE.current, hover: "" },
-  danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
+  rest: { base: MENU_ROW_TONE.rest, marked: "focus:text-ink", hover: "hover:bg-hover hover:text-ink" },
+  current: { base: MENU_ROW_TONE.current, marked: "", hover: "" },
+  danger: { base: MENU_ROW_TONE.danger, marked: "", hover: "hover:bg-hover" },
 };
 
 function isField(row: MenuRow): row is MenuField {
@@ -234,6 +239,8 @@ export function Menu(props: {
   trigger?: (trigger: MenuTriggerProps) => ReactNode;
   /** Where a context menu opens, in window coordinates. No trigger is drawn. */
   at?: { x: number; y: number };
+  /** A context menu the keyboard opened marks its first row at once. A trigger's own keys mark it themselves. */
+  fromKeyboard?: boolean;
   /** The default trigger's test id. */
   testId?: string;
   /** The default trigger stays in its place but cannot open the list. */
@@ -254,6 +261,8 @@ export function Menu(props: {
   const width = props.width ?? MENU_WIDTH_PX;
   const [place, setPlace] = useState<Place | null>(null);
   const [pointerMoved, setPointerMoved] = useState(false);
+  // Whether focus shows as the active row. Cleared when the list closes.
+  const [marked, setMarked] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
   const rows = props.items.filter((entry): entry is MenuRow => entry !== MENU_SEPARATOR);
@@ -265,8 +274,10 @@ export function Menu(props: {
   // room is known before anything shows. A context menu's point is a trigger
   // with no size: the list starts at it, with no gap.
   const at = props.at;
+  const fromKeyboard = props.fromKeyboard === true;
   useLayoutEffect(() => {
     if (!open) return;
+    if (fromKeyboard) setMarked(true);
     const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : trigger.current?.getBoundingClientRect();
     const gap = at ? 0 : GAP_PX;
     const height = list.current?.offsetHeight ?? 0;
@@ -288,8 +299,9 @@ export function Menu(props: {
     return () => {
       setPlace(null);
       setPointerMoved(false);
+      setMarked(false);
     };
-  }, [open, width, at?.x, at?.y]);
+  }, [open, width, at?.x, at?.y, fromKeyboard]);
 
   useLayoutEffect(() => {
     const id = refocus.current;
@@ -317,13 +329,17 @@ export function Menu(props: {
     if (inField && isComposingKey(event)) return;
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-    // A field keeps Home, End and the typed letters; the arrows leave it.
+    // A field keeps Home, End and the typed letters; the arrows leave it. The
+    // first key in a list with no marked row moves from outside it, so Down
+    // marks the first row and Up the last.
+    const from = marked || inField ? current() : event.key === "ArrowUp" ? count : -1;
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event, current(), rows.map((row, index) =>
+      ? moveInMenu(event, from, rows.map((row, index) =>
         "label" in row && typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
+      setMarked(true);
       rowElements.current[next]?.focus();
     } else if (event.key === "Escape") {
       // useDismiss already closed it; one Escape closes one surface.
@@ -340,10 +356,15 @@ export function Menu(props: {
     ref: trigger,
     "aria-haspopup": "menu",
     "aria-expanded": open,
-    onClick: () => onOpenChange(!open),
+    // Enter and Space click with no pointer press, so detail is 0.
+    onClick: (event) => {
+      setMarked(event.detail === 0);
+      onOpenChange(!open);
+    },
     onKeyDown: (event) => {
       if (event.key === "ArrowDown" && !open) {
         event.preventDefault();
+        setMarked(true);
         onOpenChange(true);
       }
     },
@@ -463,7 +484,7 @@ export function Menu(props: {
                   }
                 }}
                 onClick={() => pick(entry)}
-                className={`${ROW} ${tone.base} ${hover}`}
+                className={`${MENU_ROW} ${tone.base} ${marked ? `${MARKED} ${tone.marked}` : "outline-none"} ${hover}`}
               >
                 {lead ? (
                   <span className={`${MENU_ICON} ${entry.danger ? "" : "text-subtle"}`}>

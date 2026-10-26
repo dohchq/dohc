@@ -188,7 +188,7 @@ describe("Menu", () => {
     // Default prevented: the press does not move focus to the page.
     expect(fireEvent.mouseDown(screen.getByRole("status"))).toBe(false);
     expect(fireEvent.mouseDown(screen.getByRole("menu"))).toBe(false);
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Duplicate" }));
   });
 
@@ -318,7 +318,7 @@ describe("Menu", () => {
     expect(current.getAttribute("aria-current")).toBe("true");
     const forget = screen.getByRole("menuitem", { name: "Forget" });
     expect(forget.className).toContain("text-danger");
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(forget);
     // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
@@ -366,6 +366,82 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(first);
     fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
     expect(document.activeElement).toBe(second);
+  });
+
+  // A row shows as active when it has focus and focus draws the fill and the
+  // accent outline on it. A pointer open marks none, as a native menu does.
+  describe("the marked row", () => {
+    const marked = () =>
+      screen
+        .getAllByRole("menuitem")
+        .filter((row) => row === document.activeElement && row.className.split(" ").includes("focus:outline-accent"))
+        .map((row) => row.textContent);
+
+    it("marks no row on a pointer open, and the hover fill follows the pointer", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      const first = screen.getByRole("menuitem", { name: "Rename" });
+      const second = screen.getByRole("menuitem", { name: "Duplicate" });
+      expect(document.activeElement).toBe(first);
+      expect(marked()).toEqual([]);
+      expect(first.className.split(" ")).toContain("outline-none");
+
+      fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
+      expect(document.activeElement).toBe(second);
+      expect(second.className.split(" ")).toContain("hover:bg-hover");
+      expect(marked()).toEqual([]);
+    });
+
+    it("marks the first row at once on a keyboard open: Enter, Space or Down on the trigger", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      const trigger = screen.getByTestId("row-menu");
+      for (const key of ["{Enter}", " ", "{ArrowDown}"]) {
+        trigger.focus();
+        await user.keyboard(key);
+        expect(marked()).toEqual(["Rename"]);
+        await user.keyboard("{Escape}");
+        await waitFor(() => expect(document.activeElement).toBe(trigger));
+      }
+      await user.click(trigger);
+      expect(marked()).toEqual([]);
+    });
+
+    it("marks the first row of a context menu at once only when the keyboard opened it", () => {
+      const view = render(<Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={vi.fn()} items={items} />);
+      expect(marked()).toEqual([]);
+      view.unmount();
+      render(<Menu label="Row actions" at={{ x: 0, y: 0 }} fromKeyboard open onOpenChange={vi.fn()} items={items} />);
+      expect(marked()).toEqual(["Rename"]);
+    });
+
+    it("marks the first row on the first Down after a pointer open, and the last row on the first Up", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      const trigger = screen.getByTestId("row-menu");
+      await user.click(trigger);
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Rename"]);
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Duplicate"]);
+
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+      await user.click(trigger);
+      await user.keyboard("{ArrowUp}");
+      expect(marked()).toEqual(["Delete"]);
+    });
+
+    it("keeps the mark on the row the pointer moves to once a key has marked one", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Rename"]);
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
+      expect(marked()).toEqual(["Duplicate"]);
+    });
   });
 
   it("opens from the owner's trigger, named apart from its list", async () => {

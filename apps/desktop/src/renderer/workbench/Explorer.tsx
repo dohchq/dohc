@@ -183,7 +183,7 @@ export interface ExplorerProps {
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
-  // "New Collection…" from the main-owned context menu: opens the shell's
+  // "New collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
   onNewCollection: (targetDir: string) => void;
@@ -470,14 +470,15 @@ function nextChangeId(): string {
   return `pending-${editIdCounter}`;
 }
 
-// The context menu that is open: what was right-clicked, where, and the
-// entries main returned for it.
+// The context menu that is open: what was right-clicked, where, whether a
+// key opened it, and the entries main returned for it.
 type OpenMenu = {
   id: number;
   workspaceId: string;
   kind: "file" | "folder" | "root";
   path?: string;
   at: { x: number; y: number };
+  keyboard: boolean;
   entries: ExplorerMenuEntry[];
 };
 
@@ -1063,7 +1064,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           });
           if (!result.ok) {
             throw new UndoRefusedError(result.reason, true,
-              result.refusal && undoRefusedNotice(operationWord(entry.change), result.refusal));
+              result.refusal && undoRefusedNotice(entry.change, result.refusal));
           }
           if (result.remaining.length > 0) {
             throw new UndoRefusedError(
@@ -1332,6 +1333,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       path: string | undefined,
       pinnedRow: boolean,
       at: OpenMenu["at"],
+      keyboard: boolean,
     ) => {
       const request = menuRequests.next();
       // Escape or a press anywhere before main answers retires this open, as
@@ -1355,7 +1357,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         .then(
           (entries) => {
             if (!menuRequests.isCurrent(request) || entries.length === 0) return;
-            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), at, entries });
+            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), at, keyboard, entries });
           },
           (cause) => {
             if (menuRequests.isCurrent(request)) {
@@ -1457,7 +1459,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       openMenu(isFolderPath(path) ? "folder" : "file", path, props.pinned.includes(path), {
         x: event.clientX,
         y: event.clientY,
-      });
+      }, false);
     },
     [selectSingle, isFolderPath, openMenu, props.pinned],
   );
@@ -1468,7 +1470,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       event.stopPropagation();
       if (fromMenuKey(keyboardMenu)) return;
       event.currentTarget.focus({ preventScroll: true });
-      openMenu(isFolderPath(path) ? "folder" : "file", path, true, { x: event.clientX, y: event.clientY });
+      openMenu(isFolderPath(path) ? "folder" : "file", path, true, { x: event.clientX, y: event.clientY }, false);
     },
     [isFolderPath, openMenu],
   );
@@ -1477,7 +1479,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (event: MouseEvent) => {
       event.preventDefault();
       if (fromMenuKey(keyboardMenu)) return;
-      openMenu("root", undefined, false, { x: event.clientX, y: event.clientY });
+      openMenu("root", undefined, false, { x: event.clientX, y: event.clientY }, false);
     },
     [openMenu],
   );
@@ -1504,11 +1506,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         openMenu(isFolderPath(path) ? "folder" : "file", path, pinnedRow || props.pinned.includes(path), {
           x: box.left,
           y: box.bottom,
-        });
+        }, true);
         return;
       }
       const box = fileTreeRef.current?.getBoundingClientRect();
-      openMenu("root", undefined, false, { x: box?.left ?? 0, y: box?.top ?? 0 });
+      openMenu("root", undefined, false, { x: box?.left ?? 0, y: box?.top ?? 0 }, true);
     },
     [selectSingle, isFolderPath, openMenu, props.pinned],
   );
@@ -2332,6 +2334,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           key={menu.id}
           label={menu.path === undefined ? "Files" : basenameOf(menu.path)}
           at={menu.at}
+          fromKeyboard={menu.keyboard}
           open
           onOpenChange={(open) => {
             if (!open) closeMenu();

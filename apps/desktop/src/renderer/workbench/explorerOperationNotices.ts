@@ -48,13 +48,19 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
   return { message: refused.noUndo ? `${message}. ${refused.noUndo}` : message, undoable: false };
 }
 
-// An Undo main refused and named. Any other refusal says only what failed;
-// main's own text goes to Copy.
-export function undoRefusedNotice(word: ReturnType<typeof operationWord>, refusal: UndoHistoryOperationRefusal): string {
-  const failed = `Cannot undo the ${word}.`;
-  return refusal.code === "old-path-occupied"
-    ? `${failed} ${basenameOf(refusal.path)} now occupies the old path. Move it first.`
-    : failed;
+// A refused Undo says what cannot happen, what is in the way, and what to do,
+// since its row has Try again. A refusal main did not name says only what
+// cannot happen; main's own text goes to Copy.
+export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal: UndoHistoryOperationRefusal): string {
+  const word = operationWord(change);
+  const failed = word === "delete"
+    ? `Cannot restore ${basenameOf(pathOf(change))}.`
+    : word === "rename" ? "Cannot undo the rename." : `Cannot move ${basenameOf(pathOf(change))} back.`;
+  if (refusal.code !== "old-path-occupied") return failed;
+  const name = basenameOf(refusal.path);
+  return word === "move"
+    ? `${failed} ${folderOf(refusal.path)} already has a ${name}. Move or rename that one, then try again.`
+    : `${failed} A new ${name} is in its place. Move or rename it, then try again.`;
 }
 
 export function undoneNotice(done: readonly RecordedTreeChange[]): string {
