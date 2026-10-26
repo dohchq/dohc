@@ -152,6 +152,7 @@ import {
   pinnedAppCommandId,
   type CommandContext,
   type CommandHandlers,
+  type CommandId,
 } from "./commands/commandRows";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
@@ -1332,6 +1333,12 @@ export function DesktopWorkspaceShell(props: {
   // Admission and the saved-layout read never wait on this state.
   const workbenchRestored =
     restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
+  // A file open waits for the saved layout. While the opening cover shows, a
+  // command does nothing and is not replayed.
+  const workbenchRestoredRef = useRef(false);
+  workbenchRestoredRef.current = workbenchRestored;
+  const heldFileOpens = useRef<[string, HeadingTarget?, Omit<ScrollTarget, "path">?][]>([]);
+  const openingCoverShown = useRef(false);
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -1752,7 +1759,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -2489,6 +2496,10 @@ export function DesktopWorkspaceShell(props: {
       target?: HeadingTarget,
       scrollTarget?: Omit<ScrollTarget, "path">,
     ) => {
+      if (!workbenchRestoredRef.current) {
+        heldFileOpens.current.push([path, target, scrollTarget]);
+        return;
+      }
       const targetGroupId = wbRef.current.activeEditorGroup;
       const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
@@ -2572,6 +2583,10 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  useEffect(() => {
+    if (!workbenchRestored) return;
+    for (const held of heldFileOpens.current.splice(0)) openFile(...held);
+  }, [openFile, workbenchRestored]);
   // Main writes the copy next to the file and keeps the queue; a slow answer
   // for a workspace this window left paints nothing. One save per file runs
   // at a time, and asking again while it runs waits for it.
@@ -4480,9 +4495,12 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  const runCommand = useCallback((id: CommandId) => {
+    if (!openingCoverShown.current) commandHandlers[id]();
+  }, [commandHandlers]);
   const commands = useMemo<Command[]>(
-    () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
-    [commandContext, commandHandlers],
+    () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),
+    [commandContext, runCommand],
   );
   // The start surface's tiles: each kind's existing create action, where the
   // workspace allows it. An app is a folder, so it needs folder creation.
@@ -4542,13 +4560,13 @@ export function DesktopWorkspaceShell(props: {
       event.preventDefault();
       if (command === "command-palette") setPaletteOpen((open) => !open);
       else if (command === "quick-open") setQuickOpenOpen((open) => !open);
-      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
+      else if (isCommandAvailable(command, commandContext)) runCommand(command);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     commandContext,
-    commandHandlers,
+    runCommand,
     openSettings,
     reportShellError,
     undoForEditor,
@@ -4559,9 +4577,9 @@ export function DesktopWorkspaceShell(props: {
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
-      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
+      else if (isCommandAvailable(command, commandContext)) runCommand(command);
     });
-  }, [commandContext, commandHandlers]);
+  }, [commandContext, runCommand]);
 
   // Received workspaces refresh on open and on demand; ended copies stay local.
   // The relay-derived generic chat fact selects the Comment banner's next
@@ -5132,10 +5150,10 @@ export function DesktopWorkspaceShell(props: {
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
-        onIncludeArchivedCollections={shareView ? undefined : setIncludeArchived}
+        onIncludeArchivedCollections={shareView || !collectionsListed ? undefined : setIncludeArchived}
         onOpenDataCollection={openDataCollection}
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
-        onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
+        onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady && collectionsListed ? onRestoreCollection : undefined}
         collectionsRefusal={collectionsRefusal}
         collectionsElsewhere={collectionsElsewhere}
         onKeepCollections={keepCollectionsWithList}
@@ -5333,6 +5351,8 @@ export function DesktopWorkspaceShell(props: {
       ? syncStatus.engineStoreRefused
       : null;
   const storeUpdateRequired = storeUpdateRefusal !== null;
+  // A stopped store or a failed open shows in place of the opening cover.
+  openingCoverShown.current = !workbenchRestored && !storeUpdateRequired && (workspaceIsReady || !workspaceOpenFailure);
   storeUpdateRequiredRef.current = storeUpdateRequired;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [

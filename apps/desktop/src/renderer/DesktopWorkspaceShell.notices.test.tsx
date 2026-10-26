@@ -1318,6 +1318,15 @@ describe("workspace shell errors", () => {
     ).toBe(false);
   });
 
+  it("runs a menu command while the workspace could not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-open-failed");
+    act(() => bridge.emitMenuCommand("settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
   it("keeps a failed workspace inert and opens it when the user retries", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace
