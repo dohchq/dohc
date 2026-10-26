@@ -8,7 +8,14 @@ import type {RegistryEntry} from "./registryStore";
 import {workspaceRemoteMatchesCredentials} from "./chatRelayIdentity";
 import {canonicalRelayUrl} from "./syncCode";
 import {OwnerLiveRefusalsResult} from "../ipc/bridgeContract";
+import {ServerKeptEditsConflict, ServerRecoveryCopyRefusedError} from "./ownerLiveQuarantine";
 import {z} from "zod";
+
+// A list page holds up to 256 rows of edits the server kept. A row is at most
+// about 13 KiB: its 4096-character path alone can take 12 KiB of UTF-8.
+const KEPT_EDITS_PAGE_BYTES = 256 * 13 * 1024 + 64 * 1024;
+// The live document list carries its documents and the first such page.
+const LIVE_DOCUMENTS_BYTES = 1_048_576 + KEPT_EDITS_PAGE_BYTES;
 
 export function createServerOwnerConnection(options: {
   stateDir(): string;
@@ -96,6 +103,42 @@ export function createServerOwnerConnection(options: {
           refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
         },
+        // A page carries at most one engine response frame of the queue, 8 MiB, in base64.
+        async keptEdits(input, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host/kept-edits`, {
+            method: "POST", headers: {authorization: `Bearer ${session.value.token}`, "content-type": "application/json"},
+            body: JSON.stringify(input), signal: requestSignal, redirect: "error",
+          });
+          assertCurrent(); requestSignal.throwIfAborted();
+          const value = await readBoundedJson(response, 9 * 1024 * 1024, requestSignal);
+          assertCurrent();
+          if (response.status === 409) {
+            const code = value && typeof value === "object" && "code" in value ? value.code : undefined;
+            if (code === "kept-edits-changed" || code === "kept-edits-earlier") throw new ServerKeptEditsConflict(code === "kept-edits-earlier");
+            if (code === "kept-edits-unrecoverable") throw new ServerRecoveryCopyRefusedError(value && typeof value === "object" && "reason" in value ? value.reason : undefined);
+            throw new Error(value && typeof value === "object" && "error" in value && typeof value.error === "string" ? value.error
+              : "This document changed. Open Live documents to check it.");
+          }
+          if (!response.ok) throw new Error("dohc could not reach your kept edits on the server. Try again.");
+          // The next pass reads the list the action changed, not one cached before it.
+          if (input.action !== "page") discovery.delete(workspace.workspaceId);
+          return value;
+        },
+        // A later page of the list of edits the server kept, after the cursor its previous page named.
+        async keptEditsPage(after, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host?kept=1&after=${after}`, {
+            headers: {authorization: `Bearer ${session.value.token}`}, signal: requestSignal, redirect: "error",
+          });
+          assertCurrent(); requestSignal.throwIfAborted();
+          if (!response.ok) {await response.body?.cancel(); throw new Error("Owner kept edits discovery failed.");}
+          const value = await readBoundedJson(response, KEPT_EDITS_PAGE_BYTES, requestSignal);
+          assertCurrent();
+          return value;
+        },
         async retire(binding, attempt) {
           assertCurrent();const requestSignal=AbortSignal.any([signal,attempt]);
           const response=await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,{
@@ -129,7 +172,7 @@ export function createServerOwnerConnection(options: {
               assertCurrent(); requestSignal.throwIfAborted();
               if (next.done) break;
               bytes += next.value.byteLength;
-              if (bytes > 1_048_576) throw new Error("Owner live document response exceeds its byte limit.");
+              if (bytes > LIVE_DOCUMENTS_BYTES) throw new Error("Owner live document response exceeds its byte limit.");
               chunks.push(next.value);
             }
           } finally {await reader.cancel().catch(() => undefined); reader.releaseLock();}

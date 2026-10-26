@@ -3365,6 +3365,33 @@
       }
     },
     {
+      "name": "dohc_retry_kept_edits",
+      "description": "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "incident": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "path",
+          "incident"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_save_kept_copy",
       "description": "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
       "inputSchema": {
@@ -3378,6 +3405,32 @@
         },
         "required": [
           "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_save_recovery_copy",
+      "description": "Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer, or on the server for a document it hosts (`storedOn`); dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. For edits the server keeps, dohc then tells the server the copy is saved, and the `recovery` becomes `copied`. `keptEdits` is `kept` when the edits stay where `storedOn` says, `copied` when the server may now release them, and `ended` for edits a Stop could not write: dohc no longer keeps those, and the copy holds them. Accepts every `recovery`. Pass the `incident` from `keptEdits` to save exactly those kept edits; without it, dohc saves edits a Stop could not write first. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "incident": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "path"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -3566,6 +3619,33 @@
       }
     },
     {
+      "name": "dohc_stop_again",
+      "description": "Stop live editing again for a document whose Stop kept its edits, as Try again does on its row in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `not-written`, where dohc writes the kept edits into the file, or `stopping`, where it asks the server again to stop live editing. `keptEdits` is `recovered` once the file holds the edits, `kept` while dohc still keeps them, and `none` when it kept none. dohc refuses while the document is open in an editor. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "incident": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "path",
+          "incident"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_stop_workspace_sync",
       "description": "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.",
       "inputSchema": {
@@ -3620,7 +3700,7 @@
     },
     {
       "name": "dohc_workspace_status",
-      "description": "Report whether this workspace is local-only or cloud-synced.",
+      "description": "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -4413,7 +4493,7 @@
     },
     {
       "name": "dohc_workspace_status",
-      "description": "Report whether this workspace is local-only or cloud-synced.",
+      "description": "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -5165,7 +5245,7 @@
     },
     {
       "name": "dohc_workspace_status",
-      "description": "Report whether this workspace is local-only or cloud-synced.",
+      "description": "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -5963,7 +6043,7 @@
     },
     {
       "name": "dohc_workspace_status",
-      "description": "Report whether this workspace is local-only or cloud-synced.",
+      "description": "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.",
       "inputSchema": {
         "type": "object",
         "properties": {},

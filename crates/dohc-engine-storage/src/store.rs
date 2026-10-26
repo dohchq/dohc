@@ -91,11 +91,13 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 
 impl EngineStore {
     /// A bounded wait for the next checkpoint cycle, run off the writer.
-    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub fn checkpoint_cycle(&self) -> impl Fn() -> crate::CheckpointWait + Send + Sync + use<> {
         let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
         move || {
             if let Some(wait) = &wait {
-                wait();
+                wait()
+            } else {
+                crate::CheckpointWait::Finished
             }
         }
     }
@@ -222,11 +224,16 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work)?;
+        let opened = open_engine_db_read_only(path, work, None)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
-        let flushes = crate::flush::Flushes::read_only();
-        Ok(EngineStore {
-            conn: opened.conn,
+        Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// A store for queries only over `conn`, a checked connection to a current
+    /// store at `path` that this open neither migrates nor writes.
+    pub(crate) fn from_read_only(conn: Connection, path: &Path, passive: bool) -> Self {
+        EngineStore {
+            conn,
             checkpoints: None,
             checkpoint_changes: 0,
             freshly_created: false,
@@ -235,8 +242,8 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
-            flushes,
-        })
+            flushes: crate::flush::Flushes::read_only(),
+        }
     }
 
     /// Count this connection's SQLite work into `work` for as long as someone

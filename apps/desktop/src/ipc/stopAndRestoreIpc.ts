@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
-import type { PendingRestore } from "@dohc/automation-executor/automation-run-store";
+import { AutomationStoreNotOpenedError, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
@@ -219,7 +219,12 @@ export function registerStopAndRestoreIpc<
     pendingStopAndRestores: async (_input, { operation }) => {
       dependencies.assertOriginalWorkspace(operation.workspace);
       retryServerReleases(operation.workspace.workspaceId);
-      const pending = await operation.state.collectionAutomations.pendingRestores();
+      // A workspace still opening has nothing to read yet. The window reads
+      // again when its Collection automations open.
+      const pending = await operation.state.collectionAutomations.pendingRestores().catch((error: unknown) => {
+        if (error instanceof AutomationStoreNotOpenedError) return [];
+        throw error;
+      });
       operation.assertCurrent();
       return pending.flatMap(entry => {
         if (!entry.session) return [];

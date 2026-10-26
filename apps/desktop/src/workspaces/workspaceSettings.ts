@@ -24,6 +24,8 @@ export const WorkspaceSettingsResult = z.object({
   // Same bound as the warning, and for the same reason: it names the path.
   refusal: z.string().min(1).max(4600).optional(),
   ignored: IgnoredSettings.optional(),
+  // Set when the workspace had not finished opening, so dohc read no file.
+  notOpened: z.literal(true).optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 

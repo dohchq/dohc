@@ -23,6 +23,10 @@ import {
   MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
+  firstAgent,
+  newAgentDefaults,
+  withAgent,
+  withFirstAgent,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -89,9 +93,7 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
 }
 
 // The document chip's "your edits are still here" is false here: a failed
-// save rolls the control back. The title promises nothing about which value
-// it shows, because two overlapping saves that both fail leave the later
-// one's optimistic value on screen, not the value on disk.
+// save goes back to the settings the file holds.
 export const SETTINGS_SAVE_ERROR_TITLE =
   "dohc could not save this setting. Try changing it again.";
 
@@ -331,11 +333,15 @@ export function SettingsDialog(props: {
       markSaved();
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
-      setUserResult(previous);
-      applyLookSettings(previous.settings);
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      // `previous` can hold a change an earlier save failed to make, so the
+      // dialog goes back to the settings the file holds.
+      const restored = await bridge().getUserSettings().catch(() => previous);
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      setUserResult(restored);
+      applyLookSettings(restored.settings);
     }
   }, [markSaved, markSaving, props.onError, userResult]);
 
@@ -544,6 +550,7 @@ export function SettingsDialog(props: {
   }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
+  const agent = firstAgent(userSettings);
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
@@ -697,20 +704,17 @@ export function SettingsDialog(props: {
                 onChange={(yourColor) => void saveAppearance({ yourColor })}
               />
             </SettingRow>
-            <SettingRow
-              title="Your agent's color"
-              modified={userSettings.appearance.yourAgentColor !== null}
-              onReset={() => void saveAppearance({ yourAgentColor: null })}
-              testId="settings-row-your-agent-color"
-            >
-              <ChatAvatar presentation={ownAgentPresentation} name={userSettings.profile.agentName ?? "Agent"} kind="agent" size="comment" />
-              <HueControl
-                label="Your agent's color"
-                shape="agent"
-                value={userSettings.appearance.yourAgentColor}
-                onChange={(yourAgentColor) => void saveAppearance({ yourAgentColor })}
-              />
-            </SettingRow>
+            {agent ? (
+              <SettingRow title="Your agent's color" testId="settings-row-your-agent-color">
+                <ChatAvatar presentation={ownAgentPresentation} name={agent.name} kind="agent" size="comment" />
+                <HueControl
+                  label="Your agent's color"
+                  shape="agent"
+                  value={agent.hue}
+                  onChange={(hue) => void saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, hue })))}
+                />
+              </SettingRow>
+            ) : null}
             <SettingRow
               title="Editor font"
               modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
@@ -801,22 +805,30 @@ export function SettingsDialog(props: {
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
               preferredName={userSettings.profile.preferredName}
-              agentName={userSettings.profile.agentName}
-              onAgentNameChange={(agentName) => saveUserSettings({ ...userSettings, profile: { ...userSettings.profile, agentName } })}
+              agentName={agent?.name}
+              onAgentNameChange={(name) =>
+                saveUserSettings(withFirstAgent(userSettings, (current) => ({
+                  ...(current ?? newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue)),
+                  name,
+                })))
+              }
               onPreferredNameChange={(preferredName) =>
                 saveUserSettings({
                   ...userSettings,
                   profile: { ...userSettings.profile, preferredName },
                 })
               }
-              runner={userSettings.runner}
+              agent={agent}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
-              onRunnerChange={(runner) =>
-                saveUserSettings({
-                  ...userSettings,
-                  runner,
-                })
+              onAgentChange={(fields) =>
+                saveUserSettings(withFirstAgent(userSettings, (current) => ({
+                  ...(current ?? {
+                    ...newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue),
+                    name: "Agent",
+                  }),
+                  ...fields,
+                })))
               }
             />
           </div>

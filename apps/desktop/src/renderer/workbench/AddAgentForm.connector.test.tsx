@@ -2,8 +2,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, firstAgent, type DesktopUserSettings } from "../../settings/userSettings";
 import type { AgentToolsResult } from "../../agents/agentToolCatalog";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AddAgentForm } from "./AddAgentForm";
 
@@ -21,7 +22,7 @@ function fixture(probe = vi.fn(async () => detected)) {
   const selfTest = vi.fn(async () => ({ ok: true, detail: "The runner answered." }));
   vi.stubGlobal("dohcDesktop", { detectAgentTools: probe, runnerSelfTest: selfTest });
   const props = {
-    workspaceId: "workspace-a", settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam", agentName: "Nova" } },
+    workspaceId: "workspace-a", settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam" } },
     onSave: vi.fn(async (_settings: DesktopUserSettings, _base: DesktopUserSettings): Promise<void> => undefined), onError: vi.fn(), onDone: vi.fn(), onCancel: vi.fn(),
   };
   return { props, selfTest, probe };
@@ -30,28 +31,30 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("requires an agent name and saves it alongside the selected tool and owner", async () => {
   const f = fixture();
-  render(<AddAgentForm {...f.props} settings={{ ...f.props.settings, profile: { preferredName: "Sam" } }} />);
+  render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
-  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ profile: { preferredName: "Sam", agentName: "Nova" }, runner: expect.objectContaining({ profile: { tool: "codex", executable: "C:\\Tools\\codex.cmd" }, enabled: true }) }), { ...f.props.settings, profile: { preferredName: "Sam" } }));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ profile: { preferredName: "Sam" }, agents: {
+    default: expect.objectContaining({ name: "Nova", launch: { tool: "codex", executable: "C:\\Tools\\codex.cmd" }, enabled: true }),
+  } }), f.props.settings));
 });
 
-it("preserves the saved command when selecting a profile and can restore it", async () => {
+it("goes back to the agent's command after a tool was chosen, before saving", async () => {
   const f = fixture();
-  const settings = { ...f.props.settings, runner: { ...f.props.settings.runner, command: "node custom.mjs" } };
-  const view = render(<AddAgentForm {...f.props} settings={settings} />);
+  const settings = settingsWithAgent({ name: "Nova", launch: { command: "node custom.mjs" } }, f.props.settings);
+  render(<AddAgentForm {...f.props} settings={settings} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
-  await userEvent.click(screen.getByTestId("chats-add-agent-check"));
-  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ runner: expect.objectContaining({ command: "node custom.mjs", profile: { tool: "codex", executable: "C:\\Tools\\codex.cmd" } }) }), settings));
-  const saved = f.props.onSave.mock.calls[0]![0];
-  view.unmount();
-  render(<AddAgentForm {...f.props} settings={saved} />);
-  await userEvent.click(screen.getByText("Advanced"));
+  const input = screen.getByLabelText("Runner command") as HTMLInputElement;
+  expect(input.value).toContain("codex.cmd");
   await userEvent.click(screen.getByRole("button", { name: "Use saved command" }));
-  expect((screen.getByLabelText("Runner command") as HTMLInputElement).value).toBe("node custom.mjs");
+  expect(input.value).toBe("node custom.mjs");
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({
+    agents: { default: expect.objectContaining({ launch: { command: "node custom.mjs" } }) },
+  }), settings));
 });
 
 it("keeps the form open while saving and checking", async () => {
@@ -61,6 +64,7 @@ it("keeps the form open while saving and checking", async () => {
   f.props.onSave.mockReturnValue(save.promise);
   f.selfTest.mockReturnValue(check.promise);
   render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));
   fireEvent.keyDown(document, { key: "Escape" });
@@ -84,28 +88,30 @@ it("requires an update before selecting an older Claude profile", async () => {
 it.each(["Claude Code", "Codex"])("saves %s as a profile and checks through the existing runner", async (name) => {
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name }));
   expect(screen.getByText("Conversation through stdin")).toBeTruthy();
-  expect(screen.getByText("Tool configuration only. dohc adds no servers.")).toBeTruthy();
+  expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "OpenCode" }).hasAttribute("disabled")).toBe(true);
   expect(screen.queryByTestId("chats-add-agent-check-result")).toBeNull();
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));
   await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" }));
-  expect(f.props.onSave).toHaveBeenLastCalledWith(expect.objectContaining({ runner: expect.objectContaining({
-    command: "", enabled: true, profile: { tool: name === "Codex" ? "codex" : "claude", executable: name === "Codex" ? "C:\\Tools\\codex.cmd" : "C:\\Tools\\claude.exe" },
-  }) }), f.props.settings);
+  expect(f.props.onSave).toHaveBeenLastCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    enabled: true, launch: { tool: name === "Codex" ? "codex" : "claude", executable: name === "Codex" ? "C:\\Tools\\codex.cmd" : "C:\\Tools\\claude.exe" },
+  }) } }), f.props.settings);
   expect((await screen.findByTestId("chats-add-agent-check-result")).textContent).toBe("The runner answered.");
 });
 
 it("editing the Advanced command removes the profile and its permission claim", async () => {
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   await userEvent.click(screen.getByText("Advanced"));
   fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "node custom.mjs" } });
   expect(screen.queryByText("Workspace-write sandbox. Runs without approval prompts.")).toBeNull();
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
-  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ runner: expect.objectContaining({ command: "node custom.mjs", profile: undefined }) }), f.props.settings));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({ launch: { command: "node custom.mjs" } }) } }), f.props.settings));
 });
 
 it("ignores detection and checks that finish after a workspace switch", async () => {
@@ -129,7 +135,7 @@ it("reports detection failures to the shell and can refresh", async () => {
 
 it("keeps a cleared Advanced command open and preserves drafts across equivalent settings broadcasts", async () => {
   const f = fixture();
-  const settings = { ...f.props.settings, runner: { ...f.props.settings.runner, profile: { tool: "codex" as const, executable: "C:\\Tools\\codex.cmd" } } };
+  const settings = settingsWithAgent({ name: "Nova", launch: { tool: "codex", executable: "C:\\Tools\\codex.cmd" } }, f.props.settings);
   const view = render(<AddAgentForm {...f.props} settings={settings} />);
   await userEvent.click(screen.getByText("Advanced"));
   const input = screen.getByLabelText("Runner command");
@@ -155,5 +161,8 @@ it.each([undefined, "Sam"])("adds and checks an agent without editing the existi
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
   await waitFor(() => expect(f.props.onDone).toHaveBeenCalledOnce());
   expect(f.props.onSave).toHaveBeenCalledTimes(2);
-  for (const [saved] of f.props.onSave.mock.calls) expect(saved.profile).toEqual({ ...profile, agentName: "Nova" });
+  for (const [saved] of f.props.onSave.mock.calls) {
+    expect(saved.profile).toEqual(profile);
+    expect(firstAgent(saved)?.name).toBe("Nova");
+  }
 });

@@ -354,19 +354,25 @@ impl ActorHandle {
     pub(in crate::actor) async fn wait_undo_checkpoint(
         token: &crate::CancellationToken,
         since: &mut Option<std::time::Instant>,
-        wait: Arc<impl Fn() + Send + Sync + 'static>,
+        wait: Arc<impl Fn() -> dohc_engine_storage::CheckpointWait + Send + Sync + 'static>,
     ) -> Result<(), RuntimeError> {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if since.get_or_insert_with(std::time::Instant::now).elapsed()
-            >= std::time::Duration::from_secs(1)
-        {
-            return Err(StorageError::FileLocked.into());
-        }
-        tokio::task::spawn_blocking(move || wait())
+        let locked_since = *since.get_or_insert_with(std::time::Instant::now);
+        let checkpoint = tokio::task::spawn_blocking(move || wait())
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if checkpoint == dohc_engine_storage::CheckpointWait::Running {
+            // A PASSIVE checkpoint can still be copying or syncing pages.
+            // Only an idle or completed cycle can establish persistent contention.
+            *since = None;
+        } else if locked_since.elapsed() >= std::time::Duration::from_secs(1) {
+            return Err(StorageError::FileLocked.into());
+        }
         tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}

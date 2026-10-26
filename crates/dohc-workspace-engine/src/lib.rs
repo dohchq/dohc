@@ -90,6 +90,12 @@ pub struct EngineService {
     self_writes: SelfWriteSuppression,
     events: EngineEvents,
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+    /// One permit: rebuilds of recovery checkpoints, in any workspace, run one
+    /// at a time.
+    reconstructions: Arc<tokio::sync::Semaphore>,
+    /// Told when a rebuild starts waiting for the permit.
+    #[cfg(test)]
+    reconstruction_waits: tokio::sync::Notify,
     #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
@@ -233,6 +239,9 @@ impl EngineService {
             },
             events: EngineEvents::default(),
             capture_apply_probe: None,
+            reconstructions: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            reconstruction_waits: tokio::sync::Notify::new(),
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]

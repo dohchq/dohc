@@ -256,5 +256,8 @@
   "file.retained.list",
   "file.retained.delete",
   "chat.dispatch.pause.read",
-  "chat.dispatch.pause.switch"
+  "chat.dispatch.pause.switch",
+  "share.live.document.retry",
+  "share.live.document.recovery.save",
+  "workspace.name.suggest"
 ]

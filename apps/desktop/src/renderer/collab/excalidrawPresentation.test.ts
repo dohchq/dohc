@@ -9,14 +9,14 @@ import { bindExcalidrawPresence } from "./excalidrawPresence";
 import { setOwnPresentation } from "../workbench/actorPresentation";
 import { setChosenColors } from "../workbench/chosenColors";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-afterEach(() => { delete document.documentElement.dataset.theme; setChosenColors(DEFAULT_USER_SETTINGS.appearance); setOwnPresentation(undefined); });
+afterEach(() => { delete document.documentElement.dataset.theme; setChosenColors(DEFAULT_USER_SETTINGS); setOwnPresentation(undefined); });
 it("leaves collaborator colours to Excalidraw without publishing user overrides", async () => {
   const localDoc = new Y.Doc(); const remoteDoc = new Y.Doc(); const awareness = new Awareness(remoteDoc);
   awareness.setLocalState({ pointer: { x: 1, y: 2, tool: "pointer" } });
   const update = Buffer.from(encodeAwarenessUpdate(awareness, [awareness.clientID])).toString("base64");
   const updateScene = vi.fn();
   const published: unknown[] = [];
-  setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "blue" });
+  setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "blue" } });
   const binding = bindExcalidrawPresence({ doc: localDoc, clientId: "irrelevant", displayName: "You", topic: "scene",
     getApi: () => ({ updateScene }) as unknown as ExcalidrawImperativeAPI,
     transport: {
@@ -38,7 +38,7 @@ it("leaves collaborator colours to Excalidraw without publishing user overrides"
     await Promise.resolve();
     expect(updateScene).toHaveBeenCalledTimes(calls);
     setOwnPresentation({ group: "own", hue: "rose", self: true });
-    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+    setChosenColors(DEFAULT_USER_SETTINGS);
     expect(local.awareness.getLocalState()?.user).not.toHaveProperty("color");
     expect(updateScene).toHaveBeenCalledTimes(calls);
   } finally { await binding.destroy(); awareness.destroy(); localDoc.destroy(); remoteDoc.destroy(); }

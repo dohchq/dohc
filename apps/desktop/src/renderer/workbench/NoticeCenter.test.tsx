@@ -2575,6 +2575,51 @@ describe("notices sent to you", () => {
       expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
     });
 
+    // Something finished fades, but not while the person reads it.
+    it("holds a success toast while it is hovered or focused", () => {
+      vi.useFakeTimers();
+      const onHideWorkspaceError = vi.fn();
+      renderNotices({
+        workspaceErrors: [{
+          id: "s1", tone: "success", message: "Moved 4 files to Archived", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+        onHideWorkspaceError,
+      });
+      const toast = screen.getByTestId("workspace-shell-notice");
+      fireEvent.pointerEnter(toast);
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      fireEvent.pointerLeave(toast);
+      act(() => within(toast).getByRole("button", { name: "Dismiss workspace notice" }).focus());
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => (document.activeElement as HTMLElement).blur());
+      act(() => vi.advanceTimersByTime(5_999));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledWith("s1");
+    });
+
+    // A list clamps by whole entries, so none is cut in half. Its count is
+    // true only beside the whole list, so it waits for Show more.
+    it("shows a list's first 3 entries whole, and its count only with the rest", async () => {
+      renderNotices({
+        workspaceErrors: [{
+          id: "e1", title: "250 files weren't imported", message: "a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.",
+          lastLine: "246 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+      });
+      const toast = screen.getByTestId("workspace-shell-error");
+      const body = () => toast.querySelector("p")!;
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.");
+      expect(body().className).not.toContain("line-clamp");
+      expect(within(toast).queryByText("246 more weren't imported.")).toBeNull();
+
+      await userEvent.click(within(toast).getByTestId("workspace-shell-toast-more"));
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.");
+      within(toast).getByText("246 more weren't imported.");
+    });
+
     it("opens from the toast or closes it", async () => {
       const onHideSentNoticeToast = vi.fn();
       const onOpenSentNotice = vi.fn(async () => null);

@@ -14,6 +14,8 @@ export type OwnerLiveStop = Awaited<ReturnType<EngineClient["ownerYDocStopReques
 export async function reconcileOwnerLiveStops(options: {
   client: EngineClient; workspaceHandle: string; workspaceId: string; signal: AbortSignal;
   retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
+  /** Releases a retired Stop's queue; the engine's own release when absent. */
+  release?(binding: NonNullable<OwnerLiveStop["binding"]>, acceptedCursor: number, signal: AbortSignal): Promise<unknown>;
   assertCurrent(): void;
   onError?(row: OwnerLiveStop, error: unknown): Promise<void> | void;
   onComplete?(row: OwnerLiveStop): void;
@@ -33,7 +35,7 @@ export async function reconcileOwnerLiveStops(options: {
     if (acceptedCursor===null) return;
     options.assertCurrent();
     try {
-      if (stop.binding) await options.client.ownerYDocRelease(request(),stop.binding,acceptedCursor,options.signal);
+      if (stop.binding) await (options.release ? options.release(stop.binding,acceptedCursor,options.signal) : options.client.ownerYDocRelease(request(),stop.binding,{acceptedCursor},options.signal));
       else await options.client.ownerYDocStopRetired(request(),stop.document,options.signal);
     }
     catch (error) {

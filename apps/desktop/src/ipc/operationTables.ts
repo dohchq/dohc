@@ -5,6 +5,7 @@ import { chatOperations } from "./chatOperations";
 import {
   databaseImportOperations,
   workspaceSyncOperations,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
@@ -52,6 +53,7 @@ export const OPERATION_TABLES = [
   shareCopyOperations,
   linksOperations,
   workspaceSyncOperations,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,

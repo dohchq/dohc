@@ -98,7 +98,7 @@ describe("the agent offer", () => {
       <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@agent " sending={false}
         placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={() => {}}
         onSend={() => {}} agentOffer={offer("runs")}
-        above={<div data-testid="chats-replying-mode">Replying to Sam ·</div>} />,
+        above={<div data-testid="chats-replying-mode">Replying to Sam</div>} />,
     );
     const stack = screen.getByTestId("composer-agent-offer").parentElement!;
     expect(stack.firstElementChild).toBe(screen.getByTestId("chats-replying-mode"));

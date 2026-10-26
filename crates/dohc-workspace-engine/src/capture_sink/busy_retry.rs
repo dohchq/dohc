@@ -31,6 +31,20 @@ impl CaptureBatchRetry {
         result
     }
 
+    /// Let healthy single-file work end contention even after the retry budget expires.
+    pub(super) fn run_single<T>(
+        &self,
+        mut attempt: impl FnMut() -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        if self.cancel.is_cancelled() {
+            return self.observe(Err(RuntimeError::Cancelled));
+        }
+        match self.observe(attempt()) {
+            Err(error) if crate::rpc::error::store_busy(&error) => self.run(attempt),
+            result => result,
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn exhaust_for_test(&self) {
         self.deadline.set(Some(Instant::now()));
@@ -113,6 +127,27 @@ impl CaptureBatchRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_single_file_probes_once_without_extending_the_budget() {
+        let retry = CaptureBatchRetry::default();
+        retry.exhaust_for_test();
+        let attempts = Cell::new(0);
+        assert!(matches!(
+            retry.run_single(|| {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked))
+            }),
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+        ));
+        assert_eq!(attempts.get(), 1);
+        assert!(matches!(
+            retry.run(|| Ok(())),
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+        ));
+        retry.run_single(|| Ok(())).unwrap();
+        retry.run(|| Ok(())).unwrap();
+    }
 
     #[test]
     fn later_batch_gets_a_fresh_budget_after_healthy_work() {

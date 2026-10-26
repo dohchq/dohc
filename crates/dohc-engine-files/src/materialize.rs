@@ -2581,23 +2581,17 @@ fn pending_respelled_delete(
     job: &MaterializationJob,
     current_sha256: &str,
 ) -> Result<Option<MaterializationJob>, MaterializeError> {
-    let Some(file) = std::fs::canonicalize(target)
-        .ok()
-        .filter(|file| file.starts_with(root))
-    else {
+    let deletes = store.pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?;
+    if deletes.is_empty() {
         return Ok(None);
-    };
-    Ok(store
-        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
-        .into_iter()
-        .find(|delete| {
-            delete.target_path != job.target_path
-                && resolve_target(root, &delete.target_path)
-                    .ok()
-                    .filter(|path| ensure_target_symlink_free(root, path).is_ok())
-                    .and_then(|path| std::fs::canonicalize(path).ok())
-                    .is_some_and(|path| path == file)
-        }))
+    }
+    Ok(deletes.into_iter().find(|delete| {
+        delete.target_path != job.target_path
+            && resolve_target(root, &delete.target_path)
+                .ok()
+                .filter(|path| ensure_target_symlink_free(root, path).is_ok())
+                .is_some_and(|path| crate::reconcile::may_share_entry_in(root, target, &path))
+    }))
 }
 
 /// Rename the temp to the name staging emptied. `false` when a program
@@ -7830,6 +7824,67 @@ mod tests {
             projection_target_stamp(&scratch.root, path),
             ProjectionTargetStamp::Absent
         );
+    }
+
+    #[test]
+    fn pending_respelled_delete_matches_only_the_targets_entry_and_preimage() {
+        let scratch = Scratch::new("pending-respelled-delete");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::write(root.join("notes.md"), b"notes").unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"notes").unwrap();
+        enqueue_write_job(&mut store, "write", "Notes.md", b"notes", 2);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "merge-mat_notes".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let write = store.load_materialization_job("write").unwrap().unwrap();
+        let target = root.join("Notes.md");
+        let ignores_case = target.exists();
+        if !ignores_case {
+            std::fs::hard_link(root.join("notes.md"), &target).unwrap();
+        }
+        assert_eq!(
+            pending_respelled_delete(&store, &root, &target, &write, &sha)
+                .unwrap()
+                .is_some(),
+            ignores_case,
+            "known separate directory entries do not order each other's deletes"
+        );
+        assert!(
+            pending_respelled_delete(&store, &root, &target, &write, &hex_sha256(b"other"))
+                .unwrap()
+                .is_none()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(&root).unwrap().permissions();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
+            let unlistable = std::fs::read_dir(&root).is_err();
+            let pending = pending_respelled_delete(&store, &root, &target, &write, &sha);
+            std::fs::set_permissions(&root, permissions).unwrap();
+            if !unlistable {
+                eprintln!("SKIP: this user can list the folder");
+                return;
+            }
+            assert_eq!(
+                pending.unwrap().is_some(),
+                ignores_case || !cfg!(target_os = "macos")
+            );
+        }
     }
 
     /// A merge's pending delete through a link reaches the file a create
