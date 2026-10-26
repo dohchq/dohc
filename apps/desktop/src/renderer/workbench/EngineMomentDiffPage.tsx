@@ -231,13 +231,19 @@ export function EngineMomentDiffPage({
   // A step reads the next change in this page's place, which drops focus
   // while it loads. Focus goes back to the step's arrow, so the next step
   // needs no click. At either end that arrow stays focusable, so the page
-  // keeps focus and the other bracket still steps back.
-  const stepFocus = useRef<"newer" | "older" | null>(null);
+  // keeps focus and the other bracket still steps back. Only the answer for
+  // the change it steps to returns focus: a late or repeated answer for the
+  // change it left must not spend it. If the tab opens any other change
+  // first, the step gives up its focus.
+  const stepFocus = useRef<{ direction: "newer" | "older"; key: string } | null>(null);
   useEffect(() => {
-    if (state.status === "loading" || stepFocus.current === null) return;
-    const arrow = pageRef.current?.querySelector<HTMLButtonElement>(`[data-testid="engine-diff-${stepFocus.current}"]`);
+    if (stepFocus.current?.key !== `${workspaceId}\0${momentId}`) stepFocus.current = null;
+  }, [momentId, workspaceId]);
+  useEffect(() => {
+    const step = stepFocus.current;
+    if (state.status === "loading" || step === null || answeredFor.current !== step.key) return;
     stepFocus.current = null;
-    arrow?.focus();
+    pageRef.current?.querySelector<HTMLButtonElement>(`[data-testid="engine-diff-${step.direction}"]`)?.focus();
   }, [state]);
 
   const diffMoment = state.status === "ready" ? state.moment : null;
@@ -462,7 +468,7 @@ export function EngineMomentDiffPage({
   const stepTo = (direction: "newer" | "older") => {
     const step = steps?.[direction];
     if (!step || !onOpenMoment) return;
-    stepFocus.current = direction;
+    stepFocus.current = { direction, key: `${workspaceId}\0${step.momentId}` };
     onOpenMoment(step.momentId, step.path);
   };
 

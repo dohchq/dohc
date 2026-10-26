@@ -7,7 +7,9 @@ import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // `.dohc/local` holds what belongs to this computer rather than the
-// workspace, such as its layout. Only the engine creates it: each open that
+// workspace, such as its layout, and the Collections when this computer
+// keeps them. It is not a cache: some of it is the only copy, so nothing
+// removes the folder as a whole. Only the engine creates it: each open that
 // writes makes it private and, on a Mac, marks it so that file-provider
 // services such as iCloud Drive skip it, before anything is written in it.
 // A writer that created the folder itself would leave it unmarked, so
@@ -24,6 +26,18 @@ export interface LocalStateBindings {
   currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
   /** The engine open of the workspace already under way, or null. Never starts one. */
   openInProgress?(workspace: LocalStateWorkspace): Promise<unknown> | null;
+  /**
+   * The current open of a workspace at `rootPath` that prepared
+   * `.dohc/local`, once an open under way settles, or null, for a reader that
+   * knows only the root. Never starts an open.
+   */
+  localStateOpenAt(rootPath: string): Promise<LocalStateOpen | null>;
+}
+
+/** An engine open that prepared `.dohc/local`. */
+export interface LocalStateOpen {
+  /** Whether it is still the workspace's current open, and so has held the folder since. */
+  current(): boolean;
 }
 
 export type LocalStateRefusal = "not-opened" | "not-excluded";
@@ -150,17 +164,67 @@ async function folderProblem(path: string): Promise<LocalFolderProblem | "missin
   return uid !== undefined && stats.uid !== uid ? "other-owner" : null;
 }
 
+// Node can't see who may change a folder on Windows. There dohc trusts
+// `.dohc/local` only while the engine's current open of a workspace at this
+// root holds it: that open made it private and keeps it the folder it
+// checked.
+async function engineOpenAt(rootPath: string): Promise<LocalStateOpen | null> {
+  try {
+    return (await bindings?.localStateOpenAt(rootPath)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function stillCurrent(open: LocalStateOpen): boolean {
+  try {
+    return open.current();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The workspace's `.dohc/local` for a reader of state that changes what dohc
- * does, such as settings, or null when it or `.dohc` is not there. Both
- * folders are checked on every read, before any file in them: a link at
+ * The engine's current open of the workspace that prepared `.dohc/local`, or
+ * null, for a writer that goes on using what it opened in the folder. Its
+ * `current` says whether that open is still the workspace's current one, so
+ * it has held the folder since.
+ */
+export function currentLocalStateOpen(workspace: LocalStateWorkspace): LocalStateOpen | null {
+  const binding = currentBinding(workspace);
+  return binding?.localStateReady ? { current: () => currentBinding(workspace) === binding } : null;
+}
+
+/**
+ * Reads the workspace's `.dohc/local` with `read`, for state that changes
+ * what dohc does, such as settings, and returns what `read` returned. `read`
+ * gets the folder, or null when it or `.dohc` is not there. Both folders are
+ * checked on every read, before `read` opens a file in them: a link at
  * either one would be followed by the file's open. Throws
  * LocalStateFolderError when either is not a folder this user owns or can't
- * be looked at, and the metadata resolver's refusal
- * when `.dohc` leads out of the workspace, which only a mount can do. Does
- * not wait for the engine, and creates nothing.
+ * be looked at, and the metadata resolver's refusal when `.dohc` leads out of
+ * the workspace, which only a mount can do.
+ *
+ * On Windows, when the folder is there, waits for an open already under
+ * way, then throws LocalStateUnavailableError unless an engine open of the
+ * workspace holds the folder from then until `read` returns. If that open
+ * closed in between, what `read` found is dropped. Otherwise does not wait
+ * for the engine. Creates nothing.
  */
-export async function ownedLocalStateDir(rootPath: string): Promise<string | null> {
+export async function readOwnedLocalState<T>(rootPath: string, read: (dir: string | null) => Promise<T>): Promise<T> {
+  const dir = await ownedLocalStateDir(rootPath);
+  if (process.platform !== "win32" || dir === null) return read(dir);
+  // An open that holds the folder now made private the folder at its path,
+  // and keeps using it while it stays current.
+  const open = await engineOpenAt(rootPath);
+  if (open === null) throw new LocalStateUnavailableError("not-opened");
+  const found = await read(dir);
+  if (!stillCurrent(open)) throw new LocalStateUnavailableError("not-opened");
+  return found;
+}
+
+// The folder for readOwnedLocalState.
+async function ownedLocalStateDir(rootPath: string): Promise<string | null> {
   const dohc = await folderProblem(join(rootPath, ".dohc"));
   if (dohc === "missing") return null;
   if (dohc) throw new LocalStateFolderError(".dohc", dohc);
@@ -229,16 +293,20 @@ export async function ownedSqliteFiles(folder: string, name: string): Promise<bo
 }
 
 /**
- * A folder in `.dohc/local` for a reader that trusts what it finds there,
- * where `name` can be a path such as `datasets/exports`: null when it, a
- * folder on the way, `.dohc/local` or `.dohc` is missing, and "unusable" when
- * any of them is not a folder in the workspace that only this user can
- * change. Throws as ownedLocalStateDir does. Does not wait for the engine,
- * and creates nothing.
+ * Reads a folder in `.dohc/local` with `read`, for a reader that trusts what
+ * it finds there, where `name` can be a path such as `datasets/exports`.
+ * `read` gets the folder, null when it, a folder on the way, `.dohc/local`
+ * or `.dohc` is missing, and "unusable" when any of them is not a folder in
+ * the workspace that only this user can change. Throws, and on Windows waits,
+ * as readOwnedLocalState does. Creates nothing.
  */
-export async function existingLocalStateFolder(rootPath: string, name: string): Promise<string | null | "unusable"> {
-  const local = await ownedLocalStateDir(rootPath);
-  if (local === null) return null;
+export function readOwnedLocalStateFolder<T>(
+  rootPath: string, name: string, read: (dir: string | null | "unusable") => Promise<T>,
+): Promise<T> {
+  return readOwnedLocalState(rootPath, async (local) => read(local === null ? null : await folderIn(rootPath, local, name)));
+}
+
+async function folderIn(rootPath: string, local: string, name: string): Promise<string | null | "unusable"> {
   let dir = local;
   for (const part of name.split("/")) {
     dir = join(dir, part);

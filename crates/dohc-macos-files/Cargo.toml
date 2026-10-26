@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Safe wrappers that create a file without its folder's inherited ACL, keep a folder private to its owner, copy a file's macOS ACL and extended attributes, flush behind a drive barrier, keep a folder out of iCloud Drive, and unlink a file no process has open."
+description = "Safe wrappers that create a file without its folder's inherited ACL, keep a folder private to its owner, name a folder by its ID, copy a file's macOS ACL and extended attributes, flush behind a drive barrier, keep a folder out of iCloud Drive, and unlink a file no process has open."
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 libc = "0.2"

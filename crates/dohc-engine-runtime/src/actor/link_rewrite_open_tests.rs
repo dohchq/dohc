@@ -132,6 +132,11 @@ impl Fixture {
             )
             .await
     }
+    async fn undo_open_with_busy_retry(
+        &self,
+    ) -> Result<super::super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        retry_undo(&self.ws, || self.undo_open()).await
+    }
     async fn adopt(&self, object: &str) {
         let ws = self.ws.clone();
         let object = object.to_owned();
@@ -173,7 +178,7 @@ async fn ordinary_open_rewrite_and_inverse_preserve_typing_labels_and_new_links(
     f.type_document("source-0000", body).await;
     f.settle_document("source-0000").await;
     let start = Instant::now();
-    let result = f.undo_open().await.unwrap();
+    let result = f.undo_open_with_busy_retry().await.unwrap();
     let undo_ns = start.elapsed().as_nanos();
     assert!(result.not_restored.is_empty());
     let expected = "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]";
@@ -379,6 +384,8 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
     let f = Fixture::new(2000, 4999);
+    // Publication has its own proof that a queued update waits at most one turn.
+    let _publication = f.capture.clone().lock_owned().await;
     let _index_hold = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {
@@ -477,7 +484,7 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
             start.elapsed().as_nanos(),
         )
     };
-    let (result, (undo_gap, undo_wait)) = tokio::join!(f.undo_open(), typing);
+    let (result, (undo_gap, undo_wait)) = tokio::join!(f.undo_open_with_busy_retry(), typing);
     let result = result.unwrap();
 
     assert!(undo_gap <= 1);
@@ -569,7 +576,7 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
         "typing [[new#part|label]] [[./new.md]] [old](old.md)",
     )
     .await;
-    let result = f.undo_open().await;
+    let result = f.undo_open_with_busy_retry().await;
     let text = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;

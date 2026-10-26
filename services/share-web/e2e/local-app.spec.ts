@@ -9,6 +9,7 @@ import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedApp
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
 import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLocalState";
+import { unguardedCollections } from "../../../apps/desktop/src/testing/collectionsHolder";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -51,7 +52,7 @@ async function prepare(host: LocalDatasetHost) {
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   const dataset = { kind: "dataset", datasetId: definition.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
   sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
-  return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
+  return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, deferredWrites: [], compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
 }
 
 // Real compiled frontend, loopback bootstrap, opaque browser broker, isolated runtime, and durable SQLite store.
@@ -60,7 +61,7 @@ test("local app works without an account, survives restart, and stops at shared 
   const backends: LocalDatasetHost[] = [], launchers: LocalAppLaunchHost[] = [];
   try {
     await openedLocalState({ workspaceId: "w", rootPath: root });
-    let backend = await createLocalDatasetHost({ localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
+    let backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
     const publication = await backend.apps.activate(await prepare(backend), lifetime.signal);
     let launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
     const context = await browser.newContext({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce" });
@@ -83,7 +84,7 @@ test("local app works without an account, survives restart, and stops at shared 
     expect(await page.evaluate(async () => (await fetch("/backend", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status)).toBe(404);
     await page.screenshot({ path: testInfo.outputPath("local-app.png"), fullPage: true });
     await launcher.close(); await backend.close();
-    backend = await createLocalDatasetHost({ localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
+    backend = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local",  workspaceId: "w", workspaceRoot: root }); backends.push(backend);
     launcher = await createLocalAppLaunchHost({ backend: backend.apps, lifetime: lifetime.signal }); launchers.push(launcher);
     await page.goto(await launcher.launch(publication.publicationId, lifetime.signal));
     await expect(status).toHaveText("Ready");

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { open, rename, rm } from "node:fs/promises";
+import { link, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
@@ -149,6 +149,78 @@ export async function atomicReplaceFile(
     }
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Create without replacing an existing entry. True means this creator won.
+ * Hard links publish complete, flushed bytes. Failed direct writes remove
+ * their new entry; a crash during a direct write can still leave it cut off.
+ * Node cannot open directories for fsync on Windows.
+ */
+export async function atomicCreateFile(
+  destination: string,
+  data: string,
+  mode: number,
+  {
+    open: openFile = open,
+    link: publish = link,
+    rm: remove = rm,
+    allowDirectWrite = false,
+    platform = process.platform,
+    temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`,
+  }: Pick<DurableFileOperations, "open" | "platform"> & {
+    link?: (source: string, destination: string) => Promise<void>;
+    rm?: typeof rm;
+    allowDirectWrite?: boolean;
+    /** A sibling of `destination` that nothing else uses. */
+    temporary?: string;
+  } = {},
+): Promise<boolean> {
+  const writeAndFlush = async (handle: SyncHandle & { writeFile(data: string): Promise<void> }) => {
+    try {
+      await handle.writeFile(data);
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+    await syncAndClose(handle);
+  };
+  try {
+    await writeAndFlush(await openFile(temporary, "wx", mode));
+    let created = true;
+    try {
+      await publish(temporary, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        created = false;
+      } else {
+        if (!allowDirectWrite) throw error;
+        let handle;
+        try {
+          handle = await openFile(destination, "wx", mode);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          created = false;
+        }
+        if (handle) {
+          try {
+            await writeAndFlush(handle);
+          } catch (error) {
+            await remove(destination, { force: true }).catch(() => undefined);
+            throw error;
+          }
+        }
+      }
+    }
+    await remove(temporary).catch(() => undefined);
+    if (platform !== "win32") {
+      await syncAndClose(await openFile(dirname(destination), "r"));
+    }
+    return created;
+  } catch (error) {
+    await remove(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
 }

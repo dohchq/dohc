@@ -23,7 +23,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     pinned: [],
     openEditorsHeight: 180,
     onOpenEditorsHeightChange: vi.fn(),
-    createRequest: null,
+    newFolderRequest: null,
+    onNewPage: vi.fn(),
     onOpenFile: vi.fn(),
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
@@ -58,7 +59,7 @@ describe("Explorer reveal", () => {
       <Explorer
         {...explorerProps({
           expandedFolders: ["apps", "apps/reading-list"],
-          revealPath: "apps/reading-list",
+          revealPaths: ["apps/reading-list"],
           onRevealed,
         })}
       />,
@@ -72,7 +73,7 @@ describe("Explorer reveal", () => {
 
   it("drops a reveal for a path the tree does not list", () => {
     const onRevealed = vi.fn();
-    render(<Explorer {...explorerProps({ revealPath: "apps/gone", onRevealed })} />);
+    render(<Explorer {...explorerProps({ revealPaths: ["apps/gone"], onRevealed })} />);
 
     expect(onRevealed).toHaveBeenCalledTimes(1);
     expect(screen.queryAllByTestId("tree-row").some((candidate) => candidate === document.activeElement))
@@ -81,7 +82,7 @@ describe("Explorer reveal", () => {
 
   it("waits until the shell's expansion renders the row", () => {
     const onRevealed = vi.fn();
-    const props = explorerProps({ revealPath: "apps/reading-list", onRevealed });
+    const props = explorerProps({ revealPaths: ["apps/reading-list"], onRevealed });
     const view = render(<Explorer {...props} />);
 
     expect(row("apps/reading-list")).toBeUndefined();
@@ -91,6 +92,31 @@ describe("Explorer reveal", () => {
 
     expect(document.activeElement).toBe(row("apps/reading-list"));
     expect(row("apps/reading-list/index.html")).toBeDefined();
+    expect(onRevealed).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects every imported path and focuses the first in the tree", () => {
+    const onRevealed = vi.fn();
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [
+            { path: "trips/b.md", kind: "file" },
+            { path: "trips/a.md", kind: "file" },
+            { path: "trips/old.md", kind: "file" },
+          ],
+          folders: ["trips"],
+          expandedFolders: ["trips"],
+          revealPaths: ["trips/b.md", "trips/a.md"],
+          onRevealed,
+        })}
+      />,
+    );
+
+    expect(row("trips/a.md")?.getAttribute("aria-selected")).toBe("true");
+    expect(row("trips/b.md")?.getAttribute("aria-selected")).toBe("true");
+    expect(row("trips/old.md")?.getAttribute("aria-selected")).toBe("false");
+    expect(document.activeElement).toBe(row("trips/a.md"));
     expect(onRevealed).toHaveBeenCalledTimes(1);
   });
 });

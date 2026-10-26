@@ -8,7 +8,10 @@ publish.workspace = true
 description = "Safe wrappers for Windows file operations."
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[dev-dependencies]
+dohc-test-scratch = { path = "../dohc-test-scratch" }
 
 # Only the file-operation wrappers may call Windows FFI.
 [lints.rust]

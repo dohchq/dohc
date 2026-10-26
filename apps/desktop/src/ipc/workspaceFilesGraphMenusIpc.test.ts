@@ -545,7 +545,6 @@ describe("registered native menu handlers", () => {
 
   it("derives sharing and update controls from main-owned state", async () => {
     const h = await harness();
-    h.workspace.remote = { serverUrl: "https://account.example", ownerUserId: "owner" };
     await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
     expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(true);
     h.buildMenu.mockClear();
@@ -558,6 +557,25 @@ describe("registered native menu handlers", () => {
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: "Update and Restart", enabled: true }),
     ]));
+  });
+
+  // A workspace that does not sync still offers Share…, as the toolbar does:
+  // the dialog says sharing needs sync and leads to setting it up.
+  it("offers Share… on a workspace without sync, but not on the root, a mount path or a shared view", async () => {
+    const h = await harness();
+    expect(h.workspace.remote).toBeUndefined();
+    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") => {
+      h.buildMenu.mockClear();
+      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
+      return h.buildMenu.mock.calls[0]![0].some((item) => item.label === "Share…");
+    };
+    expect(await offersShare("notes.md", "file")).toBe(true);
+    expect(await offersShare("notes", "folder")).toBe(true);
+    expect(await offersShare(undefined, "root")).toBe(false);
+    expect(await offersShare("shared-with-me/sam/notes.md", "file")).toBe(false);
+    expect(await offersShare("shared-with-me/sam", "folder")).toBe(false);
+    h.setSharedScope({ access: "edit", ended: false });
+    expect(await offersShare("notes.md", "file")).toBe(false);
   });
 
   // main's own reading of the registry marker, through the native menu. The

@@ -103,7 +103,6 @@ test("installed compiler runs electron-builder resources after relocation and ch
   const style = Buffer.from("body { color: green }");
   const file = (path, bytes) => ({ path, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });
   const request = { entryPath: "main.ts", inputs: [file("main.ts", bytes), file("style.css", style)], bounds: { maxInputFiles: 8, maxInputBytes: 4096, maxOutputBytes: 8192 } };
-  // A loaded gate took 17.6 s to start a compiler owner and worker.
   const bounds = { timeoutMs: 20000, maxMemoryBytes: 256 * 1024 * 1024, maxProcesses: 8, maxInputBytes: 8192, maxOutputBytes: 16384, maxErrorBytes: 8192 };
   const environmentKeys = ["PATH", "NODE_PATH", "NODE_OPTIONS", "ESBUILD_BINARY_PATH"];
   const original = new Map(environmentKeys.map(key => [key, process.env[key]]));
@@ -124,6 +123,10 @@ test("installed compiler runs electron-builder resources after relocation and ch
     assert.match(record.head, /^<style>[\s\S]*color: green[\s\S]*<\/style>$/);
     await assert.rejects(compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<!doctype html><script src="missing.js"></script>'))] }, pageBounds),
       { message: "index.html links missing.js, which is not in the app. Add the file or fix the link." });
+    // Each compile ran the packaged owner, not one from the source tree.
+    await rm(join(destination, process.platform === "win32" ? "compiler-owner.exe" : "compiler-owner"));
+    await assert.rejects(compile({ ...request, inputs: [file("main.ts", Buffer.from("document.body.textContent = 'owner';"))] }, pageBounds),
+      { message: "The app compiler stopped before it finished. Try again." });
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;

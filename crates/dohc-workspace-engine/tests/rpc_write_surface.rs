@@ -3539,7 +3539,8 @@ async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
     });
     for (id, key_present) in [(2, false), (3, true)] {
         if key_present {
-            dohc_engine_crypto::create_key_file(scratch.path()).expect("create key file");
+            dohc_engine_crypto::create_key_file(&scratch.path().join(".dohc/engine"))
+                .expect("create key file");
         }
         let error = transport
             .call(

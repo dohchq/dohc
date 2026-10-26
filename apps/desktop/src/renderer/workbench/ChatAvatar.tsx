@@ -8,17 +8,20 @@ export function useAgentInk(token: ActorPresentation | undefined): string {
   return useSyncExternalStore(subscribePresentation, () => token ? agentTextClass(token) : "text-agent");
 }
 
+type ChatAuthorKind = "human" | "agent" | "automation" | "link";
+
 /** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
-export function AgentName(props: { kind: "human" | "agent" | "automation"; presentation: ActorPresentation; children: ReactNode }) {
+export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; children: ReactNode }) {
   const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
   return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
 }
 
 // One avatar for every chat surface: a person's initials on a tint of their
-// admitted hue, the agent's sparkle in the agent voice, or an automation's bare
-// lightning mark, the same mark as the Automations button. Sized by the
-// caller; 36px in the composer, 32px on a feed row or an opening post, 28px
-// on a comment, 18px in a strip.
+// admitted hue, the agent's sparkle in the agent voice, an automation's bare
+// lightning mark, the same mark as the Automations button, or a link holder's
+// initials in a share link's dashed ring. Sized by the caller; 36px in the
+// composer, 32px on a feed row or an opening post, 28px on a comment, 18px in
+// a strip.
 
 const SIZES = {
   post: "size-9 text-[14px]",
@@ -28,6 +31,9 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
+
+// A strip shows one initial: two wide letters, such as "WW", overflow 18px.
+const INITIALS = { post: 2, row: 2, comment: 2, strip: 1 } as const;
 
 // An agent is a rounded square and a person is round, whatever their colors.
 // The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
@@ -43,15 +49,15 @@ function firstGrapheme(word: string): string | undefined {
     : Array.from(word)[0];
 }
 
-// The first letter of the first two words. One word gives one letter.
-function initials(name: string): string {
-  const letters = name.trim().split(/\s+/, 2).flatMap((word) => firstGrapheme(word) ?? []);
+// The first letter of each of the first `count` words. One word gives one letter.
+function initials(name: string, count: number): string {
+  const letters = name.trim().split(/\s+/, count).flatMap((word) => firstGrapheme(word) ?? []);
   return letters.length ? letters.join("").toUpperCase() : "?";
 }
 
 export function ChatAvatar(props: {
   name: string;
-  kind: "human" | "agent" | "automation";
+  kind: ChatAuthorKind;
   presentation: ActorPresentation;
   size?: keyof typeof SIZES;
   className?: string;
@@ -60,6 +66,21 @@ export function ChatAvatar(props: {
   const kind = props.kind;
   const classes = useSyncExternalStore(subscribePresentation, () =>
     presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
+  if (kind === "link") {
+    // A link holder has no account, so no identity color: only their name.
+    return (
+      <span
+        aria-hidden
+        data-author-kind="link"
+        title={props.name}
+        className={`inline-grid shrink-0 place-items-center rounded-full border border-dashed border-subtle bg-bg font-semibold text-muted ${
+          SIZES[size]
+        } ${props.className ?? ""}`}
+      >
+        {initials(props.name, INITIALS[size])}
+      </span>
+    );
+  }
   if (kind === "automation") {
     // No border, fill, or identity color: an automation is not a person or an agent.
     return (
@@ -77,7 +98,7 @@ export function ChatAvatar(props: {
     <span
       aria-hidden
       title={props.name}
-      className={`inline-grid shrink-0 place-items-center border font-mono font-semibold ${
+      className={`inline-grid shrink-0 place-items-center border font-semibold ${
         SIZES[size]
       } ${
         agent
@@ -85,7 +106,17 @@ export function ChatAvatar(props: {
           : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
-      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}
+      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name, INITIALS[size])}
+    </span>
+  );
+}
+
+// Beside a link holder's name: the share link's mark, named for screen readers.
+export function LinkHolderMark(props: { testId?: string }) {
+  return (
+    <span data-testid={props.testId} title="Link holder" className="inline-flex shrink-0 self-center text-subtle">
+      <Link2 size={12} strokeWidth={1.9} aria-hidden />
+      <span className="sr-only">Link holder</span>
     </span>
   );
 }

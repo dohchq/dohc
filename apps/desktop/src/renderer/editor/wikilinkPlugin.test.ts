@@ -1,4 +1,4 @@
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { EditorState, Plugin, PluginKey } from '@tiptap/pm/state'
 import { describe, it, expect } from 'vitest'
 import {
   computeWikilinkRanges,
@@ -7,7 +7,7 @@ import {
   wikilinkPluginKey,
   type WikilinkFile,
 } from './wikilinkPlugin'
-import { codeBlock, codeMarkText, doc, paragraph } from './testDocs'
+import { codeBlock, codeMarkText, doc, paragraph, randomEdit, seededRandom } from './testDocs'
 
 // D4.8 — wikilink decoration regex tests over real ProseMirror documents
 // (testDocs.ts). A single paragraph's text starts at pos 1, so the
@@ -89,5 +89,26 @@ describe('detectAutocomplete — wikilink picker trigger', () => {
     expect(plugin).toBeInstanceOf(Plugin)
     expect(wikilinkPluginKey).toBeInstanceOf(PluginKey)
     expect(plugin.spec.key).toBe(wikilinkPluginKey)
+  })
+})
+
+describe('makeWikilinkPlugin — edits', () => {
+  it('keeps the same ranges as a full scan after every edit', () => {
+    const random = seededRandom(2522)
+    let state = EditorState.create({
+      doc: doc(
+        paragraph('see [[notes/a]] and [[b.md]]'),
+        paragraph('plain text'),
+        codeBlock('[[not/a/link]]'),
+        paragraph('\\[\\[escaped]] then [[c]]'),
+      ),
+      plugins: [makeWikilinkPlugin(() => new Map(), () => {})],
+    })
+    for (let step = 0; step < 400; step += 1) {
+      state = state.apply(randomEdit(state, random, ['[[', ']]', 'p', '/', ' ', '[[d]]', '.md']))
+      expect(wikilinkPluginKey.getState(state)?.ranges, `step ${step}`).toEqual(
+        computeWikilinkRanges(state.doc),
+      )
+    }
   })
 })

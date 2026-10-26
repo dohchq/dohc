@@ -308,6 +308,12 @@ it.skipIf(engine.missing)(
   120_000,
 );
 
+// A run store of its own, in a folder no engine opens.
+async function scratchRunStore(prefix: string) {
+  const folder = await createTestScratch(prefix);
+  return createAutomationRunStore({ forWrite: async () => folder, read: (work) => work(folder) });
+}
+
 it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
   "skips replay of a %s creation through the native engine and desktop facade",
   async change => {
@@ -318,7 +324,7 @@ it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
       const signal = new AbortController().signal;
       const run = newRun({ claimId: "creation-replay", automationId: "collection:Tasks#replay" }, automation, "key", 1);
       const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
-      const store = createAutomationRunStore(preparedAutomationStoreFolder(await createTestScratch("dohc-creation-replay-runs-")));
+      const store = await scratchRunStore("dohc-creation-replay-runs-");
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
         work(collectionRecordWrites(ctx.recordContext(ctx.person, signal))) } as CollectionAutomationRunDependencies;
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId: derivedRecordId(run.claimId), fields: [] };
@@ -376,7 +382,7 @@ it.skipIf(engine.missing)("finishes a written but unadopted creation on native d
         adopting = ctx.capture.flush();
         return unsubscribe;
       };
-      const store = createAutomationRunStore(preparedAutomationStoreFolder(await createTestScratch("dohc-unadopted-replay-runs-")));
+      const store = await scratchRunStore("dohc-unadopted-replay-runs-");
       const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId, fields: [{ field: "Status", value: "New" }] };
       run.steps = [{ ordinal: 0, effects: [effect] }]; await store.save(run);
       const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>

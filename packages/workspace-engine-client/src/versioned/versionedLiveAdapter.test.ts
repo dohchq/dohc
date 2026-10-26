@@ -419,7 +419,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
     },
   },
   {
@@ -428,7 +428,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.captureFlush,
-    valid: { settled: true, running: true, degraded: false, heldFiles: [] },
+    valid: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] },
   },
   {
     method: WORKSPACE_METHOD.captureSetAuthor,
@@ -448,7 +448,7 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 
 describe("VersionedLiveAdapter", () => {
   it("retries a held path with the real flush and retried result", async () => {
-    const result = { settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
+    const result = { deferredWrites: [], settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
       requests.push(request); return { id: request.id, result };

@@ -441,13 +441,17 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
+        let retained_copies = crate::rpc::retained_copies::summary_json(
+            crate::rpc::retained_copies::retained_summary(&open)
+                .await
+                .unwrap_or_default(),
+        );
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
-                // One snapshot — the three flags must come from the same
-                // atomic load, or a reader racing a transition could report
-                // running && terminal.
-                let snapshot = driver.status().snapshot();
+                // All flags come from one snapshot, so a transition cannot
+                // report running && terminal.
+                let snapshot = driver.status_snapshot();
                 json!({
                     "running": snapshot.running,
                     "degraded": snapshot.degraded,
@@ -457,7 +461,9 @@ impl EngineService {
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
                     "heldFiles": held_files,
+                    "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
+                    "retainedCopies": retained_copies,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -471,7 +477,9 @@ impl EngineService {
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
                 "heldFiles": held_files,
-                    "recoveryUnavailable": recovery_unavailable,
+                "deferredWrites": [],
+                "recoveryUnavailable": recovery_unavailable,
+                "retainedCopies": retained_copies,
             }),
         })
     }
@@ -517,6 +525,8 @@ impl EngineService {
             "running": outcome.running,
             "degraded": outcome.degraded,
             "heldFiles": held_files,
+            "deferredWrites": lock(&open.capture).as_ref()
+                .map(|driver| driver.status().deferred_writes()).unwrap_or_default(),
         }))
     }
 
@@ -532,7 +542,7 @@ impl EngineService {
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
         let capture = lock(&open.capture).as_ref().map(|driver| {
-            let snapshot = driver.status().snapshot();
+            let snapshot = driver.status_snapshot();
             (driver.flush_sender(), snapshot)
         });
         let Some((sender, initial_snapshot)) = capture else {
@@ -783,6 +793,145 @@ mod tests {
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
     use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_capture_task_panicking_during_import_reports_paused() {
+        stopped_capture_task_reports_paused(true, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_capture_task_returning_during_import_reports_paused() {
+        stopped_capture_task_reports_paused(true, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_capture_task_panicking_after_ready_reports_paused() {
+        stopped_capture_task_reports_paused(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_capture_task_returning_after_ready_reports_paused() {
+        stopped_capture_task_reports_paused(false, false).await;
+    }
+
+    async fn stopped_capture_task_reports_paused(importing: bool, panic: bool) {
+        let scratch = ScratchDir::new().unwrap();
+        let probe = capture_driver::CaptureApplyProbe::default();
+        let files = if importing {
+            probe.pause_next_apply();
+            capture_driver::EARLY_IMPORT_MIN_ADDED_FILES
+        } else {
+            1
+        };
+        for index in 0..files {
+            std::fs::write(scratch.path().join(format!("seed-{index}.md")), b"seed").unwrap();
+        }
+        let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(), "workspaceId": "stopped-task"
+                }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        if importing {
+            probe.wait_until_paused().await;
+        }
+        let open = service.open(Some(&handle)).unwrap();
+        let driver = lock(&open.capture).take().unwrap();
+        assert_eq!(
+            driver.status().snapshot().phase,
+            if importing {
+                capture_driver::CapturePhase::Importing
+            } else {
+                capture_driver::CapturePhase::Ready
+            }
+        );
+        probe.stop_task_for_test(panic);
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !driver.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capture task finishes");
+        *lock(&open.capture) = Some(driver);
+        service
+            .versions_ensure_main(
+                &ctx,
+                Some(handle.clone()),
+                json!({"workspaceId":"stopped-task"}),
+            )
+            .await
+            .unwrap();
+
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        let versions = service
+            .dispatch(
+                RequestContext::unbounded(),
+                Request {
+                    id: 1,
+                    workspace: Some(handle.clone()),
+                    method: "versions.list".to_owned(),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({}),
+                },
+            )
+            .await
+            .map(|reply| reply.response.result);
+        let history_params = json!({"workspaceId":"stopped-task", "versionId":"main"});
+        let history = service
+            .history_page(&ctx, Some(handle.clone()), history_params.clone())
+            .await;
+        let history_dispatch = service
+            .dispatch(
+                RequestContext::unbounded(),
+                Request {
+                    id: 2,
+                    workspace: Some(handle.clone()),
+                    method: "history.page".to_owned(),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: history_params,
+                },
+            )
+            .await
+            .map(|reply| reply.response.result);
+        // The unrecorded file exercises ydoc.open's separate import check.
+        std::fs::write(scratch.path().join("uncaptured.md"), b"not recorded").unwrap();
+        let ydoc = service
+            .ydoc_open(
+                &ctx,
+                Some(handle.clone()),
+                json!({
+                    "versionId":"main", "path":"uncaptured.md"
+                }),
+                3,
+            )
+            .await;
+        service.workspace_close(Some(handle)).await.unwrap();
+
+        assert!(
+            status["running"] == json!(false)
+                && status["degraded"] == json!(true)
+                && status["terminal"] == json!(true)
+                && versions.is_ok()
+                && history.is_ok()
+                && history_dispatch.is_ok()
+                && ydoc
+                    .as_ref()
+                    .is_err_and(|error| error.message
+                        == crate::rpc::error::initial_capture_degraded().message),
+            "status={status}; versions={versions:?}; history={history:?}; history dispatch={history_dispatch:?}; ydoc={ydoc:?}"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_mode_none_preserves_disk_drift_while_full_open_reconciles_it() {

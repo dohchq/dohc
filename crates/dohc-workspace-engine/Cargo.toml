@@ -41,15 +41,23 @@ tokio = { version = "1", features = [
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW for the capture sink's symlink-refusing reopen.
 libc = "0.2"
+# The user the engine's folders must belong to.
+rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keeps the engine's folder out of iCloud Drive.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(windows)'.dependencies]
+# Keeps the engine's folder private.
+dohc-windows-files = { path = "../dohc-windows-files" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
 seccompiler = "0.5.0"
 rustix = { version = "1", features = ["process", "thread"] }
+# Holds the engine's folder for the root binding marker.
+dohc-linux-files = { path = "../dohc-linux-files" }
 
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
@@ -59,6 +67,7 @@ harness = ["dohc-engine-runtime/fault-injection"]
 [dev-dependencies]
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 # `test-util` gives the driver-loop tests paused virtual time, so they can
 # assert what the supervision loop actually WAITS on (a 30s terminal probe
 # costs the suite nothing) instead of asserting on the tracker beside it.
@@ -68,6 +77,10 @@ proptest = "1"
 # Self-dependency so integration tests compile the library with the
 # harness-only hooks; production builds never do.
 dohc-workspace-engine = { path = ".", features = ["harness"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Stands in for /proc/self/fd where the engine's folder can't be held.
+dohc-linux-files = { path = "../dohc-linux-files", features = ["test-support"] }
 
 [lints]
 workspace = true

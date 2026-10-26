@@ -28,7 +28,7 @@ import {
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { beginPendingRecovery, waitForRecovery } from "./workspaceDeleteRecovery";
+import { beginPendingRecovery, waitForRecovery, waitForRecoveryPrune } from "./workspaceDeleteRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
 
 interface TestEvent {
@@ -57,6 +57,8 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map(async (root) => {
       await withExclusiveWorkspaceOperation(root, async () => undefined);
+      // A move or delete schedules a prune of old recovery records, which reads the workspace's trash.
+      await waitForRecoveryPrune(root);
       await rm(root, { recursive: true, force: true });
     }),
   );

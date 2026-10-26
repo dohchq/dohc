@@ -33,6 +33,8 @@ export const WORK_ROOT = join(homedir(), "dohc-release");
 export const RELEASE_LOCK = join(WORK_ROOT, "release.lock");
 // The workflow's publish job. It runs only after Preflight, which runs only on refs/heads/main.
 export const PUBLISH_JOB = "Publish";
+// The workflow's first job. It stamps a nightly's version with its run attempt.
+export const PREFLIGHT_JOB = "Preflight";
 export const UNLOCK_WAIT_MS = 30 * 60_000;
 const TARGET = "aarch64-apple-darwin";
 const DIST = "mac-arm64";
@@ -246,10 +248,22 @@ export async function preflightMacRelease(options, {
     "api", "--paginate", `repos/${repo}/actions/workflows/desktop-release.yml/runs?head_sha=${plan.commit}&event=workflow_dispatch&per_page=100`,
     "--jq", ".workflow_runs[] | {id, run_number, event}",
   ])).filter(candidate => candidate.event === "workflow_dispatch" && (!nightly || candidate.run_number === Number(nightly[1])));
-  const published = runs.some(candidate => jsonLines(read(run, "gh", [
-    "api", "--paginate", `repos/${repo}/actions/runs/${candidate.id}/jobs?filter=all&per_page=100`,
-    "--jq", ".jobs[] | {name, conclusion, run_attempt, head_sha}",
-  ])).some(job => job.name === PUBLISH_JOB && job.conclusion === "success" && job.head_sha === plan.commit && (!nightly || job.run_attempt === Number(nightly[2]))));
+  const published = runs.some(candidate => {
+    const jobs = jsonLines(read(run, "gh", [
+      "api", "--paginate", `repos/${repo}/actions/runs/${candidate.id}/jobs?filter=all&per_page=100`,
+      "--jq", ".jobs[] | {name, conclusion, run_attempt, head_sha, started_at}",
+    ]));
+    // Re-running failed jobs starts an attempt that reuses the earlier
+    // attempt's Preflight, start time included, and so publishes the version
+    // that attempt stamped.
+    const preflightStart = attempt => jobs.find(job => job.name === PREFLIGHT_JOB && job.run_attempt === attempt)?.started_at;
+    const attempt = nightly ? Number(nightly[2]) : 0;
+    const stamped = preflightStart(attempt);
+    // The tag's attempt must have run that Preflight, not kept it from an earlier one.
+    const ranPreflight = Boolean(stamped) && !jobs.some(job => job.name === PREFLIGHT_JOB && job.run_attempt < attempt && job.started_at === stamped);
+    return jobs.some(job => job.name === PUBLISH_JOB && job.conclusion === "success" && job.head_sha === plan.commit
+      && (!nightly || (ranPreflight && preflightStart(job.run_attempt) === stamped)));
+  });
   if (!published) {
     refuse(`Tag ${tag} points to ${plan.commit}, but no dispatched Desktop Release run${nightly ? ` ${nightly[1]}, attempt ${nightly[2]},` : ""} published that commit from main.`);
   }

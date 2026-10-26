@@ -11,7 +11,7 @@ import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { isInside } from "../security/pathContainment";
-import { existingLocalStateFolder, localStateDir, LocalStateFolderError, type LocalStateWorkspace } from "./workspaceLocalState";
+import { localStateDir, LocalStateFolderError, readOwnedLocalStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 
@@ -64,27 +64,32 @@ const invalidRecovery = `Cannot undo the delete. Its recovery record is invalid.
 export const missingDeleteRecoveryReason = `Cannot undo the delete. Its recovery record is missing or expired. ${restoreByHand}`;
 
 // Only recovery metadata expires. Fallback trash contents keep their lifetime.
-const pruned = new Set<string>();
+const prunes = new Map<string, Promise<void>>();
 export function scheduleRecoveryPrune(workspace: LocalStateWorkspace): void {
-  if (pruned.has(workspace.rootPath)) return;
-  pruned.add(workspace.rootPath);
-  setImmediate(() => prune(workspace).catch(() => undefined));
+  if (prunes.has(workspace.rootPath)) return;
+  prunes.set(workspace.rootPath, new Promise<void>(resolve => setImmediate(resolve)).then(() => prune(workspace)).catch(() => undefined));
+}
+// Whoever removes a workspace folder, such as a test's cleanup, waits for its prune,
+// which reads the folder on its own schedule.
+export async function waitForRecoveryPrune(root: string): Promise<void> {
+  await prunes.get(root);
 }
 // A removal is a write, so it waits for this open's `.dohc/local` too, but it
 // creates nothing.
 async function prune(workspace: LocalStateWorkspace): Promise<void> {
   await localStateDir(workspace);
-  const dir = await existingLocalStateFolder(workspace.rootPath, "trash");
-  if (dir === null || dir === "unusable") return;
-  for (const name of await readdir(dir)) {
-    if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
-    try {
-      const path = join(dir, name), entry = await lstat(path);
-      if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
-        await rm(path, { force: true });
-      }
-    } catch { /* Cleanup cannot affect another delete or its Undo. */ }
-  }
+  await readOwnedLocalStateFolder(workspace.rootPath, "trash", async (dir) => {
+    if (dir === null || dir === "unusable") return;
+    for (const name of await readdir(dir)) {
+      if (!/^(?:delete|move)-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
+      try {
+        const path = join(dir, name), entry = await lstat(path);
+        if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
+          await rm(path, { force: true });
+        }
+      } catch { /* Cleanup cannot affect another delete or its Undo. */ }
+    }
+  });
 }
 export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record: { operationId: string }, kind = "delete"): Promise<void> {
   const dir = await workspaceTrashForWrite(workspace, "save Undo information");
@@ -106,20 +111,22 @@ export async function saveRecoveryRecord(workspace: LocalStateWorkspace, record:
  * only this user can change. Any other record is "untrusted", which Undo
  * treats as invalid: it refuses and changes nothing. `.dohc` and
  * `.dohc/local` are checked first, and a problem with either is "refused"
- * with words that fix it. Reads create nothing and do not wait for the engine.
+ * with words that fix it. Reads create nothing, and wait for the engine only
+ * on Windows, for an open under way.
  */
-export async function readRecoveryRecordText(root: string, id: string, kind: "delete" | "move"):
-  Promise<{ status: "missing" } | { status: "untrusted" } | { status: "refused"; reason: string } | { status: "read"; text: string }> {
-  const dir = await existingLocalStateFolder(root, "trash").catch((error: unknown) => {
-    if (error instanceof LocalStateFolderError) return { refused: error.message };
+export async function readRecoveryRecordText(root: string, id: string, kind: "delete" | "move"): Promise<RecoveryRecordRead> {
+  return readOwnedLocalStateFolder(root, "trash", (dir) => recordIn(dir, id, kind)).catch((error: unknown): RecoveryRecordRead => {
+    if (error instanceof LocalStateFolderError) return { status: "refused", reason: error.message };
     throw error;
   });
+}
+type RecoveryRecordRead = { status: "missing" } | { status: "untrusted" } | { status: "refused"; reason: string } | { status: "read"; text: string };
+async function recordIn(dir: string | null | "unusable", id: string, kind: "delete" | "move"): Promise<RecoveryRecordRead> {
   if (dir === null) return { status: "missing" };
   if (dir === "unusable") return { status: "untrusted" };
-  if (typeof dir !== "string") return { status: "refused", reason: dir.refused };
   return readRecoveryFileText(join(dir, recordName(id, kind)));
 }
-async function readRecoveryFileText(path: string): ReturnType<typeof readRecoveryRecordText> {
+async function readRecoveryFileText(path: string): Promise<RecoveryRecordRead> {
   const entry = await info(path);
   if (!entry || Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return { status: "missing" };
   const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(() => null);
@@ -127,18 +134,19 @@ async function readRecoveryFileText(path: string): ReturnType<typeof readRecover
   return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
 }
 export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move"): Promise<{ name: string; text: string }[]> {
-  const dir = await existingLocalStateFolder(root, "trash");
-  if (dir === null || dir === "unusable") return [];
-  const records: { name: string; text: string }[] = [];
-  const recordPattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`, "u");
-  for (const name of await readdir(dir)) {
-    if (!recordPattern.test(name)) continue;
-    try {
-      const read = await readRecoveryFileText(join(dir, name));
-      if (read.status === "read") records.push({name, text: read.text});
-    } catch { /* One unavailable record does not prevent other moves from resuming. */ }
-  }
-  return records;
+  return readOwnedLocalStateFolder(root, "trash", async dir => {
+    if (dir === null || dir === "unusable") return [];
+    const records: { name: string; text: string }[] = [];
+    const recordPattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`, "u");
+    for (const name of await readdir(dir)) {
+      if (!recordPattern.test(name)) continue;
+      try {
+        const read = await readRecoveryFileText(join(dir, name));
+        if (read.status === "read") records.push({name, text: read.text});
+      } catch { /* One unavailable record does not prevent other moves from resuming. */ }
+    }
+    return records;
+  });
 }
 export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
   const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);

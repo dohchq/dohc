@@ -162,22 +162,28 @@ fn open_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Load the workspace data key, returning `Ok(None)` when no key file exists.
+/// The key file's name in the folder that holds the workspace's store.
+const SECRET_KEY_FILE_NAME: &str = "secret.key";
+
+/// Load the workspace data key from `engine_dir`, the folder that holds the
+/// workspace's store, by the path the store opened through. On a Mac that
+/// path names the folder the engine checked, not whatever has its name now.
+/// Returns `Ok(None)` when no key file exists.
 /// A present-but-malformed/unreadable/symlinked file fails CLOSED. On a
 /// successful read the file's permissions are re-tightened to 0600 (Unix; TS
 /// parity — the TS store chmods existing key files after read, so a
 /// restored or hand-copied key never stays world-readable).
-pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, CryptoError> {
-    let path = root.join(SECRET_KEY_FILE_RELATIVE);
+pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKey>, CryptoError> {
+    let path = engine_dir.join(SECRET_KEY_FILE_NAME);
     let mut file = match open_no_follow(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(CryptoError::KeyFileMalformed),
     };
-    // The file exists: its directory must be the workspace's real
-    // `.dohc/engine` (a symlinked ancestor would mean this key belongs to
-    // some other tree). Same strict-equality rule as the mint path.
-    verify_key_dir(root)?;
+    // The file exists: its folder must not resolve anywhere else (a link at
+    // `.dohc` or the folder would mean this key belongs to some other tree).
+    // Same rule as the mint path.
+    verify_key_dir(engine_dir)?;
     let read = (|| -> std::io::Result<String> {
         let metadata = file.metadata()?;
         if !metadata.file_type().is_file() {
@@ -214,73 +220,68 @@ pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, Cr
     Ok(Some(key))
 }
 
-/// The key directory must canonicalize to the workspace's real lexical
-/// `.dohc/engine` — never an aliased tree. Shared by load and mint.
-fn verify_key_dir(root: &std::path::Path) -> Result<(), CryptoError> {
-    let parent = root
-        .join(SECRET_KEY_FILE_RELATIVE)
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .ok_or(CryptoError::KeyFileMalformed)?;
-    let real_parent = parent
-        .canonicalize()
-        .map_err(|_| CryptoError::KeyFileMalformed)?;
-    let mut expected = root
-        .canonicalize()
-        .map_err(|_| CryptoError::KeyFileMalformed)?;
-    for segment in std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
-        .parent()
-        .into_iter()
-        .flat_map(|p| p.components())
-    {
-        expected.push(segment);
+/// The key folder must not resolve anywhere else: neither it nor the folder
+/// above it, `.dohc` in a workspace, may be reached through a link, as each
+/// load and mint checked on main. A folder the engine reaches as the folder it
+/// checked has no names to follow: by its ID on a Mac, and by the descriptor
+/// it holds on Linux. Shared by load and mint.
+fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
+    #[cfg(target_vendor = "apple")]
+    if dohc_macos_files::is_path_by_id(engine_dir) {
+        return Ok(());
     }
-    if real_parent == expected {
+    #[cfg(target_os = "linux")]
+    if dohc_linux_files::held::is_path_by_fd(engine_dir) {
+        return Ok(());
+    }
+    let parent = engine_dir.parent();
+    let (Some(dohc), Some(engine)) = (parent, engine_dir.file_name()) else {
+        return Err(CryptoError::KeyFileMalformed);
+    };
+    let (Some(root), Some(dohc_name)) = (dohc.parent(), dohc.file_name()) else {
+        return Err(CryptoError::KeyFileMalformed);
+    };
+    let real = engine_dir
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?;
+    let expected = root
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?
+        .join(dohc_name)
+        .join(engine);
+    if real == expected {
         Ok(())
     } else {
         Err(CryptoError::KeyFileMalformed)
     }
 }
 
-/// Mint and durably publish a fresh workspace data key. CALLER CONTRACT: only
+/// Mint and durably publish a fresh workspace data key in `engine_dir`, the
+/// folder that holds the workspace's store, by the path the store opened
+/// through. The engine made that folder private when it opened the store,
+/// and on a Mac the path names the folder it checked. CALLER CONTRACT: only
 /// invoke when the workspace has NO existing secret state — minting over
 /// orphaned ciphertext would strand it silently; the capture layer checks the
 /// encrypted store first and fails closed instead (TS parity:
 /// `loadSecretDataKey` checks protected rows before its create branch).
-/// Creation requires hard-link support; unsupported filesystems refuse creation.
-pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
-    let path = root.join(SECRET_KEY_FILE_RELATIVE);
+/// Off Windows, a drive without hard links, such as exFAT or FAT32, gets the
+/// key by a rename instead (`publish_by_rename`) when it keeps the key
+/// private. Windows can't make the renamed name durable, so it still refuses
+/// those drives.
+pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
+    create_key_file_with(engine_dir, |temp, path| std::fs::hard_link(temp, path))
+}
+
+/// [`create_key_file`], publishing with `link`.
+fn create_key_file_with(
+    engine_dir: &std::path::Path,
+    link: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<SecretDataKey, CryptoError> {
+    let path = engine_dir.join(SECRET_KEY_FILE_NAME);
     let key = SecretDataKey::generate()?;
-    // The key's directory must not advertise its existence to other local
-    // users (the file itself is 0600 below), on a Mac through an ACL entry
-    // the workspace folder passes on either.
-    #[cfg(target_vendor = "apple")]
-    {
-        let relative = std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
-            .parent()
-            .ok_or(CryptoError::KeyFileMalformed)?;
-        dohc_macos_files::ensure_private_dir(root, relative)
-            .map_err(|err| key_create_error(&err))?;
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    if let Some(parent) = path.parent() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(parent)
-            .map_err(|_| CryptoError::KeyFileMalformed)?;
-    }
-    // The key directory must be the workspace's real `.dohc/engine` — an
-    // aliased `.dohc` would redirect key custody off-workspace. (An ancestor
-    // swapped between this check and the writes below is the same documented
-    // residual as the capture sink's: fully closing it needs openat/dirfd
-    // APIs deliberately out of scope pre-cutover.)
-    verify_key_dir(root)?;
+    // A link at `.dohc` or the folder would send key custody off the
+    // workspace.
+    verify_key_dir(engine_dir)?;
     // Durable publish: temp (0600) + fsync + hard-link. The key file must
     // be durably on disk before any ciphertext is committed under it —
     // a crash that lost a visible-but-unflushed key would strand every
@@ -292,43 +293,101 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
-    // On macOS a 0600 mode does not limit an ACL entry the workspace folder
-    // gives every new file, so the key takes none of them. A failed create
-    // removes what it made, so nothing is left here for a path to clean up.
-    #[cfg(target_vendor = "apple")]
-    let mut file = (|| -> std::io::Result<std::fs::File> {
-        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
-        let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
-        let name = temp.file_name().ok_or_else(invalid)?;
-        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
-    })()
-    .map_err(|err| key_create_error(&err))?;
+    // The serialized payload carries the key; it must zeroize on drop
+    // like every other buffer holding key material.
+    let payload = Zeroizing::new(key.to_key_file());
+    let mut file = create_new_key_file(&temp).map_err(|err| key_create_error(&err))?;
     let written = (|| -> std::io::Result<()> {
-        #[cfg(not(target_vendor = "apple"))]
-        let mut file = {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            options.open(&temp)?
-        };
         use std::io::Write;
-        // The serialized payload carries the key; it must zeroize on drop
-        // like every other buffer holding key material.
-        let payload = Zeroizing::new(key.to_key_file());
         file.write_all(payload.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
+        file.sync_all()
     })();
+    drop(file);
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
         return Err(CryptoError::KeyFileMalformed);
     }
-    let publication = std::fs::hard_link(&temp, &path);
-    finish_key_publication(&path, &temp, publication)
+    let publication = match link(&temp, &path) {
+        #[cfg(unix)]
+        Err(err) if hard_links_unsupported(&err) => publish_by_rename(&temp, &path),
+        published => published,
+    };
+    finish_key_publication(&path, &temp, publication, sync_key)
+}
+
+/// Flush the key file, then its folder's entries. On Linux FAT32, a rename
+/// over the claim moves the key's entry into the claim's slot, and only a
+/// flush of the key file writes that slot. std cannot open a folder on
+/// Windows, or flush a file opened to read; NTFS metadata journaling is the
+/// best effort there.
+fn sync_key(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        open_no_follow(path)?.sync_all()?;
+        let folder = path
+            .parent()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        std::fs::File::open(folder)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Create a key file that does not exist yet, readable only by its owner.
+/// On macOS a 0600 mode does not limit an ACL entry the workspace folder
+/// gives every new file, so the key takes none of them. A failed create
+/// removes what it made, so nothing is left here for a path to clean up.
+fn create_new_key_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(target_vendor = "apple")]
+    {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let folder = std::fs::File::open(path.parent().ok_or_else(invalid)?)?;
+        let name = path.file_name().ok_or_else(invalid)?;
+        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+}
+
+/// Publish the flushed key at `temp` on a drive without hard links. An empty
+/// file claims the name, so a key already there stays, and the rename
+/// replaces only that claim. A reader finds the empty claim, which fails
+/// closed for that try, or the whole flushed key. A crash between the two
+/// leaves the empty claim. A drive that lets other users read the key gets
+/// none, since `load_key_file` would refuse it there.
+#[cfg(unix)]
+fn publish_by_rename(temp: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::symlink_metadata(temp)?.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
+    drop(create_new_key_file(path)?);
+    std::fs::rename(temp, path).inspect_err(|_| {
+        // An empty claim holds nothing a reader could use, so it can go.
+        if std::fs::symlink_metadata(path).is_ok_and(|claim| claim.is_file() && claim.len() == 0) {
+            let _ = std::fs::remove_file(path);
+        }
+    })
+}
+
+/// Whether a hard link failed because the drive has none. The rule is
+/// `materialize.rs::hard_links_unsupported`'s.
+#[cfg(unix)]
+fn hard_links_unsupported(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Unsupported
+        || err.raw_os_error().is_some_and(|code| {
+            code == libc::EPERM || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+        })
 }
 
 /// The error for a key file that could not be created.
@@ -341,34 +400,34 @@ fn key_create_error(err: &std::io::Error) -> CryptoError {
     }
 }
 
+#[cfg(not(target_vendor = "apple"))]
+fn key_create_error(_: &std::io::Error) -> CryptoError {
+    CryptoError::KeyFileMalformed
+}
+
 fn finish_key_publication(
     path: &std::path::Path,
     temp: &std::path::Path,
     publication: std::io::Result<()>,
+    sync_key: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
 ) -> Result<SecretDataKey, CryptoError> {
-    // Hard links publish atomically without replacing a concurrent winner.
-    // Replacing the winner would orphan data already encrypted with its key.
-    // Refuse filesystems that cannot provide that guarantee.
+    // Neither publication replaces a concurrent winner, which would orphan
+    // data already encrypted with its key.
     let _ = std::fs::remove_file(temp);
     if publication.is_err_and(|err| err.kind() != std::io::ErrorKind::AlreadyExists) {
         return Err(CryptoError::KeyFileMalformed);
     }
-    // Durability of the publish itself: fsync the parent directory where the
-    // platform allows it (std cannot open directories on Windows; NTFS
-    // metadata journaling is the best effort there). A failed directory sync
-    // must fail the mint — returning a key whose publish may not survive a
-    // crash would let ciphertext commit under a possibly-vanishing key.
-    #[cfg(unix)]
-    {
-        let parent = path.parent().ok_or(CryptoError::KeyFileMalformed)?;
-        let dir = std::fs::File::open(parent).map_err(|_| CryptoError::KeyFileMalformed)?;
-        dir.sync_all().map_err(|_| CryptoError::KeyFileMalformed)?;
-    }
-    // Return what is durably at the path — under any interleaving the
-    // published file is the single source of truth.
+    // Return what is at the path — under any interleaving the published file
+    // is the single source of truth — and read it before flushing it.
+    // A creator that lost the claim can find a key renamed over that claim
+    // after its own attempt, and only a later flush makes that key durable.
+    // A failed flush must fail the mint: ciphertext must not commit under a
+    // key that may not survive a crash.
     let content =
         Zeroizing::new(read_key_file_no_follow(path).map_err(|_| CryptoError::KeyFileMalformed)?);
-    SecretDataKey::parse_key_file(&content)
+    let key = SecretDataKey::parse_key_file(&content)?;
+    sync_key(path).map_err(|_| CryptoError::KeyFileMalformed)?;
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -392,22 +451,62 @@ mod tests {
             .unwrap();
         assert!(added.success());
         create_key_file(scratch.path()).unwrap();
-        // The key's folder, and `.dohc` above it, take none of the entries
-        // either (#2207).
-        let key = scratch.path().join(SECRET_KEY_FILE_RELATIVE);
-        for path in [
-            key.as_path(),
-            key.parent().unwrap(),
-            &scratch.path().join(".dohc"),
-        ] {
-            let listing = std::process::Command::new("/bin/ls")
-                .arg("-led")
-                .arg(path)
-                .output()
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-led")
+            .arg(scratch.path().join(SECRET_KEY_FILE_NAME))
+            .output()
+            .unwrap();
+        let listing = String::from_utf8(listing.stdout).unwrap();
+        assert_eq!(listing.lines().count(), 1, "{listing}");
+    }
+
+    /// The key's folder moves after the engine checks it, and another takes
+    /// its name. The key still publishes and loads through the checked
+    /// folder's path by ID, and the other folder gets nothing (#2375).
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn the_key_publishes_and_loads_in_the_folder_the_engine_checked() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("key-swap").unwrap();
+        let engine = scratch.path().join("engine");
+        std::fs::create_dir(&engine).unwrap();
+        let folder = std::fs::File::open(&engine).unwrap();
+        let shown = std::path::Path::new("engine");
+        let by_id = dohc_macos_files::path_by_id(&folder, shown)
+            .unwrap()
+            .unwrap();
+        let moved = scratch.path().join("moved");
+        std::fs::rename(&engine, &moved).unwrap();
+        std::fs::create_dir(&engine).unwrap();
+        let key = create_key_file(&by_id).unwrap();
+        assert_eq!(std::fs::read_dir(&engine).unwrap().count(), 0);
+        assert!(moved.join(SECRET_KEY_FILE_NAME).is_file());
+        std::fs::write(engine.join(SECRET_KEY_FILE_NAME), "not the key").unwrap();
+        assert_eq!(load_key_file(&by_id).unwrap(), Some(key));
+    }
+
+    /// On Linux the key goes through the descriptor held for the folder the
+    /// engine checked. After that folder moves and another takes its name,
+    /// the key still publishes and loads in the checked folder, and the
+    /// other folder gets nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_key_publishes_and_loads_through_the_held_folder() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("key-held").unwrap();
+        let engine = scratch.path().join("engine");
+        std::fs::create_dir(&engine).unwrap();
+        let folder = std::fs::File::open(&engine).unwrap();
+        let held =
+            dohc_linux_files::held::held_path(folder.as_fd(), std::path::Path::new(".dohc/engine"))
                 .unwrap();
-            let listing = String::from_utf8(listing.stdout).unwrap();
-            assert_eq!(listing.lines().count(), 1, "{listing}");
-        }
+        let moved = scratch.path().join("moved");
+        std::fs::rename(&engine, &moved).unwrap();
+        std::fs::create_dir(&engine).unwrap();
+        let key = create_key_file(&held).unwrap();
+        assert_eq!(std::fs::read_dir(&engine).unwrap().count(), 0);
+        assert!(moved.join(SECRET_KEY_FILE_NAME).is_file());
+        std::fs::write(engine.join(SECRET_KEY_FILE_NAME), "not the key").unwrap();
+        assert_eq!(load_key_file(&held).unwrap(), Some(key));
     }
 
     #[cfg(target_vendor = "apple")]
@@ -486,7 +585,7 @@ mod tests {
 
         assert_eq!(load_key_file(&dir).expect("missing key"), None);
         let first = create_key_file(&dir).expect("mint");
-        let file = dir.join(SECRET_KEY_FILE_RELATIVE);
+        let file = dir.join(SECRET_KEY_FILE_NAME);
         let content = std::fs::read_to_string(&file).expect("key file written");
         assert!(content.starts_with(SECRET_KEY_FILE_PREFIX));
 
@@ -520,20 +619,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("keymint-mode-test").unwrap();
         let _key = create_key_file(&dir).expect("mint");
-        let path = dir.join(SECRET_KEY_FILE_RELATIVE);
+        let path = dir.join(SECRET_KEY_FILE_NAME);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o600,
             "a freshly minted key file must not be readable by other local users"
-        );
-        let dir_mode = std::fs::metadata(path.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            dir_mode, 0o700,
-            "the key directory must not advertise the key to other local users"
         );
     }
 
@@ -543,7 +633,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("keyperm-test").unwrap();
         let key = create_key_file(&dir).expect("mint");
-        let path = dir.join(SECRET_KEY_FILE_RELATIVE);
+        let path = dir.join(SECRET_KEY_FILE_NAME);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let loaded = load_key_file(&dir).expect("load").expect("present");
@@ -569,7 +659,8 @@ mod tests {
                     std::fs::write(&path, winner.to_key_file()).unwrap();
                 }
 
-                let result = finish_key_publication(&path, &temp, Err(std::io::Error::from(kind)));
+                let result =
+                    finish_key_publication(&path, &temp, Err(std::io::Error::from(kind)), sync_key);
 
                 assert_eq!(result.unwrap_err(), CryptoError::KeyFileMalformed);
                 assert!(
@@ -589,6 +680,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A link put at `.dohc`, or at the engine's folder, after the workspace
+    /// opened sends the key folder's path into another tree. A later load
+    /// and a mint through that path both refuse, and the other tree gets no
+    /// key.
+    #[cfg(any(unix, windows))]
+    fn a_link_after_the_open_refuses_the_key(link: impl Fn(&std::path::Path, &std::path::Path)) {
+        for (n, linked) in [".dohc", ".dohc/engine"].into_iter().enumerate() {
+            let name = format!("key-link-{n}");
+            let scratch = dohc_test_scratch::ScratchDir::new_named(&name).unwrap();
+            let root = scratch.path();
+            let engine = root.join(".dohc").join("engine");
+            std::fs::create_dir_all(&engine).unwrap();
+            create_key_file(&engine).unwrap();
+            let elsewhere = root.join("elsewhere");
+            let other = elsewhere.join("engine");
+            std::fs::create_dir_all(&other).unwrap();
+            let key = SECRET_KEY_FILE_NAME;
+            std::fs::copy(engine.join(key), other.join(key)).unwrap();
+            std::fs::rename(root.join(".dohc"), root.join("moved")).unwrap();
+            if linked == ".dohc" {
+                link(&elsewhere, &root.join(".dohc"));
+            } else {
+                std::fs::create_dir(root.join(".dohc")).unwrap();
+                link(&other, &engine);
+            }
+            let loaded = load_key_file(&engine);
+            assert!(
+                matches!(loaded, Err(CryptoError::KeyFileMalformed)),
+                "{linked}"
+            );
+            std::fs::remove_file(other.join(key)).unwrap();
+            let minted = create_key_file(&engine);
+            assert!(
+                matches!(minted, Err(CryptoError::KeyFileMalformed)),
+                "{linked}"
+            );
+            assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0, "{linked}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_after_the_open_refuses_the_key() {
+        a_link_after_the_open_refuses_the_key(|target, link| {
+            std::os::unix::fs::symlink(target, link).unwrap();
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_after_the_open_refuses_the_key() {
+        a_link_after_the_open_refuses_the_key(|target, link| {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+        });
     }
 
     #[test]
@@ -615,11 +768,167 @@ mod tests {
         for key in keys {
             assert_eq!(key, published);
         }
-        let directory = dir
-            .join(SECRET_KEY_FILE_RELATIVE)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A hard link on exFAT or FAT32.
+    #[cfg(unix)]
+    fn no_hard_links(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_without_hard_links_creates_the_key_at_its_name() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links").unwrap();
+        let key = create_key_file_with(&dir, no_hard_links).unwrap();
+        assert_eq!(load_key_file(&dir).unwrap(), Some(key));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_that_shows_the_key_to_other_users_gets_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-public").unwrap();
+        let minted = create_key_file_with(&dir, |temp, path| {
+            std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o644))?;
+            no_hard_links(temp, path)
+        });
+        assert!(matches!(minted, Err(CryptoError::KeyFileMalformed)));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_without_hard_links_keeps_the_published_key() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-winner").unwrap();
+        let winner = create_key_file(&dir).unwrap();
+        assert_eq!(create_key_file_with(&dir, no_hard_links).unwrap(), winner);
+        assert_eq!(load_key_file(&dir).unwrap(), Some(winner));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A minter there can fail a try while another writes the key, but no
+    /// two minters ever return different keys.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_minters_without_hard_links_return_only_the_published_key() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-race").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let keys = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let start = std::sync::Arc::clone(&start);
+                    let root = &dir;
+                    scope.spawn(move || {
+                        start.wait();
+                        create_key_file_with(root, no_hard_links)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let published = load_key_file(&dir).unwrap().expect("published key");
+        assert!(keys.iter().any(Result::is_ok));
+        for key in keys.into_iter().flatten() {
+            assert_eq!(key, published);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rename_replaces_only_its_own_claim() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let temp = dir.join("pending-key");
+        let winner = SecretDataKey::from_bytes(&[2; SECRET_KEY_BYTES]).unwrap();
+        std::fs::write(&path, winner.to_key_file()).unwrap();
+        std::fs::write(&temp, "candidate").unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let claimed = publish_by_rename(&temp, &path);
+        assert_eq!(
+            claimed.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            winner.to_key_file()
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(publish_by_rename(&temp, &path).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "candidate");
+        assert!(!temp.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rename_leaves_no_claim() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim-failure").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        // A folder can't be renamed over the claimed file.
+        let temp = dir.join("pending-key");
+        std::fs::create_dir(&temp).unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(publish_by_rename(&temp, &path).is_err());
+        assert!(!path.exists());
+    }
+
+    /// A creator that lost the claim returns a key only if it flushed that
+    /// key after reading it, so the flush covers the winner's rename.
+    #[test]
+    fn a_losing_creator_flushes_the_key_it_adopts() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-adopt-flush").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let temp = dir.join("pending-key");
+        let lost = || -> std::io::Result<()> { Err(std::io::ErrorKind::AlreadyExists.into()) };
+        let winner = SecretDataKey::from_bytes(&[3; SECRET_KEY_BYTES]).unwrap();
+        // The winner renames its key over the empty claim during the flush.
+        std::fs::write(&path, "").unwrap();
+        let adopted = finish_key_publication(&path, &temp, lost(), |_| {
+            std::fs::write(&path, winner.to_key_file())
+        });
+        assert!(matches!(adopted, Err(CryptoError::KeyFileMalformed)));
+
+        std::fs::write(&path, winner.to_key_file()).unwrap();
+        let mut flushed = None;
+        let adopted = finish_key_publication(&path, &temp, lost(), |key| {
+            flushed = Some(key.to_path_buf());
+            sync_key(key)
+        });
+        assert_eq!(adopted.unwrap(), winner);
+        assert_eq!(flushed, Some(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_drive_without_hard_links_publishes_by_rename() {
+        for code in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            assert!(hard_links_unsupported(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        for code in [
+            libc::EACCES,
+            libc::EEXIST,
+            libc::EXDEV,
+            libc::EIO,
+            libc::ENOSPC,
+        ] {
+            assert!(!hard_links_unsupported(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
     }
 }

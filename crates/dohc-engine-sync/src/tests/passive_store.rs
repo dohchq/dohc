@@ -188,56 +188,60 @@ fn passive_store_concurrent_delayed_and_source() {
         b.project(ContentKind::Plaintext).unwrap().content
     );
     let mut source_results = Vec::new();
-    // A refused source has a desktop-written witness over its canonical
-    // document, which neither Rust reader can rebuild. The lenient reading
-    // keeps the nested-list witness. Indented code loses its witness: both
-    // stores project fenced code, which the owner's next settle writes, and
-    // applying the base leaves the file as it is.
-    let fenced = "Before\n\n```\nlet value = 2;\n```\n\nAfter";
-    for (name, source, refused_canonical, settled) in [
+    // A row with a desktop canonical seeds the document as the desktop reads
+    // the file, with the file as its witness. The outside fold cannot build
+    // that document. The engine's file reading proves the witness for
+    // indented code and a list item's underlined heading. The nested-list
+    // witness needs the lenient reading, which compares the snapshot.
+    for (name, source, desktop_canonical) in [
         (
             "headings.md",
             "# Workspace\n\nText with **bold** and [a link](https://example.test).\n",
-            None,
             None,
         ),
         (
             "table.md",
             "| Name | Value |\n| --- | --- |\n| Item | 2 |\n",
             None,
-            None,
         ),
         (
             "code.md",
             "Before\n\n    let value = 2;\n\nAfter\n",
-            Some(fenced),
-            Some(fenced),
+            Some("Before\n\n```\nlet value = 2;\n```\n\nAfter"),
+        ),
+        (
+            "quoted-list-code.md",
+            "    > - a\n    > \tcode\n",
+            Some("```\n> - a\n> \tcode\n```"),
+        ),
+        (
+            "list-heading.md",
+            "- Plan\n  --\n- Notes\n",
+            Some("- \n  ## Plan\n- Notes"),
         ),
         (
             "fenced-code.md",
             "Before\n\n```\nlet value = 2;\n```\n\nAfter\n",
-            None,
             None,
         ),
         (
             "nested-list-witness.md",
             "---\nid: rec\n---\n\n- \n\n  - b\n - c",
             Some("---\nid: rec\n---\n\n- \n\n- b\n- c"),
-            None,
         ),
     ] {
         let (_scratch, _path, mut owner) = open_store();
         seed_replication_version(&mut owner, "main", "main");
         seed_text_head(&mut owner, "source", "source.md", source);
         let doc = Ydoc::wire();
-        if let Some(canonical) = refused_canonical {
+        if let Some(canonical) = desktop_canonical {
+            let folded = Ydoc::wire();
             assert!(
-                doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                folded
+                    .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
                     .is_err()
-            );
-            assert!(
-                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
-                    .is_err()
+                    || folded.project(ContentKind::Richdoc).unwrap().content != canonical,
+                "{name}"
             );
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
                 .unwrap();
@@ -262,11 +266,7 @@ fn passive_store_concurrent_delayed_and_source() {
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
             .unwrap()
             .content;
-        assert_eq!(
-            owner_text,
-            settled.unwrap_or(source),
-            "owner source: {name}"
-        );
+        assert_eq!(owner_text, source, "owner source: {name}");
         assert_eq!(imported_source, owner_text, "replica source: {name}");
         if name == "nested-list-witness.md" {
             assert_ne!(missing_source, owner_text);
@@ -305,6 +305,90 @@ fn passive_store_concurrent_delayed_and_source() {
         "{}",
         json!({"concurrentAndDelayed":"passed","realDocumentComparisons":source_results})
     );
+}
+
+#[test]
+fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
+    use base64::Engine as _;
+    let vectors: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../../tests/settle-parity/yjs.json")).unwrap();
+    // Each desktop seed settles with the file on disk, then without it, which
+    // writes the vector's Markdown. Main settled `lexical-16` as fenced code,
+    // which its next settle turns back into the source. The file reading
+    // refuses a `--` heading over two lines, so both settles write its
+    // projection, as main did. A bare `-` heading over two lines, and an `=`
+    // heading that marked and main both read, keep their file, as on main.
+    // So does an `=` heading beside a `--` line that starts CDATA in any case,
+    // which only the file reading can prove.
+    for (name, file, with_file) in [
+        (
+            "lexical-16",
+            "```\nindented code\n```",
+            "    indented code\n",
+        ),
+        (
+            "list-heading",
+            "- Plan\n  --\n- Notes\n",
+            "- Plan\n  --\n- Notes\n",
+        ),
+        (
+            "list-heading-two-lines",
+            "- a\n  b\n  --\n",
+            "- \n  ## a\n  b",
+        ),
+        (
+            "list-heading-bare-dash-two-lines",
+            "- a\n  b\n  -\n",
+            "- a\n  b\n  -\n",
+        ),
+        ("list-heading-equals-bang", "- <!-x\n  =\n", "- <!-x\n  =\n"),
+        (
+            "list-heading-equals-pipe-tab",
+            "- |\t|\n  =\n",
+            "- |\t|\n  =\n",
+        ),
+        (
+            "list-heading-cdata-lowercase",
+            "- a\n  =\n- <![cdata[x\n  --\n",
+            "- a\n  =\n- <![cdata[x\n  --\n",
+        ),
+        (
+            "list-heading-cdata-mixed-case",
+            "- a\n  =\n- <![CdAtA[x\n  --\n",
+            "- a\n  =\n- <![CdAtA[x\n  --\n",
+        ),
+    ] {
+        let vector = vectors
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap();
+        let expected = vector["markdown"].as_str().unwrap();
+        let doc = Ydoc::wire();
+        for update in vector["updates"].as_array().unwrap() {
+            doc.apply(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(update.as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "source").unwrap();
+        let (_scratch, _path, mut owner) = open_store();
+        seed_replication_version(&mut owner, "main", "main");
+        seed_text_head(&mut owner, "source", "source.md", file);
+        let owner_text = owner
+            .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
+            .unwrap()
+            .content;
+        assert_eq!(owner_text, with_file, "owner: {name}");
+        let (_scratch, _path, mut replica_store) = open_passive_store();
+        seed_replication_version(&mut replica_store, "main", "main");
+        let missing_file = replica_store
+            .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
+            .unwrap()
+            .content;
+        assert_eq!(missing_file, expected, "replica without the file: {name}");
+    }
 }
 
 #[test]

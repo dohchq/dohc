@@ -1,4 +1,5 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
+import { workspaceRootsMatch } from "./workspaceRootsMatch";
 import {
   deriveSyncStatus,
   type WatcherEvent,
@@ -51,8 +52,13 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  // True once the check finds the root on a network share.
+  onNetworkShare: boolean;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
+  // Old file copies the engine keeps on a drive that cannot tell it whether
+  // a program still uses one. Null until the engine first reports.
+  retainedCopies: NonNullable<SyncStatusResult["retainedCopies"]> | null;
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
   // The engine's latest answer: Collection updates wait for an unfinished
   // pull. Asked at open and after sync passes, and kept as sync engines
@@ -105,6 +111,9 @@ export interface WorkspaceActivityOptions {
   // reads through the owner's open, so it answers only once that open, which
   // abandons a pull when sync is paused, succeeded.
   collectionsWaitingFor?: (workspace: ActivityWorkspace) => Promise<boolean>;
+  // Whether the root is on a network share. Asked once per open, without
+  // holding up the open.
+  onNetworkShare?: (rootPath: string) => Promise<boolean>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -151,6 +160,7 @@ export interface WorkspaceCaptureHooks {
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
+  onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
 }
 
@@ -279,8 +289,10 @@ export function createWorkspaceActivity(
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
+      ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
@@ -350,16 +362,17 @@ export function createWorkspaceActivity(
   }
 
   async function open(
-    workspace: ActivityWorkspace,
+    requestedWorkspace: ActivityWorkspace,
     state: WorkspaceActivityState,
   ): Promise<SyncStatusResult> {
     const current = state.entry;
     const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
-    if (rootPath !== undefined && rootPath !== workspace.rootPath) {
+    if (rootPath !== undefined && !workspaceRootsMatch(rootPath, requestedWorkspace.rootPath)) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
     }
+    const workspace = rootPath === undefined ? requestedWorkspace : { ...requestedWorkspace, rootPath };
     if (!current) {
       const entry: WatchedWorkspace = {
         workspace,
@@ -374,14 +387,21 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        onNetworkShare: false,
         recoveryUnavailable: false,
         keptFiles: [],
+        retainedCopies: null,
         heldFiles: [],
         collectionsWaiting: false,
         collectionsWaitingAsked: 0,
         collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
+      void options.onNetworkShare?.(workspace.rootPath).then((shared) => {
+        if (!shared || state.entry !== entry) return;
+        entry.onNetworkShare = true;
+        notify({ workspaceId: workspace.workspaceId });
+      }, (error) => console.error(`[desktop] could not check whether ${workspace.rootPath} is on a network share:`, error));
       // Resolve the engine capture before the watcher starts, so the mode is
       // known from the first batch. A capture failure leaves the workspace
       // with no recorder, surfaced via the history-off notice, never a
@@ -401,6 +421,12 @@ export function createWorkspaceActivity(
               onKeptFiles: (paths) => {
                 if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
                 entry.keptFiles = [...paths];
+                notify({ workspaceId: workspace.workspaceId });
+              },
+              onRetainedCopies: (summary) => {
+                const previous = entry.retainedCopies;
+                if (state.entry !== entry || (previous?.count === summary.count && previous.bytes === summary.bytes)) return;
+                entry.retainedCopies = { count: summary.count, bytes: summary.bytes };
                 notify({ workspaceId: workspace.workspaceId });
               },
               onHeldFiles: (files) => {
@@ -647,14 +673,14 @@ export function createWorkspaceActivity(
     const entry = state.entry;
     if (!entry) {
       if (!closeOptions.preserveAgentRun && state.agentRun &&
-        (closeOptions.expectedRootPath === undefined || state.agentRun.workspace.rootPath === closeOptions.expectedRootPath)) {
+        (closeOptions.expectedRootPath === undefined || workspaceRootsMatch(state.agentRun.workspace.rootPath, closeOptions.expectedRootPath))) {
         assignAgentRun(state, workspace, null);
       }
       return false;
     }
     if (
       closeOptions.expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== closeOptions.expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, closeOptions.expectedRootPath)
     ) {
       return false;
     }
@@ -837,7 +863,7 @@ export function createWorkspaceActivity(
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     if (
       expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath)
     ) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
@@ -863,7 +889,7 @@ export function createWorkspaceActivity(
     if (!slot) return;
     if (
       expectedRootPath !== undefined &&
-      slot.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath)
     ) {
       return;
     }
@@ -879,7 +905,7 @@ export function createWorkspaceActivity(
     return (
       slot !== null &&
       (expectedRootPath === undefined ||
-        slot.workspace.rootPath === expectedRootPath)
+        workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath))
     );
   }
 
@@ -928,7 +954,7 @@ export function createWorkspaceActivity(
     if (
       !entry ||
       (expectedRootPath !== undefined &&
-        entry.workspace.rootPath !== expectedRootPath)
+        !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath))
     ) {
       return null;
     }

@@ -141,8 +141,8 @@ async fn lexical_aliases_converge_on_one_actor() {
 }
 
 // oracle: a symlink/junction to the engine dir never forks a second writer.
-// On a Mac the engine refuses a store reached through a linked folder; on
-// other platforms the alias converges on the same actor (portability +
+// On a Mac and Linux the engine refuses a store reached through a linked
+// folder; on Windows the alias converges on the same actor (portability +
 // file-identity). Skips honestly if the platform refuses to create the alias.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn symlink_or_junction_alias_never_forks_a_writer() {
@@ -163,7 +163,7 @@ async fn symlink_or_junction_alias_never_forks_a_writer() {
 
     let sup = WorkspaceSupervisor::new();
     let real = sup.open(&db, 1).expect("open real").actor;
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
     {
         let Err(refused) = sup.open(&aliased_db, 1) else {
             panic!("a store reached through a linked folder must be refused");
@@ -174,7 +174,7 @@ async fn symlink_or_junction_alias_never_forks_a_writer() {
         );
         assert_ne!(real.lifecycle(), LifecycleState::Closed);
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     let via_link = {
         let via_link = sup.open(&aliased_db, 1).expect("open via link").actor;
         assert_eq!(
@@ -194,7 +194,7 @@ async fn symlink_or_junction_alias_never_forks_a_writer() {
     write(&real, "k.md", "value", 1, Arc::new(NoFaults))
         .await
         .expect("write real");
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     assert_eq!(read(&via_link, "k.md").await.as_deref(), Some("value"));
 }
 

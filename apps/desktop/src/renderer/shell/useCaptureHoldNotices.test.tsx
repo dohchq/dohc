@@ -11,7 +11,7 @@ afterEach(cleanup);
 const held: CaptureFileHold = { workspaceId: "workspace", sourceVersionId: "main", objectId: "object", path: "held.md",
   observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable",
   observedAtMs: 1, attemptCount: 1, retryRequested: false };
-const reply = { settled: true, running: true, degraded: false, retried: true, heldFiles: [held] };
+const reply = { deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: [held] };
 function fixture() {
   const retryHeldCapture = vi.fn(async () => reply);
   Object.assign(window, { dohcDesktop: { retryHeldCapture } });

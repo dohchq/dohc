@@ -31,6 +31,7 @@ import {
   type PressAutomationButtonResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import type { RemoteDatasetData } from "../workspaces/remoteDataset";
 
 // Button fields (item 8). Main decides who may press a button and which
 // automation it runs; a window only shows the answer. A press acts for the
@@ -120,7 +121,9 @@ export interface PressCaller<Operation> {
 }
 
 type SharedButton = { target?: RelayButtonTarget; state: AutomationButtonState };
-type ButtonPresser<Operation> = (input: PressAutomationButtonPayload, caller: PressCaller<Operation>, inspected?: SharedButton) => Promise<PressAutomationButtonResult>;
+/** A press's answer, and whether the server runs it, so nothing here hears how it ends. */
+type ButtonPresser<Operation> = (input: PressAutomationButtonPayload, caller: PressCaller<Operation>, inspected?: SharedButton) =>
+  Promise<{ result: PressAutomationButtonResult; onServer: boolean }>;
 
 /** A press as the CLI names it: a Collection's folder, a Button field, and a record. */
 export interface NamedPress {
@@ -184,6 +187,11 @@ export function registerAutomationButtonsIpc<
    */
   relayPress(operation: Operation, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string; confirmed: readonly string[] }): Promise<void>;
   relayInspect(operation: Operation, input: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]>;
+  /**
+   * The server a dataset Collection moved to, which runs its automations and
+   * takes its presses, or null for a Collection kept on this computer.
+   */
+  serverCollection(operation: Operation, datasetId: string): Promise<{ data: Pick<RemoteDatasetData, "press"> } | null>;
   inspectionAccount(): Promise<string | null>;
   inspectionChanged(workspaceId: string, attachmentId: symbol | undefined): void;
   pressWindows: PressWindows<Sender>;
@@ -338,15 +346,18 @@ export function registerAutomationButtonsIpc<
     const watch = caller.watch;
     if ("datasetId" in input) {
       const description = await caller.describeDataset(input.datasetId);
-      const pressed = await caller.withOperation(async (operation) => {
+      const { pressed, onServer } = await caller.withOperation(async (operation) => {
         if (shareViewIsPresent(operation.workspace.shareView)) {
           throw new Error(sharedDatasetButtonState(description, input.table).reason);
         }
-        return await operation.state.collectionAutomations.pressDataset(
-          { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, pressedBy, by: caller.by, confirmed: input.confirmed ?? [] },
-          (id) => id === input.datasetId ? Promise.resolve(description) : caller.describeDataset(id), watch);
+        const press = { datasetId: input.datasetId, table: input.table, field: input.field, recordId: input.recordId, pressId: input.pressId, by: caller.by, confirmed: input.confirmed ?? [] };
+        // The server checks the press as the person it signed in, and runs it.
+        const server = await dependencies.serverCollection(operation, input.datasetId);
+        if (server !== null) return { pressed: await server.data.press(press), onServer: true };
+        return { pressed: await operation.state.collectionAutomations.pressDataset({ ...press, pressedBy },
+          (id) => id === input.datasetId ? Promise.resolve(description) : caller.describeDataset(id), watch), onServer: false };
       });
-      return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
+      return { result: pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed, onServer };
     }
     assertCollectionPath(input.collectionPath);
     const read = await caller.withOperation(async (operation) => {
@@ -375,22 +386,24 @@ export function registerAutomationButtonsIpc<
       );
       return { kind: "document" as const, pressed };
     });
-    if (read.kind === "relayed") return { busy: false, relayed: true };
+    if (read.kind === "relayed") return { result: { busy: false, relayed: true }, onServer: false };
     const { pressed } = read;
-    return pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed;
+    return { result: pressed.busy ? { busy: true, reason: RUNNING_FOR_RECORD } : pressed, onServer: false };
   };
 
   registerHandler(CHANNELS.pressAutomationButton, async (event, payload): Promise<PressAutomationButtonResult> => {
     assertTrustedSender(event);
     const input = PressAutomationButtonPayload.parse(payload);
     const workspaceId = input.workspaceId;
-    return await press(input, {
+    const { result, onServer } = await press(input, {
       by: { kind: "human" },
       withOperation: (work) => withRendererWorkspaceOperation(event.sender, workspaceId, stale, work),
       describeDataset: (datasetId) => dependencies.describeDataset(event.sender, workspaceId, datasetId),
       // The window that pressed hears how the run settles.
       watch: (claimId, waiting) => pressWindows.watch(workspaceId, claimId, event.sender, waiting),
     });
+    // Nothing here hears how the server's run ends: the button is free again, and a failure arrives as the server's notice.
+    return onServer && "claimId" in result && result.settled === null ? { busy: false, relayed: true } : result;
   });
 
   /**
@@ -424,7 +437,7 @@ export function registerAutomationButtonsIpc<
         return (button.state.irreversible ?? []).filter((action) => !input.confirm.includes(action.name));
       });
       if (unconfirmed.length > 0) return { confirm: unconfirmed };
-      return await press({ workspaceId, collectionPath, field, recordId, pressId, confirmed: [...input.confirm] }, caller, inspected);
+      return (await press({ workspaceId, collectionPath, field, recordId, pressId, confirmed: [...input.confirm] }, caller, inspected)).result;
     }
     const pressId = namedPressId(input, "dataset");
     const description = await caller.describeDataset(datasetId);
@@ -434,17 +447,34 @@ export function registerAutomationButtonsIpc<
     // A press sent again may name a button renamed since; its table is the one it named.
     const table = named[0]?.table ?? input.table;
     if (table === undefined) throw new Error(`${field} is not a button in ${nameOf(collectionPath)}.`);
-    if (!(await caller.withOperation((operation) => operation.state.collectionAutomations.datasetPressed(pressId)))) {
+    // What a new press needs first: a ready button, and every action dohc cannot undo confirmed by name.
+    const asks = async (): Promise<{ confirm: IrreversibleAction[] } | null> => {
       const [state] = await caller.withOperation((operation) =>
         operation.state.collectionAutomations.datasetButtons(datasetId, [{ field, table }], (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id)));
       if (state === undefined || state.kind !== "ready") throw new Error(state?.reason ?? `${field} did not start.`);
       const unconfirmed = (state.irreversible ?? []).filter((action) => !input.confirm.includes(action.name));
-      if (unconfirmed.length > 0) return { confirm: unconfirmed };
-    }
-    return await press(
+      return unconfirmed.length > 0 ? { confirm: unconfirmed } : null;
+    };
+    const send = async () => (await press(
       { workspaceId, datasetId, table, field, recordId, pressId, confirmed: [...input.confirm] },
       { ...caller, describeDataset: (id) => id === datasetId ? Promise.resolve(description) : caller.describeDataset(id) },
-    );
+    )).result;
+    if (await caller.withOperation(async (operation) => (await dependencies.serverCollection(operation, datasetId)) !== null)) {
+      // The server answers a press it remembers, however the button changed
+      // since, and checks a new one itself, confirmations included. Only a
+      // press it refuses is checked here, to say why.
+      try { return await send(); }
+      catch (error) {
+        const asked = await asks();
+        if (asked !== null) return asked;
+        throw error;
+      }
+    }
+    if (!(await caller.withOperation((operation) => operation.state.collectionAutomations.datasetPressed(pressId)))) {
+      const asked = await asks();
+      if (asked !== null) return asked;
+    }
+    return await send();
   }
 
   async function inspectNamed(input: Pick<NamedPress, "collectionPath" | "table">, caller: PressCaller<Operation>): Promise<CollectionAutomationButton[]> {

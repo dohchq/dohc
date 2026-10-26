@@ -251,5 +251,13 @@
   "workspace.trust.restrict",
   "file.duplicate",
   "collection.copies.left.read",
-  "collection.copies.left.remove"
+  "collection.copies.left.remove",
+  "dataset.holder.keep",
+  "file.retained.list",
+  "file.retained.delete",
+  "chat.dispatch.pause.read",
+  "chat.dispatch.pause.switch",
+  "share.live.document.retry",
+  "share.live.document.recovery.save",
+  "workspace.name.suggest"
 ]

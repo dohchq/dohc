@@ -14,7 +14,8 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import { datasetBaseFolder, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
@@ -44,11 +45,14 @@ import {
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
+import { SERVER_TRIGGERS_ELSEWHERE, type ServerDataset } from "@dohc/automation-executor/collection-automations";
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import { PERSONAL_NEEDS_ACCOUNT } from "@dohc/automation-executor/automation-reach";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
 // dohc's generated operations in its worker, its commits claim through its
@@ -367,7 +371,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   const settledChecks = async () => { while (checking.size > 0) await Promise.all([...checking]); };
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "workspace", rootPath: root });
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: root, capacityBytes: 4 * 1024 * 1024,
     compile: compileFixture,
     agentRun: options.agentRun,
     onAutomationClaims: (failed) => { executor?.notifyClaimed(); if (failed) executor?.failuresChanged(); wake(); },
@@ -681,7 +685,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     crashAfterOwnerInvoke: (operationId: string) => { afterOwnerInvoke = { operationId, then: async () => { throw new Error("dohc stopped."); } }; },
     /** Gives a person the data grant on these operations, as the share dialog would. */
     grant: (grantId: string, userId: string, operationIds: string[], reference = rules) => {
-      const store = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"));
+      const store = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"));
       try {
         store.prepare("INSERT OR REPLACE INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", reference.datasetId, datasetPrincipalKey("workspace", grantId, userId),
           JSON.stringify({ operationIds, discover: true, revision: reference.revision, revisionSha256: reference.revisionSha256 }), "token");
@@ -707,6 +711,50 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
 }
 
 describe("Collection automations on a dataset", () => {
+  it.each(["waits", "fails"] as const)("stops claiming a Collection here once it is fenced to move to a server, while its import %s", async (end) => {
+    const f = await world();
+    await f.writeAutomations(closePaid() + `  - id: nightly
+    name: Nightly
+    when: {schedule: day, timezone: UTC}
+    do:
+      - find: record.Paid == true
+        as: paid
+        operation: invoices.list
+      - set:
+          Status: Closed
+        records: paid
+        operation: invoices.status
+`);
+    await f.executor.open();
+    onTestFinished(() => f.executor.dispose());
+    expect(f.host.automations.subscriptions()).toHaveLength(1);
+    expect(f.executor.schedules()).toHaveLength(1);
+    const reached = Promise.withResolvers<void>(), answer = Promise.withResolvers<void>();
+    const transfer = f.host.transferToShared({ datasetId: BUDGET, targetOrigin: "https://relay.example", target: { async importRecovery() {
+      reached.resolve();
+      await answer.promise;
+      throw new Error("The server stopped answering.");
+    } } });
+    await reached.promise;
+    // The fence is durable and the server has not answered: nothing here claims the Collection's changes or due times.
+    await f.until(() => f.host.automations.subscriptions().length === 0 && f.executor.schedules()?.length === 0);
+    if (end === "fails") {
+      answer.resolve();
+      await expect(transfer).rejects.toThrow("stopped answering");
+      // The failed end reconciles again, and the Collection stays fenced and unclaimed here.
+      await f.executor.idle();
+      await f.executor.automationsIn("Budget");
+      expect(f.host.transferStatus(BUDGET)?.state).toBe("ready");
+      expect(f.host.automations.subscriptions()).toEqual([]);
+      expect(f.executor.schedules()).toEqual([]);
+    } else {
+      expect(f.host.transferStatus(BUDGET)?.state).toBe("ready");
+      answer.resolve();
+      await transfer.catch(() => undefined);
+    }
+    expect(f.errors).toEqual([]);
+  });
+
   it.each(["failed reload", "dataset move"] as const)("retries a dataset press after a %s index read", async change => {
     const f = await world();
     await f.writeAutomations(closePaid().replace("field-changed: Paid", "button: Mark paid"));
@@ -1285,7 +1333,7 @@ describe("Collection automations on a dataset", () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     // Ana may use every operation the run calls, and cannot post in Team.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -1363,7 +1411,7 @@ describe("Collection automations on a dataset", () => {
     const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };
     const f = await world({ roster: withAna });
     // Ana may use the list and the status edit, which show every field but ID.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -1390,7 +1438,7 @@ describe("Collection automations on a dataset", () => {
   it("keeps a held field held when a schema change removes a field before it", async () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");
@@ -1824,6 +1872,7 @@ ${step}`;
       pressedBy: async () => PRESSER,
       relayPress: async () => { throw new Error("Nothing relays here."); },
       relayInspect: async () => { throw new Error("Nothing relays here."); },
+      serverCollection: async () => null,
       inspectionAccount: async () => null,
       inspectionChanged: () => undefined,
       pressWindows: createPressWindows(() => null),
@@ -2196,6 +2245,102 @@ ${step}`;
     await expect(press(f, { recordId: invoice, pressId: pressId(10) })).rejects.toThrow(moved);
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     await f.executor.dispose();
+  });
+
+  it("shows a Collection moved to the server as the server's, and never subscribes, schedules or presses it here", async () => {
+    const f = await world({ descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    // Each would run here if this computer still kept the Collection.
+    await f.writeAutomations(markPaid(settle) + closePaid("      - invoke: invoices.hold\n        input:\n          id: '=record.id'\n") + `  - id: nightly
+    name: Nightly
+    when: {schedule: day, timezone: UTC}
+    do:
+      - notify: Invoices to close
+        to: [user-owner]
+`);
+    // What the server answers: its approved rules and grants, and what it runs.
+    const server = { approved: f.host.automations.revision(BUDGET), generated: f.host.automations.generated(BUDGET), grants: f.host.automations.dataGrants(BUDGET) };
+    let runs: ServerDataset["runs"] = "all";
+    const asked: string[] = [];
+    // The Collection moved, so this computer's store keeps its transfer record.
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'imported',NULL,NULL,'{}')").run("workspace", BUDGET, id(400), "https://relay.example", "{}");
+    } finally { store.close(); }
+    // This computer runs the workspace's schedules, as the one that keeps the other Collections may.
+    const executor = f.makeExecutor({ groupHost: async () => 0,
+      serverDataset: async (datasetId) => { asked.push(datasetId); return datasetId === BUDGET ? { ...server, runs } : null; } });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    await executor.idle();
+    // Nothing here claims its record changes or its schedule, and a person asked nothing yet.
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    expect(executor.schedules()).toEqual([]);
+    expect(executor.hasHostTriggers()).toBe(false);
+    expect(asked).toEqual([]);
+    const { id: invoice } = await f.create({ [PAID]: false });
+    await f.edit(invoice, { [PAID]: true });
+    await executor.idle();
+    expect(f.claims()).toEqual([]);
+
+    const listed = await executor.automationsIn("Budget");
+    expect(listed).toMatchObject({ status: "read", onServer: { runs: true }, automations: [
+      { valid: true, automationId: BUTTON_AUTOMATION, cannotRun: null, lastRun: null, reach: { kind: "checked" } },
+      { valid: true, automationId: AUTOMATION, cannotRun: null, lastRun: null },
+      { valid: true, automationId: `collection:${BUDGET}#nightly`, cannotRun: null },
+    ] });
+    expect(await executor.datasetCollection(BUDGET)).toEqual({ status: "found", collectionPath: "Budget" });
+    const button = () => executor.datasetButtons(BUDGET, [{ field: "Mark paid", table: "Invoices" }], async () => owner(f));
+    // The button runs on the server, which takes the press after the person confirms what can't be undone.
+    expect(await button()).toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION, irreversible: [{ name: "invoices.settle", label: "Settle" }] }]);
+    await expect(press(f, { recordId: invoice, pressId: pressId(40), confirmed: ["invoices.settle"] })).rejects.toThrow("not approved");
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
+
+    // The server runs schedules only when Schedules run on names it.
+    runs = "no-schedules";
+    expect(await executor.automationsIn("Budget")).toMatchObject({ onServer: { runs: true }, automations: [
+      { cannotRun: null }, { cannotRun: null }, { cannotRun: SERVER_TRIGGERS_ELSEWHERE },
+    ] });
+    // A server that runs no automations runs none of them.
+    runs = "off";
+    expect(await executor.automationsIn("Budget")).toMatchObject({ onServer: { runs: false }, automations: [
+      { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF },
+    ] });
+    expect(await button()).toEqual([{ kind: "disabled", reason: AUTOMATION_SERVER_OFF }]);
+    expect(f.errors).toEqual([]);
+  });
+
+  it("checks a button on the server whose step adds a record to another Collection on the server", async () => {
+    const f = await world();
+    const ledger = generateDatasetSources({ formatVersion: 1, datasetId: id(500), name: "Ledger", schemaPath: "Ledger/schema.sql", operationsPath: "Ledger/operations.js",
+      tables: [{ tableId: id(501), name: "Entries", sqlName: "entries", primaryKey: "id", fields: [
+        { fieldId: id(502), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        { fieldId: id(503), name: "Note", sqlColumn: "note", type: "text", required: false, unique: false },
+      ] }],
+      operations: [{ operationId: id(504), name: "entries.create", label: "Create", tableId: id(501), kind: "create", access: "owner", readOnly: false, fieldIds: [id(502), id(503)] }],
+    });
+    for (const [path, text] of Object.entries(ledger.files)) {
+      await mkdir(join(f.root, dirname(path)), { recursive: true });
+      await writeFile(join(f.root, path), text);
+    }
+    const ledgerRules = describeDatasetRevision({ definition: ledger.definition, revision: 1,
+      schemaSql: ledger.files["Ledger/schema.sql"]!, operationSource: ledger.files["Ledger/operations.js"]! });
+    await f.writeAutomations(markPaid("      - add-record:\n          ID: '=record.id'\n          Note: Paid\n        collection: Ledger\n        operation: entries.create\n"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'imported',NULL,NULL,'{}')").run("workspace", BUDGET, id(401), "https://relay.example", "{}");
+    } finally { store.close(); }
+    const budget = { approved: f.host.automations.revision(BUDGET), generated: true, grants: f.host.automations.dataGrants(BUDGET), runs: "all" as const };
+    const executor = f.makeExecutor({ serverDataset: async (datasetId) => datasetId === BUDGET ? budget
+      : datasetId === id(500) ? { approved: ledgerRules, generated: true, grants: { workspaceId: "workspace", grants: [] }, runs: "all" } : null });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    // Neither Collection is kept here, so the step's destination comes from the server too.
+    const describe = async (datasetId: string) => datasetId === BUDGET ? await owner(f) : describeApprovedDataset(ledgerRules, ledgerRules.definition.operations);
+    expect(await executor.datasetButtons(BUDGET, [{ field: "Mark paid", table: "Invoices" }], describe)).toEqual([{ kind: "ready", automationId: BUTTON_AUTOMATION }]);
+    expect(await executor.automationsIn("Budget")).toMatchObject({ status: "read", automations: [{ automationId: BUTTON_AUTOMATION, cannotRun: null }] });
+    // Nothing here runs either of them.
+    expect(f.host.automations.subscriptions()).toEqual([]);
+    expect(executor.locate(BUTTON_AUTOMATION)).toBeNull();
   });
 
   it("runs a failed press again only for the person who pressed it or the owner", async () => {
@@ -2820,7 +2965,7 @@ describe("dataset agent wakes", () => {
     const sources = new Map(Object.entries(form.files).map(([path, source]) => [`form/${path}`, source]));
     sources.set("Budget/dataset.json", JSON.stringify(f.approved.definition));
     const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
-    const prepared = await prepareLocalAppPublication({ workspaceId: "workspace", appRoot: "form" }, {
+    const prepared = await prepareLocalAppPublication({ workspaceId: "workspace", appRoot: "form" }, { deferredWrites: [],
       adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {},
       async resolveDatasetRevision(binding) { return f.host.approvedArtifacts(binding.datasetId).revision; },
     });
@@ -3120,7 +3265,7 @@ describe("code steps on a dataset", () => {
     const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     // Ana may read the table and set Status. The code can pick any edit or create on the table, and she cannot use those.
-    const store = new DatabaseSync(join(f.root, ".dohc", "datasets", "state.sqlite"));
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
     try {
       store.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", "g-ana", "u-ana"),
         JSON.stringify({ operationIds: [LIST, STATUS_ONLY], discover: true, revision: f.rules.revision, revisionSha256: f.rules.revisionSha256 }), "token");

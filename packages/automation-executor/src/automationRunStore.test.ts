@@ -650,7 +650,7 @@ describe("the automation run store", () => {
 
   it("reports runs it cannot read when the host refuses its folder", async () => {
     const refuse = async (): Promise<never> => { throw new Error("That folder is not a real folder inside this workspace."); };
-    await expect(createAutomationRunStore({ forWrite: refuse, forRead: refuse }).runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    await expect(createAutomationRunStore({ forWrite: refuse, read: refuse }).runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
   });
 
   it("tells a missing reach file from one it cannot read", async () => {

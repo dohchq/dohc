@@ -398,15 +398,19 @@ it("refuses Undo of a delete or rename before the workspace's open prepares .doh
   const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
     { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
   readLocalStateFrom(null);
-  expect(await f.undo(id)).toEqual({ ok: false,
-    reason: "dohc did not undo the delete because the workspace has not finished opening. Try again when it opens." });
-  expect(await f.undo(moved.operationId!)).toEqual({ ok: false,
-    reason: "dohc did not undo the rename because the workspace has not finished opening. Try again when it opens." });
+  // On Windows nothing in `.dohc/local` is read before the open holds it, so
+  // dohc can't yet tell what it would undo.
+  const notOpened = (what: string) => process.platform === "win32"
+    ? "dohc has not finished opening this workspace. Try again when it opens."
+    : `dohc did not undo the ${what} because the workspace has not finished opening. Try again when it opens.`;
+  expect(await f.undo(id)).toEqual({ ok: false, reason: notOpened("delete") });
+  expect(await f.undo(moved.operationId!)).toEqual({ ok: false, reason: notOpened("rename") });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
-  // Reading needs no open, and the records wait for the next one.
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: false})).toMatchObject({ ok: true, withoutHistory: ["folder/assets"] });
+  // Elsewhere reading needs no open, and the records wait for the next one.
+  const read = await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: false});
+  expect(read).toMatchObject(process.platform === "win32" ? { ok: false } : { ok: true, withoutHistory: ["folder/assets"] });
   await openedLocalState(f.operation.workspace);
   expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/assets"], remaining: [] });
   expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
@@ -421,7 +425,7 @@ it("checks readiness before a retried delete Undo asks History to finish restori
     notRestored: [], compensationOperationId: otherId, deduped: false, materialized: false }));
   expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restoring" } });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
-  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) });
   expect(await f.undo(id)).toEqual({ ok: false,
     reason: "dohc did not undo the delete because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();

@@ -11,6 +11,7 @@ import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
+import { releaseChannelFromArgv } from "./updates/updateMachine";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -24,6 +25,7 @@ import type {
 import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
@@ -70,6 +72,8 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  chatDispatchPauseOperations,
+  ChatDispatchPausedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
@@ -146,6 +150,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(sharedChannelOperations, invoke),
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
@@ -156,6 +161,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  releaseChannel: releaseChannelFromArgv(process.argv),
   insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"
@@ -554,6 +560,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentRunStateOperations, invoke),
   onAgentRunState: (listener) =>
     onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
+  ...operationBridge(chatDispatchPauseOperations, invoke),
+  onChatDispatchPaused: (listener) =>
+    onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

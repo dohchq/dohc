@@ -51,6 +51,8 @@ import type {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   OwnerLiveDocumentActionPayload,
+  RetryOwnerLiveQuarantinePayload,
+  StopOwnerLiveDocumentResult,
   OwnerLiveDocumentsResult,
   OwnerLiveRefusalsResult,
   RetryOwnerLiveSharePayload,
@@ -320,6 +322,8 @@ function makeBaseBridge(
   const collectionCopiesLeftCallbacks = new Set<() => void>();
   const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
+  const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
+  let chatDispatchPaused = false;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
@@ -380,7 +384,14 @@ function makeBaseBridge(
       async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
     ),
     stopOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<StopOwnerLiveDocumentResult> => ({ keptEdits: "none" }),
+    ),
+    retryOwnerLiveQuarantine: vi.fn(
+      async (_payload: RetryOwnerLiveQuarantinePayload): Promise<void> => undefined,
+    ),
+    saveOwnerLiveRecoveryCopy: vi.fn(
+      async (payload: import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyPayload): Promise<import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyResult> =>
+        ({ copyPath: payload.path.replace(/\.md$/u, " (recovered).md"), packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json"), storedOn: "this-computer", keptEdits: "kept" }),
     ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
@@ -472,6 +483,18 @@ function makeBaseBridge(
     emitAgentRunState: (event: AgentRunStateEvent) => {
       for (const callback of [...agentRunStateCallbacks]) callback(event);
     },
+    // Agent dispatch runs until a test pauses it.
+    readChatDispatchPaused: vi.fn(async () => ({ paused: chatDispatchPaused })),
+    setChatDispatchPaused: vi.fn(async ({ paused }: { paused: boolean }) => {
+      chatDispatchPaused = paused;
+      for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
+    }),
+    onChatDispatchPaused: vi.fn((listener: (event: { paused: boolean }) => void) => {
+      chatDispatchPausedCallbacks.add(listener);
+      return () => {
+        chatDispatchPausedCallbacks.delete(listener);
+      };
+    }),
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({

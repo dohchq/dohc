@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   initialUpdateState,
+  releaseChannelFromArgv,
+  releaseChannelPreloadArguments,
   transition,
   type UpdateEvent,
   type UpdateState,
@@ -128,5 +130,13 @@ describe("updateMachine", () => {
     expect(transition(initialUpdateState, { type: "downloaded", version: "1.0.0" })).toBe(initialUpdateState);
     const upToDate = run([{ type: "check" }, { type: "not-available" }]);
     expect(transition(upToDate, { type: "progress", percent: 10 })).toBe(upToDate);
+  });
+});
+
+describe("release channel preload argument", () => {
+  it("carries the build's channel from main to the preload", () => {
+    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("nightly")])).toBe("nightly");
+    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("latest")])).toBe("latest");
+    expect(releaseChannelFromArgv(["electron"])).toBe("latest");
   });
 });

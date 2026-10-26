@@ -42,6 +42,10 @@ pub use actor::{
     TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
     YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
 };
+#[cfg(unix)]
+pub use actor::{
+    RETAINED_COPIES_DELETE_LIMIT, RETAINED_COPIES_LIST_LIMIT, RetainedCandidate, RetainedDeletion,
+};
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
 pub use search::{

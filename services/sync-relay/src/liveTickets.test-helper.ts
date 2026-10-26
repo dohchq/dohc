@@ -20,7 +20,7 @@ export const key = new Uint8Array(32).fill(13);
 export const table = "sync_relay_live_session_tickets";
 export const marker = "live-session-tickets-v1";
 const defaultScope = scope, defaultBinding = binding;
-export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}) {
+export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}, population?: {people: number; documents: number}) {
   const scope = {...defaultScope, ...(identity ? {shareId: identity.shareId ?? defaultScope.shareId, userId: identity.userId, grantId: identity.grantId, workspaceId: identity.workspaceId ?? defaultScope.workspaceId} : {})};
   const binding = {...defaultBinding, ...(identity ? {objectId: identity.objectId, workspaceId: scope.workspaceId} : {})};
   const root = await mkdtemp(join(tmpdir(), "dohc-named-ticket-"));
@@ -32,20 +32,26 @@ export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: 
   try {
   raw.exec("PRAGMA foreign_keys=ON");
   // Synthetic authority rows test private ticket transactions, not Yjs registration.
-  raw.prepare("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)").run(scope.workspaceId, "owner-1", 0);
-  raw.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
-    VALUES (?, ?, 1, 'moment-1', 'main', 'docs/a.md', ?, 'text', 1, 1)`).run(scope.workspaceId, binding.objectId, "b".repeat(64));
   const context = storage as StorageContext;
   context.tx(() => {
+    context.db.prepare("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, ?)").run(scope.workspaceId, "owner-1", 0);
     prepareLiveDeliveryWorkspace(context, scope.workspaceId, host.hostId);
-    context.db.prepare(`INSERT INTO sync_relay_live_documents VALUES (?, 'main', ?, ?, NULL, 'docs/a.md', 1, ?, 1, ?, ?, 'current', 'open', 7, 0, NULL)`)
-      .run(scope.workspaceId, binding.objectId, binding.lineageClaimId, "b".repeat(64), binding.lineageClaimId, bytes);
-    registerLiveDeliveryBaseline(context, binding, host.hostId);
+    for (let document = 1; document <= (population?.documents ?? 1); document++) {
+      const current = population ? {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`} : binding;
+      context.db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+        VALUES (?, ?, ?, ?, 'main', ?, ?, 'text', 1, 1)`).run(scope.workspaceId, current.objectId, document, "moment-" + document, current.currentPath, "b".repeat(64));
+      context.db.prepare(`INSERT INTO sync_relay_live_documents VALUES (?, 'main', ?, ?, NULL, ?, ?, ?, 1, ?, ?, 'current', 'open', 7, 0, NULL)`)
+        .run(scope.workspaceId, current.objectId, current.lineageClaimId, current.currentPath, document, "b".repeat(64), current.lineageClaimId, bytes);
+      registerLiveDeliveryBaseline(context, current, host.hostId);
+    }
+    context.db.prepare("INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms) VALUES (?, ?, 'owner-1', ?, 0)")
+      .run(scope.shareId, scope.workspaceId, JSON.stringify({ paths: ["docs"], versionId: null }));
+    for (let person = 1; person <= (population?.people ?? 1); person++) {
+      context.db.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES (?, ?, 'user', ?, NULL, 'edit', 4, 'active', 0, NULL, NULL)`)
+        .run(population ? "edit-" + person : scope.grantId, scope.shareId, population ? "reader-" + person : scope.userId);
+    }
   });
-  raw.prepare("INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms) VALUES (?, ?, 'owner-1', ?, 0)")
-    .run(scope.shareId, scope.workspaceId, JSON.stringify({ paths: ["docs"], versionId: null }));
-  raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-    VALUES (?, ?, 'user', ?, NULL, 'edit', 4, 'active', 0, NULL, NULL)`).run(scope.grantId, scope.shareId, scope.userId);
   storage.provisionLiveHostControl({ ...host, updatedAtMs: 1, guard: () => undefined });
   storage.registerLiveHost({ ...host, updatedAtMs: 2, guard: () => undefined });
   } catch (error) {

@@ -3,13 +3,16 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
-// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), and a wait the error
-// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and `readError`
-// turns that string back into words a person can act on.
+// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), a wait the error
+// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and the computer
+// that keeps a workspace's Collections (`… [computer=Studio%20Mac]: …`), and
+// `readError` turns that string back into words a person can act on.
 
 // `null`: the error names nothing a person can act on, so the caller's own
 // sentence stands alone. Copy details still carry the error as it arrived.
 type Words = string | null;
+
+export const APP_COMPILER_TIMEOUT_WORDS = "The app took too long to build. Remove files the app does not use, then try again.";
 
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
 const NOT_READ = "dohc has not read this file yet. Try again when it has.";
@@ -41,8 +44,10 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
- * kind of item, or another user's. The message names the reason, then the
- * path from the workspace's root: one of the paths below, and nothing else.
+ * kind of item, another user's, on a disk or system dohc can't check, or, on
+ * Windows, has permissions dohc can't use. The message names the reason,
+ * then the path from the workspace's root: one of the paths below, and
+ * nothing else.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
   /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
@@ -53,6 +58,9 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
+  ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
+  ["not-changeable", ["has permissions dohc can't use", "Give your account full control of this folder and everything in it, then try again."]],
+  ["unchecked-system", ["is on a system where dohc can't check it", "Run dohc where it can read its own /proc/self/fd, then try again."]],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
@@ -130,6 +138,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "ydoc-session-busy": "This file is open for editing. Close its tabs, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
@@ -154,6 +163,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineClientError: { "*": null },
   DaemonProtocolError: { "*": null },
   DaemonClientCapabilityError: { "*": null },
+  AppCompilerTimeoutError: { "*": APP_COMPILER_TIMEOUT_WORDS },
   CompilerProcessError: {
     exit: "The app's code did not build.",
     timeout: "Building the app took too long. Try again.",
@@ -220,8 +230,15 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
+// Data, such as the JSON a validation error sends as its message, or a stack.
+// A sentence can start with a bracket, as a button named "[Send]" does.
+function isDump(message: string): boolean {
+  if (message.includes("\n")) return true;
+  if (!/^[[{]/.test(message)) return false;
+  try { return typeof JSON.parse(message) === "object"; } catch { return false; }
+}
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?: /;
+const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -239,19 +256,35 @@ function retryAfterOf(error: Error): number | null {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
 }
 
-// The class, the code, and the wait, as the wire carries them before the message.
-function wireName(error: Error, code: string): string {
-  const wait = retryAfterOf(error);
-  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}`;
+// The name of the computer that keeps a workspace's Collections, as a Collections refusal sets it.
+function computerLabelOf(error: Error): string | null {
+  const value: unknown = Reflect.get(error, "computerLabel");
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
-/** Main's IPC boundary: keeps the error's code and wait in the one string Electron sends. */
+// The class, the code, the wait, and the computer, as the wire carries them before the message.
+function wireName(error: Error, code: string): string {
+  const wait = retryAfterOf(error), computer = computerLabelOf(error);
+  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}${computer === null ? "" : ` [computer=${encodeURIComponent(computer)}]`}`;
+}
+
+// A name that does not decode names no computer.
+function decodedComputer(wire: string | undefined): string | null {
+  if (wire === undefined) return null;
+  try { return decodeURIComponent(wire) || null; } catch { return null; }
+}
+
+/** Main's IPC boundary: keeps the error's code, wait and computer in the one string Electron sends. */
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
-  if (code === null) return error;
-  const wire = new Error(error.message, { cause: error });
-  wire.name = wireName(error, code);
+  // Electron sends only toString(). Keep safe compiler facts in Copy details,
+  // while readError maps this name back to the unchanged sentence above.
+  const details: unknown = error.name === "AppCompilerTimeoutError"
+    ? Reflect.get(error, "details") : undefined;
+  if (code === null && typeof details !== "string") return error;
+  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
+  wire.name = code === null ? error.name : wireName(error, code);
   return wire;
 }
 
@@ -271,6 +304,7 @@ function parse(error: unknown) {
     name: match?.[1] ?? "Error",
     code: match?.[2],
     retryAfterMs: match?.[3] === undefined ? undefined : Number(match[3]),
+    computer: decodedComputer(match?.[4]),
     message: (match ? text.slice(match[0].length) : text).trim(),
   };
 }
@@ -319,7 +353,7 @@ export function readError(error: unknown): ReadError {
     return { words, mapped: words !== null, cause: text };
   }
   if (!message) return { words: null, mapped: false, cause: null };
-  if (RAW_CODE.test(message)) {
+  if (RAW_CODE.test(message) || isDump(message)) {
     return { words: null, mapped: false, cause: plain ? message : text };
   }
   return { words: message, mapped: false, cause: plain ? null : text };
@@ -338,6 +372,69 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
   const { name, code, retryAfterMs, message } = parse(error);
   return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
     ? { words: message, waitMs: retryAfterMs } : null;
+}
+
+/**
+ * Why this computer cannot use a workspace's Collections: no computer keeps
+ * them yet, another one keeps them, dohc cannot read which one, the store
+ * this computer keeps is not there or was replaced, or the record changed
+ * while dohc wrote it.
+ */
+export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced", "changed"] as const;
+/** Refusals that keeping the Collections here can answer, after the person confirms where needed. */
+export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
+export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
+export const COLLECTIONS_REFUSAL_CODE = "collections-";
+/** The control that keeps a workspace's Collections on this computer. */
+export const USE_THIS_COMPUTER = "Use this computer";
+
+/**
+ * Where another computer keeps a workspace's Collections, and the two ways
+ * on. `others`: this computer lists some of them from its server.
+ */
+export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }, others = false): string {
+  const where = computer.sameName ? `${computer.label}, another installation of dohc with this computer's name` : computer.label;
+  return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
+}
+
+/**
+ * The computer that keeps the Collections this computer doesn't list, whether
+ * it lists others, and the sentence that says so. `computer` is null when the
+ * error that said so named none.
+ */
+export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
+
+/**
+ * The code of a Collections list this computer's server didn't give, where
+ * another computer keeps the workspace's own Collections.
+ */
+export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
+
+/**
+ * main's words for that list: on the first line, where the workspace's
+ * Collections are. After it, the server's error, which reads as it would alone.
+ */
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
+  const { name, code, computer, message } = parse(error);
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
+  const [elsewhere = "", ...failure] = message.split("\n");
+  return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
+}
+
+/**
+ * main's refusal to use a workspace's Collections here, with its words.
+ * Another computer's refusal names it, or null when the error named none.
+ */
+export type CollectionsRefusalRead =
+  | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
+  | { kind: "elsewhere"; words: string; computer: string | null };
+
+export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
+  const { name, code, computer, message } = parse(error);
+  if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
+  const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
+  if (kind === "elsewhere") return { kind, words: message, computer };
+  return kind === undefined ? null : { kind, words: message };
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
@@ -367,10 +464,20 @@ export function isWorkspaceRestricted(error: unknown): boolean {
   return parse(error).name === "WorkspaceRestrictedError";
 }
 
+/** An exclusive create found the path taken. */
+export function isPathTaken(error: unknown): boolean {
+  return parse(error).code === "EEXIST";
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
   return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
+}
+
+/** History's current rules refused a restore. Its words say why and what to do next. */
+export function isRestorePolicyRefusal(error: unknown): boolean {
+  return parse(error).name === "RestorePolicyRefusalError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
@@ -390,8 +497,18 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
   return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
 }
 
+// A note changed outside dohc closed, but capture has not recorded the new
+// version, so the note did not open again. Try again sits beside it.
+export function outsideVersionWaitingMessage(path: string): string {
+  return `dohc could not open the new version of "${path}". History has not recorded it yet.`;
+}
+
+// Capture holds every refused outside edit with one reason, so these words
+// name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
+export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file's exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.";
+
 export function captureHeldLiveMessage(path: string): string {
-  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

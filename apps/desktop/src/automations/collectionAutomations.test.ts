@@ -26,6 +26,8 @@ import { observeWorkspaceFiles } from "../workspaces/workspaceFileObservation";
 import type { FileObservationFact } from "@dohc/workspace-engine-client/daemon";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
+import { automationFailedNotice } from "@dohc/automation-executor/automation-failed-notice";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
 import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/preparedLocalState";
@@ -61,6 +63,7 @@ import {
 
 import { createUsageStore } from "../usage/usageStore";
 import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -1819,6 +1822,30 @@ describe("Collection automations", () => {
     await w.until(() => w.runsChanged.length === 1);
   });
 
+  it("sends a notice naming a lossy note whose field it could not set, and leaves the note as it was", async () => {
+    const w = await world({ automations: { Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n" } });
+    const record = w.addRecord("Tasks", "readme", { Status: "Done" });
+    const lossy = "---\nStatus: Done\n---\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n";
+    await mkdir(join(w.root, "Tasks"), { recursive: true });
+    await writeFile(join(w.root, record.path), lossy);
+    const claim = w.claim("collection:Tasks#finish", record);
+    await w.executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("failed");
+    await w.until(() => w.failureReports.length === 1);
+    const report = w.failureReports[0]!;
+    expect(report.failure.error).toBe(lossyNoteRefusal("Tasks/readme.md"));
+    expect(automationFailedNotice({
+      workspaceId: "ws", computer: { installId: "install", label: "Ice's laptop" },
+      failure: report.failure, name: report.name, collectionPath: report.collectionPath,
+    })).toMatchObject({
+      kind: "automation-failed",
+      title: 'Automation "Finish" failed',
+      body: "dohc can't change Tasks/readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead. It ran on Ice's laptop.",
+    });
+    expect(record.doc.getMap("frontmatter").get("Note")).toBeUndefined();
+    expect(await readFile(join(w.root, record.path), "utf8")).toBe(lossy);
+  });
+
   it("sends one notice per failure, replacing the one before, and none again after a restart", async () => {
     const w = await world({ collections: ["Tasks", "Budget"], automations: { Tasks: [
       "  - id: spend",
@@ -1955,7 +1982,7 @@ describe("Collection automations", () => {
       await mkdir(dirname(join(w.root, path)), { recursive: true });
       await writeFile(join(w.root, path), text);
     }
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
     const executor = w.makeExecutor({ withDatasetHost: async (work) => await work(host.automations) });
     try {
       const prepared = await host.prepare({ descriptorPath: "Donations/dataset.json", adapter: sourceCaptureAdapter(new Map(Object.entries(files)), { workspaceId: "workspace" }) });
@@ -2079,12 +2106,13 @@ describe("Collection automations", () => {
     // The person hears why, with Try again.
     await w.until(() => w.failureReports.length === 1);
     expect(w.failureReports[0]!.failure).toMatchObject({ claimId: claim.claimId, error: refused });
-    // The step saved before the refusal is still there.
+
+    await w.localState.open();
+    // The step saved before the refusal is still there. On Windows dohc reads
+    // it only while an open holds `.dohc/local`.
     const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
     expect(saved!.steps).toHaveLength(1);
     expect(saved!.applied).toEqual([]);
-
-    await w.localState.open();
     await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false });
     await w.until(() => claim.state === "done");
     expect(w.fieldsOf(task).Count).toBe(3);

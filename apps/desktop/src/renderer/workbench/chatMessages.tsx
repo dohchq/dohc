@@ -3,7 +3,7 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
@@ -747,7 +747,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   aria-hidden
                   dateTime={time.iso}
                   title={time.label}
-                  className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                  className="whitespace-nowrap text-[10px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
                 >
                   {formatClockDigits(message.createdAtMs)}
                 </time>
@@ -775,7 +775,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} presentation={message.presentation} /> : null}
+                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation} /> : null}
+                {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
                     testIdPrefix={props.testIdPrefix}
@@ -787,7 +788,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <time
                   dateTime={time.iso}
                   title={time.iso}
-                  className="shrink-0 font-mono text-[11px] text-subtle"
+                  className="shrink-0 text-[11px] tabular-nums text-subtle"
                 >
                   {formatClock(message.createdAtMs)}
                 </time>

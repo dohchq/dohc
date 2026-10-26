@@ -14,7 +14,7 @@ import type { AppOperationRefusal, JsonValue } from "./protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";
 import { validateDatasetRecovery } from "./recovery-import.js";
-import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery-install.js";
+import { createRecoveryInstaller, initializeRecoveryImports, type RecoveryInstallOptions } from "./recovery-install.js";
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
@@ -203,6 +203,8 @@ function actor(authority: DatasetAuthority): DatasetActor {
   return caller.kind === "owner" ? { kind: "owner", ...app, ...person } : { kind: "link", ...app };
 }
 function scope(input: DatasetScope): DatasetScope { return { workspaceId: text(input.workspaceId), datasetId: text(input.datasetId) }; }
+// A catalog row `c` that no unclaimed import holds.
+const CLAIMED = "NOT EXISTS(SELECT 1 FROM dohc_dataset_imports i WHERE i.workspace_id=c.workspace_id AND i.dataset_id=c.dataset_id AND i.phase<>'claimed')";
 function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
   if (input.kind === "data" && Object.keys(input).length === 1) return { kind: "data" };
   if (input.kind === "app" && Object.keys(input).length === 2) return { kind: "app", appId: text(input.appId) };
@@ -228,6 +230,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   const migrationCandidates=new Map<string,{candidate:DatasetMigrationCandidate;authorityKey:string;approved:DatasetRevision;previous:DatasetRevision;schemaSql:string;source:string}>();
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
+  transaction(() => initializeRecoveryImports(db));
   // The journal's own database, so each commit's claims are part of it.
   const automations = createDatasetAutomationClaims({ db, transaction, wake: options.wakeAutomations,
     account(key, bytes) { if (options.accountAutomations) synchronous(() => options.accountAutomations!({ ...key, bytes })); } });
@@ -293,6 +296,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const row = db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
     if (!row) denied();
     return parseDatasetRevision(JSON.parse(String(row.revision_json)));
+  }
+  // Recovery installs a dataset's catalog row before it claims the dataset,
+  // which then accepts no work. Lists and descriptions leave it out until then.
+  function unclaimed(key: DatasetScope): boolean {
+    return db.prepare("SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND phase<>'claimed'").get(key.workspaceId, key.datasetId) !== undefined;
   }
   function lifecycle(key: DatasetScope): { archived: boolean; generation: number; reason: string } {
     const row = db.prepare("SELECT archived,generation,reason FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
@@ -406,11 +414,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
           automations.forget(key);
-          if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_imports'").get()) {
-            for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
-              db.prepare(`DELETE FROM ${table} WHERE import_id IN(SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
-            db.prepare("DELETE FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
-          }
+          for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
+            db.prepare(`DELETE FROM ${table} WHERE import_id IN(SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
+          db.prepare("DELETE FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
           for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle", "dohc_dataset_catalog", "dohc_dataset_catalog_history", "dohc_dataset_attempts", "dohc_dataset_cancelled_attempts", "dohc_dataset_review_generations"])
             db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(key.workspaceId,key.datasetId);
       } });
@@ -720,6 +726,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     },
     describe(context: Context, raw: DatasetScope & { includeArchived?: boolean }): DatasetDescription {
       const key = scope(raw);
+      // Before access, so an archived one is hidden too, not refused as archived.
+      if (unclaimed(key)) denied();
       if (raw.includeArchived) owner(context, key);
       const permitted = permissions(context, key, { kind: "data" }, raw.includeArchived === true);
       if (!permitted.discover) denied();
@@ -734,13 +742,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const includeArchived = raw.includeArchived === true;
       if (includeArchived && verified.caller.kind !== "owner") denied();
       const rows = verified.caller.kind === "owner"
-        ? db.prepare("SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) ORDER BY c.dataset_id LIMIT ?").all(workspaceId, after, includeArchived ? 1 : 0, limit + 1)
+        ? db.prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, after, includeArchived ? 1 : 0, limit + 1)
         : db.prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
             ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
             AND json_extract(g.grant_json,'$.discover')=1
             AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
             AND COALESCE((SELECT archived FROM dohc_dataset_lifecycle l WHERE l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id),0)=0
-            ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, verified.principalKey, after, limit + 1);
+            AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, verified.principalKey, after, limit + 1);
       const selected = rows.slice(0, limit), datasets: Array<DatasetDescription & { archived: boolean }> = [];
       let bytes = 0;
       for (const row of selected) {

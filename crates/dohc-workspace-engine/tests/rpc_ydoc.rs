@@ -2423,24 +2423,41 @@ async fn stage_headless_session_over_an_empty_artifact(
 async fn wait_for_capture_to_defer_under_live_session(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
+    path: &str,
     id_base: u64,
 ) {
     let mut last_flush = Value::Null;
+    let mut last_status = Value::Null;
     for attempt in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         last_flush = call(
             transport,
             handle,
-            id_base + attempt,
+            id_base + attempt * 2,
             "capture.flush",
             json!({}),
         )
         .await;
-        if last_flush["settled"] == json!(false) && last_flush["degraded"] == json!(true) {
+        last_status = call(
+            transport,
+            handle,
+            id_base + attempt * 2 + 1,
+            "watcher.status",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(true)
+            && last_flush["degraded"] == json!(false)
+            && last_status["deferredWrites"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|entry| entry.as_str() == Some(path)))
+        {
             return;
         }
     }
-    panic!("capture did not report its deferred live-session write: {last_flush}");
+    panic!(
+        "capture did not report its healthy deferred live-session write: {last_flush}; {last_status}"
+    );
 }
 
 /// Capture defers an empty new file a live session holds: the file is the
@@ -3339,6 +3356,73 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seed_past_the_inband_cap_opens_as_a_blob_within_the_client_limit() {
+    // A note past 48 KiB used to refuse every open without a lineage,
+    // including each reopen after a settled close pruned it, so it was never
+    // live again (#2521).
+    let scratch = ScratchDir::new().expect("scratch");
+    let text = "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    assert!(text.len() > 48 * 1024 && text.len() < 64 * 1024);
+    write_file(scratch.path(), "notes/long.md", text.as_bytes());
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let workspace_id = "ws-rpc-ydoc-large-seed";
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    let open = |limit: Option<usize>| {
+        let mut params = json!({
+            "versionId": "main",
+            "path": "notes/long.md",
+            "contentKind": "richdoc"
+        });
+        if let Some(limit) = limit {
+            params["seedLimitBytes"] = json!(limit);
+        }
+        params
+    };
+
+    for (id, limit) in [(2, None), (3, Some(text.len() - 1))] {
+        let refused = call_error(&transport, &handle, id, "ydoc.open", open(limit)).await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(refused.message, "ydoc-seed-too-large");
+    }
+
+    let opened = call(&transport, &handle, 4, "ydoc.open", open(Some(64 * 1024))).await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["head"], json!("present"));
+    assert!(opened.get("seedContent").is_none());
+    assert!(opened["seedClientId"].is_u64());
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    assert_eq!(opened["seedBlobSha256"], json!(sha256));
+
+    let seed = service_call_with_busy_retry(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            5,
+            "versionedText.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("the seed blob reads");
+    assert_eq!(seed.response.result["bytesBase64"], Value::Null);
+    let egress = seed.blob_egress.expect("over-cap seed egress");
+    assert_eq!(egress.bytes, text.as_bytes());
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content() {
     // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
     // the editor while its.md sat at zero bytes: the settle refused
@@ -3811,7 +3895,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // Content the session never saw lands on the path. Capture observes it,
     // but the live lease keeps the head unchanged until the session ends.
     write_file(scratch.path(), &path, b"written by something else\n");
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, &path, 100).await;
     let ingested = call(
         &transport,
         &handle,
@@ -5593,7 +5677,20 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     // The disk gets the doc's exact projection. Capture observes it, but the
     // live lease keeps the head at the session's base.
     write_file(scratch.path(), PATH, TYPED.as_bytes());
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 2_000).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_000).await;
+    for method in ["capture.flush", "capture.reconcile"] {
+        let capture = call(&transport, &handle, 2_050, method, json!({})).await;
+        if method == "capture.flush" {
+            assert_eq!(capture["settled"], json!(true), "{method}");
+        }
+        assert_eq!(capture["degraded"], json!(false), "{method}");
+        assert_eq!(
+            capture["deferredWrites"],
+            json!([PATH]),
+            "{method} must expose waiting source"
+        );
+    }
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_060).await;
     let captured = call(
         &transport,
         &handle,
@@ -6405,7 +6502,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 /// close must settle to disk exactly as before the skip existed.
 ///
 /// Mutation kill: make the settle skip unconditional (drop the single-update
-/// proof from `seed_only_lineage_source`) and this test goes red — the edit
+/// proof from `pristine_seed_lineage_source`) and this test goes red — the edit
 /// never reaches the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
@@ -6743,7 +6840,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
 /// records nothing — closes.
 ///
 /// Mutation kill: drop the exactly-one-update requirement from
-/// `seed_only_lineage_source` and this test goes red — the resumed lineage
+/// `pristine_seed_lineage_source` and this test goes red — the resumed lineage
 /// prunes without ever writing the edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replayed_prior_session_ops_still_settle_on_close() {

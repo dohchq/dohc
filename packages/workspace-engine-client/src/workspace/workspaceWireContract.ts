@@ -37,6 +37,8 @@ export const WORKSPACE_METHOD = {
   captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
+  retainedCopiesList: "retainedCopies.list",
+  retainedCopiesDelete: "retainedCopies.delete",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureRetryHeld: "capture.retryHeld",
@@ -204,6 +206,21 @@ export type KeptCopiesListResult =
  */
 export type KeptCopySaveResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesSave];
+
+/**
+ * Old versions of files that a replace set aside on a drive that cannot tell
+ * dohc whether another program still has one open, so dohc never deletes
+ * them itself: how many, and their logical size in bytes. Deleting them may
+ * free less disk space than `bytes`.
+ */
+export type RetainedCopiesSummary = WatcherStatusResult["retainedCopies"];
+/** One retained copy a delete may remove, with the revision it must match. */
+export type RetainedCopy =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.retainedCopiesList]["copies"][number];
+export type RetainedCopiesListResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.retainedCopiesList];
+export type RetainedCopiesDeleteResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.retainedCopiesDelete];
 
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 export type CaptureMoveFileResult =
@@ -464,6 +481,15 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
+  [WORKSPACE_METHOD.retainedCopiesList]: WorkspaceEmptyParams;
+  /**
+   * At most 100 listed copies. A program that still has one open may lose
+   * what it writes next, so the caller accepts that risk explicitly.
+   */
+  [WORKSPACE_METHOD.retainedCopiesDelete]: WorkspaceJsonObject & {
+    copies: { id: number; revision: number }[];
+    acceptLateWriteRisk: true;
+  };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
@@ -1054,7 +1080,15 @@ const CaptureFileHoldSchema = mutableStruct({
   retryRequested: Schema.Boolean,
 });
 
+const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+
+const RetainedCopiesSummarySchema = mutableStruct({
+  count: NonNegativeIntSchema,
+  bytes: NonNegativeIntSchema,
+});
+
 const CaptureFlushResultSchema = mutableStruct({
+  deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
   heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
   settled: Schema.Boolean,
   running: Schema.Boolean,
@@ -1304,6 +1338,8 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
   [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
+    // Outside writes waiting for the open document to release its lease.
+    deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
     heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
@@ -1320,6 +1356,9 @@ const WorkspaceResultSchemas = {
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+    // Old versions of files kept on a drive that cannot tell dohc whether a
+    // program still has one open. dohc never deletes them itself.
+    retainedCopies: RetainedCopiesSummarySchema,
     captureRecoveries: Schema.mutable(Schema.Array(mutableStruct({
       momentId: Schema.NonEmptyString,
       versionId: Schema.NonEmptyString,
@@ -1349,6 +1388,19 @@ const WorkspaceResultSchemas = {
     mutableStruct({ status: Schema.Literal("gone") }),
     mutableStruct({ status: Schema.Literal("no-valid-name") }),
   ]),
+  [WORKSPACE_METHOD.retainedCopiesList]: mutableStruct({
+    copies: Schema.mutable(
+      Schema.Array(mutableStruct({ id: Schema.Int, revision: Schema.Int })),
+    ),
+    more: Schema.Boolean,
+    total: RetainedCopiesSummarySchema,
+  }),
+  [WORKSPACE_METHOD.retainedCopiesDelete]: mutableStruct({
+    deleted: NonNegativeIntSchema,
+    skipped: NonNegativeIntSchema,
+    failed: NonNegativeIntSchema,
+    remaining: RetainedCopiesSummarySchema,
+  }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({

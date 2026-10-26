@@ -49,7 +49,7 @@ vi.mock("./collab/useEngineDoc", async () => {
 describe("engine save-state lifts to the shell tab dirty dot", () => {
   const bridgeMock = {
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
+    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false, contentHash: "c".repeat(64) })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
@@ -198,9 +198,9 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
 
     const header = await screen.findByTestId("markdown-save-state");
     expect(header.getAttribute("data-state")).toBe("changed-on-disk");
-    expect(header.textContent).toBe("Changed on disk");
+    expect(header.textContent).toBe("Changed outside dohc");
     expect(header.getAttribute("title")).toContain("changed outside dohc");
-    expect(header.getAttribute("title")).toContain("Open History to restore your text");
+    expect(header.getAttribute("title")).toContain("dohc keeps your text in History.");
     // The tab dot stays dirty: this document's text is not what the file holds.
     await waitFor(() =>
       expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "changed-on-disk" })),

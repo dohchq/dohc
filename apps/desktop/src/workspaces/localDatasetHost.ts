@@ -1,8 +1,8 @@
 import { createLocalDatasetHistoryReader } from "./localDatasetHistoryReader";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, open as openFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import type { AutomationPressActor, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -27,8 +27,10 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
-import { existingLocalDatasetExports, localDatasetFolder, type LocalDatasetFolder } from "./localDatasetFolders";
-import { localStateOpened, LocalStateUnavailableError } from "./workspaceLocalState";
+import { localDatasetFolder, OLD_STORE_PATH, readLocalDatasetExports, STORE_FILE, STORE_PATH, type LocalDatasetFolder } from "./localDatasetFolders";
+import { currentLocalStateOpen, localStateOpened, LocalStateUnavailableError, readOwnedLocalState, type LocalStateWorkspace } from "./workspaceLocalState";
+import { renameWithRetry } from "../atomicReplaceFile";
+import { admitCollectionsStore, CollectionsRefusalError, createHoldingCheck, holderWork, recordCollectionsStore, type CollectionsAdmission, type CollectionsHolderCheck } from "./collectionsHolder";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
@@ -56,8 +58,19 @@ type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "
 export interface LocalDatasetHostOptions {
   workspaceId: string;
   workspaceRoot: string;
-  /** The attachment whose engine open prepares `.dohc/local`, where workers and exports live. */
+  /**
+   * Whether this installation keeps the workspace's Collections, read
+   * before the store is opened or created and again before each piece of work.
+   */
+  holder: CollectionsHolderCheck;
+  /** The attachment whose engine open prepares `.dohc/local`, where the store, workers and exports live. */
   attachmentId?: symbol;
+  /**
+   * Puts a file in the system trash, where a person can recover it. The
+   * holder trashes a store it moved into `.dohc/local`. Without it, the old
+   * store stays where it was.
+   */
+  trashItem?(path: string): Promise<void>;
   /** The main process checks that this workspace session still belongs to the caller. */
   assertCurrent?(): void;
   runtime?: AppBackendRuntimeOptions;
@@ -150,21 +163,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     return compiler.compileDatasetOperations(source, path, { signal });
   });
   const root = await realpath(options.workspaceRoot);
-  let directory = root;
-  for (const part of [".dohc", "datasets"]) {
-    directory = join(directory, part);
-    await mkdir(directory).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
-    const stat = await lstat(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || resolve(await realpath(directory)) !== resolve(directory)) throw new Error("Collection storage must remain inside this workspace.");
-  }
-  const path = join(directory, "state.sqlite");
-  for (const filePath of [path, `${path}-wal`, `${path}-shm`]) {
-    const stat = await lstat(filePath).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; });
-    if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) throw new Error("Invalid Collection storage file.");
-  }
-  const { DatabaseSync: Sqlite } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-  const db: DatabaseSync = new Sqlite(path, { allowExtension: false });
+  const localState = { workspaceId: options.workspaceId, rootPath: options.workspaceRoot, attachmentId: options.attachmentId };
+  const { db, path } = await holderWork(options.workspaceId, () => openHeldStore(root, localState, options.holder, options.trashItem));
   const historyReader = createLocalDatasetHistoryReader(path, options.workspaceId);
+  const holding = createHoldingCheck(root, options.workspaceId, options.holder, () => storeIdOf(db));
+  // Set once the record names another computer or store: every use after refuses too.
+  let refusal: CollectionsRefusalError | null = null;
   let closed = false, closePromise: Promise<void> | undefined, transactionSequence = 0;
   const lifetime = new AbortController(), active = new Set<Promise<unknown>>();
   const owner: OwnerContext = { owner: true };
@@ -181,18 +185,36 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   const pending = new Map<string, { preparation: LocalDatasetPreparation; schemaSql: string; operationSource: string; expires: number }>();
   function assertCurrent() {
     if (closed) throw new Error("This Collection session ended. Reopen the workspace.");
+    assertHeld();
     options.assertCurrent?.();
+  }
+  // Every admission and every write checks the record first, app requests too.
+  function assertHeld() {
+    if (refusal) throw refusal;
+    try { holding(); }
+    catch (error) { if (error instanceof CollectionsRefusalError) refusal = error; throw error; }
   }
   function signal(input?: AbortSignal) { assertCurrent(); return input ? AbortSignal.any([input, lifetime.signal]) : lifetime.signal; }
   function transaction<T>(work: () => T): T {
     assertCurrent();
     return commit(work);
   }
-  /** Without the session check: admitted Collection creates still record their outcomes while the host closes. */
+  /**
+   * Every write to the store, its schema too, runs through here: through
+   * `transaction`, or directly where it must skip the session check, so
+   * admitted Collection creates still record their outcomes while the host
+   * closes. Only the claims and the move, in openHeldStore, and
+   * adoptLocalDatasetStore write outside it, before the record names the
+   * store or before the host opens it, and the read-only
+   * History thread reads through its own connection. The record check runs
+   * before the work and again after it: a record that changed while the
+   * work ran rolls the work back, savepoint or transaction.
+   */
   function commit<T>(work: () => T): T {
+    assertHeld();
     const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
     db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
-    try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
+    try { const result = work(); assertHeld(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
     catch (error) { db.exec(nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK"); throw error; }
   }
   async function tracked<T>(work: () => Promise<T>): Promise<T> {
@@ -233,24 +255,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     });
     const journal = createDatasetJournal({ db, transaction });
     const attempts = createDatasetAttempts({ db, transaction, account: (scope, bytes) => charge(scope.datasetId,bytes) });
-    // Workers and exports are this computer's, in `.dohc/local`, which only
-    // the engine's open prepares. Until it has, a Collection's history and
-    // rules still read from state.sqlite. Anything that needs a worker or a
-    // staged file waits for an open already under way, never starts one, and
-    // refuses if the folder still isn't ready.
-    const localState = { workspaceId, rootPath: options.workspaceRoot, attachmentId: options.attachmentId };
-    async function folderOnceOpened(folder: LocalDatasetFolder): Promise<string> {
-      try { return await localDatasetFolder(localState, folder); }
-      catch (error) {
-        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
-        await localStateOpened(localState);
-        return await localDatasetFolder(localState, folder);
-      }
-    }
+    // Workers and exports are this computer's, in `.dohc/local`, beside the
+    // store. The engine's open prepared it before the store opened, but a
+    // close or a rebind can end that open later. Anything that needs a
+    // worker or a staged file then waits for an open already under way,
+    // never starts one, and refuses if the folder still isn't ready.
+    const folderOnce = (folder: LocalDatasetFolder) => folderOnceOpened(localState, folder);
     const resources: Resources | undefined = options.resources?.({ db, transaction });
     createRecoveryInstaller({ db, transaction, journal });
-    // While the host opens, it takes the worker folder only if it is ready, so reads never wait for the engine.
-    supervisor = await createDatasetSupervisor({ journal, directory: () => supervisor ? folderOnceOpened("workers") : localDatasetFolder(localState, "workers"), runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
+    // While the host opens, it takes the worker folder only if it is ready, so opening never waits again.
+    supervisor = await createDatasetSupervisor({ journal, directory: () => supervisor ? folderOnce("workers") : localDatasetFolder(localState, "workers"), runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}},
       // Holding the worker folder makes this the only dohc staging work here.
@@ -267,7 +281,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     let apps: ReturnType<typeof createLocalDatasetApps>;
     let appStore: LocalAppStore;
     let localApps: ReturnType<typeof createLocalApps>;
-    const exportDirectory = () => folderOnceOpened("exports");
+    const exportDirectory = () => folderOnce("exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
       wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
       recovery: {
@@ -383,8 +397,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       prepareMigrationCandidate: input => host.prepareMigration(owner, input),
       approveMigrationCandidate: input => host.approveMigration(owner, input),
       discardMigrationCandidate: input => host.discardMigration(owner, input) });
-    const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory: () => existingLocalDatasetExports(options.workspaceRoot), limits: { maxTotalBytes: maxStoredBytes },
-      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }) });
+    const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, inExportDirectory: (read) => readLocalDatasetExports(options.workspaceRoot, read), limits: { maxTotalBytes: maxStoredBytes },
+      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }),
+      fenced: () => changed(undefined) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
       return tracked(async () => {
         const abort = signal(input.signal);
@@ -443,6 +458,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {
+      /**
+       * Throws when this installation no longer keeps this store, as every
+       * use after does, so a caller that reuses an open host can close it.
+       */
+      held(): void { assertCurrent(); },
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
       approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })).then(changed); },
@@ -499,8 +519,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
+      // Each end, failed or not, tells the automation runner, which reads the transfer record again.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
+          .then(changed, (error: unknown) => { changed(undefined); throw error; });
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
@@ -560,12 +582,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
               operationId: input.operationId, input: input.input, idempotencyKey: input.idempotencyKey, signal: signal(input.signal) });
           });
         },
-        /** Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read. */
+        /**
+         * Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read.
+         * A dataset moving or moved to a server is not here: the server runs its automations.
+         */
         datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> } {
           assertCurrent();
           const definitions: DatasetDefinition[] = [], failures: Array<{ datasetId: string; error: unknown }> = [];
           // Each dataset's rules are read on their own, so one that cannot be read hides no other.
           for (const datasetId of host.datasetIds(owner, { workspaceId })) {
+            if (transfers.status(datasetId) !== null) continue;
             try { definitions.push(host.approvedRevision(owner, { workspaceId, datasetId }).definition); }
             catch (error) { failures.push({ datasetId, error }); }
           }
@@ -693,8 +719,272 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
 }
 export type LocalDatasetHost = Awaited<ReturnType<typeof createLocalDatasetHost>>;
 
-/** Whether the workspace already has its local store. Checking never creates one. */
-export const localDatasetStoreExists = (workspaceRoot: string) => lstat(join(workspaceRoot, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false);
+const STORE_TABLE = "CREATE TABLE IF NOT EXISTS local_dataset_store(singleton INTEGER PRIMARY KEY CHECK(singleton=1),store_id TEXT NOT NULL) STRICT";
+// A copy of the store that a move has not renamed into place yet.
+const MOVING_FILE = `${STORE_FILE}.moving`;
+const sqliteFiles = (path: string) => [path, `${path}-wal`, `${path}-shm`, `${path}-journal`] as const;
+
+const statOrNull = (path: string) => lstat(path).catch((error: NodeJS.ErrnoException) => {
+  if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+  throw error;
+});
+
+// Each store file that exists is a plain file with one name.
+async function assertStoreFiles(path: string): Promise<void> {
+  for (const filePath of [path, `${path}-wal`, `${path}-shm`]) {
+    const stat = await statOrNull(filePath);
+    if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) throw new Error("Invalid Collection storage file.");
+  }
+}
+
+// A Collection folder in `.dohc/local`, which only the engine's open
+// prepares. It waits for an open already under way, never starts one, and
+// refuses if the folder still isn't ready.
+async function folderOnceOpened(localState: LocalStateWorkspace, folder: LocalDatasetFolder): Promise<string> {
+  try { return await localDatasetFolder(localState, folder); }
+  catch (error) {
+    if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+    await localStateOpened(localState);
+    return await localDatasetFolder(localState, folder);
+  }
+}
+
+// The folder of the store at `store`, such as OLD_STORE_PATH, once each
+// folder on the way is a real folder inside the workspace, or null when one
+// is not there. Creates nothing.
+async function storeFolderOf(root: string, store: string): Promise<string | null> {
+  let directory = root;
+  for (const part of store.split("/").slice(0, -1)) {
+    directory = join(directory, part);
+    const stat = await statOrNull(directory);
+    if (stat === null) return null;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || resolve(await realpath(directory)) !== resolve(directory)) throw new Error("Collection storage must remain inside this workspace.");
+  }
+  return directory;
+}
+
+// Runs `work` on the store in .dohc/local, or else on one not yet moved from
+// .dohc/datasets, or on null when neither is there. Creates nothing. On
+// Windows a store in .dohc/local is used only while the engine's open holds
+// that folder, as every reader of it is: a folder that was missing when
+// dohc looked has no open behind it, so a store there now is not used.
+async function withStoreHere<T>(root: string, work: (path: string | null) => Promise<T>): Promise<T> {
+  const inLocalState = async (): Promise<{ value: T } | null> => {
+    const folder = await storeFolderOf(root, STORE_PATH), path = folder && join(folder, STORE_FILE);
+    if (!path || !(await statOrNull(path))) return null;
+    await assertStoreFiles(path);
+    return { value: await work(path) };
+  };
+  const here = process.platform === "win32"
+    ? await readOwnedLocalState(root, (dir) => dir === null ? Promise.resolve(null) : inLocalState())
+    : await inLocalState();
+  if (here) return here.value;
+  const folder = await storeFolderOf(root, OLD_STORE_PATH), old = folder && join(folder, STORE_FILE);
+  if (!old || !(await statOrNull(old))) return work(null);
+  await assertStoreFiles(old);
+  return work(old);
+}
+
+const sqlite = () => createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+
+// A read-only connection still reads the -wal, but never checkpoints into
+// the store or removes its -wal and -shm when it closes. It may create the
+// -shm index, and an empty -wal when there is none.
+function openStore(path: string, readOnly = false): DatabaseSync {
+  return new (sqlite().DatabaseSync)(path, { allowExtension: false, readOnly });
+}
+
+/** The id the store keeps for the record to name, or null when it keeps none. */
+function storeIdOf(db: DatabaseSync): string | null {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_dataset_store'").get()) return null;
+  const row = db.prepare("SELECT store_id FROM local_dataset_store WHERE singleton=1").get();
+  return row ? String(row.store_id) : null;
+}
+
+const tableCount = (db: DatabaseSync) => Number(db.prepare("SELECT count(*) AS count FROM sqlite_master").get()!.count);
+
+// Writes a file's bytes, or a folder's entries, to disk. Windows opens no folder.
+async function flush(path: string, folder = false): Promise<void> {
+  if (folder && process.platform === "win32") return;
+  const handle = await openFile(path, folder ? "r" : "r+");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+/**
+ * Copies the store the record names from .dohc/datasets, which iCloud Drive
+ * syncs, to `path` in .dohc/local, which it skips. With Optimize Mac
+ * Storage, iCloud Drive can keep a synced file's bytes only in iCloud, and
+ * moving such a file out of the synced folder can lose them. So SQLite
+ * reads the old store read-only, which downloads it, and its backup API
+ * copies it page by page, -wal included, off the main thread. The copy is
+ * reopened to check its id and flushed under another name. Before the
+ * rename to `path`, and before each retry of it, `held` checks that the
+ * record still names this installation and store, so `path` is either
+ * missing or this store whole.
+ * A crash before the rename leaves the old store, which the next open
+ * copies again.
+ */
+async function copyOldStore(root: string, path: string, storeId: string, held: () => void): Promise<void> {
+  const folder = await storeFolderOf(root, OLD_STORE_PATH), old = folder && join(folder, STORE_FILE);
+  if (!old || !(await statOrNull(old))) throw new CollectionsRefusalError({ kind: "missing" });
+  await assertStoreFiles(old);
+  const copy = join(dirname(path), MOVING_FILE);
+  try {
+    const source = openStore(old, true);
+    try {
+      if (storeIdOf(source) !== storeId) throw new CollectionsRefusalError({ kind: "replaced", path: OLD_STORE_PATH });
+      await sqlite().backup(source, copy);
+    } finally { source.close(); }
+    const db = openStore(copy);
+    try { if (storeIdOf(db) !== storeId) throw new Error("The copy is not the store."); } finally { db.close(); }
+    await flush(copy);
+    held();
+    await renameWithRetry(copy, path, {}, async () => held());
+  } catch (error) {
+    await Promise.all(sqliteFiles(copy).map(file => rm(file, { force: true }))).catch(() => undefined);
+    if (error instanceof CollectionsRefusalError) throw error;
+    throw new Error(`dohc could not copy this workspace's Collections to ${STORE_PATH}, so they stay in ${OLD_STORE_PATH}. Try again.`, { cause: error });
+  }
+  await flush(dirname(path), true);
+}
+
+/**
+ * Once the store opened in .dohc/local, puts what is left in .dohc/datasets
+ * in the system trash, where a person can still recover it: a store with
+ * this store's id, then its -wal, -shm and -journal, and those files alone
+ * once their store is gone. A store with another id may be another
+ * computer's, so it stays. Before each file, `held` checks that the record
+ * still names this installation and store, and its refusal stops the trash.
+ * Any other failure leaves the files for the next open.
+ */
+async function trashOldStore(root: string, storeId: string, trashItem: ((path: string) => Promise<void>) | undefined, held: () => void): Promise<void> {
+  if (!trashItem) return;
+  try {
+    const folder = await storeFolderOf(root, OLD_STORE_PATH);
+    if (folder === null) return;
+    const [store, ...sidecars] = sqliteFiles(join(folder, STORE_FILE));
+    if (await statOrNull(store)) {
+      await assertStoreFiles(store);
+      const db = openStore(store, true);
+      try { if (storeIdOf(db) !== storeId) return; } finally { db.close(); }
+      held();
+      await trashItem(store);
+    }
+    for (const file of sidecars) if (await statOrNull(file)) { held(); await trashItem(file); }
+  } catch (error) {
+    if (error instanceof CollectionsRefusalError) throw error;
+    console.warn(`[desktop] dohc left the Collections store in ${OLD_STORE_PATH} and will try again at the next open:`, error);
+  }
+}
+
+// Opens the store this installation keeps, or creates it, before anything
+// else is made: another computer's Collections, a store that is not
+// there, and a store the record does not name are refused. A new store is
+// a file this call creates, never one that arrived meanwhile, even empty.
+// It takes its id before the record names it. The store is in .dohc/local,
+// so it waits for the engine's open to prepare that folder. A store the
+// record names that is still in .dohc/datasets is copied here first, unless
+// one is here already: that one wins, and a store with another id here is
+// refused without touching either. The record can change while this waits
+// for the engine or copies, so it is checked again before the copy takes
+// the store's place and before the old store goes to the trash.
+async function openHeldStore(root: string, localState: LocalStateWorkspace, holder: CollectionsHolderCheck, trashItem: ((path: string) => Promise<void>) | undefined): Promise<{ db: DatabaseSync; path: string }> {
+  const { workspaceId } = localState;
+  const admission: CollectionsAdmission = await admitCollectionsStore(root, workspaceId, holder);
+  const path = join(await folderOnceOpened(localState, "store"), STORE_FILE);
+  // The engine's open that prepared the store's folder. On Windows what dohc
+  // opens there counts only while that open still holds the folder.
+  const prepared = currentLocalStateOpen(localState);
+  const held = createHoldingCheck(root, workspaceId, holder, () => admission.kind === "open" ? admission.storeId : null);
+  if (admission.kind === "open") {
+    // A copy a crash left before its rename.
+    await Promise.all(sqliteFiles(join(dirname(path), MOVING_FILE)).map(file => rm(file, { force: true })));
+    if (!(await statOrNull(path))) await copyOldStore(root, path, admission.storeId, held);
+  }
+  await assertStoreFiles(path);
+  if (admission.kind === "create") {
+    await writeFile(path, "", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+      throw error.code === "EEXIST" ? new CollectionsRefusalError({ kind: "unclaimed" }) : error;
+    });
+  }
+  const db = openStore(path);
+  try {
+    // First, so a workspace that closed meanwhile is refused as not opened, not as replaced.
+    if (process.platform === "win32" && !prepared?.current()) throw new LocalStateUnavailableError("not-opened");
+    if (admission.kind === "open" && storeIdOf(db) !== admission.storeId) throw new CollectionsRefusalError({ kind: "replaced", path: STORE_PATH });
+    if (admission.kind === "create") {
+      if (tableCount(db) !== 0) throw new CollectionsRefusalError({ kind: "unclaimed" });
+      db.exec(`BEGIN IMMEDIATE; ${STORE_TABLE};`);
+      try { db.prepare("INSERT INTO local_dataset_store VALUES(1,?)").run(admission.storeId); db.exec("COMMIT"); }
+      catch (error) { db.exec("ROLLBACK"); throw error; }
+      await recordCollectionsStore(root, workspaceId, holder.here(), admission.storeId, admission.seen);
+    }
+    if (admission.kind === "open") { held(); await trashOldStore(root, admission.storeId, trashItem, held); }
+    return { db, path };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+/**
+ * The id the workspace's store keeps, or null when it keeps none or is not
+ * there. A store not yet moved from .dohc/datasets counts. Creates no store.
+ */
+export async function localDatasetStoreId(workspaceRoot: string): Promise<string | null> {
+  return withStoreHere(await realpath(workspaceRoot), async (path) => {
+    if (path === null) return null;
+    const db = openStore(path, true);
+    try { return storeIdOf(db); } finally { db.close(); }
+  });
+}
+
+/**
+ * Writes `storeId` into the workspace's existing store, so a record can
+ * name it: the one in .dohc/local, or else one not yet moved from
+ * .dohc/datasets, which the holder moves when it next opens. Refuses a store
+ * that belongs to another workspace, and never creates one.
+ */
+export async function adoptLocalDatasetStore(workspaceRoot: string, workspaceId: string, storeId: string): Promise<void> {
+  const root = await realpath(workspaceRoot);
+  await withStoreHere(root, async (path) => {
+    if (path === null) throw new Error(`dohc could not find ${STORE_PATH}. Restore it from a backup, then try again.`);
+    const db = openStore(path);
+    try {
+      db.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
+      try {
+        if (tableCount(db) === 0) {
+          // A file with no store in it may be one still syncing from another
+          // computer. In .dohc/local, it is one a creation cut short.
+          throw new Error(path === join(root, ...STORE_PATH.split("/"))
+            ? `${STORE_PATH} is empty. Delete it, then try again.`
+            : `${OLD_STORE_PATH} is empty here, and may still be syncing from another computer. Try again once it has synced.`);
+        }
+        const identity = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_dataset_identity'").get()
+          ? db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get() : undefined;
+        if (identity && identity.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
+        db.exec(STORE_TABLE);
+        db.prepare("INSERT OR REPLACE INTO local_dataset_store VALUES(1,?)").run(storeId);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      db.close();
+    }
+  });
+}
+
+/**
+ * Whether the workspace already has its local store, in .dohc/local or not
+ * yet moved from .dohc/datasets, so opening it moves it. Checking never
+ * creates one.
+ */
+export async function localDatasetStoreExists(workspaceRoot: string): Promise<boolean> {
+  const found = await Promise.all([STORE_PATH, OLD_STORE_PATH].map(path => lstat(join(workspaceRoot, path)).then(() => true, () => false)));
+  return found.includes(true);
+}
 /** After attachment or engine reconnection, settles admitted Collection app responses in an existing store. */
 export async function reconcileExistingLocalCollectionApps(workspaceRoot: string, open: () => Promise<Pick<LocalDatasetHost, "apps">>): Promise<void> {
   if (await localDatasetStoreExists(workspaceRoot)) (await open()).apps.reconcile();

@@ -74,11 +74,11 @@ Returns `{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`.
 
 ### `dohc_workspace_status`
 
-Report whether this workspace is local-only or cloud-synced.
+Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -195,6 +195,60 @@ Changes the workspace, so a shared view does not offer it.
 - `id`: `integer`. Required.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
+
+### `dohc_save_recovery_copy`
+
+Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer, or on the server for a document it hosts (`storedOn`); dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. For edits the server keeps, dohc then tells the server the copy is saved, and the `recovery` becomes `copied`. `keptEdits` is `kept` when the edits stay where `storedOn` says, `copied` when the server may now release them, and `ended` for edits a Stop could not write: dohc no longer keeps those, and the copy holds them. Accepts every `recovery`. Pass the `incident` from `keptEdits` to save exactly those kept edits; without it, dohc saves edits a Stop could not write first. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`
+
+Returns `{ ok: true, copyPath, packagePath, folder, storedOn, keptEdits } | { ok: false, reason }`.
+
+### `dohc_retry_kept_edits`
+
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`. Required.
+
+Returns `{ ok: true, path } | { ok: false, reason }`.
+
+### `dohc_stop_again`
+
+Stop live editing again for a document whose Stop kept its edits, as Try again does on its row in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `not-written`, where dohc writes the kept edits into the file, or `stopping`, where it asks the server again to stop live editing. `keptEdits` is `recovered` once the file holds the edits, `kept` while dohc still keeps them, and `none` when it kept none. dohc refuses while the document is open in an editor. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`. Required.
+
+Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
+
+### `dohc_list_retained_copies`
+
+List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.
+
+A shared view keeps no old file copies, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, copies: { id, revision }[], more, total: { count, bytes } } | { ok: false, reason }`.
+
+### `dohc_delete_retained_copies`
+
+Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `copies`: `({ id: integer, revision: integer })[]`. Required.
+- `acceptLateWriteRisk`: `true`. Required.
+
+Returns `{ ok: true, deleted, skipped, failed, remaining: { count, bytes } } | { ok: false, reason }`.
 
 ### `dohc_read_change`
 
@@ -492,27 +546,29 @@ Returns `{ ok: true, recordId, recordPath, kept? } | { ok: false, reason, partia
 
 ### `dohc_list_automation_runs`
 
-List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.
+List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `page`: `string`
+- `server`: `boolean`
 
-Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next } | { ok: false, reason }`.
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next } | { ok: false, reason }`.
 
 ### `dohc_read_automation_run`
 
-Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `run`: `string`. Required.
+- `server`: `boolean`
 
-Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } } | { ok: false, reason }`.
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } } | { ok: false, reason }`.
 
 ### `dohc_retry_automation_run`
 
@@ -713,7 +769,7 @@ With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvi
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -790,6 +846,54 @@ Use - as the body to read it from stdin. The first message allows at most 64 KiB
 - `--run-id <id>`: Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
+
+#### `dohc document kept-edits`
+
+```sh
+dohc document kept-edits [options]
+```
+
+List live documents whose edits the server refused, and where dohc keeps those edits.
+
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true }[] }`.
+
+#### `dohc document save-recovery-copy`
+
+```sh
+dohc document save-recovery-copy <path> [<incident>] [options]
+```
+
+Save a document's kept edits next to it.
+
+Accepts every recovery but unreadable. With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first. dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document. For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied. keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them. It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them. dohc writes these files itself, not as the agent that asked.
+
+With `--json`, prints `{ schemaVersion, ok: true, copyPath, packagePath, folder, storedOn, keptEdits }`.
+
+#### `dohc document retry-kept-edits`
+
+```sh
+dohc document retry-kept-edits <path> <incident> [options]
+```
+
+Send a document's kept edits to the server once more.
+
+Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps. For unreadable, dohc reads the kept edits again. It fails with the reason while it still cannot read them. A not-written or stopping document needs stop-again instead. Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document stop-again`
+
+```sh
+dohc document stop-again <path> <incident> [options]
+```
+
+Stop live editing again for a document whose Stop kept its edits.
+
+Take the incident from kept-edits. Accepts a recovery of not-written or stopping. For not-written, dohc writes the kept edits into the file. For stopping, it asks the server again to stop live editing. keptEdits is recovered once the file holds the edits, kept while dohc still keeps them, and none when it kept none. dohc refuses while the document is open in an editor. Run kept-edits again to follow it.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, keptEdits }`.
 
 ### `dohc chat`
 
@@ -963,12 +1067,14 @@ Each verb takes one JSON object that names workspaceId. Find workspaceId in .doh
 
 List Collections.
 
+On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others.
+
 - `workspaceId`: `string`. Required.
 - `after`: `UUID`
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
 
 #### `dohc dataset describe`
 
@@ -1690,8 +1796,9 @@ List an automation's runs on this computer, newest first.
 Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID. When older runs remain, the last line gives the --page value that lists them.
 
 - `--page <page>`: List the older runs the last line of an earlier listing names.
+- `--server`: List the runs of the workspace's self-hosted server instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next }`.
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next }`.
 
 #### `dohc automation run`
 
@@ -1703,7 +1810,9 @@ Show one run: what started it, what each step changed, and why it failed.
 
 Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
 
-With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } }`.
+- `--server`: Show a run of the workspace's self-hosted server. It lists what the run changed, without steps.
+
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } }`.
 
 #### `dohc automation retry`
 

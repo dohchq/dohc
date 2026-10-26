@@ -22,6 +22,8 @@ export const ERROR_NAMES: ReadonlySet<string> = new Set([
   // JavaScript and the web platform.
   "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError",
   "AggregateError", "AbortError", "TimeoutError", "DOMException",
+  // dohc's app compiler.
+  "AppCompilerTimeoutError",
   // dohc's engine client.
   "EngineDaemonUnavailableError", "EngineClientError", "EngineRequestError", "EngineRequestDeadlineError",
   "EngineWorkspaceRebindError", "EngineWorkspaceRebuildingError", "EngineWorkspaceRetryDeadlineError",

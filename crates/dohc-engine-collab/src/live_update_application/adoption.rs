@@ -296,6 +296,10 @@ mod tests {
         f.adopt().unwrap();
         let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
         let operation = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore-owner".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),
@@ -420,6 +424,10 @@ mod tests {
             assert_eq!(f.store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
             let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
             let input = NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: f.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "empty-owner-restore".into(),
                 relay_database_namespace: "namespace".into(),
                 old_binding: f.binding.clone(),
@@ -494,6 +502,10 @@ mod tests {
         assert!(!pending_before.is_empty());
         let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
         let input = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "owner-restore".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),
@@ -644,6 +656,23 @@ mod tests {
                 (kind == Some(ChangeActorKind::Human)).then_some(&serde_json::Value::Bool(true))
             );
         }
+    }
+
+    #[test]
+    fn new_native_adoption_establishes_the_reader_history_shortcut() {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let signal: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(!signal);
     }
 
     #[test]

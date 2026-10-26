@@ -1,8 +1,9 @@
 import { readDatasetHistoryHeads } from "@dohc/app-backend-runtime/dataset-history";
 import { createHash } from "node:crypto";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
-import { createHistoryCollectionRemote } from "./historyCollectionRemote";
+import { createHistoryCollectionRemote, serverHistorySources } from "./historyCollectionRemote";
 import { createRemoteDatasetData, type OwnerDatasetData } from "./remoteDataset";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -574,4 +575,28 @@ it("reads the owner's renamed Collection name in the same history reply without 
   f.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=json_set(revision_json,'$.definition.name',?) WHERE dataset_id=?").run("Owner renamed", remote);
   expect(await remoteRead(remote, undefined, operation.signal)).toMatchObject({ name: "Owner renamed" });
   expect(relay).toHaveBeenCalledTimes(2);
+});
+
+it("reads the Collections a server lists, on a computer that doesn't keep the workspace's own", async () => {
+  const f = await fixture(), a = f.initialize(1), b = f.initialize(2);
+  f.event(a, 400); f.event(b, 600); await f.write("file", 500);
+  const described = (datasetId: string) => ({ datasetId }) as unknown as DatasetDescription;
+  const list = vi.fn<OwnerDatasetData["list"]>(async ({ after }) => after === undefined
+    ? { datasets: [described(a)], nextCursor: a } : { datasets: [described(b)], nextCursor: null });
+  let current = true;
+  f.reads.local = serverHistorySources({ list }, () => { if (!current) throw new Error("workspace changed"); });
+  f.reads.remote = async (datasetId, before) => f.host.history("owner", { workspaceId: "workspace", datasetId, beforeRevision: before, limit: 51, metadataOnly: true });
+  const first = await f.page({ limit: 2 });
+  expect(first.entries.map(label)).toEqual([b + ":1", "file"]);
+  expect(first).toMatchObject({ completeness: "complete", omittedSources: 0 });
+  // A later page reads the sources its cursor names, without listing again.
+  expect((await f.page({ cursor: first.nextCursor! })).entries.map(label)).toEqual([a + ":1", "main"]);
+  expect(list).toHaveBeenCalledTimes(2);
+  // A server that doesn't answer leaves the files.
+  list.mockRejectedValue(new Error("offline"));
+  const files = await f.page();
+  expect(files.entries.map(label)).toEqual(["file", "main"]);
+  expect(files).toMatchObject({ completeness: "complete", unavailableSources: [] });
+  current = false;
+  await expect(f.page()).rejects.toThrow("workspace changed");
 });

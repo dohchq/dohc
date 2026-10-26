@@ -1,10 +1,11 @@
 import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles";
 import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import * as fsPromises from "node:fs/promises";
 import { lstat, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { DaemonRefusalError, VERSIONED_METHOD, type Request } from "@dohc/workspace-engine-client";
 import { EngineDaemonUnavailableError, EngineWorkspaceSessionsClosedError, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -14,7 +15,7 @@ import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { createWorkspaceEngineCapture, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { admitPath, deleteWorkspacePathByHand, moveWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
@@ -23,6 +24,10 @@ import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import { forceStoredNameListing } from "../testing/storedNameListing";
+import * as storedEntryPaths from "./storedEntryPath";
+
+vi.mock("./storedEntryPath", async importOriginal => ({ ...await importOriginal<typeof import("./storedEntryPath")>() }));
 
 // Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(() => ({} as {
@@ -138,12 +143,272 @@ async function fixture(options: {
   return { reference, resolve: (refs: WorkspaceFileRef[]) => resolveRefs({ workspaceId, rootPath, attachmentId }, refs), rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
+    moveByHand: (fromPath: string, toPath: string) => moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { ...pathOptions(), capture: engine() }),
     remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()),
     removeByHand: (path: string, capture: PathChangeOptions["capture"] | null = engine()) =>
       deleteWorkspacePathByHand(operation, path, person, { capture, requestId: "request", trashItem, markDeleted }) };
 }
 
 describe("agent moves and deletes", () => {
+  for (const folder of [false, true]) {
+    for (const sameName of [false, true]) {
+      it(`keeps a local symlink destination in its own folder for a ${folder ? "folder" : "file"} ${sameName ? "drag" : "rename"}`, async () => {
+        const f = await fixture();
+        const from = folder ? "a/notes" : "a/notes.md";
+        const to = `b/${sameName ? "notes" : "link"}${folder ? "" : ".md"}`;
+        await write(f.rootPath, folder ? `${from}/content.md` : from, "body");
+        await mkdir(join(f.rootPath, "b"));
+        await symlink(join(f.rootPath, from), join(f.rootPath, to), folder ? "dir" : "file");
+        const seen = await f.start();
+        try {
+          await expect(f.moveByHand(from, to)).rejects.toThrow(folder ? /EPERM|ENOTDIR/u : `${to} already exists.`);
+          expect(await readdir(join(f.rootPath, "a"))).toEqual([folder ? "notes" : "notes.md"]);
+          expect(await readdir(join(f.rootPath, "b"))).toEqual([sameName ? (folder ? "notes" : "notes.md") : (folder ? "link" : "link.md")]);
+          expect((await lstat(join(f.rootPath, to))).isSymbolicLink()).toBe(true);
+          expect(await readFile(join(f.rootPath, folder ? `${from}/content.md` : from), "utf8")).toBe("body");
+          expect(await f.added(seen)).toEqual([]);
+        } finally { await f.engine().stop(); }
+      });
+    }
+  }
+
+  describe("stored endpoint names", () => {
+    const platform = process.platform;
+    afterEach(() => {
+      vi.restoreAllMocks();
+      Object.defineProperty(process, "platform", { value: platform });
+    });
+    const lookupCase = (root: string) => {
+      Object.defineProperty(process, "platform", { value: "linux" });
+      const original = fsPromises.realpath.bind(fsPromises);
+      vi.spyOn(fsPromises, "realpath").mockImplementation(async path => {
+        const resolved = await original(path);
+        return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+      });
+    };
+    const probeCase = async (root: string, context: { skip(note: string): void }) => {
+      await write(root, "Notes.md", "body");
+      if (!existsSync(join(root, "notes.md"))) context.skip("this disk keeps case apart");
+    };
+
+    for (const operation of ["move", "delete"] as const) {
+      it(`passes an alias ${operation} endpoint to capture under its stored name`, async context => {
+        const f = await fixture();
+        await probeCase(f.rootPath, context);
+        await f.start();
+        lookupCase(f.rootPath);
+        const capture = vi.spyOn(f.engine(), "changePathsAs");
+        try {
+          const result = operation === "move" ? await f.move("notes.md", "other.md") : await f.remove("notes.md");
+          expect(result).toMatchObject({ ok: true });
+          expect(capture.mock.calls[0]?.[0][0]).toBe("Notes.md");
+        } finally { await f.engine().stop(); }
+      });
+    }
+
+    for (const overwrite of [false, true]) {
+      it(`completes a Linux case-only rename with overwrite ${overwrite}`, async context => {
+        const f = await fixture();
+        await probeCase(f.rootPath, context);
+        const seen = await f.start();
+        lookupCase(f.rootPath);
+        try {
+          expect(await f.move("Notes.md", "notes.md", named, overwrite)).toMatchObject({ ok: true });
+          expect(await readdir(f.rootPath)).toContain("notes.md");
+          expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "notes.md", agentId: named.agentId });
+        } finally { await f.engine().stop(); }
+      });
+    }
+
+    it("refuses a Linux CLI move that only retypes the source folder before recording a move", async context => {
+      const requests: string[] = [];
+      const f = await fixture({ beforeRequest: request => { requests.push(request.method); } });
+      await write(f.rootPath, "Docs/a.md", "body");
+      if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+      const seen = await f.start();
+      requests.length = 0;
+      lookupCase(f.rootPath);
+      const mutation = vi.spyOn(fsPromises, "rename");
+      try {
+        expect(await f.move("docs/a.md", "Docs/a.md")).toEqual({ ok: false, path: "docs/a.md",
+          reason: "Cannot move docs/a.md to Docs/a.md: one holds the other. Choose a destination outside both." });
+        expect(mutation).not.toHaveBeenCalled();
+        expect(requests).not.toContain(VERSIONED_METHOD.textRename);
+        expect(await f.added(seen)).toEqual([]);
+        expect(await readdir(join(f.rootPath, "Docs"))).toEqual(["a.md"]);
+        expect(await readFile(join(f.rootPath, "Docs", "a.md"), "utf8")).toBe("body");
+      } finally { await f.engine().stop(); }
+    });
+
+    for (const byHand of [false, true]) {
+      it(`keeps the stored parent in History for a case-only ${byHand ? "local" : "CLI"} rename through an alias parent`, async context => {
+        const f = await fixture();
+        await write(f.rootPath, "Docs/notes.md", "body");
+        if (!existsSync(join(f.rootPath, "docs/notes.md"))) context.skip("this disk keeps case apart");
+        const seen = await f.start();
+        lookupCase(f.rootPath);
+        try {
+          if (byHand) expect(await f.moveByHand("docs/notes.md", "docs/Notes.md")).toMatchObject({ path: "docs/Notes.md" });
+          else expect(await f.move("docs/notes.md", "docs/Notes.md")).toMatchObject({ ok: true });
+          expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "Docs/Notes.md", agentId: byHand ? undefined : named.agentId });
+          expect(await readdir(join(f.rootPath, "Docs"))).toEqual(["Notes.md"]);
+        } finally { await f.engine().stop(); }
+      });
+
+      it(`reads the stored source ${byHand ? "three" : "two"} times for an ordinary ${byHand ? "local" : "CLI"} move`, async () => {
+        const f = await fixture();
+        await write(f.rootPath, "Docs/a.md", "body");
+        await f.start();
+        lookupCase(f.rootPath);
+        const stored = vi.spyOn(storedEntryPaths, "storedEntryPath");
+        try {
+          if (byHand) await f.moveByHand("Docs/a.md", "archive.md");
+          else expect(await f.move("Docs/a.md", "archive.md")).toMatchObject({ ok: true });
+          expect(stored.mock.calls.filter(([, path]) => path === join(f.rootPath, "Docs", "a.md"))).toHaveLength(byHand ? 3 : 2);
+        } finally { vi.restoreAllMocks(); await f.engine().stop(); }
+      });
+    }
+
+    for (const native of [false, true]) {
+      for (const byHand of [false, true]) {
+        it(`allows a ${byHand ? "local" : "CLI"} alias source parent when the destination keeps its stored name with ${native ? "native" : "Linux"} realpath`, async context => {
+          const f = await fixture();
+          await write(f.rootPath, "Docs/a.md", "body");
+          if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+          const seen = await f.start();
+          if (!native) lookupCase(f.rootPath);
+          const stored = vi.spyOn(storedEntryPaths, "storedEntryPath");
+          try {
+            if (byHand) expect(await f.moveByHand("docs/a.md", "Docs/b.md")).toMatchObject({ path: "Docs/b.md" });
+            else expect(await f.move("docs/a.md", "Docs/b.md")).toMatchObject({ ok: true });
+            expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "Docs/b.md", agentId: byHand ? undefined : named.agentId });
+            if (byHand) expect(stored.mock.calls.filter(([, path]) => [join(f.rootPath, "docs"), join(f.rootPath, "Docs")].includes(path))).toHaveLength(4);
+          } finally { await f.engine().stop(); }
+        });
+      }
+    }
+
+    it("reports a missing CLI source when only the destination parent exists", async context => {
+      const f = await fixture();
+      await write(f.rootPath, "docs/b.md", "body");
+      if (existsSync(join(f.rootPath, "Docs/b.md"))) context.skip("this disk ignores case");
+      await f.start();
+      lookupCase(f.rootPath);
+      try {
+        expect(await f.move("Docs/a.md", "docs/a.md")).toMatchObject({ ok: false,
+          reason: "Nothing is at Docs/a.md. List the folder to see what is there." });
+      } finally { await f.engine().stop(); }
+    });
+
+    it("keeps real case-colliding hard-link names distinct during admission", async context => {
+      const root = await createTestScratch("dohc-case-links-");
+      await write(root, "Notes.md", "body");
+      if (existsSync(join(root, "notes.md"))) context.skip("this disk ignores case");
+      await fsPromises.link(join(root, "Notes.md"), join(root, "notes.md"));
+      lookupCase(root);
+      const listing = vi.spyOn(fsPromises, "readdir");
+      expect((await admitPath(root, "Notes.md")).physical).toBe("Notes.md");
+      expect((await admitPath(root, "notes.md")).physical).toBe("notes.md");
+      expect(listing).not.toHaveBeenCalled();
+    });
+
+    for (const unknown of [false, true]) {
+      it(`${unknown ? "accepts an unreadable result after" : "refuses a no-op"} case-only rename`, async context => {
+        const requests: string[] = [];
+        const f = await fixture({ beforeRequest: request => { requests.push(request.method); } });
+        await probeCase(f.rootPath, context);
+        await f.start();
+        lookupCase(f.rootPath);
+        const original = fsPromises.rename.bind(fsPromises);
+        const listing = fsPromises.readdir.bind(fsPromises);
+        vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+          if (String(from) !== join(f.rootPath, "Notes.md")) return original(from, to);
+          if (unknown) {
+            await original(from, to);
+            vi.spyOn(fsPromises, "readdir").mockImplementation((path, options) => {
+              if (String(path) === f.rootPath) throw Object.assign(new Error("unreadable"), { code: "EIO" });
+              return listing(path, options);
+            });
+          }
+        });
+        try {
+          const result = await f.move("Notes.md", "notes.md");
+          if (unknown) {
+            expect(result).toMatchObject({ ok: true });
+            expect(requests).toContain(VERSIONED_METHOD.textRename);
+          } else {
+            expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("This disk kept the name Notes.md.") });
+            expect(requests).not.toContain(VERSIONED_METHOD.textRename);
+            expect(await readFile(join(f.rootPath, "Notes.md"), "utf8")).toBe("body");
+          }
+        } finally { vi.restoreAllMocks(); await f.engine().stop(); }
+      });
+    }
+
+    for (const native of [false, true]) {
+      for (const destination of ["docs/a.md", "docs/b.md"]) {
+        it(`refuses a CLI parent case change to ${destination} with ${native ? "native" : "Linux"} realpath`, async context => {
+          const f = await fixture();
+          await write(f.rootPath, "Docs/a.md", "body");
+          if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+          await f.start();
+          if (native) Object.defineProperty(process, "platform", { value: platform });
+          else lookupCase(f.rootPath);
+          const mutation = vi.spyOn(fsPromises, "rename");
+          try {
+            expect(await f.move("Docs/a.md", destination)).toMatchObject({ ok: false,
+              reason: `dohc did not move Docs/a.md to ${destination}. The folder is named Docs, not docs. Use that name, or rename the folder first.` });
+            expect(mutation).not.toHaveBeenCalled();
+          } finally { await f.engine().stop(); }
+        });
+      }
+    }
+
+    it.each(["move", "delete"])("refuses unknown CLI %s endpoint identity before capture", async operation => {
+      const f = await fixture();
+      await write(f.rootPath, "a.md", "body");
+      await f.start();
+      lookupCase(f.rootPath);
+      forceStoredNameListing(join(f.rootPath, "a.md"));
+      vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+      const capture = vi.spyOn(f.engine(), "changePathsAs");
+      try {
+        const result = operation === "move" ? await f.move("a.md", "b.md") : await f.remove("a.md");
+        expect(result).toMatchObject({ ok: false, reason: operation === "move"
+          ? expect.stringContaining("dohc could not tell which files or folders on disk")
+          : "dohc did not delete a.md. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again." });
+        expect(capture).not.toHaveBeenCalled();
+      } finally { vi.restoreAllMocks(); await f.engine().stop(); }
+    });
+
+    it("names the first changed folder in a nested CLI move", async context => {
+      const f = await fixture();
+      await write(f.rootPath, "base/Docs/sub/a.md", "body");
+      if (!existsSync(join(f.rootPath, "base/docs/sub/a.md"))) context.skip("this disk keeps case apart");
+      await f.start();
+      lookupCase(f.rootPath);
+      try {
+        expect(await f.move("base/dOCS/sub/a.md", "base/docs/sub/b.md")).toMatchObject({ ok: false,
+          reason: "dohc did not move base/dOCS/sub/a.md to base/docs/sub/b.md. The folder is named Docs, not docs. Use that name, or rename the folder first." });
+      } finally { await f.engine().stop(); }
+    });
+
+    it("refuses unknown CLI parent identity before capture", async context => {
+      const f = await fixture();
+      await write(f.rootPath, "Docs/a.md", "body");
+      if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+      await f.start();
+      lookupCase(f.rootPath);
+      vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+      const capture = vi.spyOn(f.engine(), "changePathsAs");
+      try {
+        expect(await f.move("Docs/a.md", "docs/b.md")).toMatchObject({ ok: false,
+          reason: expect.stringContaining("dohc could not tell which files or folders on disk") });
+        expect(capture).not.toHaveBeenCalled();
+      } finally { vi.restoreAllMocks(); await f.engine().stop(); }
+    });
+  });
+
   it("stages the source when the filesystem refuses an exclusive rename", async () => {
     const requests: string[] = [];
     const f = await fixture({ nativeMove: false, beforeRequest: request => { requests.push(request.method); } });
@@ -1209,7 +1474,7 @@ it("records a hand-made record as a local file edit under the person main read, 
 describe("before the workspace's open prepares .dohc/local", () => {
   const notReady = {
     "not-opened": () => readLocalStateFrom(null),
-    "not-excluded": () => readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) }),
+    "not-excluded": () => readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) }),
   };
   const because = {
     "not-opened": "because the workspace has not finished opening. Try again when it opens.",

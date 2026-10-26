@@ -1,7 +1,7 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
-import { existingLocalStateDir, localStateDir, type LocalStateWorkspace } from "./workspaceLocalState";
+import { existingLocalStateDir, localStateDir, readOwnedLocalState, type LocalStateWorkspace } from "./workspaceLocalState";
 
 // Main-side store for per-workspace UI state (.dohc/local/ui-state.json). The
 // layout belongs to this computer, so it lives in `.dohc/local`, which
@@ -20,22 +20,28 @@ const writeQueues = new Map<string, Promise<void>>();
 export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 
 // Tolerant read: a missing, corrupt, oversized, or escape-y file is "no saved
-// state", never an error. Returns the raw parsed JSON — the IPC handler
-// validates the shape with the WorkspaceUiState zod contract before it
-// reaches the renderer.
+// state", never an error. So is any file on Windows unless the engine's open
+// holds `.dohc/local` throughout the read. Returns the raw parsed JSON — the
+// IPC handler validates the shape with the WorkspaceUiState zod contract
+// before it reaches the renderer.
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
   try {
-    const dir = await existingLocalStateDir(rootPath);
-    if (dir === null) return null;
-    const path = join(dir, UI_STATE_FILE);
-    // lstat-cap before reading: zod can only bound what already sits in memory.
-    const fileStats = await lstat(path);
-    if (fileStats.isSymbolicLink() || !fileStats.isFile()) return null;
-    if (fileStats.size > MAX_UI_STATE_FILE_BYTES) return null;
-    return JSON.parse(await readFile(path, "utf8"));
+    return await (process.platform === "win32"
+      ? readOwnedLocalState(rootPath, uiStateIn)
+      : uiStateIn(await existingLocalStateDir(rootPath)));
   } catch {
     return null;
   }
+}
+
+async function uiStateIn(dir: string | null): Promise<unknown> {
+  if (dir === null) return null;
+  const path = join(dir, UI_STATE_FILE);
+  // lstat-cap before reading: zod can only bound what already sits in memory.
+  const fileStats = await lstat(path);
+  if (fileStats.isSymbolicLink() || !fileStats.isFile()) return null;
+  if (fileStats.size > MAX_UI_STATE_FILE_BYTES) return null;
+  return JSON.parse(await readFile(path, "utf8"));
 }
 
 async function writeUiStateFileNow(

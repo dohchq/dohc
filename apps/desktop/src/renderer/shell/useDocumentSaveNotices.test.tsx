@@ -363,6 +363,18 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
+  // #2463. A note closed over a change made outside dohc before the capture
+  // poll noticed it: its refused save first reads as a failure, then main
+  // says the file changed outside dohc. No failed-save row may stay.
+  it("clears a closing note's failed save when main says the file changed outside dohc", () => {
+    render(<Shell />);
+    emit({ ...failed(null), closing: true });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't save notes/a.md");
+    emit({ state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, closing: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
   it("ignores a late failure from a session a newer one replaced", () => {
     render(<Shell />);
     emit({ sessionId: "session-1", state: { kind: "saved-here" } });

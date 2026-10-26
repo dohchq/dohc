@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
@@ -31,8 +31,8 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Recovery proof", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    const newRecord = collection.getByRole("form", { name: "New record" });
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    const newRecord = collection.getByRole("row", { name: "New record" });
     await newRecord.getByLabel("Name", { exact: true }).fill("Before agent edit");
     await newRecord.getByLabel("Receipt", { exact: true }).setInputFiles({ name: "receipt.txt", mimeType: "text/plain", buffer: receipt });
     await expect(newRecord.getByText(/receipt\.txt.*Save to attach/)).toBeVisible();
@@ -88,6 +88,15 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     restoredDesktop = await launchDesktopApp({ workspace: target });
     const restored = restoredDesktop.page;
     expect((await openWorkspaceFromFirstRun(restored, target)).workspaceId).toBe(workspaceId);
+    // The copied manifest names no computer for the Collections, so this computer neither opens nor creates a store until the person keeps them here.
+    const collections = restored.getByRole("region", { name: "Collections", exact: true });
+    await expect(collections.getByTestId("collections-refusal")).toHaveText("Which computer keeps these Collections?Use this computer");
+    await expect(restored.getByRole("button", { name: "Restore from recovery file", exact: true })).toBeHidden();
+    const missing = (...path: string[]) => lstat(join(target.rootPath, ...path)).then(() => false, () => true);
+    expect(await missing(".dohc", "local", "datasets", "state.sqlite")).toBe(true);
+    expect(await missing(".dohc", "datasets")).toBe(true);
+    await collections.getByRole("button", { name: "Use this computer", exact: true }).click();
+    await expect(collections.getByTestId("collections-refusal")).toBeHidden();
     expect(await dataset(restored, { action: "list", workspaceId, includeArchived: true })).toMatchObject({ kind: "list", datasets: [] });
     await restoredDesktop.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, archivePath);
     await restored.getByRole("button", { name: "Restore from recovery file", exact: true }).click();

@@ -640,6 +640,21 @@ describe("engine Y.Doc IPC adapter", () => {
     await holding;
     await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
   });
+  // An agent's Stop again refuses a document an editor holds, as the window closes its own editors first.
+  it("changes a document's live editing for a main-side door only while no editor holds it", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const change = vi.fn(async () => "stopped");
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
+      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+    expect(change).not.toHaveBeenCalled();
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
+    // The change's own failure passes through unchanged.
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", async () => {throw new Error("Stop live editing is waiting.");}))
+      .rejects.toThrow("Stop live editing is waiting.");
+  });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();
@@ -1963,12 +1978,29 @@ describe("engine Y.Doc IPC adapter", () => {
       workspaceId: "workspace-1",
       path: "notes/a.md",
       origin: agentOrigin,
+      assertEditable: async () => undefined,
       change: async (state: Uint8Array, { keepBlocks }: { keepBlocks: boolean }) => {
         keepBlocksSeen.push(keepBlocks);
         return documentEditUpdate(state, documentEdit, { keepBlocks });
       },
     });
     const append = edit({ replacement: "After." });
+
+    it("refuses a lossy note before it opens a session or changes the held one", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      const refusal = new Error("dohc can't change notes/a.md without also changing parts it can't show.");
+      const refused = { ...append, assertEditable: vi.fn(async () => { throw refusal; }) };
+
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(refused.assertEditable).toHaveBeenCalledWith("notes/a.md");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
 
     it("applies the edit through the editor that holds the document and shows it there", async () => {
       const sender = new FakeSender(7);

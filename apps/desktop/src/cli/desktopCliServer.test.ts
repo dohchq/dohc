@@ -1,4 +1,5 @@
-import { getShareCopyDetails, moveWorkspacePath } from "@dohc/mcp/tools";
+import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -74,6 +75,8 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     readMoment: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["readMoment"]>(),
     listKeptCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listKeptCopies"]>(),
     saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
+    listRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listRetainedCopies"]>(),
+    deleteRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["deleteRetainedCopies"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
       async () => ({ versions: [], activeVersionId: "main" })), ...historyPageFields,
     // Writes the file as the capture chain does, refusing one that exists.
@@ -124,12 +127,12 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     chatFileMentions: vi.fn(async () => null),
     chatLinks: vi.fn(async () => null),
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
-    automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
+    automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false), agentRunWorkspace: vi.fn(() => undefined) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -451,7 +454,11 @@ describe("desktop CLI workspace context", () => {
   });
 
   it("runs collection fields through physical admission and the existing Y.Doc edit", async () => {
-    const f = fixture();
+    // A field write first reads its record to check it is not a lossy note.
+    const root = await createTestScratch("dohc-cli-fields-");
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "one.md"), "# One\n");
+    const f = fixture(root);
     const doc = new Y.Doc();
     const events: string[] = [];
     const session = {
@@ -505,6 +512,51 @@ describe("desktop CLI workspace context", () => {
         [{ workspaceId: "workspace", path: "notes.md" }],
         [{ workspaceId: "workspace", path: "notes.md" }],
       ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a lossy note as its file, and refuses to edit it before any session opens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-lossy-"));
+    const lossy = "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [the docs][docs].\n\n[docs]: https://example.com/docs\n";
+    try {
+      await writeFile(join(root, "readme.md"), lossy);
+      await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      // Even with an editor holding it, the agent reads what is on disk.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "readme.md", state: Y.encodeStateAsUpdate(markdownToYDoc(lossy)) });
+      expect(await context.documents!.read("readme.md")).toEqual({ path: "readme.md", markdown: lossy });
+      // A document an editor holds before its file exists still reads from the editor.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "draft.md", state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")) });
+      expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft" });
+
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });
+      const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      await expect(input.assertEditable("readme.md")).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+      );
+      await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
+      // A read that fails, other than for a missing file, refuses too.
+      await mkdir(join(root, "folder.md"));
+      await expect(input.assertEditable("folder.md")).rejects.toThrow(
+        "dohc couldn't read folder.md to check it, so nothing changed. Try again.",
+      );
+      // At the turn that changes it, the session's own document is judged: a
+      // file replaced after the read can't slip through.
+      const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+      const session = markdownToYDoc(lossy);
+      session.getMap("meta").set("dohcMarkdownSource", lossy);
+      session.getMap("meta").set("dohcMarkdownSourceSha256", sha(lossy));
+      session.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(session)));
+      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true })).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show",
+      );
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -886,7 +938,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     await writeFile(join(f.root, "old.md"), "original");
     const save = recovery.saveRecoveryRecord;
     const saving = vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => {
-      readLocalStateFrom({currentBinding: () => ({localStateReady: false})});
+      readLocalStateFrom({currentBinding: () => ({localStateReady: false}), localStateOpenAt: async () => ({current: () => true})});
       return save(...args);
     });
     try {
@@ -1283,6 +1335,220 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
     await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(f.remote).not.toHaveBeenCalled();
   });
+});
+
+// Both agent doors reach the desktop engine's Save recovery copy and Try again
+// through the desktop CLI server. The stand-in engine keeps refused edits per
+// workspace, as main's own record does. It leaves the incident to the server.
+async function keptEditsFixture(options: { engine?: boolean; caller?: string } = {}) {
+  const root = await createTestScratch("dohc-cli-kept-edits-");
+  await mkdir(join(root, "notes"), { recursive: true });
+  await writeFile(join(root, "notes", "plan.md"), "plan");
+  await writeFile(join(root, "elsewhere.md"), "elsewhere");
+  const cwd = join(root, options.caller ?? "");
+  await mkdir(cwd, { recursive: true });
+  const f = fixture(root);
+  const row = (objectId: string, path: string, incident = "outbox:delivery:0", recovery: OwnerLiveQuarantine["recovery"] = "paused"): OwnerLiveQuarantine =>
+    ({ objectId, path, reason: "invalid-update", storedOn: "this-computer", incident, recovery });
+  const kept: Record<string, OwnerLiveQuarantine[]> = { workspace: [row("object-plan", "notes/plan.md")], other: [row("object-elsewhere", "elsewhere.md")] };
+  const save = vi.fn(async (workspace: RegistryEntry, path: string, incident?: string) => {
+    const found = kept[workspace.workspaceId]?.find(candidate => candidate.path === path && (incident === undefined || candidate.incident === incident));
+    if (!found) throw new Error("dohc has no kept edits for this file. Open Live documents to check it.");
+    // A copy of edits the server keeps is confirmed to it, as the desktop engine does.
+    if (found.storedOn === "server") found.recovery = "copied";
+    return { copyPath: path.replace(/\.md$/, " (recovered).md"), packagePath: path.replace(/\.md$/, " (recovered).dohc-recovery.json"), storedOn: found.storedOn,
+      keptEdits: found.storedOn === "server" ? "copied" as const : "kept" as const };
+  });
+  const retry = vi.fn(async (workspace: RegistryEntry, objectId: string, _incident: string) => {
+    const found = kept[workspace.workspaceId]?.find(candidate => candidate.objectId === objectId);
+    if (!found || (found.recovery !== "paused" && !(found.storedOn === "server" && found.recovery === "copied"))) throw new Error("This document changed. Open Live documents to check it.");
+    found.recovery = "retrying";
+  });
+  // Stands in for the window's guarded Stop of the row's document: a not-written release writes the file and its row ends.
+  const stoppedIn: string[] = [];
+  const stopAgain = vi.fn(async (operation: { workspace: RegistryEntry }, again: { path: string; objectId: string; recovery: "not-written" | "stopping" }) => {
+    stoppedIn.push(operation.workspace.workspaceId);
+    const rows = kept[operation.workspace.workspaceId] ?? [];
+    const found = rows.find(candidate => candidate.objectId === again.objectId && again.recovery === "not-written" && candidate.recovery === "not-written");
+    if (found) rows.splice(rows.indexOf(found), 1);
+    return { keptEdits: found ? "recovered" as const : "kept" as const };
+  });
+  if (options.engine !== false) f.dependencies.ownerLiveRecovery = { keptEdits: workspaceId => kept[workspaceId] ?? [], save, retry, stopAgain };
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const cli = async (...argv: string[]) => {
+    const result = await executeCli({ argv: ["document", ...argv, "--json"], cwd, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...answer } = JSON.parse(result.stdout);
+    return answer;
+  };
+  const ctx = { root: cwd, home: join(root, "state"), request: transport };
+  const doors = {
+    cli: {
+      list: () => cli("kept-edits"),
+      save: (path: string, incident?: string) => incident === undefined ? cli("save-recovery-copy", path) : cli("save-recovery-copy", path, incident),
+      retry: (path: string, incident: string) => cli("retry-kept-edits", path, incident),
+      stopAgain: (path: string, incident: string) => cli("stop-again", path, incident),
+    },
+    mcp: {
+      list: async () => {
+        const status = await workspaceStatus(ctx);
+        return "keptEdits" in status ? { ok: true, keptEdits: status.keptEdits } : { ok: false, reason: "no keptEdits" };
+      },
+      save: (path: string, incident?: string) => saveRecoveryCopy(ctx, incident === undefined ? { path } : { path, incident }),
+      retry: (path: string, incident: string) => retryKeptEdits(ctx, { path, incident }),
+      stopAgain: (path: string, incident: string) => stopAgainTool(ctx, { path, incident }),
+    },
+  };
+  return { ...f, root, kept, row, save, retry, stopAgain, stoppedIn, doors };
+}
+
+describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
+  it("lists only this workspace's kept edits, without the engine's object ids", async () => {
+    const f = await keptEditsFixture();
+    expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [
+      { path: "notes/plan.md", reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused" },
+    ] });
+  });
+  it("saves a recovery copy next to the document and names both files and their folder", async () => {
+    const f = await keptEditsFixture();
+    expect(await f.doors[door].save("notes/plan.md")).toEqual({ ok: true,
+      copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", folder: "notes", storedOn: "this-computer", keptEdits: "kept" });
+    expect(f.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "notes/plan.md", undefined);
+    expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+  });
+  // With two rows at one path, the incident the caller read names which kept edits it saves.
+  it("saves the row the incident names when two rows share a path", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-released", "notes/plan.md", "release:a:0", "not-written"), f.row("object-plan", "notes/plan.md")];
+    expect(await f.doors[door].save("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: true, keptEdits: "kept" });
+    expect(f.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "notes/plan.md", "outbox:delivery:0");
+  });
+  it("lists, saves and tries again edits the server keeps, as the window does", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [{ ...f.row("object-plan", "notes/plan.md", "server:outbox:1"), storedOn: "server" }];
+    expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [
+      { path: "notes/plan.md", reason: "invalid-update", storedOn: "server", incident: "server:outbox:1", recovery: "paused" },
+    ] });
+    expect(await f.doors[door].save("notes/plan.md")).toMatchObject({ ok: true, storedOn: "server", folder: "notes", keptEdits: "copied" });
+    expect(await f.doors[door].list()).toMatchObject({ ok: true, keptEdits: [{ storedOn: "server", recovery: "copied" }] });
+    expect(await f.doors[door].retry("notes/plan.md", "server:outbox:1")).toEqual({ ok: true, path: "notes/plan.md" });
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "object-plan", "server:outbox:1");
+  });
+  it("tries again the refusal the caller read, by the engine's own object id", async () => {
+    const f = await keptEditsFixture();
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toEqual({ ok: true, path: "notes/plan.md" });
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "object-plan", "outbox:delivery:0");
+    expect(await f.doors[door].list()).toMatchObject({ ok: true, keptEdits: [{ path: "notes/plan.md", recovery: "retrying" }] });
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("This document changed") });
+  });
+  it("tries again the row the incident names when two rows share a path", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-released", "notes/plan.md", "release:a:0", "not-written"), f.row("object-plan", "notes/plan.md")];
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toEqual({ ok: true, path: "notes/plan.md" });
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "object-plan", "outbox:delivery:0");
+  });
+  // The Stop the window's Notices row runs again, for the row the caller read, under main's own admission.
+  it("stops again a Stop that kept the edits, and only one", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "release:a:0", "not-written")];
+    expect(await f.doors[door].stopAgain("notes/plan.md", "release:a:0")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "recovered" });
+    expect(f.stoppedIn).toEqual(["workspace"]);
+    expect(f.stopAgain.mock.calls.map(call => call[1])).toEqual([{ path: "notes/plan.md", objectId: "object-plan", recovery: "not-written" }]);
+    expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [] });
+    // A waiting Stop runs again too; edits that wait for the owner are Try again's, not a Stop's.
+    // With a record row beside it at the same path, the incident names the waiting Stop's document.
+    f.kept.workspace = [f.row("object-released", "notes/plan.md", "release:a:0", "not-written"), f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "kept" });
+    expect(f.stopAgain.mock.lastCall?.[1]).toEqual({ path: "notes/plan.md", objectId: "object-plan", recovery: "stopping" });
+    for (const recovery of ["paused", "cannot-write", "retrying"] as const) {
+      f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:1", recovery)];
+      expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:1")).toMatchObject({ ok: false, reason: expect.stringContaining("No Stop of notes/plan.md is waiting") });
+    }
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:9")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(await f.doors[door].stopAgain("../outside.md", "outbox:delivery:1")).toMatchObject({ ok: false });
+    expect(f.stopAgain).toHaveBeenCalledTimes(2);
+  });
+  it("refuses Stop again from a received share or a received workspace", async () => {
+    const shared = await keptEditsFixture({ caller: "shared-with-me/received" });
+    shared.kept.workspace = [shared.row("object-plan", "notes/plan.md", "release:a:0", "not-written")];
+    expect(await shared.doors[door].stopAgain("plan.md", "release:a:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    const received = await keptEditsFixture(); vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({});
+    received.kept.workspace = [received.row("object-plan", "notes/plan.md", "release:a:0", "not-written")];
+    expect(await received.doors[door].stopAgain("notes/plan.md", "release:a:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    const marked = await keptEditsFixture(); marked.workspace.shareView = {} as RegistryEntry["shareView"];
+    marked.kept.workspace = [marked.row("object-plan", "notes/plan.md", "release:a:0", "not-written")];
+    expect(await marked.doors[door].stopAgain("notes/plan.md", "release:a:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    for (const f of [shared, received, marked]) expect(f.stopAgain).not.toHaveBeenCalled();
+  });
+  it("refuses an incident the caller has not read", async () => {
+    const f = await keptEditsFixture();
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:9")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("refuses a caller inside a received share's folder, which resolves to this workspace", async () => {
+    const f = await keptEditsFixture({ caller: "shared-with-me/received" });
+    expect(await f.doors[door].list()).toMatchObject({ ok: false });
+    // A path inside the received folder passes the path rules, so only the guard refuses it.
+    expect(await f.doors[door].save("plan.md")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].retry("plan.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].save("../../notes/plan.md")).toMatchObject({ ok: false });
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("refuses a document with no kept edits", async () => {
+    const f = await keptEditsFixture();
+    await writeFile(join(f.root, "notes", "other.md"), "other");
+    expect(await f.doors[door].save("notes/other.md")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(await f.doors[door].retry("notes/other.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("refuses another workspace's kept edits and a path outside this workspace", async () => {
+    const f = await keptEditsFixture();
+    expect(await f.doors[door].retry("elsewhere.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(await f.doors[door].save("elsewhere.md")).toMatchObject({ ok: false, reason: expect.stringContaining("no kept edits") });
+    expect(await f.doors[door].save("../outside.md")).toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    expect(f.retry).not.toHaveBeenCalled();
+    expect(f.save.mock.calls.map(([workspace, path]) => [workspace.workspaceId, path])).toEqual([["workspace", "elsewhere.md"]]);
+  });
+  it("refuses a received workspace at socket per-verb admission", async () => {
+    const f = await keptEditsFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+    expect(await f.doors[door].save("notes/plan.md")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].list()).toMatchObject({ ok: false });
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("refuses a received marker before reaching the engine", async () => {
+    const f = await keptEditsFixture(); f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.doors[door].save("notes/plan.md")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].list()).toMatchObject({ ok: false });
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("refuses when the desktop offers no recovery for this workspace", async () => {
+    const f = await keptEditsFixture({ engine: false });
+    expect(await f.doors[door].save("notes/plan.md")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.doors[door].retry("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+  });
+});
+
+it("refuses kept edits on a retired desktop attachment before reaching the engine", async () => {
+  const f = await keptEditsFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+  await f.authorities.invalidate("workspace");
+  await expect(context.keptEdits!.saveRecoveryCopy("notes/plan.md")).rejects.toThrow("This workspace changed while this ran. Try again.");
+  await expect(context.keptEdits!.retry("notes/plan.md", "outbox:delivery:0")).rejects.toThrow("This workspace changed while this ran. Try again.");
+  await expect(context.keptEdits!.stopAgain("notes/plan.md", "outbox:delivery:0")).rejects.toThrow("This workspace changed while this ran. Try again.");
+  expect(f.save).not.toHaveBeenCalled();
+  expect(f.retry).not.toHaveBeenCalled();
+  expect(f.stopAgain).not.toHaveBeenCalled();
 });
 
 it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {

@@ -12,6 +12,8 @@ import {
   ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
+  LossyNoteNotice,
+  OpenExternallyLink,
 } from "./fileInspectorUi";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -30,6 +32,9 @@ import {
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
+import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
+import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
@@ -48,9 +53,13 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import type { LossyNoteCheck } from "./editor/lossyNote";
 import {
+  applyFrontmatter,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  orderFrontmatter,
+  parseFrontmatter,
 } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
@@ -73,6 +82,7 @@ import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
 import { dirnameOf } from "./path";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
@@ -103,8 +113,6 @@ export type HeadingTarget = HeadingNavigationTarget;
 const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
-
-const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 
 const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
@@ -151,6 +159,47 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
     : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
 }
 
+export const CHANGED_OUTSIDE_NOTICE =
+  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
+
+// How long the save chip says Reloaded after the document took in a change
+// made outside dohc.
+const RELOADED_SIGN_MS = 4_000;
+
+// A note's content, to tell a reload that took in a change from one that
+// came back the same: its body, and its frontmatter values as the model
+// holds them, bigints and negative zero included.
+type NoteContent = { body: string; frontmatter: Record<string, unknown> };
+
+function noteContent(doc: Y.Doc | null): NoteContent | null {
+  return doc
+    ? { body: doc.getXmlFragment("body").toString(), frontmatter: frontmatterMapValues(doc.getMap("frontmatter")) }
+    : null;
+}
+
+function sameNoteContent(left: NoteContent | null, right: NoteContent | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.body === right.body && sameFrontmatterValue(left.frontmatter, right.frontmatter);
+}
+
+function ChangedOutsideNotice(props: { onReload: () => void }) {
+  return (
+    <div
+      data-testid="changed-outside-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>{CHANGED_OUTSIDE_NOTICE}</span>
+      <button
+        type="button"
+        onClick={props.onReload}
+        className="shrink-0 whitespace-nowrap text-muted hover:text-ink"
+      >
+        Reload
+      </button>
+    </div>
+  );
+}
+
 function DeletedWhileEditingNotice(props: {
   cause: DocumentGoneCause | null;
   hasSetAsideEdit: boolean;
@@ -176,6 +225,13 @@ function PropertiesFallback() {
     </div>
   );
 }
+
+// A document's editor, as a new page hands it what the person typed.
+export type PageEditor = {
+  editor: MarkdownEditorHandle;
+  // Writes the title and icon into the document, skipping an empty one.
+  setIdentity: (identity: { title: string; icon: string }) => void;
+};
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
   useEffect(() => props.onRendered(), [props.onRendered]);
@@ -247,19 +303,33 @@ export function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name.
   engine: UseEngineDoc;
+  // Whether the note is a lossy note. The inspector holds the engine open
+  // until this is "clear", so "checking" waits as an open does.
+  lossyNote: LossyNoteCheck;
+  onEditAnyway: () => void;
+  // Set while capture holds the note. A held lossy note shows the hold, which
+  // Edit anyway would reach only after its warning.
+  onRetryHeldCapture?: () => void;
   // Reopen the engine session after `engine.engineMayHoldDocument`.
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
+  // Reopen the note after a change outside dohc. Unlike a retry, it opens the
+  // new bytes as a new note: the inspector reads and checks them again.
+  onReloadChangedOutside: () => void;
   // Set by the inspector during every render for its live write refusal,
   // including a pending switch reread. Read by every write guard beside
   // `readOnlyRef`, because an engine refusal can arrive in the commit that
   // unmounts this component, with no child render to fold into `readOnly`.
   writesRefusedRef: { current: boolean };
   localBuffer: SharedLocalDocument;
+  // A new page waits here for the editor to take the keystrokes it held.
+  // Called each time an editable editor mounts, and with null once the
+  // document opens with none.
+  onEditorReady?: (editor: PageEditor | null) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
-    props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+    props.truncated || exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
       ? "read"
       : "wysiwyg",
   );
@@ -304,7 +374,7 @@ export function MarkdownView(props: {
   // editor — writable, autosaving straight TO disk — while the session about
   // to bind seeded from the engine head. Keystrokes in that window took a path
   // that session never sees. Nothing here is writable until the open answers.
-  const opening = engine.opening;
+  const opening = engine.opening || props.lossyNote === "checking";
   // What the user sees, as against `mode`, which is what the user CHOSE. An
   // opening document reads; its chosen mode is kept and restored, so a
   // document that would have opened straight into the editor still does.
@@ -633,7 +703,9 @@ export function MarkdownView(props: {
     return () => doc.destroy();
   }, [endedSnapshot]);
   const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
-  const displayDoc = engine.doc ?? readOnlyCopy;
+  // A large note's session can bind before its check answers. Until then it
+  // stays in read mode, as it opened, and its editor mounts once, editable.
+  const displayDoc = props.lossyNote === "checking" ? null : engine.doc ?? readOnlyCopy;
 
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
@@ -696,13 +768,72 @@ export function MarkdownView(props: {
         ? ("recovery" as const)
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
+  // The file changed outside dohc. Reopening closes this session first, and
+  // main lets the disk version stand, keeping any unsaved text in History.
+  // A document with nothing unsaved reopens by itself, never over edits main
+  // has not confirmed; otherwise the notice asks the person.
+  const { onReloadChangedOutside, onButtonError } = props;
+  const [reloading, setReloading] = useState(false);
+  const [reloadedItself, setReloadedItself] = useState(false);
+  // The content a reload replaced. A reopened note with other content took
+  // in the change, so it may reload by itself again. One with the same
+  // content did not, and reloading it again would only repeat that. A Try
+  // again after a refused open keeps the earlier snapshot.
+  const engineDocRef = useRef(engine.doc);
+  engineDocRef.current = engine.doc;
+  const replacedText = useRef<NoteContent | null>(null);
+  const reloadChangedOutside = useCallback(() => {
+    replacedText.current = noteContent(engineDocRef.current) ?? replacedText.current;
+    setReloading(true);
+    onReloadChangedOutside();
+  }, [onReloadChangedOutside]);
+  const reloadsItself = engine.changedOutside === "saved" && !reloadedItself;
+  useEffect(() => {
+    if (!reloadsItself) return;
+    setReloadedItself(true);
+    if (!engine.unsavedEditsPending()) reloadChangedOutside();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadsItself, reloadChangedOutside]);
+  const changedOutsideNotice = engine.outsideWriteWaiting || engine.changedOutside === "unsaved" ||
+    (engine.changedOutside === "saved" && reloadedItself && !reloading);
+  // The Reloaded sign starts when the reopened document binds.
+  const [reloadedSign, setReloadedSign] = useState(0);
+  const reloadedBound = reloading && engine.available;
+  useEffect(() => {
+    if (!reloadedBound) return;
+    setReloading(false);
+    setReloadedSign((count) => count + 1);
+    if (!sameNoteContent(noteContent(engine.doc), replacedText.current)) setReloadedItself(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadedBound]);
+  const [reloadedShown, setReloadedShown] = useState(false);
+  useEffect(() => {
+    if (reloadedSign === 0) return;
+    setReloadedShown(true);
+    const timer = setTimeout(() => setReloadedShown(false), RELOADED_SIGN_MS);
+    return () => clearTimeout(timer);
+  }, [reloadedSign]);
+  // Capture has not recorded the version changed outside dohc, so the note
+  // did not open again. The notice stays, and Try again reloads.
+  useEffect(() => {
+    if (!engine.outsideWriteWaiting) return;
+    setReloading(false);
+    const message = outsideVersionWaitingMessage(props.path);
+    onButtonError?.(message, new Error(message), () => {
+      if (!unmounted.current) reloadChangedOutside();
+    }, `outside-write-waiting:${props.workspaceId}:${props.path}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine.outsideWriteWaiting]);
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
   const engineChipState =
     engine.saveState.kind === "saved-here" && orphanedDrafts.length > 0
       ? ("recovery" as const)
-      : engine.goneCause ?? engine.saveState;
+      : engine.goneCause ??
+        (reloadedShown && engine.saveState.kind === "saved-here" && engine.changedOutside === null
+          ? ("reloaded" as const)
+          : engine.saveState);
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -852,16 +983,52 @@ export function MarkdownView(props: {
     engine.readOnlyWhileEditing ||
     engine.permanentFailureWhileEditing ||
     engine.removalInProgress !== null ||
+    engine.outsideWriteWaiting ||
     // The engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
     engine.engineMayHoldDocument ||
+    props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  // The rich editor's handle is kept as state only while a new page waits
+  // for it, so no other document renders again when its editor mounts.
+  const { onEditorReady } = props;
+  const onEditorReadyRef = useRef(onEditorReady);
+  onEditorReadyRef.current = onEditorReady;
+  const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+    wysiwygRef.current = handle;
+    if (onEditorReadyRef.current) setPageEditor(handle);
+  }, []);
+  useEffect(() => {
+    if (!onEditorReady || opening) return;
+    if (readOnly || (!displayDoc && surfaceMode !== "wysiwyg")) {
+      onEditorReady(null);
+      return;
+    }
+    if (!pageEditor) return;
+    onEditorReady({
+      editor: pageEditor,
+      setIdentity: (identity) => {
+        const values = Object.entries(identity).filter(([, value]) => value !== "");
+        if (displayDoc) {
+          for (const [key, value] of values) setFrontmatterValue(displayDoc, key, value);
+        } else if (values.length > 0) {
+          // Without a live session the title field writes the draft, so the
+          // page's title does too.
+          const { meta } = parseFrontmatter(latestDraft.current);
+          onPropertiesDraft(applyFrontmatter(latestDraft.current, orderFrontmatter({ ...meta, ...Object.fromEntries(values) })));
+        }
+      },
+    });
+    // onPropertiesDraft reads refs and this render's readOnly, checked above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayDoc, onEditorReady, opening, pageEditor, readOnly, surfaceMode]);
   // A record's properties show the ⚡ of the automations that set them. An
   // editable file in a folder asks; main answers none for a folder that is
   // not a document Collection. A shared file's automations run on its
@@ -1666,7 +1833,7 @@ export function MarkdownView(props: {
       // expensive. Keep that performance boundary when editing starts: source
       // mode handles the full draft without building a ProseMirror document.
       switchMode(
-        props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+        exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
           ? "source"
           : "wysiwyg",
       );
@@ -1917,6 +2084,9 @@ export function MarkdownView(props: {
   if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
+      {changedOutsideNotice && !engine.deletedWhileEditing ? (
+        <ChangedOutsideNotice onReload={reloadChangedOutside} />
+      ) : null}
       {engine.deletedWhileEditing ? (
         <DeletedWhileEditingNotice
           cause={engine.goneCause}
@@ -1958,6 +2128,9 @@ export function MarkdownView(props: {
               title={
                 engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
                   ? "Your access to this document ended."
+                  : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
+                    engine.saveState.kind === "changed-on-disk"
+                  ? CHANGED_OUTSIDE_NOTICE
                   : (engineChipState === "deleted" ||
                   engineChipState === "object-changed") &&
                 hasSetAsideEdit
@@ -2068,7 +2241,7 @@ export function MarkdownView(props: {
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
           >
             <LazyMarkdownEditor
-              ref={wysiwygRef}
+              ref={attachEditor}
               value={props.body}
               onDirty={() => undefined}
               workspaceId={props.workspaceId}
@@ -2166,7 +2339,7 @@ export function MarkdownView(props: {
                     // the open answers "not engine-backed", the file IS the
                     // document and this lifts.
                     getMarkdown: () =>
-                      engine.opening || engine.engineMayHoldDocument
+                      opening || engine.engineMayHoldDocument
                         ? null
                         : serializeDraftRef.current(),
                   }
@@ -2180,6 +2353,13 @@ export function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
+      {props.lossyNote === "lossy" && props.onRetryHeldCapture ? (
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryHeldCapture} contentShown message={captureHeldLiveMessage(props.path)}>
+          <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+        </EngineMayHoldDocumentNotice>
+      ) : props.lossyNote === "lossy" ? (
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+      ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
       ) : null}
@@ -2242,7 +2422,7 @@ export function MarkdownView(props: {
           >
             <LazyMarkdownEditor
               key={wysiwygResyncEpoch}
-              ref={wysiwygRef}
+              ref={attachEditor}
               value={markdownEditorBody(draft)}
               onDirty={(materialize) =>
                 scheduleSave("wysiwyg", materialize)

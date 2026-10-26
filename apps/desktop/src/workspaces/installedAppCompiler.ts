@@ -8,9 +8,13 @@ import type { CompilerProcessBounds } from "./compilerProcessSupervisor";
 /** The compiler's own reason reaches the person; the supervisor's codes do not. */
 export function appBuildError(error: unknown): unknown {
   if (!(error instanceof Error) || error.name !== "CompilerProcessError") return error;
-  const { reason, diagnostics } = error as Error & { reason?: string; diagnostics?: string };
+  const { reason, diagnostics, details } = error as Error & { reason?: string; diagnostics?: string; details?: string };
   if (reason === "cancelled") return error;
-  if (reason === "timeout") return new Error("The app took too long to build. Remove files the app does not use, then try again.");
+  if (reason === "timeout") {
+    const timeout = new Error("The app took too long to build. Remove files the app does not use, then try again.");
+    timeout.name = "AppCompilerTimeoutError";
+    return Object.assign(timeout, { details });
+  }
   if (reason === "memory") return new Error("The app needs too much memory to build. Remove files the app does not use, then try again.");
   if (reason === "processes") return new Error("The app compiler started more processes than dohc allows, so dohc stopped it. Try again.");
   const detail = reason === "exit" ? diagnostics?.trim().split(/\r?\n/, 1)[0] : undefined;
@@ -50,9 +54,8 @@ export async function createInstalledAppCompiler(resourcesRoot: string) {
   // This installed module and its dependencies stay outside app.asar. It
   // resolves the worker and supervisor assets relative to its own location.
   const adapter = await import(/* @vite-ignore */ pathToFileURL(join(root, "adapter.mjs")).href);
-  const runtime = process.platform === "win32"
-    ? { nodeExecutable: join(root, "node.exe"), workerPath: join(root, "worker.mjs") }
-    : { nodeExecutable: join(root, "node"), workerPath: join(root, "worker.mjs"), ownerExecutable: join(root, "compiler-owner") };
+  const exe = process.platform === "win32" ? ".exe" : "";
+  const runtime = { nodeExecutable: join(root, `node${exe}`), workerPath: join(root, "worker.mjs"), ownerExecutable: join(root, `compiler-owner${exe}`) };
   return async (request: ClosedAppBuildRequest, bounds: CompilerProcessBounds, signal?: AbortSignal): Promise<ClosedAppBuild> => {
     try {
       return await adapter.compileClosedAppInProcess(runtime, request, bounds, signal);

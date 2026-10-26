@@ -14,8 +14,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::{
-    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState,
-    remove_empty_directory_target,
+    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState, disk_spelling,
+    may_share_entry, remove_empty_directory_target,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
@@ -530,14 +530,7 @@ pub(super) fn projection_target_alias<'a>(
     candidates
         .iter()
         .copied()
-        .find(|target| projection_paths_share_entry(root, path, target))
-}
-
-fn projection_paths_share_entry(root: &std::path::Path, path: &str, target: &str) -> bool {
-    let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
-        return false;
-    };
-    std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+        .find(|target| may_share_entry(root, path, target))
 }
 
 /// The heads of one version, with their content kinds, grouped by how a disk
@@ -594,7 +587,7 @@ impl AliasHeads {
         };
         let mut owners: Vec<_> = candidates
             .iter()
-            .filter(|(head, _)| head != path && projection_paths_share_entry(root, path, head))
+            .filter(|(head, _)| head != path && may_share_entry(root, path, head))
             .cloned()
             .collect();
         owners.sort();
@@ -625,15 +618,7 @@ fn reaches_other_spelling(root: &std::path::Path, path: &str) -> bool {
                 }
             })
             .collect();
-        let composed: String = segments[index]
-            .chars()
-            .map(|c| match c {
-                ';' => '\u{37e}',
-                '`' => '\u{1fef}',
-                'K' => '\u{212a}',
-                c => c,
-            })
-            .collect();
+        let composed = dohc_engine_files::floor::look_alike_spelling(segments[index]);
         [swapped, composed].iter().any(|spelling| {
             if spelling == segments[index] {
                 return false;
@@ -646,24 +631,22 @@ fn reaches_other_spelling(root: &std::path::Path, path: &str) -> bool {
 }
 
 /// Whether the disk stores the file `path` reaches under another spelling of
-/// its last segment.
+/// its last segment. Not when the disk can't say, so an owner keeps the file.
 fn stored_spelling_differs(root: &std::path::Path, path: &str) -> bool {
     let leaf = path.rsplit('/').next().unwrap_or(path);
-    std::fs::canonicalize(root.join(path)).is_ok_and(|file| {
-        file.file_name()
-            .is_some_and(|name| name != std::ffi::OsStr::new(leaf))
-    })
+    disk_spelling(root, path)
+        .ok()
+        .flatten()
+        .is_some_and(|file| file.rsplit('/').next() != Some(leaf))
 }
 
 /// Whether the disk stores the file `path` reaches under exactly that path,
-/// folders included.
+/// folders included. It may when the disk can't say.
 fn stored_as(root: &std::path::Path, path: &str) -> bool {
-    let mut prefix = root.to_path_buf();
-    path.split('/').all(|segment| {
-        prefix.push(segment);
-        std::fs::canonicalize(&prefix)
-            .is_ok_and(|stored| stored.file_name() == Some(std::ffi::OsStr::new(segment)))
-    })
+    match disk_spelling(root, path) {
+        Ok(stored) => stored.is_some_and(|stored| stored == path),
+        Err(_) => true,
+    }
 }
 
 fn case_alias_targets<'a>(
@@ -906,8 +889,8 @@ fn secret_ciphertext_sha(
     Ok(hex_sha256(&ciphertext))
 }
 
-fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
-    load_key_file(root_dir)
+fn load_projection_secret_key(store: &EngineStore) -> Result<SecretDataKey, RuntimeError> {
+    load_key_file(super::store_folder(store.database_path()))
         .map_err(DomainError::from)?
         .ok_or_else(|| {
             RuntimeError::from(DomainError::StateCorrupt {
@@ -965,7 +948,7 @@ fn plan_secret_switch(
             continue;
         };
         if secret_key.is_none() {
-            *secret_key = Some(load_projection_secret_key(root_dir)?);
+            *secret_key = Some(load_projection_secret_key(store)?);
         }
         let plaintext =
             SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
@@ -1492,14 +1475,7 @@ pub(super) fn materialize_relay_page_on_store(
                 },
             )
         };
-        let head = relay_head(
-            store,
-            workspace_id,
-            &active,
-            root_dir,
-            &change,
-            &mut secret_key,
-        )?;
+        let head = relay_head(store, workspace_id, &active, &change, &mut secret_key)?;
         // A path with no head needs no file there, and a folder is none.
         if head.is_none() && is_folder(root_dir, &change.path) {
             continue;
@@ -1557,14 +1533,8 @@ pub(super) fn materialize_relay_page_on_store(
                         operation: "write",
                         content_kind: kind,
                     };
-                    let Some(owner_head) = relay_head(
-                        store,
-                        workspace_id,
-                        &active,
-                        root_dir,
-                        &owner,
-                        &mut secret_key,
-                    )?
+                    let Some(owner_head) =
+                        relay_head(store, workspace_id, &active, &owner, &mut secret_key)?
                     else {
                         continue;
                     };
@@ -1714,7 +1684,6 @@ fn relay_head(
     store: &mut EngineStore,
     workspace_id: &str,
     active: &str,
-    root_dir: &std::path::Path,
     change: &dohc_engine_sync::MomentMaterializationChange,
     secret_key: &mut Option<SecretDataKey>,
 ) -> Result<Option<RelayHead>, RuntimeError> {
@@ -1722,7 +1691,7 @@ fn relay_head(
     Ok(match change.content_kind {
         "secret" => {
             if secret_key.is_none() {
-                *secret_key = Some(load_projection_secret_key(root_dir)?);
+                *secret_key = Some(load_projection_secret_key(store)?);
             }
             let key = secret_key.as_ref().expect("secret key loaded");
             let Some(plaintext) = SecretFileStore::new(store, key).materialize_secret_file(
@@ -2062,6 +2031,62 @@ pub(super) mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_later_pages_delete_leaves_an_owner_in_an_unlistable_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "private/notes.md", "same\n", 2);
+        write_head(&mut store, "owner", "private/NOTES.MD", "same\n", 3);
+        let private = scratch.join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(private.join("notes.md"), "same\n").unwrap();
+        match std::fs::hard_link(private.join("notes.md"), private.join("NOTES.MD")) {
+            Ok(()) if cfg!(target_os = "macos") => {
+                eprintln!("SKIP: macOS knows the two entries on this disk that keeps case apart");
+                return;
+            }
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("could not create the owner's hard link: {error}"),
+        }
+        delete_head(&mut store, "private/notes.md", 4);
+        let permissions = std::fs::metadata(&private).unwrap().permissions();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+        if std::fs::read_dir(&private).is_ok() {
+            std::fs::set_permissions(&private, permissions).unwrap();
+            eprintln!("SKIP: this user can list the private folder");
+            return;
+        }
+        let result = materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![MomentMaterializationChange {
+                version_id: "main".to_owned(),
+                path: "private/notes.md".to_owned(),
+                operation: "delete",
+                content_kind: "text",
+            }],
+            &(),
+            4,
+            &CancellationToken::new(),
+        );
+        std::fs::set_permissions(&private, permissions).unwrap();
+        result.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(private.join("notes.md")).unwrap(),
+            "same\n"
+        );
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "private/notes.md")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// With three spellings, the file stays with the owner whose bytes it
     /// holds, though another owner comes first in path order.
     #[test]
@@ -2149,7 +2174,6 @@ pub(super) mod tests {
 
     /// Two owners hold the file's bytes. The one the disk already spells the
     /// file as keeps it, though the other comes first in path order.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_keeps_the_owner_spelled_as_the_file() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2172,7 +2196,6 @@ pub(super) mod tests {
 
     /// The disk spells the file as an owner the files policy no longer tracks,
     /// so the file and its local edits are that owner's to keep.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_keeps_the_file_of_an_untracked_owner() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();
@@ -2199,7 +2222,6 @@ pub(super) mod tests {
 
     /// The disk spells the file's folder as the deleted path does, not as the
     /// untracked owner does, so the file isn't that owner's and the delete runs.
-    #[cfg(windows)]
     #[test]
     fn a_later_pages_delete_removes_a_file_only_its_folder_spells_as_an_untracked_owner() {
         let (scratch, _, mut store) = dohc_engine_testkit::open_store();

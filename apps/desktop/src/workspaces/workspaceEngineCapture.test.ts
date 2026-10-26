@@ -63,6 +63,7 @@ import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -350,7 +351,7 @@ describe("probeEngineStoreRefusal", () => {
     const sessions = mockLiveSessions(
       new VersionedLoopbackEngine(),
       undefined,
-      () => ({ settled: true, running: true, degraded: false, heldFiles: [] }),
+      () => ({ deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] }),
       async () => {
         throw probeError;
       },
@@ -688,6 +689,11 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(session.doc.getMap("frontmatter").toJSON()).toEqual(status === "ownerPending"
       ? { Name: "Manual", id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : { Name: "Manual" });
     expect(open).toHaveBeenCalledTimes(2);
+    // The note open and the record's adoption both read a seed past the
+    // in-band cap, up to the WYSIWYG editor's limit (#2521).
+    for (const [options] of open.mock.calls) {
+      expect(options).toMatchObject({ largeSeed: { workspaceId: WORKSPACE_ID, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES } });
+    }
     expect(healthyEvict).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
     expect(evict).not.toHaveBeenCalled();
@@ -1758,7 +1764,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let settled = true;
     const sessions = mockLiveSessions(loopback, requests, () => {
       if (!settled) polling.resolve();
-      return { settled, running: true, heldFiles: [], degraded: !settled };
+      return { deferredWrites: [], settled, running: true, heldFiles: [], degraded: !settled };
     });
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, { rustEngineSessions: sessions });
@@ -1783,7 +1789,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
-    const sessions = mockLiveSessions(loopback, undefined, () => ({
+    const sessions = mockLiveSessions(loopback, undefined, () => ({ deferredWrites: [],
       settled,
       running: true,
       heldFiles: [], degraded: !settled,
@@ -2023,6 +2029,63 @@ describe("workspaceEngineCapture batch capture", () => {
     engine.beginShutdown();
     await engine.stop();
     expect(discardUnsentState).not.toHaveBeenCalled();
+  });
+
+  // #2463 in a synced workspace. A replicated release succeeds over a save
+  // refused because the file changed outside dohc. The close then waits for
+  // capture to record the outside version, as a local-only eviction does, and
+  // the refused save reads as that change, not as a failed save.
+  it("closes a synced note over a change made outside dohc like a local one", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const stale = new DaemonRefusalError({code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no"}, undefined);
+    const sessions = mockLiveSessions(loopback);
+    const live = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    let released = false;
+    const statusReads: string[][] = [];
+    const store = new Proxy(live, {
+      get(target, property) {
+        if (property === "watcherStatus") {
+          return async () => {
+            const deferredWrites = released ? [] : ["notes/a.md"];
+            statusReads.push(deferredWrites);
+            return {running: true, degraded: false, terminal: false, deferredWrites, keptFiles: [], heldFiles: []};
+          };
+        }
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const states: string[] = [];
+    const changedOutside: boolean[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: sessions, store, onError: () => undefined,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
+          settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
+          close: async () => { released = true; throw new YdocReleasedWithSettleFailureError(options.path, stale); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state), onChangedOutside: (unsaved) => changedOutside.push(unsaved)});
+    const editor = new Y.Doc();
+    editor.getText("plainText").insert(0, "typed");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor));
+    engine.start();
+    await vi.waitFor(() => expect(changedOutside).toEqual([true]));
+    await expect(session.settleNow()).rejects.toBe(stale);
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(states.at(-1)).toBe("changed-on-disk");
+    // The close answered after capture stopped holding the outside version.
+    expect(statusReads.at(-1)).toEqual([]);
+    engine.beginShutdown();
+    await engine.stop();
   });
 
   // A save can write the file and still find it gone, deleted again right
@@ -2567,6 +2630,7 @@ describe("workspaceEngineCapture batch capture", () => {
               running: true,
               degraded,
               terminal: false,
+              deferredWrites: [],
             });
           }
           if (property === "flushCapture") return async () => undefined;
@@ -2615,7 +2679,7 @@ describe("workspaceEngineCapture batch capture", () => {
         await release.promise;
         if (failFirst) throw new Error("temporary watcher failure");
       }
-      return { running: true, degraded: false, terminal: false, recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], recoveryUnavailable: watcherStatus.mock.calls.length === 1 };
     });
     const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
     const outcomes: WorkspaceEngineCaptureFailure[] = [];
@@ -2660,6 +2724,138 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // An engine still taking in a new workspace's files refuses the poll's
+  // reads. That is busy, not broken: no outcome changes, and a real error
+  // still reports a failure.
+  it("keeps the capture outcome while the engine is still updating, and reports a real failure", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const updating = () => new DaemonRefusalError(
+      { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+    let status: "updating" | "ok" = "ok";
+    let adoptionsAnswer: "updating" | "fail" | "ok" = "updating";
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => {
+          if (status === "updating") throw updating();
+          return { running: true, degraded: false, terminal: false, deferredWrites: [] };
+        };
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (adoptionsAnswer === "updating") throw updating();
+          if (adoptionsAnswer === "fail") throw new Error("store gone");
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    // The flush queues behind the poll, so its settling means the poll ran.
+    // It drains the same adoptions, so it can be refused too.
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      status = "updating";
+      await poll();
+      expect(outcomes).toEqual([]);
+
+      status = "ok";
+      adoptionsAnswer = "fail";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "updating";
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+      adoptionsAnswer = "ok";
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+    } finally {
+      status = "ok";
+      adoptionsAnswer = "ok";
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
+  // Busy is bounded by the engine's own status. Its refusal cannot hide a
+  // degraded watcher, and the early-import deadline answers not running and
+  // degraded, which reports a failure whatever the adoptions answer.
+  it("reports a degraded or timed-out import while the engine still refuses reads", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    let watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] as string[] };
+    let refuseAdoptions = true;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => {
+          if (refuseAdoptions) {
+            throw new DaemonRefusalError(
+              { code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined);
+          }
+          return { adoptions: [], nextCursor: null };
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([]);
+      watcher = { ...watcher, degraded: true };
+      await poll();
+      expect(outcomes).toEqual(["other"]);
+
+      watcher = { ...watcher, degraded: false };
+      refuseAdoptions = false;
+      await poll();
+      expect(outcomes).toEqual(["other", null]);
+      // The deadline's status, with a refusal still in flight.
+      watcher = { ...watcher, running: false, degraded: true };
+      refuseAdoptions = true;
+      await poll();
+      expect(outcomes).toEqual(["other", null, "other"]);
+    } finally {
+      watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] };
+      refuseAdoptions = false;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -2669,7 +2865,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const polled = deferred();
     const watcherStatus = vi.fn(async () => {
       polled.resolve();
-      return { running: true, degraded: false, terminal: false, noAtomicPlacement: true };
+      return { running: true, degraded: false, terminal: false, deferredWrites: [], noAtomicPlacement: true };
     });
     const daemonStore = new Proxy(liveStore, {
       get(target, property) {
@@ -2733,7 +2929,7 @@ describe("workspaceEngineCapture batch capture", () => {
                   },
                 });
               }
-              return { running: true, degraded: false, terminal: false };
+              return { running: true, degraded: false, terminal: false, deferredWrites: [] };
             };
           }
           if (property === "flushCapture") return async () => undefined;
@@ -2967,7 +3163,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       const requests: Request[] = [];
       let settled = true;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,
@@ -3863,7 +4059,7 @@ describe("workspaceEngineCapture agent attribution", () => {
       const loopback = new VersionedLoopbackEngine();
       let settled = false;
       const engine = capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        rustEngineSessions: mockLiveSessions(loopback, requests, () => ({ deferredWrites: [],
           settled,
           running: true,
           heldFiles: [], degraded: !settled,

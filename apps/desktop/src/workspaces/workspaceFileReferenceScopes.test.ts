@@ -4,6 +4,9 @@ import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { createReceivedFileReferenceScopes, type ReceivedScopeDependencies, workspaceFileRefs } from "./workspaceFileReferenceScopes";
 import { createEngineFileResolver } from "./resolveEngineFiles";
 import type { ShareMountRecord, ShareViewIdentity } from "./registryStore";
+import { realpathSync } from "node:fs";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
+import { createTestScratch } from "./testTemp";
 
 const token = "share-object:v1:" + "a".repeat(64);
 const pin = { receivedSource: "share-source:v1:" + "b".repeat(64), grantId: "grant", generation: 2 };
@@ -11,11 +14,11 @@ const selector = { paths: ["docs"], versionId: null, access: "view" as const };
 const attachmentId = Symbol("attachment");
 const workspace = { workspaceId: "host", rootPath: "C:/host", attachmentId };
 
-function harness(mounted = false) {
+function harness(mounted = false, rootPath = workspace.rootPath) {
   const view: ShareViewIdentity = { shareId: "share", granterEmail: null, genericChatWritable: false,
     grantedSelector: structuredClone(selector), receivedIdentity: { ...pin }, relayUrl: "https://relay.example/", recipientUserId: "recipient" };
   const mount: ShareMountRecord = { ...view, label: "alex", relayUrl: "https://relay.example/" };
-  let registry = { rootPath: workspace.rootPath, shareView: mounted ? undefined : view, shareMounts: mounted ? [mount] : [] };
+  let registry = { rootPath, shareView: mounted ? undefined : view, shareMounts: mounted ? [mount] : [] };
   let credentials = { userId: "recipient", relayUrl: "https://relay.example" };
   let generation = 1, attachment = attachmentId, session = 1;
   let duringResolve: () => void = () => undefined;
@@ -98,4 +101,20 @@ it("rejects a replaced caller attachment before loading credentials", async () =
   const h = harness();
   expect(await h.scopes({ ...workspace, attachmentId: Symbol("old") })).toEqual([]);
   expect(h.deps.warmCredentials).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("resolves renamed received files across root spellings and refuses another folder (mount %s)", async mounted => {
+  const folder = await createTestScratch("reference-root-spelling-");
+  const registryRoot = canonicalWorkspaceRoot(folder), nativeRoot = realpathSync.native(folder);
+  const h = harness(mounted, registryRoot);
+  for (const rootPath of [registryRoot, nativeRoot]) {
+    expect(await h.scopes({ ...workspace, rootPath })).toHaveLength(1);
+    expect(await h.resolve({ ...workspace, rootPath }, h.refs)).toEqual([
+      { status: "found", objectId: token, path: mounted ? "shared-with-me/alex/docs/renamed.md" : "docs/renamed.md" },
+    ]);
+  }
+  const other = canonicalWorkspaceRoot(await createTestScratch("reference-other-root-"));
+  h.resolveFiles.mockClear();
+  expect(await h.scopes({ ...workspace, rootPath: other })).toEqual([]);
+  expect(h.resolveFiles).not.toHaveBeenCalled();
 });

@@ -61,6 +61,7 @@ import {
   isYdocRemoteUpdatesPendingRefusal,
   isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
+  isWorkspaceUpdatingRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
@@ -76,6 +77,10 @@ import {
   type ChangeAttributionWire,
   type KeptCopy,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopiesSummary,
+  type RetainedCopy,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
@@ -93,6 +98,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
@@ -227,6 +233,9 @@ export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
+// How long a close waits for capture to record a change made outside dohc
+// to its file, after the close released the file.
+const OUTSIDE_WRITE_RECORD_DEADLINE_MS = 10_000;
 // An engine-originated removal the chain is about to make on disk. The
 // detached-debt cleanup reads it to tell dohc's own removal from an external
 // delete; a failing-close session reads it to arm its removal suppression.
@@ -581,6 +590,10 @@ export interface WorkspaceEngineCapture {
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
     onObjectChanged?: () => void;
+    // The file changed outside dohc, and capture holds that change until
+    // this session closes. `unsaved` is whether the document has edits no
+    // save carried. Called once per session.
+    onChangedOutside?: (unsaved: boolean) => void;
     contentKind?: YdocContentKind;
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.
@@ -655,6 +668,11 @@ export interface WorkspaceEngineCapture {
   // visible copy beside its file.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Old versions of files kept on a drive that cannot tell dohc whether a
+  // program still has one open. dohc never deletes them itself; these list
+  // and delete them for a person or agent who accepted that risk.
+  listRetainedCopies(): Promise<RetainedCopiesListResult>;
+  deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
@@ -838,6 +856,7 @@ export interface WorkspaceEngineCaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
+  onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
@@ -1342,6 +1361,21 @@ export class YDocRemovalInProgressError extends Error {
     );
     this.name = "YDocRemovalInProgressError";
   }
+}
+
+// A close released this file, but capture has not recorded the change made
+// outside dohc to it. Opening now would take the file back and show the old
+// version, so the open waits for capture.
+export class YDocOutsideWriteWaitingError extends Error {
+  readonly code = "outside-write-waiting" as const;
+  constructor(readonly workspacePath: string, cause?: unknown) {
+    super(`${workspacePath} changed outside dohc, and capture has not recorded that version yet.`, cause === undefined ? undefined : { cause });
+    this.name = "YDocOutsideWriteWaitingError";
+  }
+}
+
+export function isYDocOutsideWriteWaitingError(error: unknown): error is YDocOutsideWriteWaitingError {
+  return error instanceof YDocOutsideWriteWaitingError;
 }
 
 export function isYDocRemovalInProgressError(
@@ -1904,8 +1938,19 @@ export function createWorkspaceEngineCapture(
     // caps at the same 10s as that TTL, so a delete landing right after
     // one retry can otherwise expire before the next retry arrives to ask.
     armRemovalSuppression: (expected: boolean, deletedSeq: number) => void;
+    // Capture holds a change made outside dohc to this session's file.
+    changedOutside: () => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+  // Paths whose close released the file while capture still held a change
+  // made outside dohc to it. An open of one waits for that change first.
+  const outsideWritesUnrecorded = new Set<string>();
+  // Whether capture still holds a change made outside dohc to this path.
+  async function outsideWriteWaits(path: string): Promise<boolean> {
+    const engine = await engineStore();
+    await engine.flushCapture?.();
+    return (await engine.watcherStatus?.())?.deferredWrites.includes(path) ?? false;
+  }
   // Set-aside drafts of a deleted file's text that a newer draft or a save
   // replaced, and that the draft store has not removed yet. Every later draft
   // step and the capture's stop try again, so none lingers as a duplicate.
@@ -2487,6 +2532,9 @@ export function createWorkspaceEngineCapture(
           ? "The edit does not match this file's format."
           : reason.includes("share-read-only")
             ? "This file is read-only."
+            // The server refused this file's earlier edits, so its queue takes no more.
+            : reason.includes("owner-outbox-frozen")
+              ? "Live editing is paused for this file."
             : unanswered
               ? "No answer after three attempts."
               : "dohc refused this edit.";
@@ -2687,6 +2735,9 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
+            // A note the WYSIWYG editor opens can seed past the in-band cap.
+            // A larger one keeps its read preview and edits its file directly.
+            largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
             onRemoteUpdate: (update) => {
               if (current !== opened || canonicalDoc === null) {
                 if (!opening.installed) opening.updates.push(update);
@@ -3688,7 +3739,7 @@ export function createWorkspaceEngineCapture(
       // anything the engine is still missing whatever `settle` says, and
       // refuses to release while it is behind (ydocProviderSession `close`).
       if (entry.status === "live") {
-        await entry.session.settleNow({ summary });
+        await entry.session.settleNow({ summary, ifNeeded: true });
       }
       await entry.close({ settle: false });
     }
@@ -4056,24 +4107,27 @@ export function createWorkspaceEngineCapture(
   // Wraps one background capture task so its overall outcome (ok / failed)
   // reaches onCaptureOutcome, whether the failure was a thrown task (store
   // unavailable) or per-path errors the task swallowed to keep the batch
-  // going. Rethrows so enqueue's catch still logs via onError.
+  // going. Rethrows so enqueue's catch still logs via onError. An engine
+  // still taking in files is busy, not broken: that refusal leaves the
+  // previous outcome standing.
   async function reportCaptureOutcome(task: () => Promise<boolean>): Promise<void> {
-    let ok = false;
+    let ok: boolean;
     try {
       ok = await task();
       storeRefused = null;
       storeRefusedDetail = null;
     } catch (error) {
+      if (isWorkspaceUpdatingRefusal(error)) return;
       // A thrown pass says whether the engine refused the store or
       // failed some other way; a pass that completed — even degraded —
       // reached the store, so any earlier refusal no longer describes it.
       storeRefused = engineStoreRefusalOf(error);
       storeRefusedDetail =
         storeRefused === null ? null : engineStoreRefusalDetailOf(error);
+      emitCaptureOutcome(false);
       throw error;
-    } finally {
-      emitCaptureOutcome(ok);
     }
+    emitCaptureOutcome(ok);
   }
 
   function drainPendingCollectionAdoptions(
@@ -4164,6 +4218,7 @@ export function createWorkspaceEngineCapture(
                   expectedObjectId: adoption.objectId,
                   contentKind: "richdoc",
                   seedAbsentLineage: true,
+                  largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
                   // File-backed adoption state needs no draft writer; terminal eviction releases its lease.
                   onRemoteUpdate: () => undefined,
                 });
@@ -4247,15 +4302,20 @@ export function createWorkspaceEngineCapture(
         if (status?.noAtomicPlacement) options.onAtomicPlacementUnavailable?.();
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
+          options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onHeldFiles?.(status.heldFiles);
+          for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
+        const healthy =
+          status === undefined || (status.running && !status.degraded && !status.terminal);
         if (status === undefined || (status.running && !status.terminal)) {
-          await drainPendingCollectionAdoptions(engine);
+          await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
+            // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
+            if (healthy || !isWorkspaceUpdatingRefusal(error)) throw error;
+          });
         }
-        return status === undefined
-          ? true
-          : status.running && !status.degraded && !status.terminal;
+        return healthy;
       }).finally(() => {
         daemonCaptureHealthQueued = false;
       }),
@@ -4308,6 +4368,14 @@ export function createWorkspaceEngineCapture(
             "open",
             removal.operation,
           );
+        }
+        if (outsideWritesUnrecorded.has(input.path)) {
+          // A check that fails proves nothing, so the open still waits.
+          const waits = await outsideWriteWaits(input.path).catch((error: unknown) => ({ error }));
+          if (waits !== false) {
+            throw new YDocOutsideWriteWaitingError(input.path, waits === true ? undefined : waits.error);
+          }
+          outsideWritesUnrecorded.delete(input.path);
         }
         // An orphaned session — one a refused open could not release — still
         // belongs to the daemon, which answers ydoc-session-busy for as long
@@ -4406,6 +4474,13 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
+        // Set by the capture health poll while capture holds a change made
+        // outside dohc to this file. The session keeps it until it closes.
+        let changedOutside = false;
+        // Capture keeps a note's unsaved text in History when it records an
+        // outside version, but has no such copy for a drawing's strokes. A
+        // drawing keeps its guarded close instead.
+        const keepsTextInHistory = liveDocumentKindForPath(input.path) !== "scene";
         // How many settles this session has started, so the open can tell a
         // refusal before its settle started from that settle's own failure.
         let settleStarts = 0;
@@ -4649,7 +4724,7 @@ export function createWorkspaceEngineCapture(
           }
           if (isConflictStaleTargetCause(error)) setTextAside();
           reportSaveState(
-            settleFailureSaveState(error),
+            changedOutside && keepsTextInHistory && isConflictStaleTargetCause(error) ? "changed-on-disk" : settleFailureSaveState(error),
             saveToken,
             "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
@@ -4706,6 +4781,10 @@ export function createWorkspaceEngineCapture(
           onSettleStart,
           onSettleError,
         });
+        // Edits no save carried, including unsettled text the session opened
+        // with until a save settles it.
+        const hasUnsavedEdits = (): boolean =>
+          updatesSeen !== updatesSettled || (unsettled && lastSettledSha === null);
         // Register the live session only after the open succeeds (a secret/
         // already-live/path-not-in-version rejection propagates to the caller
         // and never guards a path that has no session). The close below drops the entry
@@ -4957,8 +5036,8 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
-            if (result.materialized) settleCovers = covers;
-            return result.materialized;
+            if (result?.materialized) settleCovers = covers;
+            return result?.materialized === true;
           };
           try {
             if (writeCancelled) {
@@ -5309,6 +5388,36 @@ export function createWorkspaceEngineCapture(
         // The close was refused and eviction released the lease. The absent-head
         // checks below must not treat that release as a successful settlement.
         let dischargedByEvict = false;
+        // Once the lease is gone, the close answers only after capture stops
+        // holding the outside change, so a reopen shows the disk version. A
+        // reopen within capture's next tick would take the lease again first.
+        // Until capture records it, an open of this path waits (see
+        // `outsideWritesUnrecorded`).
+        const recordOutsideWrite = async (): Promise<void> => {
+          const deadline = Date.now() + OUTSIDE_WRITE_RECORD_DEADLINE_MS;
+          try {
+            for (let attempt = 1; ; attempt += 1) {
+              if (stopped || shuttingDown || !(await outsideWriteWaits(input.path))) {
+                outsideWritesUnrecorded.delete(input.path);
+                return;
+              }
+              if (Date.now() >= deadline) throw new Error("capture still holds the change made outside dohc");
+              await new Promise(resolve => setTimeout(resolve, Math.min(25 * 2 ** attempt, 500)));
+            }
+          } catch (error) {
+            outsideWritesUnrecorded.add(input.path);
+            onError(`capture of ${input.path} after its close`, error);
+          }
+        };
+        // The save this close refused over the outside change reads as that
+        // change, so a save-failure notice does not outlive the document.
+        const reportChangedOutsideClose = (error: unknown): void => {
+          const key = (value: unknown): object | null => typeof value === "object" && value !== null ? value : null;
+          const failure = key(error);
+          const cause = failure && "cause" in failure ? key(failure.cause) : null;
+          const failedToken = (failure && settleFailureTokens.get(failure)) ?? (cause && settleFailureTokens.get(cause)) ?? 0;
+          reportSaveState("changed-on-disk", failedToken, "status");
+        };
         let closeInFlight: Promise<void> | null = null;
         let quitClose: Promise<void> | null = null;
         let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
@@ -5371,6 +5480,8 @@ export function createWorkspaceEngineCapture(
           const effective: WorkspaceEngineYDocCloseOptions | undefined =
             liveEntry.orphaned || (liveEntry.status === "failing-close" && suppressSettleForRemoval())
               ? { ...opts, settle: false, settleOnRefusal: false }
+              // Nothing to save, and a save would be refused over the change.
+              : changedOutside && !hasUnsavedEdits() ? { ...opts, settle: false }
               : opts;
           try {
             if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
@@ -5397,6 +5508,17 @@ export function createWorkspaceEngineCapture(
               // path must resume; nothing holds the reservation).
               if (liveYDocSessions.get(input.path) === liveEntry) {
                 liveYDocSessions.delete(input.path);
+              }
+              // A replicated release succeeds over unsaved edits and keeps
+              // them in the lineage. When the save was refused over a change
+              // made outside dohc that capture holds, the disk version stands,
+              // as it does after the local-only eviction below. Only a mocked
+              // replicated session proves this branch (workspaceEngineCapture.test.ts).
+              if (!shuttingDown && keepsTextInHistory && isConflictStaleTargetCause(error.cause) &&
+                  (changedOutside || (await outsideWriteWaits(input.path).catch(() => false)))) {
+                reportChangedOutsideClose(error);
+                await recordOutsideWrite();
+                return;
               }
               // The settle met a head the daemon's capture had already
               // moved — an edit made outside dohc, ingested before this close.
@@ -5457,11 +5579,22 @@ export function createWorkspaceEngineCapture(
             // A quit cannot wait for another settle attempt. Orphans and
             // cancelled writes also cannot settle. Eviction journals pending
             // text or preserves a recovered draft before releasing the lease.
-            // Interactive close/switch failures keep their guard for retry.
-            if (shuttingDown ||
+            // So does a note's save refused over a change made outside dohc
+            // that capture holds: the disk version stands, and capture's fold
+            // keeps the unsaved text in a recovered copy and History
+            // (ydoc_apply.rs, recover_unsettled_local_in_tx). Other
+            // interactive close/switch failures keep their guard for retry.
+            const keepDiskVersion = !shuttingDown && keepsTextInHistory && isConflictStaleTargetCause(error) &&
+              (changedOutside || (await outsideWriteWaits(input.path).catch(() => false)));
+            let evictFailure: unknown;
+            if (shuttingDown || keepDiskVersion ||
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
               try {
                 await session.evict();
+                if (keepDiskVersion) {
+                  reportChangedOutsideClose(error);
+                  await recordOutsideWrite();
+                }
                 quitEvictionFailure = null;
                 dischargedByEvict = true;
                 if (liveYDocSessions.get(input.path) === liveEntry) {
@@ -5472,6 +5605,7 @@ export function createWorkspaceEngineCapture(
                 // Keep the close refusal as the caller's error, and report the
                 // failed release separately. The guard below remains reserved.
                 onError(`ydoc evict of ${input.path}`, evictError);
+                evictFailure = evictError;
                 if (shuttingDown) quitEvictionFailure = { closeError: error, evictError };
               }
             }
@@ -5481,7 +5615,7 @@ export function createWorkspaceEngineCapture(
             // teardown).
             if (liveYDocSessions.get(input.path) === liveEntry) {
               liveEntry.status = "failing-close";
-              scheduleTransientCloseRetry(quitEvictionFailure?.evictError ?? error, opts);
+              scheduleTransientCloseRetry(evictFailure ?? error, opts);
             }
             throw error;
           }
@@ -5491,6 +5625,7 @@ export function createWorkspaceEngineCapture(
           if (liveYDocSessions.get(input.path) === liveEntry) {
             liveYDocSessions.delete(input.path);
           }
+          if (changedOutside && keepsTextInHistory && !shuttingDown) await recordOutsideWrite();
         };
         const liveEntry: LiveYDocSession = {
           path: input.path,
@@ -5503,6 +5638,18 @@ export function createWorkspaceEngineCapture(
           orphaned: false,
           close: closeEntry,
           armRemovalSuppression,
+          changedOutside: () => {
+            if (changedOutside) return;
+            changedOutside = true;
+            // A drawing has no notice or reload, and its chip must not say
+            // History keeps its strokes.
+            if (!keepsTextInHistory) return;
+            try {
+              input.onChangedOutside?.(hasUnsavedEdits());
+            } catch {
+              // Observer boundary, like the save-state hook.
+            }
+          },
         };
         entry = liveEntry;
         // A session whose release failed is still the daemon's: a refused
@@ -6078,7 +6225,7 @@ export function createWorkspaceEngineCapture(
         const duplicating = authored.operation === "duplicate";
         if (duplicating) {
           for (const entry of [...liveYDocSessions.values()]) {
-            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file"});
+            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file", ifNeeded: true});
           }
         } else {
           await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");
@@ -6632,6 +6779,14 @@ export function createWorkspaceEngineCapture(
 
     async saveKeptCopy(id) {
       return await (await engineStore()).saveKeptCopy(id);
+    },
+
+    async listRetainedCopies() {
+      return await (await engineStore()).listRetainedCopies();
+    },
+
+    async deleteRetainedCopies(copies) {
+      return await (await engineStore()).deleteRetainedCopies(copies);
     },
 
     resolveConflict(conflictId, resolution) {

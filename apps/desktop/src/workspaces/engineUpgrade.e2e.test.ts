@@ -38,13 +38,14 @@ type EngineView = { files: FileView[]; moments: Map<string, { path: string; oper
 
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-async function withEngine<T>(command: string, rootDir: string, work: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T> {
+async function withEngine<T>(command: string, rootDir: string, work: (adapter: VersionedLiveAdapter, requester: WorkspaceDaemonRequester) => Promise<T>): Promise<T> {
   const client = await createEngineClient({ command, authToken: "engine-upgrade", protocolVersion: 2, capabilities: [] });
+  const requester = new WorkspaceDaemonRequester(client);
   let adapter: VersionedLiveAdapter | undefined;
   // The daemon always exits, and a failed shutdown never hides the failure that preceded it.
   const shutDown = async () => {
     try {
-      if (adapter) await new WorkspaceDaemonRequester(client).request("workspace.close", {}, { workspace: adapter.workspace });
+      if (adapter) await requester.request("workspace.close", {}, { workspace: adapter.workspace });
     } finally {
       client.close();
       await client.waitForExit();
@@ -53,7 +54,7 @@ async function withEngine<T>(command: string, rootDir: string, work: (adapter: V
   let result: T;
   try {
     adapter = await VersionedLiveAdapter.openWorkspace(client, { rootDir, workspaceId });
-    result = await work(adapter);
+    result = await work(adapter, requester);
   } catch (error) {
     await shutDown().catch(cleanup => console.error("The engine also failed to shut down:", cleanup));
     throw error;
@@ -101,11 +102,14 @@ async function readView(adapter: VersionedLiveAdapter): Promise<EngineView> {
 const momentsFor = (view: EngineView, path: string) => [...view.moments.values()].filter(moment => moment.path === path).length;
 
 /** Flushes capture until it settles with the expected content and per-path moment counts. */
-async function settledView(adapter: VersionedLiveAdapter, expected: Record<string, Buffer> = {}, moments: Record<string, number> = {}): Promise<EngineView> {
+async function settledView(adapter: VersionedLiveAdapter, expected: Record<string, Buffer> = {}, moments: Record<string, number> = {}, previousRequester?: WorkspaceDaemonRequester): Promise<EngineView> {
   let view: EngineView | undefined;
   await expect.poll(async () => {
-    const flushed = await adapter.workspaceRequest("capture.flush", {});
-    if (!flushed.settled) return "capture has not settled";
+    // The previous engine may omit fields required by today's capture.flush schema. Only settled is needed here.
+    const flushed = previousRequester
+      ? await previousRequester.request("capture.flush", {}, { workspace: adapter.workspace })
+      : await adapter.workspaceRequest("capture.flush", {});
+    if (flushed === null || typeof flushed !== "object" || Array.isArray(flushed) || flushed.settled !== true) return "capture has not settled";
     view = await readView(adapter);
     const listed = new Map(view.files.map(file => [file.path, file]));
     for (const [path, bytes] of Object.entries(expected)) {
@@ -132,10 +136,10 @@ it.skipIf(engine.missing || previousEngine === null)("opens a workspace from the
   const disk = { ...SEED, [NOTE]: NOTE_EDIT };
   const paths = Object.keys(disk).sort((a, b) => a.localeCompare(b));
 
-  const before = await withEngine(previousEngine!, root, async adapter => {
-    await settledView(adapter, SEED, Object.fromEntries(paths.map(path => [path, 1])));
+  const before = await withEngine(previousEngine!, root, async (adapter, requester) => {
+    await settledView(adapter, SEED, Object.fromEntries(paths.map(path => [path, 1])), requester);
     await writeFile(join(root, NOTE), NOTE_EDIT);
-    const view = await settledView(adapter, disk, { [NOTE]: 2 });
+    const view = await settledView(adapter, disk, { [NOTE]: 2 }, requester);
     return { view, bodies: await readBodies(adapter, view.moments.keys()) };
   });
   const diskBefore = await readDisk(root, paths);

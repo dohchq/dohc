@@ -13,6 +13,7 @@
     "./frontmatter-map": "./src/frontmatter-map.ts",
     "./live-journal-validation": "./src/live-journal-validation.ts",
     "./image-src": "./src/image-src.ts",
+    "./lossy-markdown": "./src/lossy-markdown.ts",
     "./markdown-extensions": "./src/dohc-markdown-extensions.ts",
     "./restore-proof": "./src/liveRestoreProof.ts",
     "./named-live-provider": "./src/namedLiveProvider.ts",

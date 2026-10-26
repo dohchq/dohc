@@ -20,6 +20,8 @@ const secondaryButtonClass =
   "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
+const ghostButtonClass =
+  "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-[12px] leading-5 text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:outline-offset-1 disabled:opacity-50";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
@@ -76,6 +78,14 @@ export const SecondaryButton = forwardRef<HTMLButtonElement, SecondaryButtonProp
   },
 );
 
+/** Quiet action with no border and no fill until hover, such as Change beside
+ * a path. An icon can lead its label. */
+export const GhostButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
+  function GhostButton({ className, type, ...rest }, ref) {
+    return <button ref={ref} type={type ?? "button"} className={cx(ghostButtonClass, className)} {...rest} />;
+  },
+);
+
 /** Ghost icon affordance for toolbars and row actions. Pass the icon as
  * children; size stays 24px unless a `size-*` class overrides it. Forwards its
  * ref so callers can restore focus to the trigger (e.g. a menu returning focus
@@ -116,7 +126,7 @@ export function Pill({
   );
 }
 
-/** Uppercase section label for panel groups. */
+/** Section label for panel groups. */
 export function SectionLabel({
   as: Element = "span",
   className,

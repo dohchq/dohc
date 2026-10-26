@@ -17,6 +17,7 @@
   "cancelRelayShareDiscussionActivity",
   "captureHolds",
   "chatDispatchNotices",
+  "chatDispatchPaused",
   "chatDispatchStateForThread",
   "chatRunRecordsForThread",
   "checkCollectionAutomation",

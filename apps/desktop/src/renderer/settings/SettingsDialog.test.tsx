@@ -20,6 +20,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
@@ -114,6 +115,9 @@ const bridge = {
     runActive = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
+  readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
+  setChatDispatchPaused: vi.fn(async () => undefined),
+  onChatDispatchPaused: vi.fn(() => () => undefined),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -175,6 +179,7 @@ const bridge = {
     source: "stored" as const,
   })),
 };
+const savedSettings = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
 
 const writeText = vi.fn(async () => {});
 
@@ -397,6 +402,7 @@ describe("SettingsDialog", () => {
 
   it("saves your colors, the accent, and the editor type", async () => {
     const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "default" });
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -412,22 +418,22 @@ describe("SettingsDialog", () => {
     expect(saved()?.appearance.yourColor).toBe("teal");
     expect(within(yours).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
 
-    // A person's swatches are round with no olive; an agent's are squares after an olive Default.
+    // A person's swatches are round with no olive; an agent's are squares, olive first.
     const personHues = within(yours).getAllByRole("radio");
     expect(personHues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
     for (const radio of personHues) expect(radio.className).toContain("rounded-full");
     const agent = screen.getByTestId("settings-row-your-agent-color");
     const agentHues = within(agent).getAllByRole("radio");
-    expect(agentHues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Default", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
+    expect(agentHues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
     for (const radio of agentHues) expect(radio.className).toContain("rounded-md");
-    expect(within(agent).getByRole("radio", { name: "Default" }).getAttribute("aria-checked")).toBe("true");
+    expect(within(agent).getByRole("radio", { name: "Olive" }).getAttribute("aria-checked")).toBe("true");
     await user.click(within(agent).getByRole("radio", { name: "Plum" }));
-    expect(saved()?.appearance.yourAgentColor).toBe("plum");
-    await user.click(within(agent).getByRole("radio", { name: "Default" }));
-    expect(saved()?.appearance.yourAgentColor).toBeNull();
+    expect(saved()?.agents.default?.hue).toBe("plum");
+    await user.click(within(agent).getByRole("radio", { name: "Olive" }));
+    expect(saved()?.agents.default?.hue).toBe("olive");
     // Here the arrows choose as they move.
     await user.keyboard("{ArrowRight}");
-    expect(saved()?.appearance.yourAgentColor).toBe("rust");
+    expect(saved()?.agents.default?.hue).toBe("rust");
     expect(document.activeElement).toBe(within(agent).getByRole("radio", { name: "Rust" }));
 
     // The picker saves once, when it closes, not on each step of a drag.
@@ -940,6 +946,33 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("goes back to the saved settings when a save behind a failed one also fails", async () => {
+    const user = userEvent.setup();
+    let failFirst: (cause: Error) => void = () => {};
+    bridge.setUserSettings
+      .mockImplementationOnce(() => new Promise<never>((_, reject) => { failFirst = reject; }))
+      .mockRejectedValueOnce(new Error("Disk full"));
+    applyLookSettings(DEFAULT_USER_SETTINGS);
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByRole("radio", { name: "System" });
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
+    // This save starts from Dark, which the first save never wrote.
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    failFirst(new Error("Disk full"));
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe("true"),
+    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
+  });
+
   it("supports arrow-key navigation inside segmented appearance controls", async () => {
     const user = userEvent.setup();
     render(
@@ -1017,11 +1050,7 @@ describe("SettingsDialog", () => {
 
   it("shows an enabled named runner as ready without a personal name", async () => {
     bridge.getUserSettings.mockResolvedValueOnce({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        profile: { agentName: "Nova" },
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
-      },
+      settings: settingsWithAgent({ name: "Nova" }),
       source: "default",
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
@@ -1038,19 +1067,6 @@ describe("SettingsDialog", () => {
     expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Copy" }));
   });
 
-  it("does not call an enabled runner ready without an agent name to post as", async () => {
-    bridge.getUserSettings.mockResolvedValueOnce({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
-      },
-      source: "default",
-    });
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("unnamed"));
-    expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Agent name needed");
-  });
-
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
     const user = userEvent.setup();
     render(
@@ -1062,10 +1078,9 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const agentName = await screen.findByTestId("runner-agent-name-input");
-    await user.type(agentName, "Nova");
-    await user.tab();
     const command = await screen.findByTestId("runner-command-input");
+    // A name can come before the command: the agent may post from outside dohc.
+    expect(screen.getByTestId("runner-agent-name-input")).toBeTruthy();
     expect(command.getAttribute("placeholder")).toBe(
       "Enter the command that starts your agent",
     );
@@ -1081,21 +1096,39 @@ describe("SettingsDialog", () => {
     await user.type(timeout, "45");
     await user.tab();
 
+    // The name goes to the agent the command made.
+    const agentName = await screen.findByTestId("runner-agent-name-input");
+    await user.clear(agentName);
+    await user.type(agentName, "Nova");
+    await user.tab();
+
     await waitFor(() =>
-      expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
-        base: expect.any(Object),
-        settings: expect.objectContaining({
-          runner: {
-            command: "codex exec --sandbox workspace-write",
-            enabled: true,
-            timeoutMinutes: 45,
-          },
-        }),
+      expect(savedSettings()?.agents).toEqual({
+        default: {
+          name: "Nova",
+          hue: "olive",
+          launch: { command: "codex exec --sandbox workspace-write" },
+          changesFiles: true,
+          enabled: true,
+          timeoutMinutes: 45,
+        },
       }),
     );
     expect(
       screen.getByTestId("runner-configuration-status").getAttribute("data-state"),
     ).toBe("active");
+  });
+
+  it("saves a name for an agent dohc does not start", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
+    await waitFor(() =>
+      expect(savedSettings()?.agents).toEqual({
+        default: { name: "Nova", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 30 },
+      }),
+    );
   });
 
   it("keeps runner enable disabled until the command draft is non-empty", async () => {
@@ -1109,9 +1142,6 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const agentName = await screen.findByTestId("runner-agent-name-input");
-    await user.type(agentName, "Nova");
-    await user.tab();
     const command = await screen.findByTestId("runner-command-input");
     const enable = screen.getByRole("switch", { name: "Enable chat runner" });
     expect(enable.getAttribute("disabled")).not.toBeNull();
@@ -1124,17 +1154,12 @@ describe("SettingsDialog", () => {
     await user.click(enable);
 
     await waitFor(() =>
-      expect(bridge.setUserSettings).toHaveBeenCalledWith({
-        base: expect.any(Object),
-        settings: expect.objectContaining({
-          runner: {
-            // Persisted commands are trimmed; the draft's leading whitespace
-            // must not survive the save.
-            command: "codex exec",
-            enabled: true,
-            timeoutMinutes: 30,
-          },
-        }),
+      expect(savedSettings()?.agents.default).toMatchObject({
+        // Persisted commands are trimmed; the draft's leading whitespace
+        // must not survive the save.
+        launch: { command: "codex exec" },
+        enabled: true,
+        timeoutMinutes: 30,
       }),
     );
   });
@@ -1150,8 +1175,6 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
-    await user.tab();
     await user.type(
       await screen.findByTestId("runner-command-input"),
       "claude -p",
@@ -1159,12 +1182,7 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByTestId("runner-self-test-button"));
 
     await waitFor(() =>
-      expect(bridge.setUserSettings).toHaveBeenCalledWith({
-        base: expect.any(Object),
-        settings: expect.objectContaining({
-          runner: expect.objectContaining({ command: "claude -p" }),
-        }),
-      }),
+      expect(savedSettings()?.agents.default?.launch).toEqual({ command: "claude -p" }),
     );
     expect(bridge.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     expect((await screen.findByTestId("runner-self-test-result")).textContent).toBe(
@@ -1197,8 +1215,6 @@ describe("SettingsDialog", () => {
 
     // Configured, and the engine setting is ON (the schema default) — so the
     // live-setting gate alone would enable this button.
-    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
-    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
@@ -1253,8 +1269,6 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
-    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     await screen.findByTestId("runner-self-test-engine-note");
     const button = await screen.findByTestId("runner-self-test-button");
@@ -1280,8 +1294,6 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
-    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     await user.click(screen.getByTestId("runner-self-test-button"));
 

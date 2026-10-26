@@ -199,8 +199,9 @@ function buildCodeLanguageDecorations(
   report: ErrorReporter,
 ): DecorationSet {
   const decorations: Decoration[] = [];
+  // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return;
+    if (!isCodeBlockNode(node)) return !node.isTextblock;
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
 
     const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
@@ -340,6 +341,7 @@ function buildCodeLanguageDecorations(
         },
       ),
     );
+    return false;
   });
 
   return DecorationSet.create(doc, decorations);

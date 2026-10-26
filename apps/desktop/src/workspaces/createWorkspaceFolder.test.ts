@@ -110,6 +110,20 @@ describe("createWorkspaceFolder", () => {
     expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
     // Its schedules run on the computer that made it, whichever computer reads the folder.
     expect(await scheduleComputer(root, { installId: "install-desk", label: "Desk" })).toEqual({ kind: "computer", computer });
+    // So do its Collections, whose store it makes later.
+    expect(JSON.parse(await readFile(join(root, ".dohc", "collections.json"), "utf8")))
+      .toEqual({ version: 1, workspaceId: created.workspaceId, installId: computer.installId, label: computer.label, storeId: null });
+  });
+
+  it("names the computer that keeps Collections only for a workspace it makes, never one it adopts or joins", async () => {
+    const root = join(base, "kept");
+    await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    const record = await readFile(join(root, ".dohc", "collections.json"), "utf8");
+    await createWorkspaceFolder({ rootPath: root, homeDir, computer: { installId: "install-desk", label: "Desk" }, kind: "personal" });
+    expect(await readFile(join(root, ".dohc", "collections.json"), "utf8"), "attaching again keeps the record").toBe(record);
+    const joined = join(base, "joined-collections");
+    await createWorkspaceFolder({ rootPath: joined, homeDir, computer, kind: "personal", workspaceId: "ws-synced-elsewhere" });
+    expect(await readdir(join(joined, ".dohc"))).not.toContain("collections.json");
   });
 
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {

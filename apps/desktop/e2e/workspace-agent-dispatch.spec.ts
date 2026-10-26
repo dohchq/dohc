@@ -3,7 +3,7 @@ import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
@@ -60,13 +60,11 @@ async function seedRunnerSettings(
   mode: "report" | "silent-fail" | "ask",
 ): Promise<string> {
   const command = runnerCommand(mode);
-  const settings = {
+  const settings: DesktopUserSettings = {
     ...DEFAULT_USER_SETTINGS,
-    profile: { agentName: "Nova", preferredName: "Sam" },
-    runner: {
-      command,
-      enabled: true,
-      timeoutMinutes: 1,
+    profile: { preferredName: "Sam" },
+    agents: {
+      default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
     },
   };
   await writeFile(
@@ -169,6 +167,8 @@ test("My agent dispatches a fresh successful run for each human message", async 
     await expect(page.getByTestId("chats-run-popover")).toBeVisible();
     await expect(page.getByTestId("chats-run-command")).toHaveText(command);
     await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
+    // The command and log path wrap inside the popover, Copy included.
+    expect(await page.getByTestId("chats-run-popover").evaluate((popover) => popover.scrollWidth <= popover.clientWidth)).toBe(true);
 
     // A second committed human message is a second ledger trigger. The same
     // report text arriving again, attached to a distinct run chip, proves the
@@ -292,7 +292,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
   try {
     await seedWorkspaceManifest(temp, "agent-settings-failure-e2e");
     await seedRunnerSettings(temp, "silent-fail");
-    desktop = await launchDesktopApp({ workspace: temp });
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);

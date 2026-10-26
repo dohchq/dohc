@@ -19,6 +19,7 @@ import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "..
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
@@ -186,7 +187,7 @@ describe("registered settings IPC", () => {
     for (const channel of [settingsOperations.setUserSettings.channel, ...workspaceRequests.map(([channel]) => channel)]) {
       await expect(h.invoke(channel, {})).rejects.toThrow();
     }
-    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: { ...DEFAULT_USER_SETTINGS, runner: { command: " ", enabled: true, timeoutMinutes: 30 } }, base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
+    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: settingsWithAgent({ launch: { command: " " } }), base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: -1 } })).rejects.toThrow();
     for (const port of [writes, workspaceReads, workspaceWrites, resets, uiReads, uiWrites]) expect(port).not.toHaveBeenCalled();
     expect(h.effects).toEqual([]);
@@ -303,7 +304,7 @@ describe("registered settings IPC", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => { logged.resolve(); });
     h.refreshDispatchTray.mockImplementationOnce(async () => { trayReached.resolve(); await trayRelease.promise; });
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     const result = h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS });
     try {
       await trayReached.promise;
@@ -328,7 +329,7 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const error = new Error("tray unavailable");
     h.refreshDispatchTray.mockRejectedValueOnce(error);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(3);
@@ -392,6 +393,7 @@ describe("registered settings IPC", () => {
       settings: { appearance: { zoomLevel: 4 }, profile: { preferredName: "Ada" } },
     });
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      version: 2,
       appearance: { themeMode: "system", zoomLevel: 4 },
       profile: { preferredName: "Ada" },
     });
@@ -416,9 +418,9 @@ describe("registered settings IPC", () => {
     expect(h.applyZoomLevelToWindows).not.toHaveBeenCalled();
   });
 
-  it("scans for waiting runner work only when the runner or the agent's name changes", async () => {
+  it("scans for waiting runner work only when the agent that answers changes", async () => {
     const h = await harness();
-    const runner = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const runner = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: runner, base: DEFAULT_USER_SETTINGS });
     await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
     h.scanWorkspace.mockClear();
@@ -665,7 +667,8 @@ describe("registered workspace settings and UI state", () => {
     h.closeLocalState();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: 300 } }))
       .rejects.toThrow("dohc has not finished opening this workspace.");
-    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
+    // On Windows nothing reads it until the next open holds the folder.
+    expect(JSON.parse(await readFile(join(h.root, ".dohc", "local", "ui-state.json"), "utf8"))).toEqual(state);
   });
 
   it("denies a UI-state read from a renderer until its open admits it", async () => {

@@ -34,6 +34,9 @@ type CliCommandBody =
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "saveRecoveryCopy"; path: string; incident?: string }
+  | { verb: "liveKeptEdits" }
+  | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
@@ -83,10 +86,10 @@ type CliCommandBody =
   | { verb: "historyUndo"; operationId: string }
   | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
-  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
+  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string; server?: true }
   | { verb: "automationList"; collectionPath: string }
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
-  | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
+  | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
@@ -323,6 +326,70 @@ const DOCUMENT_VERBS = {
       return { verb: "fileChatStart", path, title, body: text ?? "", stdin: body === "-",
         ...(agent === undefined ? {} : { agent }), ...(requestId === undefined ? {} : { requestId }),
         ...(runId === undefined ? {} : { runId }) };
+    },
+  },
+  "kept-edits": {
+    capabilityId: "workspace.status",
+    summary: "List live documents whose edits the server refused, and where dohc keeps those edits.",
+    operands: "",
+    notes: ["storedOn is this-computer, or server for a document the server hosts.",
+      "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
+      "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
+      "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
+      "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
+      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them."],
+    parse: input => {
+      noExtraArgs(input.operands, "document kept-edits");
+      return { verb: "liveKeptEdits" };
+    },
+  },
+  "save-recovery-copy": {
+    capabilityId: "share.live.document.recovery.save",
+    summary: "Save a document's kept edits next to it.",
+    operands: "<path> [<incident>]",
+    notes: ["Accepts every recovery but unreadable.",
+      "With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first.",
+      "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
+      "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
+      "keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them.",
+      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them.",
+      "dohc writes these files itself, not as the agent that asked."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path) fail("document save-recovery-copy requires a path");
+      noExtraArgs(extra, "document save-recovery-copy");
+      return { verb: "saveRecoveryCopy", path, ...(incident ? { incident } : {}) };
+    },
+  },
+  "retry-kept-edits": {
+    capabilityId: "share.live.document.retry",
+    summary: "Send a document's kept edits to the server once more.",
+    operands: "<path> <incident>",
+    notes: ["Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps.",
+      "For unreadable, dohc reads the kept edits again. It fails with the reason while it still cannot read them.",
+      "A not-written or stopping document needs stop-again instead.",
+      "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path || !incident) fail("retry-kept-edits requires a path and an incident");
+      noExtraArgs(extra, "document retry-kept-edits");
+      return { verb: "retryKeptEdits", path, incident };
+    },
+  },
+  "stop-again": {
+    capabilityId: "share.live.document.stop",
+    summary: "Stop live editing again for a document whose Stop kept its edits.",
+    operands: "<path> <incident>",
+    notes: ["Take the incident from kept-edits. Accepts a recovery of not-written or stopping.",
+      "For not-written, dohc writes the kept edits into the file. For stopping, it asks the server again to stop live editing.",
+      "keptEdits is recovered once the file holds the edits, kept while dohc still keeps them, and none when it kept none.",
+      "dohc refuses while the document is open in an editor. Run kept-edits again to follow it."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path || !incident) fail("stop-again requires a path and an incident");
+      noExtraArgs(extra, "document stop-again");
+      return { verb: "stopAgain", path, incident };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -621,7 +688,10 @@ const AUTOMATION_VERBS = {
     capabilityId: "automation.runs.list",
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
-    flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
+    flags: [
+      { name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." },
+      { name: "--server", text: "List the runs of the workspace's self-hosted server instead." },
+    ],
     notes: [
       "Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID.",
       "When older runs remain, the last line gives the --page value that lists them.",
@@ -629,19 +699,20 @@ const AUTOMATION_VERBS = {
     parse: (input) => {
       const { collectionPath, automation } = automationOperands(input, "runs", false);
       const page = lastValue(input, "--page");
-      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }) };
+      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }), ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   run: {
     capabilityId: "automation.run.read",
     summary: "Show one run: what started it, what each step changed, and why it failed.",
     operands: "<collection> <automation> <run>",
+    flags: [{ name: "--server", text: "Show a run of the workspace's self-hosted server. It lists what the run changed, without steps." }],
     notes: [
       "Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
     ],
     parse: (input) => {
       const { collectionPath, automation, run } = automationOperands(input, "run", true);
-      return { verb: "automationRun", collectionPath, automation, run };
+      return { verb: "automationRun", collectionPath, automation, run, ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   retry: {
@@ -793,7 +864,10 @@ const migrationApproval = "Review the result, then approve it with approveMigrat
 const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
-  list: { summary: "List Collections." },
+  list: {
+    summary: "List Collections.",
+    notes: ["On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others."],
+  },
   describe: {
     summary: "Show a Collection's tables, fields, and operations.",
     notes: ["Use describe to find approved operation IDs."],
@@ -1117,7 +1191,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

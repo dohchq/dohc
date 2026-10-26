@@ -350,7 +350,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
         )
         .await
         .expect("main");
-    let key = create_key_file(scratch.path()).expect("secret key");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
     actor
         .write_secret_file(
             SecretWrite {
@@ -387,7 +387,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
         )
         .await
         .expect("feature");
-    let key = dohc_engine_crypto::load_key_file(scratch.path())
+    let key = dohc_engine_crypto::load_key_file(&scratch.path().join(".dohc/engine"))
         .expect("load key")
         .expect("key exists");
     actor
@@ -457,7 +457,7 @@ async fn secret_switch_delete_preserves_an_edit_between_planning_and_phase_two()
         )
         .await
         .expect("main");
-    let key = create_key_file(scratch.path()).expect("secret key");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
     actor
         .write_secret_file(
             SecretWrite {
@@ -851,7 +851,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         .await
         .expect("main");
 
-    let key = create_key_file(scratch.path()).expect("secret key");
+    let key = create_key_file(&scratch.path().join(".dohc/engine")).expect("secret key");
     write_secret(
         &actor,
         "main",
@@ -878,7 +878,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         )
         .await
         .expect("feature");
-    let key = dohc_engine_crypto::load_key_file(scratch.path())
+    let key = dohc_engine_crypto::load_key_file(&scratch.path().join(".dohc/engine"))
         .expect("load key")
         .expect("key exists");
     write_secret(

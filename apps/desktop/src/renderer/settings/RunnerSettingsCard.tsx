@@ -1,22 +1,25 @@
 import { AgentNameControl } from "./AgentNameControl";
 import { isComposingKey } from "../ui/keys";
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { launchCommand, launchFrom, launchProfile, type AgentLaunch, type AgentLaunchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "./AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
 } from "react";
 import { FlaskConical, Terminal } from "lucide-react";
 import type { RunnerSelfTestResult } from "../../ipc/bridgeContract";
-import type { RunnerSettings } from "../../settings/userSettings";
+import type { AgentSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 import { SecondaryButton } from "../ui/controls";
 import { ipcErrorMessage } from "../ipcError";
+import { useChatDispatchPaused } from "../useChatDispatchPaused";
+import { withErrorWords } from "../../ipc/errorWords";
 
 const RUNNER_COMMAND_PLACEHOLDER = "Enter the command that starts your agent";
 
@@ -32,7 +35,19 @@ function validTimeoutMinutes(value: string, fallback: number): number {
     : fallback;
 }
 
-function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boolean {
+// The first agent's fields this card edits.
+type RunnerFields = { command: string; profile?: AgentLaunchProfile; enabled: boolean; timeoutMinutes: number };
+
+function runnerFields(agent: AgentSettings | null): RunnerFields {
+  return {
+    command: agent?.launch && "command" in agent.launch ? agent.launch.command : "",
+    ...(agent?.launch && launchProfile(agent.launch) ? { profile: launchProfile(agent.launch) } : {}),
+    enabled: agent?.enabled ?? false,
+    timeoutMinutes: agent?.timeoutMinutes ?? 30,
+  };
+}
+
+function runnerSettingsEqual(left: RunnerFields, right: RunnerFields): boolean {
   return (
     left.command === right.command &&
     left.profile?.tool === right.profile?.tool &&
@@ -66,7 +81,8 @@ function runnerEngineNote(
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   onError?: (message: string, cause?: unknown) => void;
-  runner: RunnerSettings;
+  // The first agent, or null before there is one.
+  agent: AgentSettings | null;
   agentName?: string;
   onAgentNameChange?: (name: string) => Promise<void>;
   // Mirrors SettingsDialog's shared-view fact.
@@ -74,15 +90,15 @@ export function RunnerSettingsCard(props: {
   // Whether main built a recorder for this workspace in this app session.
   // Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
-  onRunnerChange: (runner: RunnerSettings) => Promise<void>;
+  onAgentChange: (fields: Pick<AgentSettings, "launch" | "enabled" | "timeoutMinutes">) => Promise<void>;
 }) {
   const {
     workspaceId,
-    runner,
     sharedView,
     sessionRecorderOn,
-    onRunnerChange,
+    onAgentChange,
   } = props;
+  const runner = useMemo(() => runnerFields(props.agent), [props.agent]);
   const [commandDraft, setCommandDraft] = useState(runner.command);
   const [profile, setProfile] = useState(runner.profile);
   const [advanced, setAdvanced] = useState(!runner.profile && runner.command.length > 0);
@@ -91,6 +107,8 @@ export function RunnerSettingsCard(props: {
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const editedCommandRef = useRef<string | null>(null);
   const requestVersionRef = useRequestSequence();
+  const dispatchPaused = useChatDispatchPaused((cause) =>
+    props.onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
 
   useEffect(() => {
     const editedCommand = editedCommandRef.current;
@@ -115,14 +133,16 @@ export function RunnerSettingsCard(props: {
   }, [workspaceId]);
 
   const queueSave = useCallback(
-    (next: RunnerSettings): Promise<void> => {
+    (next: RunnerFields): Promise<void> => {
+      const launch: AgentLaunch | null = launchFrom(next.profile, next.command);
+      if (!launch) return saveQueueRef.current;
       const queued = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => onRunnerChange(next));
+        .then(() => onAgentChange({ launch, enabled: next.enabled, timeoutMinutes: next.timeoutMinutes }));
       saveQueueRef.current = queued;
       return queued;
     },
-    [onRunnerChange],
+    [onAgentChange],
   );
 
   const commitDrafts = useCallback(
@@ -132,7 +152,15 @@ export function RunnerSettingsCard(props: {
         runner.timeoutMinutes,
       );
       const command = commandDraft.trim();
-      const next: RunnerSettings = {
+      // An agent always has a way to start, so a cleared command puts the saved one back.
+      if (!launchFrom(profile, command)) {
+        editedCommandRef.current = null;
+        setCommandDraft(runner.command);
+        setProfile(runner.profile);
+        setTimeoutDraft(String(timeoutMinutes));
+        return saveQueueRef.current;
+      }
+      const next: RunnerFields = {
         command,
         profile,
         enabled,
@@ -180,7 +208,7 @@ export function RunnerSettingsCard(props: {
     }
   }, [commitDrafts, workspaceId]);
 
-  const configured = configuredRunnerCommand({ command: commandDraft, profile }).length > 0 && Boolean(props.agentName?.trim());
+  const configured = launchFrom(profile, commandDraft) !== null;
   const selfTestRunning = selfTest.status === "running";
   const engineNote = runnerEngineNote(Boolean(sharedView), sessionRecorderOn);
 
@@ -230,13 +258,6 @@ export function RunnerSettingsCard(props: {
           }} />
         <details className="mt-3" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
         <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
-        {profile && commandDraft.trim() ? <SecondaryButton size="compact" disabled={selfTestRunning} onClick={() => {
-          const timeoutMinutes = validTimeoutMinutes(timeoutDraft, runner.timeoutMinutes);
-          setProfile(undefined);
-          setTimeoutDraft(String(timeoutMinutes));
-          setSelfTest({ status: "idle" });
-          void queueSave({ ...runner, command: commandDraft.trim(), profile: undefined, timeoutMinutes }).catch((cause: unknown) => props.onError?.(ipcErrorMessage(cause, "Could not save the agent."), cause));
-        }}>Use saved command</SecondaryButton> : null}
         <label
           htmlFor="runner-command"
           className="text-[11px] font-medium text-ink"
@@ -246,7 +267,7 @@ export function RunnerSettingsCard(props: {
         <input
           id="runner-command"
           data-testid="runner-command-input"
-          value={profile ? configuredRunnerCommand({ command: commandDraft, profile }) : commandDraft}
+          value={profile ? launchCommand(profile) : commandDraft}
           maxLength={4096}
           spellCheck={false}
           autoCapitalize="none"
@@ -267,19 +288,38 @@ export function RunnerSettingsCard(props: {
         <div className="flex items-center justify-between gap-3 border-r border-line px-4 py-3 max-[720px]:border-b max-[720px]:border-r-0">
           <div>
             <p className="m-0 text-[11px] font-medium text-ink">Enable dispatch</p>
-            <p className="m-0 mt-0.5 text-[10px] text-subtle">
-              Runs in the background.
+            <p data-testid="runner-dispatch-state" className="m-0 mt-0.5 text-[10px] text-subtle">
+              {runner.enabled && dispatchPaused ? "Paused until you resume or quit dohc." : "Runs in the background."}
             </p>
           </div>
-          <SwitchControl
-            label="Enable chat runner"
-            checked={runner.enabled}
-            disabled={!configured && !runner.enabled}
-            onChange={(enabled) => {
-              if (enabled && !configured) return;
-              void commitDrafts(enabled);
-            }}
-          />
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Pausing holds waiting requests; turning dispatch off fails them. */}
+            {runner.enabled ? (
+              <SecondaryButton
+                size="compact"
+                data-testid="runner-dispatch-pause"
+                aria-label={dispatchPaused ? "Resume agent dispatch" : "Pause agent dispatch"}
+                onClick={() => {
+                  const paused = !dispatchPaused;
+                  void bridge().setChatDispatchPaused({ paused }).catch((cause: unknown) => props.onError?.(
+                    withErrorWords(paused ? "dohc could not pause agent dispatch." : "dohc could not resume agent dispatch.", cause),
+                    cause,
+                  ));
+                }}
+              >
+                {dispatchPaused ? "Resume" : "Pause"}
+              </SecondaryButton>
+            ) : null}
+            <SwitchControl
+              label="Enable chat runner"
+              checked={runner.enabled}
+              disabled={!configured && !runner.enabled}
+              onChange={(enabled) => {
+                if (enabled && !configured) return;
+                void commitDrafts(enabled);
+              }}
+            />
+          </div>
         </div>
 
         <div className="flex items-center justify-between gap-3 px-4 py-3">

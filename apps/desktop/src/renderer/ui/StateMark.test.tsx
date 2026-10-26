@@ -32,8 +32,10 @@ describe("StateMark", () => {
     // covers the newest local edit, and by the draft hook and Settings only
     // after their write returned. Every other state is still working, held
     // by something, or needs the person, so none of them may read as done.
+    // "reloaded" stands in for "saved" only over a saved document that just
+    // opened the file as it is on disk.
     const settled = KEYS.filter((key) => SAVE_STATE[key].mark === "settled");
-    expect(settled).toEqual(["saved"]);
+    expect(settled).toEqual(["saved", "reloaded"]);
     // "Saved" at the start of a label claims the edit is durable somewhere.
     // The host and the local engine store are the only other places that
     // can make that claim.
@@ -105,7 +107,7 @@ describe("StateMark", () => {
     // The chip has its own column and keeps room for its mark and an ellipsis.
     const chip = screen.getByTestId("mark");
     expect(chip.parentElement!.parentElement).toBe(status);
-    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[25px]");
+    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[28px]");
     expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 

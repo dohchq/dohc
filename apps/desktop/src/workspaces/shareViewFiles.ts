@@ -41,6 +41,7 @@ import {
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import {
+  assertHeldSpellingsUnchanged,
   assertShareChangesJournalable,
   recordedShareSelector,
   SharePinInvalidError,
@@ -734,6 +735,7 @@ export function createShareViewFiles(
         );
       }
       assertShareChangesJournalable(captured.unjournalablePaths);
+      assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
     const before = await canonicalSnapshot(
       store,
@@ -1046,7 +1048,8 @@ export function createShareViewFiles(
         return [...new Set([
           ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
           ...(captured.failedPaths ?? []),
-          ...captured.unjournalablePaths.map(entry => entry.path),
+          // A held spelling's file is another spelling's, not unsaved work.
+          ...captured.unjournalablePaths.filter(entry => entry.reason !== "spelling-collision").map(entry => entry.path),
         ])];
       });
     } catch {

@@ -1,4 +1,5 @@
 import { resolveDatasetAddress } from "./datasetAddress";
+import { assertSourcePathsNotDeferred } from "./datasetSourceCapture";
 import { isPortableNamePath } from "@dohc/workspace-contracts/names";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
@@ -25,6 +26,7 @@ export interface OwnerPublicationSelection { workspaceId: string; appRoot: strin
 export interface OwnerPublicationGrant { shareId: string; grantId: string; generation: number; status: "active" | "revoked"; revokedAtMs: number | null; selector: { paths: string[]; versionId: string | null } | null }
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
 export interface AppPublicationPreparationDependencies {
+  deferredWrites: readonly string[];
   adapter: SourceAdapter;
   signal: AbortSignal;
   assertCurrent(): void;
@@ -119,11 +121,13 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   const manifestPath = `${input.appRoot}/app.publish.json`;
   if (!allowed(manifestPath)) throw new Error("The app declaration is outside this link's shared files.");
   assertCurrent(); signal.throwIfAborted();
+  assertSourcePathsNotDeferred(dependencies.deferredWrites, [], input.appRoot);
   const folder = (await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId, under: input.appRoot })).map(file => file.path);
   assertCurrent(); signal.throwIfAborted();
   const hasManifest = folder.includes(manifestPath);
   const capture = async (paths: string[], maxInputBytes: number) => {
     assertCurrent(); signal.throwIfAborted();
+    assertSourcePathsNotDeferred(dependencies.deferredWrites, paths);
     const metadata = await adapter.captureSourceMetadata({ workspaceId: input.workspaceId, versionId, paths, bounds: { maxInputFiles: inputBounds.maxInputFiles, maxInputBytes }, signal })
       .catch(async (error: unknown) => { throw await captureRefusal(error, paths, maxInputBytes); });
     assertCurrent();
@@ -159,6 +163,7 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
     const { datasetPath, ...reference } = declared.dataset;
+    assertSourcePathsNotDeferred(dependencies.deferredWrites, [datasetPath]);
     const datasetId = await resolveDatasetAddress(adapter, input.workspaceId, datasetPath, signal, versionId);
     assertCurrent(); signal.throwIfAborted();
     const resolved = { ...reference, datasetId };

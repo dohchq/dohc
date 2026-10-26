@@ -6,6 +6,7 @@ import type {
   DatabaseSnapshotView,
 } from "./workspaceDatabaseTypes.ts";
 import type { ImportDataInput } from "@dohc/sqlite-worker";
+import type { FsEntryIdentity } from "@dohc/workspace-core/fs-entry-identity";
 
 /**
  * The code of an edit the worker refused because a line in the operations
@@ -57,6 +58,7 @@ export type WorkspaceDatabaseWorkerRequest =
       resultPath: string;
       logPath: string;
       statePath: string;
+      storageIdentity: FsEntryIdentity;
       edit: DatabaseEdit;
       operation: DatabaseOperationInput;
       pageOffset: number;

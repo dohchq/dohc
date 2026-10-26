@@ -1,5 +1,5 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
-import { AGENTS_RESTRICTED_MESSAGE, configuredRunnerCommand } from "./agentToolCatalog";
+import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
@@ -7,16 +7,18 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
+  readRunnerNodeAvailable,
   RUNNER_KILL_GRACE_MS,
   type RunnerProcess,
   type ChatRunnerProcessOptions,
+  type ReplyRuntimeAvailability,
 } from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { RunnerSettings } from "../settings/userSettings";
+import type { AgentWithLaunch } from "../settings/userSettings";
 import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -83,10 +85,14 @@ function runNoticeTitle(outcome: RunOutcome, thread: string): string {
   return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
 }
 
-// A run that failed to start says why in its notice, and the start error
-// says what to do next. Other outcomes have no body. A body holds no control
-// characters, or the notice store would refuse it.
-function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome): string {
+// A run that failed to start says why and what to do next.
+// Only a missing PATH runtime recommends installing Node.js.
+// Other outcomes have no body. A body holds no control characters,
+// or the notice store would refuse it.
+function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
+  if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available) {
+    return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
+  }
   if (outcome !== "not-started" || !run.failureReason) return "";
   const reason = [...run.failureReason
     .slice(`${RUNNER_START_FAILURE}: `.length)
@@ -115,6 +121,7 @@ const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
 const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
 const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
+const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
 export interface ChatDispatchWorkspace {
   workspaceId: string;
@@ -155,10 +162,12 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
+  startSelfTestThread(workspace: ChatDispatchWorkspace, input: { channelId: string; title: string; body: string }): Promise<string>;
   dispatchStoreFor(
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
-  readRunnerSettings(): Promise<RunnerSettings>;
+  // The agent that answers chats, or null when none is set up.
+  readDispatchAgent(): Promise<AgentWithLaunch | null>;
   identityFor(
     workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
@@ -171,6 +180,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  onPausedChanged?(paused: boolean): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth, for the person main names.
@@ -267,12 +277,39 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 }
 
 
-function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
+// How a runner posts its reply. A tool profile's run replies through the dohc
+// MCP server that its launch starts (chatRunnerProcess.ts replyServerArguments).
+// A custom command replies through the dohc CLI.
+type ReplyForm = "argument" | "mcp";
+
+function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
+  return tool ? "mcp" : "argument";
+}
+
+function replyCommand(threadId: string, body: string): string {
+  return `dohc chat reply ${threadId} --as-agent "${body}"`;
+}
+
+function replyToolCall(threadId: string, runId: string): string {
+  return `the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``;
+}
+
+// A Claude Code run loads only the person's own Claude Code settings
+// (agentToolCatalog.ts), which leaves out the workspace's instruction files.
+function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
+  const form = replyFormFor(tool);
+  const instructionsFile = tool === "claude" ? "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them. " : "";
+  const replyInstruction = form === "mcp"
+    ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
+    : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
+  const decisionInstruction = form === "mcp"
+    ? "If blocked on the user, set `needsDecision`. To ask them to pick, list the choices in `options`; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc_reply_to_chat` are shown."
+    : "If blocked on the user, reply with `--needs-decision`. To ask them to pick, add `--option \"<choice>\"` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc chat` are shown.";
   return `${threadMarkdown.trimEnd()}
 
 ## Report contract
 
-Work on the request represented by this thread. Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`. Report outcomes, not tool logs. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
+${instructionsFile}Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -749,12 +786,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
+    let nodeAvailable: ReplyRuntimeAvailability | undefined;
+    if (outcome === "failed" || outcome === "no-reply") {
+      nodeAvailable = await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath));
+      if (nodeAvailable?.source === "path" && !nodeAvailable.available && outcome === "failed") {
+        const replies = await options.dispatchStoreFor(workspace)
+          .listRunMessages(workspaceId, run.runId, durableDispatchRequest);
+        if (replies.length > 0) nodeAvailable = undefined;
+      }
+    }
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
       title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
-      body: runNoticeBody(run, outcome),
+      body: runNoticeBody(run, outcome, nodeAvailable),
       target: { thread: run.threadId, run: run.runId },
     });
   }
@@ -841,7 +887,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function startClaim(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    runner: RunnerSettings,
+    agent: AgentWithLaunch,
     releaseWorkspace: (() => Promise<void>) | null,
     assertMayStart: () => void,
   ): Promise<void> {
@@ -870,20 +916,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId: claim.run.threadId,
         runId: claim.run.runId,
         logPath,
-        command: configuredRunnerCommand(runner),
-        profile: runner.profile,
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId),
+        command: launchCommand(agent.launch),
+        profile: launchProfile(agent.launch),
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, launchProfile(agent.launch)?.tool),
         assertMayStart,
       });
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
-      }, runner.timeoutMinutes * 60_000);
+      }, agent.timeoutMinutes * 60_000);
       const live: LiveRun = {
         workspace,
         claim,
         child,
         logPath,
-        timeoutMinutes: runner.timeoutMinutes,
+        timeoutMinutes: agent.timeoutMinutes,
         timeout,
         presenceHeartbeat: null,
         killEscalation: null,
@@ -963,10 +1009,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ) {
       return;
     }
-    const runner = await options.readRunnerSettings();
-    const command = configuredRunnerCommand(runner);
+    const agent = await options.readDispatchAgent();
     const dispatch = options.dispatchStoreFor(workspace);
-    if (!runner.enabled || !command) {
+    if (!agent?.enabled) {
       const threadIds = new Set(
         (await dispatch.listPending(workspace.workspaceId))
           .map((pending) => pending.threadId),
@@ -982,7 +1027,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         try {
           options.onDispatchNotice?.(workspace, {
             reason: "no-runner", threadId,
-            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
+            message: `No agent could take this request. ${agent ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
           });
         } catch (error) {
           reportError(error);
@@ -990,6 +1035,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       return;
     }
+    const command = launchCommand(agent.launch);
     const assertMayStart = await agentStartCheck(workspace);
     if (!assertMayStart) {
       await holdForTrust(workspace, dispatch);
@@ -1028,7 +1074,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           if (bypassBudget) budgetBypassThreads.add(bypassKey);
           throw error;
         }
-        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace, assertMayStart);
+        await startClaim(workspace, uncertainClaim, agent, releaseWorkspace, assertMayStart);
         return;
       }
       runReservations.delete(workspace.workspaceId);
@@ -1116,19 +1162,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
-      await startClaim(workspace, claim, runner, releaseWorkspace, assertMayStart);
+      await startClaim(workspace, claim, agent, releaseWorkspace, assertMayStart);
       return;
     }
   }
 
   async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
-    const [identity, runner] = await Promise.all([
+    const [identity, agent] = await Promise.all([
       options.identityFor(workspace),
-      options.readRunnerSettings(),
+      options.readDispatchAgent(),
     ]);
     // The agent channel is part of opting into local dispatch. A background
     // scan must not create an agent conversation in every new workspace.
-    if (runner.enabled && configuredRunnerCommand(runner)) {
+    if (agent?.enabled) {
       await options.chatStoreFor(workspace).ensureAgentChannel({
         workspaceId: workspace.workspaceId,
       });
@@ -1400,7 +1446,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   function setPaused(next: boolean): void {
+    const changed = paused !== next;
     paused = next;
+    if (changed) {
+      try {
+        options.onPausedChanged?.(paused);
+      } catch (error) {
+        reportError(error);
+      }
+    }
     if (!paused && !stopped) {
       for (const workspace of options.listOpenWorkspaces()) {
         void scanWorkspace(workspace.workspaceId).catch(reportError);
@@ -1577,9 +1631,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let reservationHeldByProcess = false;
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
-      const runner = await options.readRunnerSettings();
-      const command = configuredRunnerCommand(runner);
-      if (!command) return { ok: false, detail: "Configure a runner command first." };
+      const agent = await options.readDispatchAgent();
+      if (!agent) return { ok: false, detail: "Configure a runner command first." };
+      const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
 
@@ -1613,8 +1667,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         const opening = messages[0];
         if (
-          opening?.author.kind === "agent" &&
-          opening.body.startsWith(SELF_TEST_MARKER_PREFIX)
+          opening?.author.kind === "human" &&
+          opening.body === SELF_TEST_OPENING
         ) {
           scratchThreadId = summary.thread.id;
           break;
@@ -1623,10 +1677,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const runId = `run_self_test_${createId()}`;
       const marker = `${SELF_TEST_MARKER_PREFIX}${runId}`;
       const logPath = join(options.stateDir(), "run-logs", `${runId}.log`);
-      const commandToRun = scratchThreadId
-        ? `dohc chat reply ${scratchThreadId} --as-agent "${marker}"`
-        : `dohc chat post ${agentChannel.id} --as-agent --title "${SELF_TEST_THREAD_TITLE}" "${marker}"`;
-      const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${commandToRun}`;
       try {
         if (
           shuttingDown ||
@@ -1642,6 +1692,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               : "A runner became active before the self-test could start.",
           };
         }
+        assertMayStart();
+        const threadId = scratchThreadId ?? await options.startSelfTestThread(workspace, {
+          channelId: agentChannel.id,
+          title: SELF_TEST_THREAD_TITLE,
+          body: SELF_TEST_OPENING,
+        });
+        if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+        if (liveRuns.has(workspaceId) || runReservations.has(workspaceId) || selfTests.has(workspaceId) || options.runSlotOccupied?.(workspace) === true) {
+          return { ok: false, detail: "A runner became active before the self-test could start." };
+        }
+        // The same reply form as a real run, so passing proves replies work.
+        const prompt = replyFormFor(launchProfile(agent.launch)?.tool) === "mcp"
+          ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
+          : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
         await options.setRunAttribution(workspace, {
           agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,
@@ -1650,11 +1714,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,
-          threadId: scratchThreadId ?? undefined,
+          threadId,
           runId,
           logPath,
           command,
-          profile: runner.profile,
+          profile: launchProfile(agent.launch),
           prompt,
           assertMayStart,
         });
@@ -1707,14 +1771,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             try {
-              const candidates = scratchThreadId
-                ? [scratchThreadId]
-                : (await chat.listChannelThreads({ workspaceId, channelId: agentChannel.id }))
-                    .filter((summary) => summary.thread.title === SELF_TEST_THREAD_TITLE)
-                    .map((summary) => summary.thread.id);
-              const messages = (await Promise.all(candidates.map((threadId) =>
-                chat.listMessages({ workspaceId, threadId }),
-              ))).flat();
+              const messages = await chat.listMessages({ workspaceId, threadId });
               if (
                 messages.some(
                   (message) =>

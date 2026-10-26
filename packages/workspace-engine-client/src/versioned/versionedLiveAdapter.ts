@@ -69,6 +69,9 @@ import {
   type ConflictResolveResult,
   type KeptCopiesListResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopy,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
@@ -1689,6 +1692,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async saveKeptCopy(id: number): Promise<KeptCopySaveResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
+  }
+
+  async listRetainedCopies(): Promise<RetainedCopiesListResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.retainedCopiesList, {});
+  }
+
+  /** Deletes listed copies; a program that still has one open may lose what it writes next. */
+  async deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.retainedCopiesDelete, {
+      copies: copies.map(({ id, revision }) => ({ id, revision })),
+      acceptLateWriteRisk: true,
+    });
   }
 
   async flushCapture(): Promise<CaptureFlushResult> {

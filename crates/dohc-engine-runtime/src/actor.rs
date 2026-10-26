@@ -27,7 +27,7 @@
 mod automations;
 mod capture;
 mod recovery_import;
-use crate::supervisor::ActorOpenMode;
+use crate::supervisor::{ActorOpenMode, PreparedStore};
 pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
@@ -45,6 +45,10 @@ mod materialization;
 mod relay;
 #[cfg(unix)]
 mod retained;
+#[cfg(unix)]
+pub use retained::{
+    RETAINED_COPIES_DELETE_LIMIT, RETAINED_COPIES_LIST_LIMIT, RetainedCandidate, RetainedDeletion,
+};
 mod search;
 mod secrets;
 mod versioned;
@@ -52,9 +56,9 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CapturePassSettlement,
-    CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
-    WorkspaceRootGuard,
+    CAPTURE_NEW_FILE_LIVE, CAPTURE_RETIRE_WAITS_FOR_SESSION, CAPTURE_WRITE_WAITS_FOR_SESSION,
+    CapturePassSettlement, CapturePlacementPath, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
@@ -81,7 +85,7 @@ use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::OwnedPermit;
@@ -188,7 +192,9 @@ enum Command {
 /// Owns the worker thread and the command sender. Held by the supervisor;
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
+    reader_configured: Arc<AtomicBool>,
     identity: EngineDbIdentity,
+    store: Arc<StoreLocation>,
     generation: u64,
     mode: ActorOpenMode,
     /// Authoritative open disposition reported by [`EngineStore`]. This is
@@ -215,7 +221,82 @@ pub struct WorkspaceActor {
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
+/// Where an actor's store is: the path it opened by and, once the supervisor
+/// hands it over, the folder that path goes through, held open. The actor and
+/// every handle to it share one, so the folder stays open while any of them
+/// can still reach the store by that path. On a Mac the path names the folder
+/// by its ID, and on Linux by this process's descriptor for it, whose number
+/// goes to the next file opened once it closes.
+pub struct StoreLocation {
+    path: std::path::PathBuf,
+    prepared: std::sync::OnceLock<PreparedStore>,
+}
+
+impl StoreLocation {
+    fn new(path: std::path::PathBuf) -> Arc<Self> {
+        Arc::new(StoreLocation {
+            path,
+            prepared: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The path the store opened by. Reopening the store by it reaches the
+    /// folder the engine checked, as the actor's own connection does.
+    pub fn database_path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The folder that holds the store, by the same path, where the
+    /// workspace's data key lives.
+    pub fn folder(&self) -> &std::path::Path {
+        store_folder(&self.path)
+    }
+}
+
+/// A read-only store opened by its location's path. It keeps the location,
+/// and so the folder the path goes through, for as long as it lives, after
+/// its caller, the actor and every handle have gone.
+pub(crate) struct HeldReader {
+    store: EngineStore,
+    _location: Arc<StoreLocation>,
+}
+
+impl HeldReader {
+    pub(crate) fn open(location: Arc<StoreLocation>) -> Result<Self, RuntimeError> {
+        let store = EngineStore::open_read_only(location.database_path())?;
+        #[cfg(test)]
+        held_reader_tests::opened(location.database_path(), &store);
+        Ok(HeldReader {
+            store,
+            _location: location,
+        })
+    }
+}
+
+impl std::ops::Deref for HeldReader {
+    type Target = EngineStore;
+
+    fn deref(&self) -> &EngineStore {
+        &self.store
+    }
+}
+
+impl std::ops::DerefMut for HeldReader {
+    fn deref_mut(&mut self) -> &mut EngineStore {
+        &mut self.store
+    }
+}
+
 impl WorkspaceActor {
+    /// This actor, keeping `prepared`, the store's folder, open for as long
+    /// as the actor or any handle to it lives.
+    pub(crate) fn holding(self, prepared: Option<PreparedStore>) -> Self {
+        if let Some(prepared) = prepared {
+            let _ = self.store.prepared.set(prepared);
+        }
+        self
+    }
+
     /// Spawn the actor's worker thread and open the store. Blocks until the
     /// open completes so open errors (including the fingerprint fence)
     /// propagate synchronously. `spawn` is intentionally synchronous — a
@@ -335,6 +416,7 @@ impl WorkspaceActor {
         let worker_metrics = Arc::clone(&link_metrics);
         let link_drain_holds = Arc::new(AtomicU64::new(0));
         let worker_link_drain_holds = Arc::clone(&link_drain_holds);
+        let store = StoreLocation::new(db_path.clone());
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -359,7 +441,9 @@ impl WorkspaceActor {
             Ok(Ok(store_freshly_created)) => {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
+                    reader_configured: Arc::default(),
                     identity,
+                    store,
                     generation,
                     mode,
                     store_freshly_created,
@@ -401,7 +485,9 @@ impl WorkspaceActor {
     /// A clonable handle for issuing commands.
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
+            reader_configured: Arc::clone(&self.reader_configured),
             identity: self.identity.clone(),
+            store: Arc::clone(&self.store),
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
@@ -496,9 +582,11 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    reader_configured: Arc<AtomicBool>,
     #[cfg(unix)]
     retained_root: retained::Root,
     identity: EngineDbIdentity,
+    store: Arc<StoreLocation>,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
@@ -560,8 +648,10 @@ impl ActorHandle {
         &self,
         resolver: std::sync::Arc<dohc_engine_collab::reader_resolver::ReaderResolver>,
     ) -> Result<(), RuntimeError> {
+        let configured = Arc::clone(&self.reader_configured);
         self.run(move |_, cache| {
             cache.reader_resolver = Some(resolver);
+            configured.store(true, Ordering::Release);
             Ok(())
         })
         .await
@@ -745,6 +835,25 @@ impl ActorHandle {
         &self.identity
     }
 
+    /// The path the store opened by. Reopening the store by it reaches the
+    /// folder the engine checked, as the actor's own connection does. Hold
+    /// this handle, or its [`Self::location`], while using the path.
+    pub fn database_path(&self) -> &std::path::Path {
+        self.store.database_path()
+    }
+
+    /// The folder that holds the store, by the same path, where the
+    /// workspace's data key lives.
+    pub fn store_folder(&self) -> &std::path::Path {
+        self.store.folder()
+    }
+
+    /// Where the store is. Keep it, rather than a copy of its path, for work
+    /// that may outlive this handle: it keeps the store's folder open.
+    pub fn location(&self) -> Arc<StoreLocation> {
+        Arc::clone(&self.store)
+    }
+
     /// The actor's current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
@@ -763,7 +872,12 @@ impl ActorHandle {
                     .staging_location(&row.job_id)?
                     .unwrap_or_else(|| ".dohc/engine/displaced".into());
                 let path = format!("{dir}/{}", row.displaced_name);
-                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                let (_, reached) = dohc_engine_files::materialize::stored_path(
+                    store.database_path(),
+                    &root,
+                    std::path::Path::new(&path),
+                );
+                if std::fs::symlink_metadata(reached).is_ok() {
                     files.push((row.target_path, path));
                 }
             }
@@ -1077,7 +1191,9 @@ async fn wait_for_conversation_retry(
 fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R, RuntimeError> {
     let drain = store.drain_flushes().map_err(|error| {
         RuntimeError::Materialize(dohc_engine_files::MaterializeError::Io {
-            path: store.database_path().to_string_lossy().into_owned(),
+            path: shown_path(store.database_path())
+                .to_string_lossy()
+                .into_owned(),
             kind: error.kind(),
             raw_os_error: error.raw_os_error(),
             // macOS checks privacy when a path opens, and the drain uses a
@@ -1086,6 +1202,18 @@ fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R
         })
     });
     outcome.and_then(|value| drain.map(|()| value))
+}
+
+/// The store's path as a person can read it. On Linux it goes through the
+/// held folder's current name, not this process's descriptor for it.
+fn shown_path(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    if let (Some(folder), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(current) = dohc_linux_files::held::path_by_name(folder)
+    {
+        return current.join(name);
+    }
+    path.to_owned()
 }
 
 #[cfg(any(windows, target_vendor = "apple"))]
@@ -1111,6 +1239,12 @@ fn require_single_database_link(file: &std::fs::File) -> Result<(), RuntimeError
         return Err(RuntimeError::WorkspaceHardlinked);
     }
     Ok(())
+}
+
+/// The folder that holds the store at `database_path`, by the path the store
+/// opened by, where the workspace's data key lives.
+pub(crate) fn store_folder(database_path: &std::path::Path) -> &std::path::Path {
+    database_path.parent().unwrap_or(std::path::Path::new(""))
 }
 
 fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeError> {
@@ -1161,6 +1295,93 @@ fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeE
 mod reader_tests;
 
 #[cfg(test)]
+mod held_reader_tests {
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+
+    type Hook = Box<dyn FnOnce(&EngineStore) + Send>;
+
+    fn hooks() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Hook>> {
+        static HOOKS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<PathBuf, Hook>>,
+        > = std::sync::OnceLock::new();
+        HOOKS.get_or_init(Default::default)
+    }
+
+    /// Run the hook a test set for the next reader of `path`, once it opens.
+    pub(super) fn opened(path: &std::path::Path, store: &EngineStore) {
+        let hook = hooks().lock().unwrap().remove(path);
+        if let Some(hook) = hook {
+            hook(store);
+        }
+    }
+
+    /// A History reader keeps the store's folder after the future that
+    /// started it is dropped, its handle is gone and its actor has closed,
+    /// and reads through it until it finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reader_keeps_the_store_folder_after_its_caller_and_actor_go() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        let location = Arc::downgrade(&actor.location());
+        let held = actor.database_path().to_path_buf();
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let hook: Hook = Box::new(move |store| {
+            opened_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let read = store.read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            });
+            read_tx.send(read.is_ok_and(|tables| tables > 0)).unwrap();
+        });
+        hooks().lock().unwrap().insert(held.clone(), hook);
+        let call = tokio::spawn({
+            let (actor, root) = (actor.clone(), scratch.path().to_path_buf());
+            async move {
+                actor
+                    .history_undo_pending_publication(
+                        "workspace".into(),
+                        "operation".into(),
+                        root,
+                        crate::CancellationToken::new(),
+                    )
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || opened_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        drop(actor);
+        assert!(supervisor.close(&db).unwrap());
+        assert!(location.upgrade().is_some(), "the reader let the folder go");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let (by_held, by_name) = (
+                std::fs::metadata(&held).unwrap(),
+                std::fs::metadata(&db).unwrap(),
+            );
+            assert_eq!(
+                (by_held.dev(), by_held.ino()),
+                (by_name.dev(), by_name.ino())
+            );
+        }
+        release_tx.send(()).unwrap();
+        let read = tokio::task::spawn_blocking(move || read_rx.recv());
+        assert!(read.await.unwrap().unwrap(), "the reader could not read");
+    }
+}
+
+#[cfg(test)]
 mod saturation_tests {
     use super::*;
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1183,7 +1404,9 @@ mod saturation_tests {
         let metrics = SharedMetrics::default();
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
+            reader_configured: Arc::default(),
             identity,
+            store: StoreLocation::new(db.to_path_buf()),
             generation: 1,
             mode: ActorOpenMode::ReadWrite,
             store_freshly_created: false,

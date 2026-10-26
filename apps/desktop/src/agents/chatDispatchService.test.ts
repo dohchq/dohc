@@ -7,7 +7,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -22,7 +22,11 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RunnerSettings } from "../settings/userSettings";
+import { launchFrom, type AgentLaunchProfile } from "./agentToolCatalog";
+import { testAgent } from "../testing/agentSettings";
+
+// The first agent's launch, switch and timeout, which a test changes in place.
+type RunnerSettings = { command: string; profile?: AgentLaunchProfile; enabled: boolean; timeoutMinutes: number };
 import type { PostNoticeInput } from "../notices/noticeStore";
 import { createOwedRunNotices, type OwedRunNotices } from "./owedRunNotices";
 import {
@@ -56,6 +60,10 @@ import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/works
 import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
 import { createWorkspaceTrust, type WorkspaceTrust } from "../workspaces/workspaceTrust";
+
+const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
+  ? ["win32", "x64", "node.exe"] as const
+  : ["darwin", "arm64", "node"] as const;
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -113,8 +121,10 @@ class FakeRunnerProcess implements RunnerProcess {
 }
 
 interface FixtureOptions {
+  packaged?: boolean;
   workspaceAttachmentId?: symbol;
   platform?: NodeJS.Platform;
+  arch?: string;
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   dispatchNoticeFailures?: Error[];
@@ -590,11 +600,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       storeResolves.chat += 1;
       return chat;
     },
+    startSelfTestThread: async (place, input) => (await chat.startChannelThread({
+      workspaceId: place.workspaceId, ...input,
+      authorActorKey: null, author: { kind: "human", displayName: "Sam" }, origin: "cli",
+    })).thread.id,
     dispatchStoreFor: () => {
       storeResolves.dispatch += 1;
       return serviceDispatch;
     },
-    readRunnerSettings: async () => ({ ...runner }),
+    readDispatchAgent: async () => {
+      const launch = launchFrom(runner.profile, runner.command);
+      return launch ? { id: "default", ...testAgent({ enabled: runner.enabled, timeoutMinutes: runner.timeoutMinutes }), launch } : null;
+    },
     identityFor: async () =>
       options.identity ?? {
         displayName: "Nova",
@@ -603,7 +620,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
-    isPackaged: () => false,
+    isPackaged: () => options.packaged ?? false,
+    resourcesPath: () => join(appRoot, "resources"),
     queueSync: async (dispatchWorkspace) => {
       syncWorkspaces.push(dispatchWorkspace);
       syncRequests.push(dispatchWorkspace.workspaceId);
@@ -655,6 +673,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     spawnRunner,
     killProcessGroup,
     platform: options.platform ?? "linux",
+    arch: options.arch,
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -820,6 +839,91 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 }
 
 describe("chatDispatchService", () => {
+  it("the connection test exposes the missing packaged runtime repair instruction", async () => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    const result = await fixture.service.runnerSelfTest(WORKSPACE_ID);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+    expect(result.detail).not.toContain("runner failed to start: runner failed to start:");
+    expect(fixture.spawnCalls).toHaveLength(0);
+  });
+  it.each([0, 7])("a packaged run with its own Node does not recommend installing Node, exit %s", async (exitCode) => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    const compiler = join(fixture.appRoot, "resources", "app-compiler");
+    await mkdir(compiler, { recursive: true });
+    await writeFile(join(compiler, nodeName), "runtime", { mode: 0o755 });
+    vi.stubEnv("PATH", "");
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.notices).toHaveLength(1);
+    expect(fixture.notices[0]!.body).toBe("");
+  });
+
+  it("shows the missing packaged runtime repair instruction in Notices", async () => {
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      body: "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+    })]);
+  });
+  it.each([
+    { nodePresent: false, exitCode: 7, replied: false },
+    { nodePresent: false, exitCode: 0, replied: false },
+    { nodePresent: true, exitCode: 7, replied: false },
+    { nodePresent: true, exitCode: 0, replied: false },
+    { nodePresent: false, exitCode: 0, replied: true },
+    { nodePresent: false, exitCode: 7, replied: true },
+  ])("adds the Node.js notice only for a missing runtime and missing reply: %j", async ({ nodePresent, exitCode, replied }) => {
+    const fixture = await createFixture();
+    const bin = join(fixture.appRoot, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    if (nodePresent) await writeFile(join(bin, "node"), "not executed", { mode: 0o700 });
+    vi.stubEnv("PATH", "");
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    if (replied) await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toHaveLength(1);
+    expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
+      ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
+      : "");
+  });
+
+  it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
+    const noticeFailures = Array.from({ length: 20 }, () => new Error("Notice unavailable"));
+    const fixture = await createFixture({ noticeFailures });
+    vi.stubEnv("PATH", "");
+    await createAgentThread(fixture, { body: "Recover the notice.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const runId = fixture.spawnCalls[0]!.options.env.DOHC_RUN_ID!;
+    expect(fixture.notices).toEqual([]);
+    expect(await fixture.owedRunNotices.list(WORKSPACE_ID)).toContain(runId);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode });
+    await fixture.service.stop();
+    fixture.service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      runNotices: {
+        post: async (notice) => { fixture.notices.push(notice); },
+        owed: createOwedRunNotices(() => fixture.owedRunNoticesPath),
+      },
+    });
+    vi.unstubAllEnvs();
+    await activate(fixture);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      body: "Agent replies need Node.js. Install Node.js, restart dohc, then try again.",
+    })]);
+  });
+
   it("does not provision an agent channel before the runner is enabled", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
 
@@ -928,6 +1032,20 @@ describe("chatDispatchService", () => {
       (await fixture.dispatch.listPending(WORKSPACE_ID)).map((record) => record.triggerMessageId),
     ).toEqual([agentHuman.messageId, localWithoutRelayIdentity.messageId, mention.message.id]);
     expect(fixture.spawnCalls).toHaveLength(0);
+  });
+
+  it("reports each pause and resume once, wherever it came from", async () => {
+    const fixture = await createFixture();
+    const onPausedChanged = vi.fn<(paused: boolean) => void>();
+    const service = createChatDispatchService({ ...fixture.serviceOptions, onPausedChanged });
+
+    service.setPaused(true);
+    service.setPaused(true);
+    service.setPaused(false);
+    service.setPaused(false);
+
+    expect(onPausedChanged.mock.calls).toEqual([[true], [false]]);
+    expect(service.isPaused()).toBe(false);
   });
 
   it("records exactly the human UI messages addressed to the agent", async () => {
@@ -1075,7 +1193,7 @@ describe("chatDispatchService", () => {
     const prompt = firstSpawn.process.stdinText;
     expect(prompt).toContain("# Launch review");
     expect(prompt).toContain("Audit the rollback plan.");
-    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent`);
+    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent "<report>"`);
     expect(prompt).toContain("Your final text is not shown anywhere");
     expect(firstSpawn.options).toMatchObject({
       cwd: fixture.root,
@@ -1523,7 +1641,7 @@ describe("chatDispatchService", () => {
 
     const call = fixture.spawnCalls[0]!;
     const prompt = call.process.stdinText ?? "";
-    expect(prompt).toContain(`--as-agent "`);
+    expect(prompt).toContain(`--option "<choice>"`);
     expect(prompt).toContain("Ship the release notes.");
     // Nothing carrying a quote may reach the command line, because that is
     // exactly what cmd.exe cannot represent.
@@ -3282,9 +3400,56 @@ describe("chatDispatchService", () => {
     expect(fixture.errors).toContain(noticeError);
   });
 
-  it.each([undefined, "claude", "codex"] as const)("passes the spawn contract in a %s runner self-test", async (tool) => {
+  // Each reply form as a runner's prompt shows it, with the reply's body in place.
+  function expectedReply(form: "argument" | "mcp", threadId: string, runId: string, body: string): string {
+    if (form === "mcp") return `the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``;
+    return `dohc chat reply ${threadId} --as-agent "${body}"`;
+  }
+
+  it.each([
+    [undefined, "argument"],
+    ["claude", "mcp"],
+    ["codex", "mcp"],
+  ] as const)("uses the %s runner's reply form", async (tool, form) => {
+    const profile = tool ? { tool, executable: resolve(`test-${tool}.exe`) } : undefined;
+    const fixture = await createFixture({ runner: { command: "claude -p", profile } });
+    const thread = await createAgentThread(fixture, { body: "Reply." });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const call = fixture.spawnCalls[0]!;
+    const prompt = call.process.stdinText;
+    expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
+    if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
+    const instructionsFile = "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them.";
+    if (tool === "claude") expect(prompt).toContain(instructionsFile);
+    else expect(prompt).not.toContain("CLAUDE.md");
+  });
+
+  it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
+    const fixture = await createFixture();
+    const writing = deferred<void>();
+    const thread = deferred<string>();
+    fixture.serviceOptions.startSelfTestThread = async () => { writing.resolve(); return thread.promise; };
+    const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await writing.promise;
+    if (reason === "shutdown") await fixture.service.stop();
+    else fixture.serviceOptions.runSlotOccupied = () => true;
+    thread.resolve("test-thread");
+    await expect(result).resolves.toEqual({ ok: false, detail: reason === "shutdown" ? "Agent dispatch is stopping." : "A runner became active before the self-test could start." });
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.attributions).toEqual([]);
+  });
+
+  it.each([
+    [undefined, "linux", "argument"],
+    ["claude", "linux", "mcp"],
+    ["claude", "win32", "mcp"],
+    ["codex", "linux", "mcp"],
+    ["codex", "win32", "mcp"],
+  ] as const)("passes the spawn contract in a %s runner self-test on %s", async (tool, platform, form) => {
     const profile = tool ? { tool, executable: resolve(`test-${tool}.exe`) } : undefined;
     const fixture = await createFixture({
+      platform,
       runner: { command: profile ? "" : "claude -p", profile },
     });
 
@@ -3296,33 +3461,49 @@ describe("chatDispatchService", () => {
     });
     expect(fixture.spawnCalls).toHaveLength(1);
     const call = fixture.spawnCalls[0]!;
-    expect(call.options.env.DOHC_CHAT_THREAD).toBeUndefined();
+    const threadId = call.options.env.DOHC_CHAT_THREAD!;
+    expect(threadId).toEqual(expect.any(String));
     const runId = call.options.env.DOHC_RUN_ID;
     if (!runId) throw new Error("Expected self-test attribution.");
     if (profile) {
       expect(call.command).toBe(profile.executable);
-      expect(call.args).toEqual(agentProfileArguments(profile));
+      // The run starts the dohc MCP server it replies through.
+      const cliBin = join(fixture.appRoot, "node_modules", ".bin");
+      const server = join(cliBin, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
+      const configPath = join(fixture.stateRoot, "run-logs", `${runId}.log.mcp.json`);
+      expect(call.args).toEqual(agentProfileArguments(profile, profile.tool === "codex" ? [
+        `mcp_servers.dohc.command='${server}'`,
+        `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
+        `mcp_servers.dohc.cwd='${cliBin}'`,
+        "mcp_servers.dohc.required=true",
+        "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
+        "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
+      ].flatMap((entry) => ["--config", entry]) : ["--mcp-config", configPath]));
+      if (profile.tool === "claude") {
+        expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
+          mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },
+        });
+      }
       expect(call.options.cwd).toBe(fixture.workspace.rootPath);
     }
     const marker = `dohc-runner-self-test:${runId}`;
     const agentChannel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    expect(call.process.stdinText).toContain(
-      `dohc chat post ${agentChannel.id} --as-agent --title "dohc runner self-test" "${marker}"`,
-    );
+    expect(call.process.stdinText).toContain(expectedReply(form, threadId, runId, marker));
+    if (form === "mcp") expect(call.process.stdinText).toContain(`\`body\` \`${marker}\``);
     expect(runId).toBe("run_self_test_self_test_id_1");
     expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: UNNAMED_AGENT_ID, agentRunId: runId, depth: 0, dispatch: "self-test" });
 
-    expect(await fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agentChannel.id })).toEqual([]);
-    const started = await fixture.chat.startChannelThread({
+    expect(await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toEqual([
+      expect.objectContaining({ author: expect.objectContaining({ kind: "human" }), body: "Reply here to check the agent connection." }),
+    ]);
+    await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
-      channelId: agentChannel.id,
-      title: "dohc runner self-test",
+      threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: marker,
     });
-    const threadId = started.thread.id;
     call.process.emitExit(0);
 
     await expect(resultPromise).resolves.toEqual({
@@ -3414,12 +3595,10 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
     });
     const call = fixture.spawnCalls[0]!;
-    const agentChannel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    await fixture.chat.startChannelThread({
+    await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
-      channelId: agentChannel.id,
-      title: "dohc runner self-test",
+      threadId: call.options.env.DOHC_CHAT_THREAD!,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,

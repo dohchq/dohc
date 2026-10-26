@@ -67,6 +67,7 @@ import {
   YDocSessionClosedError,
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
+  isYDocOutsideWriteWaitingError,
   isYDocSessionUnreleasedError,
   isConflictStaleTargetCause,
   isVolumeSharesNewFilesCause,
@@ -162,6 +163,7 @@ interface SessionEvent {
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
+  changedOutside?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["changedOutside"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -291,6 +293,12 @@ export interface LiveDocumentEdit {
    * typing in the document.
    */
   change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  /**
+   * Throws when the document at the resolved `path` is a lossy note
+   * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
+   * It runs before any session opens or anything changes.
+   */
+  assertEditable(path: string): Promise<void>;
   origin: LiveDocumentEditOrigin;
 }
 
@@ -682,6 +690,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
           signals.emit(event);
@@ -743,6 +752,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onObjectChanged: () => {
               publish(() => markObjectChanged());
+            },
+            onChangedOutside: (unsaved) => {
+              publish(() => emit({
+                state: unsaved ? "changed-on-disk" : "saved", seq: saveSeq.dirtySeq, changedOutside: { unsaved },
+              }));
             },
           });
         } catch (error) {
@@ -1050,6 +1064,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<AppliedEdit> {
+    await input.assertEditable(path);
     const attachment = workspace.attachmentId;
     const held = this.#owner.documentSession(attachment, path);
     if (held) return await this.#editHeld(held, path, input);
@@ -1335,6 +1350,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return this.#fileMutationPort;
   }
 
+  /**
+   * Changes a document's live editing for a main-side door, as the window
+   * does once its editors closed: refused while an editor holds the
+   * document, and an editor that opens meanwhile waits for the change.
+   */
+  async withLiveEditingChange<T>(authorityId: symbol, path: string, change: () => Promise<T>): Promise<T> {
+    try {
+      return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
+    } catch (error) {
+      if (!(error instanceof LiveDocumentOwnedError)) throw error;
+      throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`, { cause: error });
+    }
+  }
+
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
@@ -1412,6 +1441,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   #openRefusal(error: unknown): OpenResult {
     if (isCaptureFileHeldRefusal(error)) return unavailableOpen({ captureHeld: true });
+    if (isYDocOutsideWriteWaitingError(error)) return unavailableOpen({ outsideWriteWaiting: true });
     if (isYDocPathNotInVersionError(error)) {
       return unavailableOpen({ notInVersion: true });
     }
@@ -1466,8 +1496,12 @@ async function applyDocumentEdit(
     // The session's journal holds the edit and a later settle saves it.
     // Sending the edit again could apply it twice.
     const cause = error instanceof Error ? error.message : String(error);
+    // Over a change made outside dohc, the disk version stands when the
+    // document reloads or closes, and the edit stays in History.
     throw new LiveDocumentEditAppliedError(
-      `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+      isConflictStaleTargetCause(error)
+        ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+        : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
       { cause: error },
     );
   }

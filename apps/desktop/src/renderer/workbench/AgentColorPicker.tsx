@@ -60,7 +60,7 @@ const EDGE_PX = 12;
  */
 export function AgentColorScope(props: {
   name: string;
-  kind: "human" | "agent" | "automation";
+  kind: "human" | "agent" | "automation" | "link";
   presentation: ActorPresentation;
   children: ReactNode;
 }) {
@@ -195,12 +195,13 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
   );
 }
 
-/** The popover's frame and swatches, olive Default first. */
+/** The popover's frame and swatches, olive first. Olive is no color chosen, so it stores nothing. */
 export function AgentColorSwatches(props: { label: string; value: IdentityHue | null; onChange: (hue: IdentityHue | null) => void }) {
   return (
     <div className={MENU_FRAME}>
       <div className="p-1">
-        <HueControl label={props.label} shape="agent" value={props.value} arrowsMoveFocus onChange={props.onChange} />
+        <HueControl label={props.label} shape="agent" value={props.value ?? "olive"} arrowsMoveFocus
+          onChange={(hue) => props.onChange(hue === "olive" ? null : hue)} />
       </div>
     </div>
   );

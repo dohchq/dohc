@@ -1793,9 +1793,43 @@ pub(crate) struct CompleteYdocLineage {
 pub struct PreparedLocalYdocLineage {
     complete: CompleteYdocLineage,
     projection: Option<dohc_engine_collab::Projection>,
+    reader_delta: Option<Vec<u8>>,
 }
 
 impl PreparedLocalYdocLineage {
+    pub fn accept_outside_fold(
+        &mut self,
+        conn: &Connection,
+        fold: &dohc_engine_collab::reader_resolver::PreparedFold,
+        source: &str,
+    ) -> Result<(), SyncError> {
+        let Some((marker, doc)) = self.complete.state.as_ref() else {
+            return Ok(());
+        };
+        if !fold.matches(&self.complete.key, marker, doc, source) {
+            return Err(SyncError::RetryableState {
+                reason: "outside-fold-stale",
+            });
+        }
+        if let Ok(candidate) = doc.native_fold_candidate(&fold.delta) {
+            let projection = match project_ydoc_with_store(
+                conn,
+                &self.complete.key,
+                &candidate,
+                ContentKind::Richdoc,
+            ) {
+                Ok(projection) => projection,
+                Err(SyncError::InvalidInput { .. } | SyncError::ProjectionTooLarge { .. }) => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if projection.content == source {
+                self.reader_delta = Some(fold.delta.clone());
+            }
+        }
+        Ok(())
+    }
     pub fn projection(&self) -> Option<&dohc_engine_collab::Projection> {
         self.projection.as_ref()
     }
@@ -1815,6 +1849,7 @@ pub fn prepare_local_ydoc_lineage_in_tx(
     Ok(PreparedLocalYdocLineage {
         complete,
         projection,
+        reader_delta: None,
     })
 }
 
@@ -2187,6 +2222,7 @@ pub fn reconcile_local_head_in_tx(
         tx,
         &complete,
         None,
+        None,
         resulting,
         actor_origin_id,
         attribution,
@@ -2208,6 +2244,7 @@ pub fn reconcile_prepared_local_head_in_tx(
         tx,
         &prepared.complete,
         prepared.projection.as_ref(),
+        prepared.reader_delta.as_deref(),
         resulting,
         actor_origin_id,
         attribution,
@@ -2215,10 +2252,12 @@ pub fn reconcile_prepared_local_head_in_tx(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconcile_local_complete_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
     projection: Option<&dohc_engine_collab::Projection>,
+    reader_delta: Option<&[u8]>,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
@@ -2252,6 +2291,7 @@ fn reconcile_local_complete_resulting_head_in_tx(
                 now_ms,
                 LineageFoldCause::LocalMutation { unsettled_authors },
                 projection,
+                reader_delta,
             )?;
             match folded {
                 LineageFold::Folded {
@@ -2356,7 +2396,7 @@ fn projection_held_in_tx(
     key: &DocKey,
     content: &str,
 ) -> Result<bool, SyncError> {
-    if dohc_engine_collab::seed_only_lineage_source(tx, key)
+    if dohc_engine_collab::pristine_seed_lineage_source(tx, key)
         .map_err(map_collab_hard_error)?
         .is_some()
     {
@@ -2615,6 +2655,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         now_ms,
         cause,
         None,
+        None,
     )
 }
 
@@ -2628,6 +2669,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     now_ms: i64,
     cause: LineageFoldCause,
     projection: Option<&dohc_engine_collab::Projection>,
+    reader_delta: Option<&[u8]>,
 ) -> Result<LineageFold, SyncError> {
     let LineageFoldAuthor {
         actor_origin_id,
@@ -2700,30 +2742,32 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let (mut update, source_bound) =
-            match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
-                Err(CollabError::MarkdownNotRepresentable)
-                    if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
-                {
-                    retire_complete_ydoc_lineage_in_tx(tx, complete)?;
-                    return Ok(LineageFold::NoContent);
-                }
-                // Keep the body XML when the chosen file keeps its settled
-                // body. The final proof below checks the retained XML.
-                Err(CollabError::MarkdownNotRepresentable)
-                    if marker.content_kind == ContentKind::Richdoc
-                        && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
-                            markdown_body(&settled) == markdown_body(chosen_text)
-                        }) =>
-                {
-                    (
-                        doc.replace_frontmatter_for_fold(chosen_text)
-                            .map_err(map_fold_edit_error)?,
-                        true,
-                    )
-                }
-                result => (result.map_err(map_fold_edit_error)?, false),
-            };
+        let (mut update, source_bound) = match reader_delta.map_or_else(
+            || doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text),
+            |delta| doc.apply(delta).map(|()| delta.to_vec()),
+        ) {
+            Err(CollabError::MarkdownNotRepresentable)
+                if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
+            {
+                retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                return Ok(LineageFold::NoContent);
+            }
+            // Keep the body XML when the chosen file keeps its settled
+            // body. The final proof below checks the retained XML.
+            Err(CollabError::MarkdownNotRepresentable)
+                if marker.content_kind == ContentKind::Richdoc
+                    && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
+                        markdown_body(&settled) == markdown_body(chosen_text)
+                    }) =>
+            {
+                (
+                    doc.replace_frontmatter_for_fold(chosen_text)
+                        .map_err(map_fold_edit_error)?,
+                    true,
+                )
+            }
+            result => (result.map_err(map_fold_edit_error)?, false),
+        };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {

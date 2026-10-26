@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DOHC_COLLECTIONS_GUARD,
   DOHC_ENGINE_GUARD,
+  DOHC_DATABASES_GUARD,
   DOHC_METADATA_GUARD,
   DOHC_SYNC_HISTORY_GUARD,
   DOHC_TRASH_GUARD,
@@ -8,6 +10,9 @@ import {
   notARealFolderRefusal,
   notOnlyYoursRefusal,
   outsideWorkspaceRefusal,
+  hardLinkedFileRefusal,
+  fileChangedWhileOpeningRefusal,
+  folderChangedBeforeWritingRefusal,
 } from "./dohcGuardRefusals";
 
 const asFile = { isSymbolicLink: () => false, isFile: () => true };
@@ -19,6 +24,18 @@ const asOther = { isSymbolicLink: () => false, isFile: () => false };
 // surfaces at once. Pinned by exact match, byte for byte — swapping "folder"
 // back to "directory" fails these first.
 describe("dohc guard refusals", () => {
+  it("names a file's other link and a change during opening with recovery steps", () => {
+    const guard = { ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data/operations.jsonl" };
+    expect(hardLinkedFileRefusal(guard)).toBe(
+      "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl has another link, so changes here would change that file too. Remove or rename this file. Then retry.",
+    );
+    expect(fileChangedWhileOpeningRefusal(guard)).toBe(
+      "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl changed while dohc opened it. Stop other programs from changing this file. Then retry.",
+    );
+    expect(folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" })).toBe(
+      "dohc could not save this database edit. The folder at .dohc/databases/data changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.",
+    );
+  });
   it("names the squatter, the constraint, and the way out — one noun for both paths", () => {
     expect(notARealFolderRefusal(DOHC_TRASH_GUARD, asFile)).toBe(
       "dohc could not move this to the workspace trash. A file is at .dohc/local/trash, which must be a real folder. Remove or rename that file. Then retry.",
@@ -38,6 +55,9 @@ describe("dohc guard refusals", () => {
     expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
     );
+    expect(notAFileRefusal(DOHC_COLLECTIONS_GUARD, asLink)).toBe(
+      "dohc could not read which computer keeps this workspace's Collections. A link is at .dohc/collections.json, which must be a file. Remove or rename that link. Then retry.",
+    );
     expect(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, asLink)).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.",
     );
@@ -53,7 +73,7 @@ describe("dohc guard refusals", () => {
 
   it("names a folder another user can change, and the way out", () => {
     expect(notOnlyYoursRefusal(DOHC_TRASH_GUARD)).toBe(
-      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash, which must be a folder only you can change. Remove or rename it. Then retry.",
+      "dohc could not move this to the workspace trash. Another user can change .dohc/local/trash. Make it a folder only you can change. Then retry.",
     );
   });
 

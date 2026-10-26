@@ -113,8 +113,6 @@
     "apps/desktop/src/main.ts | CHANNELS.getSitePackage",
     "apps/desktop/src/main.ts | CHANNELS.listSites",
     "apps/desktop/src/main.ts | handleIpc forwards channel to ipcMain.handle",
-    "apps/desktop/src/main.ts | registerAutomationButtonsIpc.registerHandler forwards channel to ipcMain.handle",
-    "apps/desktop/src/main.ts | registerStopAndRestoreIpc.registerHandler forwards channel to ipcMain.handle",
     "apps/desktop/src/preload.ts | CHANNELS.acceptDm",
     "apps/desktop/src/preload.ts | CHANNELS.applyDatabaseEdit",
     "apps/desktop/src/preload.ts | CHANNELS.attachWorkspaceFolder",

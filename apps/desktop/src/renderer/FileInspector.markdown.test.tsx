@@ -16,6 +16,7 @@ import {
 } from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // Collect the real lazy modules before hook and renderer assertion timers start.
 import "./markdown/IncrementalMarkdownDocument";
@@ -51,6 +52,9 @@ const engineDocState: UseEngineDoc = {
   deletedDraftId: null,
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
+  changedOutside: null,
+  outsideWriteWaiting: false,
+  unsavedEditsPending: () => false,
   readOnlyWhileEditing: false,
   readOnlyDraftId: null,
   readOnlyCause: null,
@@ -76,10 +80,10 @@ const TABLE_DOCUMENT = [
   "| name | 214 |",
   "| entry | 1024 |",
   "",
-  // Cross the 64 KiB WYSIWYG threshold without using a truncated read. This
+  // Cross the WYSIWYG threshold without using a truncated read. This
   // test owns the non-truncated rich-read branch; the test below owns the
   // bounded source branch for truncated Markdown.
-  "x".repeat(64 * 1024),
+  "x".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES),
   "",
 ].join("\n");
 
@@ -118,6 +122,23 @@ describe("FileInspector renders markdown through the shared component map", () =
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it("opens a note over the limit in bytes as the read preview, even under it in characters", async () => {
+    // A live session seeds at most WYSIWYG_MARKDOWN_THRESHOLD_BYTES of UTF-8,
+    // so the WYSIWYG editor must not open a note past it without one (#2521).
+    // Each sentence is 10 characters and 30 bytes.
+    const japanese = `# 長いメモ\n\n${"長いメモの段落です。".repeat(Math.floor(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 20))}\n`;
+    expect(japanese.length).toBeLessThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
+    expect(new TextEncoder().encode(japanese).byteLength).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: japanese, truncated: false }));
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      expect((await screen.findByTestId("markdown-edit-toggle")).textContent).toContain("Edit");
+    } finally {
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
   });
 
   it("shows a table as a table, inside the wrapper that keeps the page from scrolling sideways", async () => {

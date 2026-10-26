@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import { foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import type {
@@ -15,7 +16,6 @@ import type {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   VersionedLiveAdapter,
-  YdocReleasedWithSettleFailureError,
   isWorkspaceUpdatingRefusal,
   openEngineYdocProviderSession,
   type EngineTransport,
@@ -23,6 +23,7 @@ import {
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
+  isYDocOutsideWriteWaitingError,
   isYDocPathNotInVersionError,
   type WorkspaceEngineCaptureFailure,
   type WorkspaceEngineCaptureOptions,
@@ -149,14 +150,17 @@ async function waitForDaemonCaptureDeferral(
 ): Promise<void> {
   const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
   while (performance.now() < deadline) {
-    const outcome = await sessions.run(
+    const status = await sessions.run(
       workspace,
-      async ({ client, workspace: handle }) =>
-        await new VersionedLiveAdapter(client, handle, {
+      async ({ client, workspace: handle }) => {
+        const engine = new VersionedLiveAdapter(client, handle, {
           workspaceId: workspace.workspaceId,
-        }).flushCapture(),
+        });
+        expect(await engine.flushCapture()).toMatchObject({ settled: true, degraded: false });
+        return engine.watcherStatus();
+      },
     );
-    if (!outcome.settled) return;
+    if (status.deferredWrites.length > 0) return;
     await delay(25);
   }
   throw new Error("Daemon capture did not report its live-session deferral.");
@@ -591,7 +595,7 @@ it.skipIf(engine.missing)(
       await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
       const settled = await session.settleNow();
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(
-        settled.content,
+        settled?.content,
       );
 
       // The outside writer replaces the file. Nothing is typed afterwards, so
@@ -757,7 +761,7 @@ it.skipIf(engine.missing)(
 );
 
 // #496 under the live-session capture gate: the daemon observes the outside
-// edit but cannot ingest it while the Y.Doc lease is live. The unsettled flush
+// edit but cannot ingest it while the Y.Doc lease is live. The deferred path
 // is the ordering proof. A clean close releases the lease, after which the
 // queued disk edit becomes a capture moment.
 it.skipIf(engine.missing)(
@@ -975,14 +979,12 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // deferred outside edit as above, but the user has unsettled edits when the
 // close runs: the close-settle refuses ConflictStaleTarget, and then the
 // release refuses too — a local-only prune needs the CRDT projection to equal
-// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
-// daemon reinserts the session entry on that refusal
-// (crates/dohc-workspace-engine/src/lib.rs, ydoc_close_inner). The doc stays
-// reserved, live, and unsaved, so the failure must stay loud. Deciding this
-// at the refusal instead of after the release reported "changed on disk" over
-// exactly this state.
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs). The outside
+// edit waits for this session, so the close evicts it: the disk version
+// stands and the unsettled text comes back as a recovered copy (#2463). The
+// save refusal still reads as an error, never as "changed on disk".
 it.skipIf(engine.missing)(
-  "keeps the close loud when unsettled edits meet a deferred outside edit",
+  "keeps unsettled edits in a recovered copy when their close meets a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
     const lifecycle = createRealDaemonLifecycle({
@@ -1042,40 +1044,15 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      const closeError = await session.close().then(
-        () => null,
-        (error: unknown) => error,
-      );
-      // The sharpest statement of the fix. The error the release throws here
-      // carries the stale-target message — the escalated settling release
-      // refuses the same way the settle did — while not being the
-      // released-with-settle-failure signal, because nothing was released.
-      // A downgrade keyed on the refusal's message would fire on exactly
-      // this; keyed on the type, it cannot.
-      expect(closeError).not.toBeNull();
-      expect(closeError).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
-      expect(String(closeError)).toContain("conflict-stale-target");
-      expect(states.at(-1)).toBe("error");
-      expect(states).not.toContain("changed-on-disk");
+      await expect(session.close()).resolves.toBeUndefined();
+      // The refused save reads as the change made outside dohc, which clears
+      // its save-failure notice. No capture poll ran before this close.
+      expect(states).toContain("error");
+      expect(states.at(-1)).toBe("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
 
-      // The refused close kept the session usable and its lease held. A
-      // second settle reaches the same stale target, and no capture moment
-      // can appear over that still-unsaved Y.Doc state.
-      await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-      expect(
-        await listDaemonPathMoments(sessions, workspace, "note.md"),
-      ).toHaveLength(2);
-
-      // The outside author still owns the file, and the unsettled text is not
-      // in it — which is why "changed on disk" would have been a lie.
-      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
-
-      // Workspace teardown is the safe eviction boundary after the caller
-      // has observed the loud refusal. Reopening rebuilds capture and ingests
-      // the queued disk edit without letting the failed Y.Doc close overwrite
-      // it.
-      await sessions.closeWorkspace(workspace);
+      // The close recorded the queued disk edit without letting the refused
+      // Y.Doc save overwrite it.
       const capturedMoments = await waitForPathMoments(capture, "note.md", 4);
       expect(capturedMoments).toHaveLength(4);
       const recovery = capturedMoments.find(moment => moment.metadata.origin === "capture-recovery");
@@ -1283,8 +1260,8 @@ const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 // to settle and fails as "dohc could not check whether open files changed"
 // while History is still updating. Last, it answers the outcome of the first
 // health poll, which raises History paused unless it is null.
-async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}) {
-  const root = await createTestScratch(`dohc-${workspaceId}-`);
+async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}, existingRoot?: string) {
+  const root = existingRoot ?? await createTestScratch(`dohc-${workspaceId}-`);
   const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
@@ -1310,8 +1287,428 @@ async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEn
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
   };
-  return { root, sessions, capture, health, stop };
+  const withEngine = <T>(run: (engine: VersionedLiveAdapter) => Promise<T>) => sessions.run(workspace,
+    ({ client, workspace: handle }) => run(new VersionedLiveAdapter(client, handle, { workspaceId })));
+  return { root, sessions, capture, health, stop, withEngine, workspaceId, stopEngine: () => lifecycle.stop() };
 }
+
+it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
+  "captures an outside %s write into an open document without pausing History (#2463)",
+  async (style) => {
+    const opened = await openRealCapture(`outside-write-${style}`, { settleDebounceMs: 60_000 });
+    const editor = new Y.Doc();
+    const base = "base\n";
+    const outside = "written outside dohc\n";
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, base, "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const session = await opened.capture.openYDocSession({
+        path: "note.md", contentKind: "plaintext",
+        onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+      });
+      Y.applyUpdate(editor, session.initialUpdate);
+      expect(editor.getText("plainText").toString()).toBe(base);
+
+      if (style === "rename") {
+        const temporary = join(opened.root, "note.md.tmp");
+        await writeFile(temporary, outside, "utf8");
+        await rename(temporary, absolute);
+      } else {
+        const file = await open(absolute, "r+");
+        try {
+          await file.truncate(0);
+          await file.writeFile(outside, "utf8");
+        } finally {
+          await file.close();
+        }
+      }
+
+      // Part (a) keeps this editor unchanged. Part (b) takes in the edit.
+      expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.flushCapture())).toMatchObject({ settled: true, deferredWrites: ["note.md"] });
+      expect(await opened.withEngine((engine) => engine.reconcileCapture())).toMatchObject({ degraded: false, deferredWrites: ["note.md"] });
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      await writeFile(join(opened.root, "other.md"), "other file\n");
+      await waitForPathMoments(opened.capture, "other.md", 1);
+      await opened.withEngine(async (engine) => {
+        const operationId = `dohc-operation:other-during-${style}`;
+        const hold = await engine.holdCapture({ operationId });
+        try {
+          await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
+            fromPath: "other.md", toPath: "moved.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+          await rename(join(opened.root, "other.md"), join(opened.root, "moved.md"));
+        } finally { await engine.releaseCapture(hold.holdId); }
+        await engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId, requestId: `undo-other-${style}` });
+        expect(await engine.watcherStatus()).toMatchObject({ deferredWrites: ["note.md"] });
+      });
+      expect.soft(await readFile(absolute, "utf8")).toBe(outside);
+      // A refused pre-close save must still release the session's lease.
+      await session.close().catch(() => undefined);
+      await waitForPathMoments(opened.capture, "note.md", 2);
+      const history = await opened.capture.listMoments({ limit: 100 }).then(async (page) =>
+        Promise.all(page.moments.filter((moment) => moment.path === "note.md").map(async (moment) => {
+          const detail = await opened.capture.readMoment(moment.id);
+          return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+        })),
+      (error: unknown) => isWorkspaceUpdatingRefusal(error) ? "still updating" : Promise.reject(error));
+      expect.soft(history).toEqual([outside, base]);
+      expect.soft(await readFile(absolute, "utf8")).toBe(outside);
+      expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+      editor.destroy();
+    }
+  },
+  60_000,
+);
+
+// An agent replaces an open note's file, by rename or in place.
+async function writeOutside(absolute: string, text: string, style: "rename" | "in-place"): Promise<void> {
+  if (style === "rename") {
+    await writeFile(`${absolute}.tmp`, text, "utf8");
+    await rename(`${absolute}.tmp`, absolute);
+    return;
+  }
+  const file = await open(absolute, "r+");
+  try {
+    await file.truncate(0);
+    await file.writeFile(text, "utf8");
+  } finally {
+    await file.close();
+  }
+}
+
+// The editor's part of an open note: its Y.Doc, the save states main
+// reports, and what main says when the file changed outside dohc.
+async function openNote(capture: Pick<Awaited<ReturnType<typeof openRealCapture>>["capture"], "openYDocSession">) {
+  const editor = new Y.Doc();
+  const states: string[] = [];
+  const changedOutside: boolean[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md", contentKind: "plaintext",
+    onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+    onSaveState: (state) => states.push(state),
+    onChangedOutside: (unsaved) => changedOutside.push(unsaved),
+  });
+  Y.applyUpdate(editor, session.initialUpdate);
+  // An agent's edit through dohc reaches the same session with its origin.
+  const type = (text: string, author: "person" | "agent" = "person") => {
+    const vector = Y.encodeStateVector(editor);
+    editor.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector), undefined, author === "agent"
+      ? { actorOriginId: "test-agent", attribution: { actorKind: "agent", onBehalfOf: "local-person", depth: 0 } }
+      : undefined);
+  };
+  return { editor, session, states, changedOutside, type, text: () => editor.getText("plainText").toString() };
+}
+
+const RECOVERED_COPY = /^note \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
+
+it.skipIf(engine.missing).each(["rename", "in-place"] as const)(
+  "reloads an open note with nothing unsaved after a %s write outside dohc (#2463)",
+  async (style) => {
+    const opened = await openRealCapture(`reload-untouched-${style}`, { settleDebounceMs: 60_000 });
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const note = await openNote(opened.capture);
+      await writeOutside(absolute, "written outside dohc\n", style);
+      opened.capture.start();
+      await vi.waitFor(() => expect(note.changedOutside).toEqual([false]), { timeout: REAL_DAEMON_DEADLINE_MS });
+      const reported = note.states.length;
+      // The editor reopens by itself: its close saves nothing and answers
+      // once capture recorded the disk version.
+      await note.session.close();
+      expect(note.states.slice(reported)).not.toContain("error");
+      const reopened = await openNote(opened.capture);
+      expect(reopened.text()).toBe("written outside dohc\n");
+      await reopened.session.close();
+      expect(await readdir(opened.root)).toEqual([".dohc", "note.md"]);
+      expect(await readFile(absolute, "utf8")).toBe("written outside dohc\n");
+      expect(await opened.health()).toEqual({ newestMoment: "read", health: null });
+      expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing).each([
+  ["person", "reload", "rename"], ["person", "reload", "in-place"], ["person", "close", "rename"], ["person", "close", "in-place"],
+  ["agent", "reload", "rename"], ["agent", "close", "in-place"],
+] as const)(
+  "keeps the %s's unsaved edit in a copy on %s after a %s write outside dohc (#2463)",
+  async (author, action, style) => {
+    const opened = await openRealCapture(`reload-unsaved-${author}-${action}-${style}`, { settleDebounceMs: 60_000 });
+    try {
+      const absolute = join(opened.root, "note.md");
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(opened.capture, "note.md", 1);
+      const note = await openNote(opened.capture);
+      note.type("typed ", author);
+      await writeOutside(absolute, "written outside dohc\n", style);
+      opened.capture.start();
+      await vi.waitFor(() => expect(note.changedOutside).toEqual([true]), { timeout: REAL_DAEMON_DEADLINE_MS });
+      // The editor keeps the person's text until they act.
+      expect(note.text()).toBe("typed base\n");
+      // Reload closes the session and opens it again. Closing the note is
+      // the same close without the reopen.
+      await note.session.close();
+      if (action === "reload") {
+        const reopened = await openNote(opened.capture);
+        expect(reopened.text()).toBe("written outside dohc\n");
+        await reopened.session.close();
+      }
+      expect(await readFile(absolute, "utf8")).toBe("written outside dohc\n");
+      const copies = (await readdir(opened.root)).filter((name) => RECOVERED_COPY.test(name));
+      expect(copies).toHaveLength(1);
+      expect(await readFile(join(opened.root, copies[0]!), "utf8")).toBe("typed base\n");
+      expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+    } finally {
+      await opened.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)("treats unsettled text a reopened note starts with as unsaved (#2463)", async () => {
+  const opened = await openRealCapture("reload-unsettled-restart", { settleDebounceMs: 60_000 });
+  let restarted: Awaited<ReturnType<typeof openRealCapture>> | undefined;
+  let releaseSettle = (): void => undefined;
+  const settleGate = new Promise<void>((resolve) => { releaseSettle = resolve; });
+  try {
+    const absolute = join(opened.root, "note.md");
+    await writeFile(absolute, "base\n", "utf8");
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    const note = await openNote(opened.capture);
+    await new Promise<void>((armed) => {
+      const vector = Y.encodeStateVector(note.editor);
+      note.editor.getText("plainText").insert(0, "typed ");
+      note.session.applyLocalUpdate(Y.encodeStateAsUpdate(note.editor, vector), armed);
+    });
+    // Stop the daemon before any save, then open the note again. Its save of
+    // the text it starts with waits, so an outside write arrives first.
+    await opened.stopEngine();
+    restarted = await openRealCapture("reload-unsettled-restart", { settleDebounceMs: 60_000, openSettleGate: () => settleGate }, opened.root);
+    const reopened = await openNote(restarted.capture);
+    expect(reopened.text()).toBe("typed base\n");
+    await writeOutside(absolute, "written outside dohc\n", "rename");
+    restarted.capture.start();
+    await vi.waitFor(() => expect(reopened.changedOutside).toEqual([true]), { timeout: REAL_DAEMON_DEADLINE_MS });
+    releaseSettle();
+    await reopened.session.close();
+    expect(await readFile(absolute, "utf8")).toBe("written outside dohc\n");
+  } finally {
+    releaseSettle();
+    await restarted?.stop();
+    await opened.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing)("does not open a note again until capture records its outside version (#2463)", async () => {
+  const root = await createTestScratch("dohc-capture-unrecorded-");
+  const workspace = { workspaceId: "capture-unrecorded", rootPath: root, attachmentId: Symbol("capture-unrecorded") };
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  await lifecycle.start();
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  // Capture that does not record the outside version: its status keeps the
+  // path waiting. Its flush can also fail.
+  let captureRecords = false;
+  let flushFails = false;
+  const live = createCaptureLiveStores(workspace, sessions).store;
+  const store = new Proxy(live, {
+    get(target, property) {
+      if (property === "watcherStatus") {
+        return async () => {
+          const status = await target.watcherStatus!();
+          return captureRecords ? status : { ...status, deferredWrites: [...new Set([...status.deferredWrites, "note.md"])] };
+        };
+      }
+      if (property === "flushCapture") {
+        return async () => {
+          if (flushFails) throw new Error("capture did not settle");
+          await target.flushCapture!();
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const errors: string[] = [];
+  const capture = createAttachedWorkspaceEngineCapture({
+    ...workspace, rustEngineSessions: sessions, store, settleDebounceMs: 60_000,
+    onError: (context) => errors.push(context),
+  });
+  try {
+    const absolute = join(root, "note.md");
+    await writeFile(absolute, "base\n", "utf8");
+    await waitForPathMoments(capture, "note.md", 1);
+    const note = await openNote(capture);
+    await writeOutside(absolute, "written outside dohc\n", "rename");
+    capture.start();
+    await vi.waitFor(() => expect(note.changedOutside).toEqual([false]), { timeout: REAL_DAEMON_DEADLINE_MS });
+    // The close waits for capture, then says it could not record the change.
+    await note.session.close();
+    expect(errors).toContain("capture of note.md after its close");
+    // Opening again would take the file back and show the old version.
+    const refusal = await openNote(capture).then(() => null, (error: unknown) => error);
+    expect(isYDocOutsideWriteWaitingError(refusal)).toBe(true);
+    // A check that fails proves nothing either: the open still waits, and
+    // says why.
+    flushFails = true;
+    const failedCheck = await openNote(capture).then(() => null, (error: unknown) => error);
+    expect(isYDocOutsideWriteWaitingError(failedCheck)).toBe(true);
+    expect(String((failedCheck as Error).cause)).toContain("capture did not settle");
+    flushFails = false;
+    // Once capture records it, the note opens on the disk version.
+    captureRecords = true;
+    const reopened = await openNote(capture);
+    expect(reopened.text()).toBe("written outside dohc\n");
+    await reopened.session.close();
+  } finally {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  }
+}, 60_000);
+
+// Capture keeps a note's unsaved text in History when it records an outside
+// version, but has nothing that keeps a drawing's strokes. A drawing keeps its
+// guarded close: the close refuses, and the strokes stay in the open drawing.
+it.skipIf(engine.missing)("keeps a drawing's unsaved strokes when its file changed outside dohc (#2463)", async () => {
+  const opened = await openRealCapture("drawing-outside-write", { settleDebounceMs: 60_000 });
+  const scene = (elements: unknown[]) => JSON.stringify({ type: "excalidraw", version: 2, source: "test", elements, appState: {}, files: {} });
+  const stroke = { id: "stroke", x: 42, y: 17, type: "rectangle", version: 1, versionNonce: 1, isDeleted: false };
+  try {
+    const absolute = join(opened.root, "drawing.excalidraw");
+    await writeFile(absolute, scene([]), "utf8");
+    await waitForPathMoments(opened.capture, "drawing.excalidraw", 1);
+    const editor = new Y.Doc();
+    const states: string[] = [];
+    const changedOutside: boolean[] = [];
+    const session = await opened.capture.openYDocSession({
+      path: "drawing.excalidraw", contentKind: "scene",
+      onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
+      onSaveState: (state) => states.push(state),
+      onChangedOutside: (unsaved) => changedOutside.push(unsaved),
+    });
+    Y.applyUpdate(editor, session.initialUpdate);
+    await new Promise<void>((armed) => {
+      const vector = Y.encodeStateVector(editor);
+      insertElementRevision(editor, stroke);
+      session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector), armed);
+    });
+    await writeOutside(absolute, scene([{ ...stroke, id: "outside" }]), "rename");
+    opened.capture.start();
+    await vi.waitFor(async () => expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["drawing.excalidraw"] }), { timeout: REAL_DAEMON_DEADLINE_MS });
+    const closed = await session.close().then(() => null, (error: unknown) => error);
+    // The close stays refused, and the lease stays held with the strokes.
+    expect(closed).not.toBeNull();
+    expect(foldScene(session.doc).elements.map((element) => element.id)).toEqual(["stroke"]);
+    expect(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["drawing.excalidraw"] });
+    // The drawing has no notice, and its chip promises nothing about History.
+    expect(changedOutside).toEqual([]);
+    expect(states).not.toContain("changed-on-disk");
+  } finally {
+    await opened.stop();
+  }
+}, 60_000);
+
+it.skipIf(engine.missing)("keeps two open files' outside writes independent (#2463)", async () => {
+  const opened = await openRealCapture("two-deferred-writes", { settleDebounceMs: 60_000 });
+  try {
+    const sessions = [];
+    for (const path of ["first.md", "second.md"]) {
+      await writeFile(join(opened.root, path), "base\n");
+      await waitForPathMoments(opened.capture, path, 1);
+      sessions.push(await opened.capture.openYDocSession({ path, contentKind: "plaintext", onRemoteUpdate: () => undefined }));
+      await writeFile(join(opened.root, path), `outside ${path}\n`);
+      expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    }
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ deferredWrites: ["first.md", "second.md"] });
+    await sessions[1]!.close().catch(() => undefined);
+    await waitForPathMoments(opened.capture, "second.md", 2);
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: ["first.md"] });
+    await sessions[0]!.close().catch(() => undefined);
+    await waitForPathMoments(opened.capture, "first.md", 2);
+    expect.soft(await opened.withEngine((engine) => engine.watcherStatus())).toMatchObject({ degraded: false, deferredWrites: [] });
+  } finally { await opened.stop(); }
+}, 60_000);
+
+it.skipIf(engine.missing)("records a deferred outside write after the daemon restarts (#2463)", async () => {
+  const opened = await openRealCapture("deferred-write-restart", { settleDebounceMs: 60_000 });
+  let restarted: Awaited<ReturnType<typeof openRealCapture>> | undefined;
+  try {
+    await writeFile(join(opened.root, "note.md"), "base\n");
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    await opened.capture.openYDocSession({ path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined });
+    await writeFile(join(opened.root, "note.md"), "outside before restart\n");
+    expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    // Stop the daemon without closing or settling the document session.
+    await opened.stopEngine();
+    restarted = await openRealCapture("deferred-write-restart", {}, opened.root);
+    const moments = await waitForPathMoments(restarted.capture, "note.md", 2);
+    // Startup may also retain the abandoned Y.Doc as a recovery moment.
+    // The outside bytes themselves must be captured exactly once.
+    const texts = await Promise.all(moments.filter((moment) => moment.metadata.origin === "local-file").map(async (moment) => {
+      const detail = await restarted!.capture.readMoment(moment.id);
+      return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+    }));
+    expect(texts).toEqual(["outside before restart\n", "base\n"]);
+    expect(await restarted.health()).toEqual({ newestMoment: "read", health: null });
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe("outside before restart\n");
+  } finally {
+    await restarted?.stop();
+    await opened.stop();
+  }
+}, 60_000);
+
+// Waits on #2478: baseline settlement refuses an outside write before the open note's links can be rewritten.
+it.skip("keeps an outside write when a rename rewrites the open note's links (#2463)", async () => {
+  const opened = await openRealCapture("deferred-write-rename", { settleDebounceMs: 60_000 });
+  const outside = "agent text [[old]]\n";
+  try {
+    await writeFile(join(opened.root, "old.md"), "target\n");
+    await writeFile(join(opened.root, "note.md"), "[[old]]\n");
+    await waitForPathMoments(opened.capture, "old.md", 1);
+    await waitForPathMoments(opened.capture, "note.md", 1);
+    const session = await opened.capture.openYDocSession({ path: "note.md", contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await writeFile(join(opened.root, "note.md"), outside);
+    expect.soft(await opened.health()).toEqual({ newestMoment: "read", health: null });
+    const operationId = "dohc-operation:deferred-rename";
+    await opened.withEngine(async (engine) => {
+      const hold = await engine.holdCapture({ operationId });
+      try {
+        await engine.renameTextFile({ workspaceId: opened.workspaceId, versionId: "main",
+          fromPath: "old.md", toPath: "new.md", captureHoldId: hold.holdId, metadata: { origin: "api" } });
+        await rename(join(opened.root, "old.md"), join(opened.root, "new.md"));
+      } finally { await engine.releaseCapture(hold.holdId); }
+    });
+    const rewritten = await opened.withEngine((engine) => engine.rewriteHistoryLinks({ workspaceId: opened.workspaceId, operationId, requestId: "rewrite-deferred" }));
+    expect(rewritten).toMatchObject({ documents: 1, complete: true });
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
+    await vi.waitFor(async () => expect((await readdir(opened.root)).some((path) => path.includes(".conflict"))).toBe(true));
+    const conflicts = (await readdir(opened.root)).filter((path) => path.includes(".conflict"));
+    expect(await Promise.all(conflicts.map((path) => readFile(join(opened.root, path), "utf8")))).toContain("[[new]]\n");
+    const undone = await opened.withEngine((engine) => engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId: operationId!, requestId: "undo-deferred" }));
+    expect(undone.notRestored).toContain("note.md");
+    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
+    await session.close().catch(() => undefined);
+    await vi.waitFor(async () => {
+      const moments = await opened.capture.listMoments({ limit: 100 });
+      const note = moments.moments.filter((moment) => moment.path === "note.md");
+      const texts = await Promise.all(note.map(async (moment) => {
+        const detail = await opened.capture.readMoment(moment.id);
+        return detail?.protected === false ? detail.moment.payload.after?.text : undefined;
+      }));
+      expect(texts).toContain(outside);
+    }, { timeout: REAL_DAEMON_DEADLINE_MS });
+  } finally { await opened.stop(); }
+}, 60_000);
 
 // dohc#2308. An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until

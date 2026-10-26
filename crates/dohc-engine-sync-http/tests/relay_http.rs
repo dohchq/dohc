@@ -1312,6 +1312,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "blob_not_found" => RelayError::BlobMissing,
         "conflict"
         | "dependents_changed"
+        | "link_name_already_set"
         | "notice_list_full"
         | "restore-in-progress"
         | "stale" => RelayError::Conflict,

@@ -773,6 +773,7 @@ fn hydrate_chat_search_fragment(
     let author = match author_kind.as_str() {
         "human" => author_display_name,
         "agent" => format!("{author_display_name} (agent)"),
+        "link" => format!("{author_display_name} (link holder)"),
         _ => {
             return Err(SearchError::Corrupt(
                 "chat message has an unknown author kind",

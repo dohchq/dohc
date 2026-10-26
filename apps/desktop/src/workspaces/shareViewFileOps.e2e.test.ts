@@ -555,7 +555,7 @@ describe("share-view file operations through the real store", () => {
     async () => {
       const view = await harness("dohc-share-capture-posture-", "edit");
 
-      await expect(flushCapture(view)).resolves.toEqual({
+      await expect(flushCapture(view)).resolves.toEqual({ deferredWrites: [],
         heldFiles: [],
         running: false,
         settled: false,
@@ -1680,6 +1680,7 @@ describe("share-view file operations through the real store", () => {
       ).toEqual({
         imported: ["docs/dropped.md"],
         skipped: 2,
+        skippedSources: [{ path: "link.md", reason: "link" }, { path: "folder", reason: "no-files" }],
       });
       expect(await storePaths(view)).toEqual([
         "docs/dropped.md",

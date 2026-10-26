@@ -101,6 +101,39 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites three linking docum
   } finally {editor?.dispose(); await capture.stop(); await sessions.closeAll(); await lifecycle.stop();}
 }, REAL_DAEMON_TEST_TIMEOUT_MS);
 
+// A lossy note (CONTEXT.md) the desktop shows read-only has no session, so the
+// pass treats it as closed: it splices the link and leaves every other byte.
+it.skipIf(engine.missing)("rewrites a closed lossy note's link by splicing its text", async () => {
+  const rootPath = await createTestScratch("dohc-lossy-link-engine-");
+  const lossy = "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [[old]] and [the docs][docs].\n\n![logo](/docs/logo.png)\n\n1. Install:\n\n       pnpm install\n\n[docs]: https://example.com/docs\n";
+  await writeFile(join(rootPath, "old.md"), "target\n");
+  await writeFile(join(rootPath, "readme.md"), lossy);
+  const workspace = {workspaceId: "lossy-link-rewrite-engine", rootPath, attachmentId: Symbol("lossy-link-rewrite")};
+  const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0});
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  readLocalStateFrom(sessions);
+  const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
+  const operation = {workspace: {...workspace, readOnly: false, shareView: undefined}, state: {}, signal: new AbortController().signal, assertCurrent: vi.fn()};
+  await lifecycle.start();
+  try {
+    capture.start(); await capture.flush();
+    for (const name of ["old.md", "readme.md"]) await waitForPathMoments(capture, name, 1);
+    const history = await sessions.run(workspace, async binding => new VersionedLiveAdapter(binding.client, binding.workspace, {workspaceId: workspace.workspaceId}));
+    const owner = createWorkspaceFileMutationOwner({historyFor: () => history, assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({workspace: operation.workspace, signal: operation.signal, authorityId: workspace.attachmentId,
+        capture, assertCurrent: operation.assertCurrent, yDocSessions: {withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined}}),
+      shareViewFiles: {change: async () => {throw new Error("No shares");}}, trashItem: async () => {throw new Error("No trash");}, localPerson: async () => person,
+      notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined});
+    const moved = await owner.movePath({}, {workspaceId: workspace.workspaceId, fromPath: "old.md", toPath: "new.md"});
+    await expect.poll(() => readWorkspaceHistoryOperation(operation, {operationId: moved.operationId!}, history, {agent: false}), {timeout: REAL_DAEMON_DEADLINE_MS})
+      .toMatchObject({ok: true, links: {state: "done", documents: 1, unchecked: [], uncheckedCount: 0}});
+    const result = await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId: moved.operationId!, requestId: `move-links:${moved.operationId}`, author: person});
+    expect(result).toEqual({documents: 1, links: 1, unchecked: [], uncheckedCount: 0, complete: true});
+    const written = await history.readTextFile({workspaceId: workspace.workspaceId, versionId: "main", path: "readme.md"});
+    expect(written?.text).toBe(lossy.replace("[[old]]", "[[new]]"));
+  } finally {await capture.stop(); await sessions.closeAll(); await lifecycle.stop();}
+}, REAL_DAEMON_TEST_TIMEOUT_MS);
+
 it.skipIf(engine.missing)("undoes a folder delete through the real engine and restores files without History rows", async () => {
   const rootPath = await createTestScratch("dohc-delete-undo-engine-");
   await mkdir(join(rootPath, "folder/node_modules/pkg"), { recursive: true });
@@ -231,7 +264,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const socketHome = await createTestScratch("cli-");
     server = await startCliServer({ stateDir: socketHome, listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
-      agentRunDepth: () => 0, dispatchedAgentRun: () => false });
+      agentRunDepth: () => 0, dispatchedAgentRun: () => false, agentRunWorkspace: () => undefined });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
     const request = async (verb: "fileMove" | "historyUndo", args: object) => {
       const socket = createConnection(server!.socketPath); socket.setEncoding("utf8");

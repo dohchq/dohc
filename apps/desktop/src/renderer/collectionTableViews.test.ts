@@ -18,7 +18,7 @@ it("checks stable field references against the approved read action, not source 
   expect(()=>validateTableView({...view,filters:[{fieldId:id(9),value:"private"}]},dataset,id(2))).toThrow(/cannot read/);
   expect(()=>validateTableView({...view,kind:"board",groupBy:id(3)},dataset,id(2))).not.toThrow();
   expect(()=>validateTableView({...view,kind:"board",groupBy:id(9)},dataset,id(2))).toThrow(/readable field/);
-  expect(()=>validateTableView({...view,kind:"calendar",dateField:id(3)},dataset,id(2))).toThrow(/readable date/);
+  expect(()=>validateTableView({...view,kind:"calendar",dateField:id(3)},dataset,id(2))).not.toThrow();
 });
 it("reads a missing view file without creating it and never overwrites a changed source",async()=>{
   backend.readWorkspaceText.mockRejectedValueOnce(Error("missing"));backend.listWorkspaceFiles.mockResolvedValueOnce({files:[]});

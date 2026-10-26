@@ -15,7 +15,9 @@ import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
-import { SecondaryButton } from "./ui/controls";
+import { EmptyState, SecondaryButton } from "./ui/controls";
+import { Laptop, TriangleAlert } from "lucide-react";
+import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -37,6 +39,8 @@ export interface ConnectedTransactionalCollectionProps {
   datasetPath: string;
   tableId: string;
   onError(fallback: string, error: unknown, retry?: (() => void) | null, identity?: string): void;
+  /** Keeps Collections that no computer keeps yet on this one, then runs `then`. */
+  onKeepCollections?(then: () => void): void;
   /** Removes the row in Notices a report with this identity left. */
   onSettled?(identity: string): void;
   onFormCreated(appRoot: string): void;
@@ -55,7 +59,7 @@ export interface ConnectedTransactionalCollectionProps {
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   const addressInput = <T extends { datasetId: string },>(input: T) => {
@@ -66,6 +70,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
   const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
+  // Why this computer cannot use the workspace's Collections; the page says so in place.
+  const [refusal, setRefusal] = useState<{ kind: CollectionsRefusalKind; words: string } | null>(null);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [historyRestore, setHistoryRestore] = useState<DatasetMigrationPreparation | undefined>();
@@ -78,7 +84,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
     onHistoryShown?.();
   }, [historyRequested, onHistoryShown]);
   const [viewingPending, setViewingPending] = useState(false);
-  const [editingFields, setEditingFields] = useState(false);
+  // True, or the type of the new field the dialog opens on.
+  const [editingFields, setEditingFields] = useState<boolean | "date">(false);
   const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -103,13 +110,18 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
+      setRefusal(null);
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
     } catch (error) {
       if (sequence !== request.current) return;
       setRecordsVersion(value => value + 1);
-      onError("Could not open this Collection.", error, () => { void refresh(); });
+      const refused = readCollectionsRefusal(error);
+      setRefusal(refused);
+      // Collections this computer cannot use any more stop showing, in place.
+      if (refused) setDataset(null);
+      else onError("Could not open this Collection.", error, () => { void refresh(); });
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetPath, onError, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
@@ -176,6 +188,16 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
   }
   if (deleted) return <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">Collection deleted</div>;
   // The same place as the tab's fallback lines, which these take over.
+  if ((!dataset || !columns) && refusal && !loading) {
+    const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
+    return <EmptyState data-testid="collection-refusal" icon={held ? Laptop : TriangleAlert} tone={held ? "warning" : "danger"} title={refusal.words}>
+      <div className="flex flex-wrap justify-center gap-2">
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections &&
+          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{USE_THIS_COMPUTER}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
+      </div>
+    </EmptyState>;
+  }
   if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <span className="text-sm text-muted">Open this collection to see its records.</span>
     <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>
@@ -229,6 +251,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
     onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
     onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
     onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+    onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
     onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
     onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
     onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
@@ -349,6 +372,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
     {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
       files={[{ path: `${automations.collectionPath}/${AUTOMATIONS_FILE}`, holds: "automations" }]} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      addType={editingFields === "date" ? "date" : undefined}
       buttonStates={buttonStates}
       onChooseButton={table ? chooseButton : undefined}
       onButtonAdded={table ? chooseButton : undefined}

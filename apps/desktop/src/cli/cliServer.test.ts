@@ -462,6 +462,7 @@ describe("CLI socket server", () => {
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       dispatchedAgentRun: (workspaceId) => workspaceId === WORKSPACE_ID && dispatchedRun,
+      agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
       },
@@ -1939,6 +1940,7 @@ describe("CLI socket server", () => {
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
           steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      serverRuns: vi.fn(), serverRun: vi.fn(),
       retry: vi.fn(async (input) => {
         retries.push(input);
         return answers.shift()!;
@@ -1994,6 +1996,46 @@ describe("CLI socket server", () => {
     expect(retries).toHaveLength(3);
   });
 
+  it("reads the runs of the workspace's server, including one its rebuilt copy says may not have been sent", async () => {
+    const trigger = { kind: "added" as const, recordId: "rec_1", by: "human" as const, sharedAuthor: null, depth: 0 };
+    const ran = { claimId: "atc_server", state: "done" as const, error: null, createdAtMs: 3, updatedAtMs: 4, trigger,
+      definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+      writes: [{ kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Status", before: "Open", after: "Paid" }] };
+    // The server lost its copy after this run changed it; the rebuilt copy keeps only this mark of it.
+    const lost = { ...ran, claimId: "atc_lost", state: "failed" as const, writes: [], unsentChangesLost: true as const,
+      trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      error: "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed." };
+    const pages = new Map([[undefined, { runs: [ran], next: "lost:2:1:atc_lost" }], ["lost:2:1:atc_lost", { runs: [lost], next: null }]]);
+    context.automations = {
+      automationIdAt: vi.fn(async (_collectionPath: string, id: string) => `collection:object-tasks#${id}`),
+      runs: vi.fn(), run: vi.fn(), retry: vi.fn(),
+      serverRuns: vi.fn(async (_automationId: string, before?: string) => pages.get(before) ?? null),
+      serverRun: vi.fn(async (_automationId: string, claimId: string) => [ran, lost].find((run) => run.claimId === claimId) ?? null),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp", server: true };
+    const fields = { error: lost.error, createdAtMs: 3, updatedAtMs: 4, trigger: lost.trigger, definitionChanged: false, neverStarted: false,
+      chainStopped: false, undone: false };
+    await expect(invoke("automationRuns", args)).resolves.toMatchObject({ ok: true, runs: [{ run: "atc_server", changes: 1 }], next: "lost:2:1:atc_lost" });
+    await expect(invoke("automationRuns", { ...args, page: "lost:2:1:atc_lost" })).resolves.toEqual({
+      ok: true, runs: [{ run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, changes: 0 }], next: null,
+    });
+    expect(context.automations.serverRuns).toHaveBeenLastCalledWith("collection:object-tasks#stamp", "lost:2:1:atc_lost");
+    await expect(invoke("automationRun", { ...args, run: "atc_lost" })).resolves.toEqual({
+      ok: true, run: { run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, server: true, changes: [] },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_server" })).resolves.toMatchObject({
+      ok: true, run: { run: "atc_server", server: true, changes: ran.writes },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_gone" })).resolves.toEqual({
+      ok: false, reason: "Your server has no run atc_gone of this automation that this computer can read.",
+    });
+    expect(context.automations.runs).not.toHaveBeenCalled();
+    expect(context.automations.run).not.toHaveBeenCalled();
+    await expect(invoke("automationRuns", { ...args, page: "unknown" })).resolves.toEqual({
+      ok: false, reason: "Your server has no runs in this workspace that this computer can read.",
+    });
+  });
+
 
   it("gives share agents the definition list and switch seam, including pending results", async () => {
     context.readOnly = true;
@@ -2001,7 +2043,7 @@ describe("CLI socket server", () => {
       sync: "pending" as const };
     const switched = { status: "written" as const, contentHash: "b".repeat(64), sync: "pending" as const };
     const list = vi.fn(async () => definitions), toggle = vi.fn(async () => switched);
-    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn(), list, switch: toggle };
+    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn(), list, switch: toggle };
     const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks" };
     await expect(invoke("automationList", args)).resolves.toEqual({ ok: true, definitions });
     await expect(invoke("automationSwitch", { ...args, automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" })).resolves.toEqual({ ok: true, result: switched });
@@ -2223,6 +2265,48 @@ describe("CLI socket server", () => {
     });
   });
 
+  it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {
+    let copies = [{ id: 3, revision: 10 }, { id: 4, revision: 11 }];
+    const deleted: { id: number; revision: number }[][] = [];
+    context.retainedCopies = {
+      async list() {
+        return { copies, more: false, total: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+      async delete(requested) {
+        deleted.push([...requested]);
+        copies = copies.filter(copy => !requested.some(gone => gone.id === copy.id));
+        return { deleted: requested.length, skipped: 0, failed: 0, remaining: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+    };
+
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
+      more: false,
+      total: { count: 2, bytes: 2048 },
+    });
+    for (const args of [
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }] },
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: false },
+      { cwd: workspaceRoot, actor: "agent", copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })), acceptLateWriteRisk: true },
+    ]) {
+      const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "deleteRetainedCopies", args });
+      expect(response.ok, JSON.stringify(args).slice(0, 80)).toBe(false);
+    }
+    expect(deleted).toEqual([]);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual({ ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 1, bytes: 1024 } });
+    expect(deleted).toEqual([[{ id: 3, revision: 10 }]]);
+
+    delete context.retainedCopies;
+    const unavailable = { ok: false, reason: "Old file copies are kept only in the owning workspace. Open it to continue." };
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(unavailable);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 4, revision: 11 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual(unavailable);
+  });
+
   it("answers whether Collection updates wait with the engine's own answer", async () => {
     const answers = [true, false];
     context.daemonReads.collectionsWaiting = async () => {
@@ -2412,6 +2496,8 @@ describe("CLI socket server", () => {
     context.automations = {
       automationIdAt: vi.fn(async () => "collection:app-tasks#stamp"),
       runs: vi.fn(),
+      serverRuns: vi.fn(),
+      serverRun: vi.fn(),
       retry: vi.fn(),
       run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
     };
@@ -2593,6 +2679,20 @@ describe("CLI socket server", () => {
     const own = await post({ actor: "human", title: "Mine", body: "My own post." });
     const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
     expect(mine?.author.kind).toBe("human");
+  });
+
+  it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
+    const posted = await post({ actor: "human", title: "Test", body: "Check." });
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
+    const args = { cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.", attachments: [], needsDecision: false, runId: "run_live" } as const;
+    await invoke("reply", { ...args, attachments: [] });
+    expect((await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind).toBe("agent");
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    expect(calls.openWorkspace).toBe(opened);
   });
 
   it("records a named MCP client's file write and reply in a dispatched run as one agent", async () => {

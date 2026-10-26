@@ -8,6 +8,8 @@
     "./paths": "./src/paths.ts",
     "./realPath": "./src/realPath.ts",
     "./owned-file": "./src/ownedFile.ts",
+    "./guard-refusals": "./src/dohcGuardRefusals.ts",
+    "./fs-entry-identity": "./src/fsEntryIdentity.ts",
     "./hash": "./src/hash.ts",
     "./html": "./src/html.ts",
     "./records": "./src/records.ts",

@@ -216,19 +216,46 @@ pub(super) fn initialize(
         tx,
         held,
         &checkpoint,
+        baseline,
         &mut restore_content::Budget {
             remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
         },
     )
 }
 
+// Update v1 spells a key at its first definition. Retain that signal across
+// inherited keys and removals; literal marker text is a safe false positive.
+fn record_reader_history(
+    tx: &Transaction<'_>,
+    p: [&str; 5],
+    bytes: &[u8],
+    initial: bool,
+) -> Result<(), ApplicationError> {
+    let marker = crate::ydoc::MARKDOWN_SOURCE_READER_META_KEY.as_bytes();
+    if memchr::memmem::find(bytes, marker).is_some() {
+        tx.execute(
+            "INSERT INTO live_accepted_reader_history VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT DO UPDATE SET may_have_reader=1 WHERE may_have_reader=0",
+            p,
+        ).map_err(write_sql)?;
+    } else if initial {
+        // Only an empty accepted lineage can establish a native shortcut.
+        tx.execute(
+            &format!("INSERT OR IGNORE INTO live_accepted_reader_history VALUES(?1,?2,?3,?4,?5,EXISTS(SELECT 1 FROM live_accepted_checkpoints WHERE {DOCUMENT}) OR EXISTS(SELECT 1 FROM live_accepted_updates WHERE {DOCUMENT}))"),
+            p,
+        ).map_err(write_sql)?;
+    }
+    Ok(())
+}
+
 fn insert_checkpoint(
     tx: &Transaction<'_>,
     held: &Registration,
     c: &NativeAcceptedCheckpoint,
+    state: &[u8],
     budget: &mut restore_content::Budget,
 ) -> Result<(), ApplicationError> {
     let p = parameters(held);
+    record_reader_history(tx, p, state, c.event_count == 0)?;
     tx.execute(
         "INSERT INTO live_accepted_checkpoints VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
@@ -740,6 +767,8 @@ fn append_inner(
         || bytes >= CHECKPOINT_BYTES
         || event.metadata.checkpoint_coverage.is_some()
     {
+        // Native application and adoption still answer a missing dependency
+        // as a conflict.
         let history = reconstruction
             .map(|policy| {
                 read_state(
@@ -748,6 +777,10 @@ fn append_inner(
                     event.metadata.accepted.receipt.journal_cursor,
                     policy,
                 )
+                .map_err(|error| match error {
+                    ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                    error => error,
+                })
             })
             .transpose()?;
         let doc = restored
@@ -787,6 +820,7 @@ fn append_inner(
                 state_digest: put_binary_blob(tx, &state)?,
                 evidence_digest: evidence,
             },
+            &state,
             budget,
         )?;
     }
@@ -812,6 +846,7 @@ pub(super) fn append(
         &binding.lineage_claim_id,
     ];
     let update = put_binary_blob(tx, &event.update_bytes)?;
+    record_reader_history(tx, p, &event.update_bytes, false)?;
     tx.execute(
         "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
@@ -925,6 +960,65 @@ pub(super) fn read(
         max_events,
         HistoryPurpose::Restore,
     )
+}
+
+pub(super) fn read_selected_point(
+    conn: &Connection,
+    held: &Registration,
+    selection: &NativeRestoreSelection,
+    budget: &mut restore_content::Budget,
+    max_events: usize,
+) -> Result<HistoryRead, ApplicationError> {
+    let selected = read(conn, held, selection.journal_cursor, budget, max_events)?;
+    if selected
+        .proof
+        .terminal
+        .as_ref()
+        .map_or(held.binding.lineage_claim_id.as_str(), |r| {
+            r.update_digest.as_str()
+        })
+        != selection.receipt_digest
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(selected)
+}
+
+/// Unknown history must take the reader preflight, never the native shortcut.
+pub(super) fn may_have_reader(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        &format!("SELECT may_have_reader FROM live_accepted_reader_history WHERE {DOCUMENT}"),
+        parameters(held),
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|seen| seen.unwrap_or(true))
+    .map_err(read_sql)
+}
+
+/// A cursor is append-only; recheck its identity after rebuilding outside the writer.
+pub(super) fn require_selected_terminal(
+    conn: &Connection,
+    held: &Registration,
+    selection: &NativeRestoreSelection,
+) -> Result<(), ApplicationError> {
+    let matches = if selection.journal_cursor == 0 {
+        selection.receipt_digest == held.binding.lineage_claim_id
+    } else {
+        let p = parameters(held);
+        conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM live_accepted_updates WHERE {DOCUMENT} AND journal_cursor=?6 AND update_sha256=?7)"),
+            params![p[0],p[1],p[2],p[3],p[4],selection.journal_cursor,selection.receipt_digest],
+            |row| row.get(0),
+        ).map_err(read_sql)?
+    };
+    if !matches {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
 }
 
 pub(super) enum HistoryPurpose {

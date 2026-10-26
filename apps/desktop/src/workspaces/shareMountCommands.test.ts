@@ -1154,7 +1154,7 @@ it("reconciles a revoked mount even when missing-pin detail lookup returns 404",
   const mountRoot = await createTestScratch("share-mount-commands-");
   await mkdir(join(mountRoot, ".dohc", "local"), { recursive: true });
   const opened = { localStateReady: true };
-  readLocalStateFrom({ currentBinding: () => opened });
+  readLocalStateFrom({ currentBinding: () => opened, localStateOpenAt: async () => ({ current: () => true }) });
   const files = createShareViewFiles({
     resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
     openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),

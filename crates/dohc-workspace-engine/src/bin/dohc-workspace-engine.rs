@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use dohc_engine_protocol::{
-    cancel::CancelSignal,
+    cancel::{CancelSignal, Cancelled},
     error::{EnvelopeDecodeError, ErrorCode, Retryability, WireError},
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
     limits::WireLimits,
@@ -219,6 +219,8 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
         live,
     )
     .await;
+    // Earlier stores open for recovery close, and their copies go.
+    service.close_recovery_stores().await;
     // Store actors are closed by the hook above; any in-flight capture write
     // failed contained and stays un-acked (the next start re-offers it). This
     // drain joins the watcher/files threads so the process exits clean.
@@ -711,8 +713,12 @@ async fn write_output<W: AsyncWrite + Unpin>(
         match item {
             OutputItem::Guarded { response, guard } => {
                 let request_id = response.id;
-                let frame = encode_reply_or_limit_error(&Envelope::Response(response), limits)
+                let mut frame = encode_reply_or_limit_error(&Envelope::Response(response), limits)
                     .map_err(|error| io::Error::other(format!("response encode: {error:?}")))?;
+                let length = frame.len();
+                let last = [frame
+                    .pop()
+                    .ok_or_else(|| io::Error::other("empty response frame"))?];
                 let cancel = guard.cancel_signal();
                 let retired = guard.retirement_signal();
                 let deadline = guard.deadline();
@@ -723,12 +729,21 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // out once retirement, a workspace close, or the deadline has
                 // ended the answer, even if its request was cancelled.
                 let mut offset = 0;
-                while offset < frame.len() {
+                while offset < length {
+                    // The client cannot read the response before its last
+                    // byte, so the frame and the reservations go just before it.
+                    let bytes = if offset + 1 < length {
+                        &frame[offset..]
+                    } else {
+                        frame = Vec::new();
+                        guard.release();
+                        &last[..]
+                    };
                     let write = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
                         if !guard.with_current(offset == 0, &mut || {
                             result = std::pin::Pin::new(&mut output)
-                                .poll_write(cx, &frame[offset..])
+                                .poll_write(cx, bytes)
                                 .map(|result| result.map(Some));
                         }) {
                             return std::task::Poll::Ready(Ok(None));
@@ -840,7 +855,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
             }
             OutputItem::Blob { response, egress } => {
                 let request_id = response.id;
-                let outcome = write_blob_egress(&mut output, response, egress, limits).await;
+                let outcome = write_blob_egress(&mut output, response, egress, limits, || {}).await;
                 lock(&active_egress).remove(&request_id);
                 outcome?;
             }
@@ -860,15 +875,19 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 let mut fenced = GuardedBlobWriter {
                     output: &mut output,
                     guard: &guard,
+                    cancelled: cancel.cancelled(),
                     wrote: false,
                     frame_pending: false,
                 };
+                // A Cancel stops a blob only between frames, where the writer
+                // refuses the next frame's first byte. A started frame must
+                // finish, or the broken stream ends the connection. Retirement,
+                // a workspace close, or the deadline still end it.
                 let result = tokio::select! {
                     biased;
-                    ()=cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output cancelled")),
                     ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
                     ()=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline.into()).await,None=>std::future::pending().await}}=>Err(io::Error::new(io::ErrorKind::TimedOut,"native restore output expired")),
-                    result=write_blob_egress(&mut fenced,response,egress,limits)=>result,
+                    result=write_blob_egress(&mut fenced,response,egress,limits,|| guard.release())=>result,
                 };
                 lock(&active_egress).remove(&request_id);
                 if result.is_err() && !fenced.frame_pending && !guard.is_current() {
@@ -888,6 +907,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                                 "native restore output retired",
                             )
                         };
+                        // The interrupted write dropped the blob, and the
+                        // client acts on this error, so the reservations go first.
+                        guard.release();
                         write_envelope(
                             &mut output,
                             &Envelope::Error(ErrorEnvelope {
@@ -951,6 +973,8 @@ async fn write_envelope<W: AsyncWrite + Unpin>(
 struct GuardedBlobWriter<'a, W> {
     output: &'a mut W,
     guard: &'a Arc<dyn OutputGuard>,
+    /// Wakes a writer waiting to start a frame when its request is cancelled.
+    cancelled: Cancelled,
     wrote: bool,
     /// Bytes from the current frame remain unflushed.
     frame_pending: bool,
@@ -962,8 +986,12 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
         bytes: &[u8],
     ) -> std::task::Poll<Result<usize, io::Error>> {
         let this = self.get_mut();
+        let cancellable = !this.frame_pending;
+        if cancellable {
+            let _ = std::future::Future::poll(std::pin::Pin::new(&mut this.cancelled), cx);
+        }
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(true, &mut || {
+        if !this.guard.with_current(cancellable, &mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_write(cx, bytes);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -983,7 +1011,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
     ) -> std::task::Poll<Result<(), io::Error>> {
         let this = self.get_mut();
         let mut result = std::task::Poll::Pending;
-        if !this.guard.with_current(true, &mut || {
+        if !this.guard.with_current(false, &mut || {
             result = std::pin::Pin::new(&mut *this.output).poll_flush(cx);
         }) {
             return std::task::Poll::Ready(Err(io::Error::new(
@@ -1009,6 +1037,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
     response: Response,
     egress: BlobEgress,
     limits: &WireLimits,
+    release: impl FnOnce(),
 ) -> Result<(), io::Error> {
     let request_id = response.id;
     let interruption = |deadline: Option<std::time::Instant>| {
@@ -1024,62 +1053,57 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
             )
         }
     };
-    if egress.cancel.is_cancelled()
-        || egress
-            .deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-    {
-        return write_envelope(
-            output,
-            &Envelope::Error(ErrorEnvelope {
-                id: Some(response.id),
+    let interrupted = |egress: &BlobEgress| {
+        (egress.cancel.is_cancelled()
+            || egress
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline))
+        .then(|| {
+            Envelope::Error(ErrorEnvelope {
+                id: Some(request_id),
                 error: interruption(egress.deadline),
+            })
+        })
+    };
+    let encode = |envelope: &Envelope| {
+        encode_reply_or_limit_error(envelope, limits)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))
+    };
+    // The client finishes the request on the frame after the blob, its
+    // response or an error, so the blob and the reservations go before it.
+    let last = 'blob: {
+        if let Some(error) = interrupted(&egress) {
+            break 'blob encode(&error)?;
+        }
+        let Ok(response_frame) = encode_control(&Envelope::Response(response), limits) else {
+            break 'blob encode(&response_limit_error(Some(request_id)))?;
+        };
+        write_envelope(
+            output,
+            &Envelope::BlobStart(BlobStart {
+                request_id,
+                stream_id: egress.stream_id,
+                total_bytes: Some(egress.bytes.len() as u64),
+                sha256: Some(egress.sha256.clone()),
             }),
             limits,
         )
-        .await;
-    }
-    let response_frame = match encode_control(&Envelope::Response(response), limits) {
-        Ok(frame) => frame,
-        Err(_) => {
-            return write_envelope(output, &response_limit_error(Some(request_id)), limits).await;
+        .await?;
+        let chunk_bytes = limits.max_blob_chunk_bytes as usize;
+        for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
+            if let Some(error) = interrupted(&egress) {
+                break 'blob encode(&error)?;
+            }
+            let frame = encode_blob_chunk_frame(egress.stream_id, fin, chunk, limits)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "blob chunk too large"))?;
+            output.write_all(&frame).await?;
+            output.flush().await?;
         }
+        response_frame
     };
-    write_envelope(
-        output,
-        &Envelope::BlobStart(BlobStart {
-            request_id,
-            stream_id: egress.stream_id,
-            total_bytes: Some(egress.bytes.len() as u64),
-            sha256: Some(egress.sha256),
-        }),
-        limits,
-    )
-    .await?;
-
-    let chunk_bytes = limits.max_blob_chunk_bytes as usize;
-    for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
-        if egress.cancel.is_cancelled()
-            || egress
-                .deadline
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
-            return write_envelope(
-                output,
-                &Envelope::Error(ErrorEnvelope {
-                    id: Some(request_id),
-                    error: interruption(egress.deadline),
-                }),
-                limits,
-            )
-            .await;
-        }
-        let frame = encode_blob_chunk_frame(egress.stream_id, fin, chunk, limits)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "blob chunk too large"))?;
-        output.write_all(&frame).await?;
-        output.flush().await?;
-    }
-    output.write_all(&response_frame).await?;
+    drop(egress);
+    release();
+    output.write_all(&last).await?;
     output.flush().await
 }
 
@@ -2035,8 +2059,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guarded_blob_interruption_during_partial_frame_closes_output() {
-        for retire in [false, true] {
+    async fn guarded_blob_cancel_during_partial_frame_stops_at_frame_boundary() {
+        for flushing in [false, true] {
+            let cancel = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: CancelSignal::new(),
+                deadline: None,
+                dropped: dropped.clone(),
+            })))
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
+            let limits = WireLimits {
+                max_blob_chunk_bytes: 1024,
+                ..WireLimits::default()
+            };
+            let (writer, mut reader) = eight_byte_pipe(flushing);
+            let writer_limits = limits.clone();
+            let writer_active = active.clone();
+            let task = tokio::spawn(async move {
+                write_output(writer, &mut rx, &writer_limits, writer_active).await
+            });
+            // Cancel once the first chunk's first byte is out.
+            let header_len = dohc_engine_protocol::frame::FRAME_HEADER_LEN;
+            let mut transcript = vec![0; header_len];
+            reader.read_exact(&mut transcript).await.unwrap();
+            let start_len =
+                header_len + u32::from_le_bytes(transcript[8..12].try_into().unwrap()) as usize;
+            transcript.resize(start_len + 1, 0);
+            reader
+                .read_exact(&mut transcript[header_len..])
+                .await
+                .unwrap();
+            cancel.cancel();
+            reader.read_to_end(&mut transcript).await.unwrap();
+            task.await
+                .unwrap()
+                .expect("a Cancel lets the started frame finish");
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(lock(&active).is_empty());
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("BlobStart missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::BlobStart(start) if start.request_id == 9)
+            );
+            let Some(Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            }) = decoder.next_frame().unwrap()
+            else {
+                panic!("started chunk missing");
+            };
+            assert_eq!(stream_id, 9);
+            assert!(!fin);
+            assert_eq!(bytes, vec![42; limits.max_blob_chunk_bytes as usize]);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("request interruption missing");
+            };
+            let Envelope::Error(error) = decode_control(&payload, &limits).unwrap() else {
+                panic!("blob data continued after the started chunk");
+            };
+            assert_eq!(error.id, Some(9));
+            assert_eq!(error.error.code, ErrorCode::Cancelled);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_blob_retirement_during_partial_frame_closes_output() {
+        for cancelled in [false, true] {
             let cancel = CancelSignal::new();
             let retired = CancelSignal::new();
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
@@ -2067,11 +2178,10 @@ mod tests {
             });
             let mut prefix = [0; 8];
             reader.read_exact(&mut prefix).await.unwrap();
-            if retire {
-                retired.cancel();
-            } else {
+            if cancelled {
                 cancel.cancel();
             }
+            retired.cancel();
             assert_eq!(
                 task.await.unwrap().unwrap_err().kind(),
                 io::ErrorKind::ConnectionAborted
@@ -2091,6 +2201,11 @@ mod tests {
     async fn guarded_blob_releases_reservation_on_cancelled_write_and_flush() {
         for flush_only in [false, true] {
             for retire in [false, true] {
+                if flush_only && !retire {
+                    // A Cancel lets a started flush finish.
+                    // `guarded_blob_cancel_during_partial_frame_stops_at_frame_boundary` covers it.
+                    continue;
+                }
                 let cancel = CancelSignal::new();
                 let retired = CancelSignal::new();
                 let dropped = Arc::new(AtomicBool::new(false));
@@ -2218,6 +2333,132 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[derive(Debug)]
+    struct ReleaseGuard {
+        cancel: CancelSignal,
+        released: Arc<AtomicBool>,
+    }
+
+    impl OutputGuard for ReleaseGuard {
+        fn is_current_ignoring_cancel(&self) -> bool {
+            true
+        }
+        fn cancel_signal(&self) -> CancelSignal {
+            self.cancel.clone()
+        }
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Records how much of the transcript was written when the guard
+    /// released. Each write waits once and takes at most 512 bytes.
+    struct ReleaseRecorder {
+        released: Arc<AtomicBool>,
+        transcript: Vec<u8>,
+        released_at: Option<usize>,
+        ready: bool,
+        /// Cancelled when the first frame is flushed.
+        cancel: Option<CancelSignal>,
+    }
+
+    impl AsyncWrite for ReleaseRecorder {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !std::mem::replace(&mut self.ready, false) {
+                self.ready = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if self.released_at.is_none() && self.released.load(Ordering::SeqCst) {
+                self.released_at = Some(self.transcript.len());
+            }
+            let count = bytes.len().min(512);
+            self.transcript.extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            if let Some(cancel) = self.cancel.take() {
+                cancel.cancel();
+            }
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Writes `item`, cancelled after its first frame if `cancel`, and
+    /// returns the transcript after the guard released.
+    async fn after_release(
+        item: impl FnOnce(Arc<dyn OutputGuard>) -> OutputItem,
+        cancel: bool,
+    ) -> Vec<u8> {
+        let released = Arc::new(AtomicBool::new(false));
+        let signal = CancelSignal::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(item(Arc::new(ReleaseGuard {
+            cancel: signal.clone(),
+            released: released.clone(),
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let mut output = ReleaseRecorder {
+            released,
+            transcript: Vec::new(),
+            released_at: None,
+            ready: false,
+            cancel: cancel.then_some(signal),
+        };
+        write_output(
+            &mut output,
+            &mut rx,
+            &WireLimits::default(),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await
+        .unwrap();
+        let released_at = output.released_at.expect("the guard released");
+        output.transcript.split_off(released_at)
+    }
+
+    /// The one complete envelope in `bytes`.
+    fn only_envelope(bytes: &[u8]) -> Envelope {
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(bytes);
+        let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+            panic!("one control frame expected");
+        };
+        assert!(decoder.next_frame().unwrap().is_none());
+        decode_control(&payload, &limits).unwrap()
+    }
+
+    #[tokio::test]
+    async fn guarded_output_releases_reservations_before_the_client_can_read_the_response() {
+        // A client acting on the answer must find its reservations free.
+        let acknowledgement = |guard| OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"content": "x".repeat(1024)}),
+            },
+            guard,
+        };
+        assert_eq!(after_release(acknowledgement, false).await.len(), 1);
+        assert!(matches!(
+            only_envelope(&after_release(guarded_blob, false).await),
+            Envelope::Response(response) if response.id == 9
+        ));
+        assert!(matches!(
+            only_envelope(&after_release(guarded_blob, true).await),
+            Envelope::Error(ErrorEnvelope { id: Some(9), .. })
+        ));
     }
 
     impl AsyncWrite for BlockedWriter {
@@ -3467,7 +3708,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(bytes.len() + 4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, &limits, || {})
             .await
             .expect("write blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3539,7 +3780,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, &limits, || {})
             .await
             .expect("write empty blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3607,7 +3848,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response, egress, &limits)
+        write_blob_egress(&mut output, response, egress, &limits, || {})
             .await
             .expect("write cancellation");
         output.shutdown().await.expect("close transcript");

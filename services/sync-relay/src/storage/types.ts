@@ -626,6 +626,21 @@ export interface SyncRelayStorage {
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
+  /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
+  recordServiceKeptEdits(input: {identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity; outboxId: string;
+    binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; refusalKey: string; nowMs: number}): void;
+  forgetServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
+  releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}): void;
+  listServiceKeptEdits(workspaceId: string, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
+  readServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
+  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
+  endServiceKeptEditsRetry(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}): boolean;
+  observeServiceKeptEditsCheckpoint(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue, frozenCheckpoint: string | null): void;
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
@@ -651,6 +666,14 @@ export interface SyncRelayStorage {
   recordAutomationServerStart(input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null }): void;
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
+  recordAutomationServerRunChanging(input: Parameters<typeof import("./automationHosts").recordAutomationServerRunChanging>[1]): void;
+  endAutomationServerRun(input: import("./automationHosts").AutomationServerRun): boolean;
+  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }): Array<{ automationId: string; claimId: string; touch: number }>;
+  confirmAutomationServerRunsSent(input: Parameters<typeof import("./automationHosts").confirmAutomationServerRunsSent>[1]): void;
+  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }): void;
+  lostAutomationServerRuns(input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1]): import("./automationHosts").LostAutomationServerRun[];
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
+  reportAutomationServerRunsLost(input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1]): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
@@ -869,6 +892,7 @@ export interface SyncRelayStorage {
     workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
+  appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

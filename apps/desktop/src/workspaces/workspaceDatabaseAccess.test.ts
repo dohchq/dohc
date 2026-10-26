@@ -142,8 +142,8 @@ describe("this computer's operation counter", () => {
     // What an earlier build left beside the log, and the Collections database, which stays put.
     const oldFolder = join(f.rootPath, ".dohc", "databases", databaseFolderName("data.sqlite"));
     await writeCounter(oldFolder, 50);
-    const collections = join(f.rootPath, ".dohc", "datasets", "state.sqlite");
-    await mkdir(join(f.rootPath, ".dohc", "datasets"));
+    const collections = join(f.rootPath, ".dohc", "local", "datasets", "state.sqlite");
+    await mkdir(join(f.rootPath, ".dohc", "local", "datasets"), { recursive: true });
     await writeFile(collections, "the Collections");
 
     expect(await f.editWorkspaceDatabaseInWorker(f.input)).toMatchObject({ version: 1 });
@@ -158,7 +158,7 @@ describe("this computer's operation counter", () => {
     expect(await loggedNumbers(f.logPath)).toEqual([1]);
     expect((await readdir(oldFolder)).sort()).toEqual(["operations.jsonl", "state.sqlite"]);
     expect(lastNumber(oldFolder)).toBe(50);
-    expect(await readdir(join(f.rootPath, ".dohc", "datasets"))).toEqual(["state.sqlite"]);
+    expect(await readdir(join(f.rootPath, ".dohc", "local", "datasets"))).toEqual(["state.sqlite"]);
     expect(await readFile(collections, "utf8")).toBe("the Collections");
   });
 

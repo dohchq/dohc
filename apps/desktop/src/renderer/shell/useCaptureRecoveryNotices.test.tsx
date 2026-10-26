@@ -202,10 +202,10 @@ describe("useCaptureRecoveryNotices", () => {
     const h = harness([RECOVERY]);
     await waitFor(() => expect(recoveryRows(h)).toHaveLength(1));
     const row = recoveryRows(h)[0]!;
-    expect(row.title).toBe("Typing kept in History");
+    expect(row.title).toBe("Text kept in History");
     expect(row.title).toBe(CAPTURE_RECOVERY_TITLE);
     expect(row.message).toBe(
-      'The file "notes/rich.md" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.',
+      'The file "notes/rich.md" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.',
     );
     expect(row.message).toBe(captureRecoveryMessage("notes/rich.md", false));
     expect(row.identity).toBe("capture-recovery:moment-capture-recovery-a");
@@ -292,7 +292,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(took).toBe(true);
     const shared = recoveryRows(h).find((row) => row.identity === "capture-recovery:moment-capture-recovery-a")!;
     expect(shared.message).toBe(
-      'The file "notes/rich.md" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.',
+      'The file "notes/rich.md" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.',
     );
     expect(shared.message).not.toContain("Restore shared file");
     expect(shared.title).toBe(CAPTURE_RECOVERY_TITLE);
@@ -363,5 +363,5 @@ describe("useCaptureRecoveryNotices", () => {
 });
 
 it("names deletion and the recovery Restore that recreates the file", () => {
- expect(captureRecoveryMessage("notes/deleted.md",false,true)).toBe('The file "notes/deleted.md" was deleted. Your typing is in History. Open the recovery change and choose Restore to recreate the file.');
+ expect(captureRecoveryMessage("notes/deleted.md",false,true)).toBe('The file "notes/deleted.md" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.');
 });

@@ -62,7 +62,7 @@ async function noticeRows(user: ReturnType<typeof userEvent.setup>) {
   return shownRows();
 }
 
-describe("typing kept in History", () => {
+describe("text kept in History", () => {
   it("keeps Copy's fallback through activity refreshes during and after the moment reads", async () => {
     const {bridge,clear}=recoveryBridge();clear();
     let copied=false;
@@ -108,7 +108,7 @@ describe("typing kept in History", () => {
     expect(toast.querySelector("svg.text-warning")).toBeTruthy();
     expect(toast.textContent).toContain(CAPTURE_RECOVERY_TITLE);
     expect(toast.textContent).toContain(
-      'The file "notes/plan.md" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.',
+      'The file "notes/plan.md" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.',
     );
     expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
@@ -117,7 +117,7 @@ describe("typing kept in History", () => {
     await openRecoveryFromToast(user);
     expect(screen.getByTestId("activity-history").getAttribute("aria-current")).toBe("page");
     expect(screen.getByTestId(`tab-dohc://moment-diff/${RECOVERY.momentId}`)).toBeTruthy();
-    expect(screen.getByTestId("engine-diff-source").textContent).toBe("Typing kept");
+    expect(screen.getByTestId("engine-diff-source").textContent).toBe("Text kept");
     expect(screen.getByTestId("engine-diff-lines").textContent).toContain("Typing kept here.");
 
     // The change gives the kept file back whole, beside the diff it shows.
@@ -214,7 +214,7 @@ describe("typing kept in History", () => {
     const toast = await screen.findByTestId(NOTICE_TOAST);
     expect(toast.textContent).toContain(CAPTURE_RECOVERY_TITLE);
     expect(toast.textContent).toContain(
-      'The file "notes/plan.md" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.',
+      'The file "notes/plan.md" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.',
     );
     expect(toast.textContent).toContain(captureRecoveryMessage(PATH, true));
     expect(toast.textContent).not.toContain("Restore shared file");

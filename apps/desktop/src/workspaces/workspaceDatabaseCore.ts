@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { fstatSync, statSync, type BigIntStats } from "node:fs";
+import { fstatSync, type BigIntStats } from "node:fs";
 import {
-  mkdir,
+  lstat,
   mkdtemp,
   open,
   rm,
@@ -10,7 +10,16 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import {
+  DOHC_DATABASES_GUARD,
+  fileChangedWhileOpeningRefusal,
+  folderChangedBeforeWritingRefusal,
+  hardLinkedFileRefusal,
+  notAFileRefusal,
+  notARealFolderRefusal,
+} from "@dohc/workspace-core/guard-refusals";
+import { sameFsEntry, type FsEntryIdentity } from "@dohc/workspace-core/fs-entry-identity";
 import type {
   DatabaseColumnView,
   DatabaseEdit,
@@ -318,44 +327,30 @@ const readLogs = new Map<string, LoggedOperations & { version: LogVersion }>();
 // holds, and the highest number among them. Another computer can add any
 // number anywhere in the log, so a changed log is read whole, a line at a
 // time. An unchanged one is not read again.
-async function loggedOperations(logPath: string): Promise<LoggedOperations> {
-  // Synchronous, like the SQLite work around it.
-  const named = statSync(logPath, { bigint: true, throwIfNoEntry: false });
+async function loggedOperations(logPath: string, handle: FileHandle): Promise<LoggedOperations> {
+  const version = logVersion(fstatSync(handle.fd, { bigint: true }));
   const known = readLogs.get(logPath);
-  if (named && known && sameLogVersion(known.version, logVersion(named))) return known;
-  let handle: FileHandle;
-  try {
-    handle = await open(logPath, "r");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    readLogs.delete(logPath);
-    return { lines: 0, highest: 0, uncountable: false };
-  }
-  try {
-    const version = logVersion(fstatSync(handle.fd, { bigint: true }));
-    let lines = 0;
-    let highest = 0;
-    let uncountable = false;
-    for await (const line of handle.readLines({ encoding: "utf8", autoClose: false })) {
-      if (line.trim().length === 0) continue;
-      lines += 1;
-      let number: unknown;
-      try {
-        ({ version: number } = JSON.parse(line) as { version?: unknown });
-      } catch {
-        // A line that does not parse names no number, but still counts as one.
-      }
-      if (typeof number !== "number") continue;
-      // An earlier dohc wrote numbers past the safe range, where adding one
-      // can give the same number back.
-      if (!Number.isSafeInteger(number)) uncountable = true;
-      else if (number > highest) highest = number;
+  if (known && sameLogVersion(known.version, version)) return known;
+  let lines = 0;
+  let highest = 0;
+  let uncountable = false;
+  for await (const line of handle.readLines({ encoding: "utf8", autoClose: false })) {
+    if (line.trim().length === 0) continue;
+    lines += 1;
+    let number: unknown;
+    try {
+      ({ version: number } = JSON.parse(line) as { version?: unknown });
+    } catch {
+      // A line that does not parse names no number, but still counts as one.
     }
-    readLogs.set(logPath, { lines, highest, uncountable, version });
-    return { lines, highest, uncountable };
-  } finally {
-    await handle.close();
+    if (typeof number !== "number") continue;
+    // An earlier dohc wrote numbers past the safe range, where adding one
+    // can give the same number back.
+    if (!Number.isSafeInteger(number)) uncountable = true;
+    else if (number > highest) highest = number;
   }
+  readLogs.set(logPath, { lines, highest, uncountable, version });
+  return { lines, highest, uncountable };
 }
 
 function openCounter(statePath: string): SqliteDb {
@@ -371,7 +366,7 @@ function openCounter(statePath: string): SqliteDb {
 async function reserveOperationVersion(input: {
   logPath: string;
   statePath: string;
-}): Promise<number> {
+}, handle: FileHandle): Promise<number> {
   const state = openCounter(input.statePath);
   let transactionOpen = false;
   try {
@@ -386,7 +381,7 @@ async function reserveOperationVersion(input: {
     // number in the shared log, which another computer may have added to.
     // The counter covers numbers a sync dropped from the log. Without a
     // counter, every line in the log counts as a number given out.
-    const logged = await loggedOperations(input.logPath);
+    const logged = await loggedOperations(input.logPath, handle);
     if (logged.uncountable) {
       throw Object.assign(new Error("The operations log has a version past the safe integer range."), { code: UNCOUNTABLE_LOG_VERSION });
     }
@@ -418,32 +413,82 @@ async function reserveOperationVersion(input: {
   }
 }
 
-async function appendOperationDurably(
-  logPath: string,
-  operation: DatabaseOperationInput & { version: number },
-): Promise<void> {
-  const line = `${JSON.stringify(operation)}\n`;
-  const handle = await open(logPath, "a", 0o600);
-  try {
-    const before = logVersion(fstatSync(handle.fd, { bigint: true }));
-    await handle.appendFile(line, "utf8");
-    await handle.sync();
-    const after = fstatSync(handle.fd, { bigint: true });
-    // When only this line went in since dohc last read the log, the next edit
-    // needn't read it again. Anything else makes it read the whole log.
-    const known = readLogs.get(logPath);
-    if (known && sameLogVersion(known.version, before) && after.size === before[2] + BigInt(Buffer.byteLength(line))) {
-      readLogs.set(logPath, {
-        ...known,
-        lines: known.lines + 1,
-        highest: Math.max(known.highest, operation.version),
-        version: logVersion(after),
-      });
-    } else {
-      readLogs.delete(logPath);
+async function withOperationLog<T>(
+  input: { logPath: string; storageIdentity: FsEntryIdentity },
+  run: (append: (operation: DatabaseOperationInput & { version: number }) => Promise<void>, handle: FileHandle) => Promise<T>,
+): Promise<T> {
+  const { logPath, storageIdentity } = input;
+  const folderGuard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}` };
+  const checkFolder = async () => {
+    const stats = await lstat(dirname(logPath), { bigint: true });
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error(notARealFolderRefusal(folderGuard, stats));
     }
-  } finally {
+    if (sameFsEntry(storageIdentity, stats) !== "same") {
+      throw new Error(folderChangedBeforeWritingRefusal(folderGuard));
+    }
+  };
+  // Refuse a queued edit before creating its log in a replacement folder.
+  await checkFolder();
+  const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}/operations.jsonl` };
+  const checkFile = (stats: BigIntStats) => {
+    if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
+    if (stats.nlink > 1n) throw new Error(hardLinkedFileRefusal(guard));
+  };
+  const before = await lstat(logPath, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (before) checkFile(before);
+  const handle = await open(logPath, before ? "a+" : "ax+", 0o600);
+  let closed = false;
+  const closeLog = async () => {
+    if (closed) return;
+    closed = true;
     await handle.close();
+  };
+  try {
+    const checkLog = async () => {
+      const opened = await handle.stat({ bigint: true });
+      const named = await lstat(logPath, { bigint: true });
+      checkFile(opened);
+      checkFile(named);
+      if (sameFsEntry(opened, named) !== "same" ||
+          (before && sameFsEntry(before, opened) !== "same")) {
+        throw new Error(fileChangedWhileOpeningRefusal(guard));
+      }
+    };
+    await checkLog();
+    // Opening the log can yield. Recheck that it opened in the folder dohc checked.
+    await checkFolder();
+    return await run(async (operation) => {
+      await checkLog();
+      const line = `${JSON.stringify(operation)}\n`;
+      const beforeAppend = logVersion(fstatSync(handle.fd, { bigint: true }));
+      await handle.appendFile(line, "utf8");
+      await handle.sync();
+      const after = fstatSync(handle.fd, { bigint: true });
+      // When only this line went in since dohc last read the log, the next edit
+      // needn't read it again. Anything else makes it read the whole log.
+      const known = readLogs.get(logPath);
+      if (known && sameLogVersion(known.version, beforeAppend) && after.size === beforeAppend[2] + BigInt(Buffer.byteLength(line))) {
+        readLogs.set(logPath, {
+          ...known,
+          lines: known.lines + 1,
+          highest: Math.max(known.highest, operation.version),
+          version: logVersion(after),
+        });
+      } else {
+        readLogs.delete(logPath);
+      }
+      await closeLog().catch((error) => {
+        console.error("[desktop] database operation log close failed after sync:", error);
+      });
+    }, handle);
+  } finally {
+    await closeLog().catch(() => {
+      // Preserve the edit or append error through cleanup.
+    });
   }
 }
 
@@ -489,50 +534,52 @@ export async function editDatabaseAtPath(input: {
   resultPath: string;
   logPath: string;
   statePath: string;
+  storageIdentity: FsEntryIdentity;
   edit: DatabaseEdit;
   operation: DatabaseOperationInput;
   pageOffset: number;
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
-  await mkdir(dirname(input.logPath), { recursive: true });
-  const version = await reserveOperationVersion(input);
-  const operation = createValidatedOperation(input.operation, version);
-  const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(input.absolutePath);
-  let transactionOpen = false;
-  try {
-    db.exec("BEGIN IMMEDIATE");
-    transactionOpen = true;
-    runEdit(db, input.edit);
-    await appendOperationDurably(input.logPath, operation);
-    db.exec("COMMIT");
-    transactionOpen = false;
-    const page = tablePage(
-      db,
-      input.resultPath,
-      input.edit.table,
-      input.pageOffset,
-    );
-    return {
-      path: input.resultPath,
-      table: input.edit.table,
-      page: {
-        offset: page.offset,
-        rows: page.rows,
-        nextOffset: page.nextOffset,
-      },
-      version,
-    };
-  } catch (error) {
-    if (transactionOpen) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Preserve the original edit or durable-log failure.
+  return withOperationLog(input, async (append, handle) => {
+    const version = await reserveOperationVersion(input, handle);
+    const operation = createValidatedOperation(input.operation, version);
+    const { DatabaseSync } = nodeSqlite();
+    const db = new DatabaseSync(input.absolutePath);
+    let transactionOpen = false;
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      runEdit(db, input.edit);
+      await append(operation);
+      db.exec("COMMIT");
+      transactionOpen = false;
+      const page = tablePage(
+        db,
+        input.resultPath,
+        input.edit.table,
+        input.pageOffset,
+      );
+      return {
+        path: input.resultPath,
+        table: input.edit.table,
+        page: {
+          offset: page.offset,
+          rows: page.rows,
+          nextOffset: page.nextOffset,
+        },
+        version,
+      };
+    } catch (error) {
+      if (transactionOpen) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // Preserve the original edit or durable-log failure.
+        }
       }
+      throw error;
+    } finally {
+      db.close();
     }
-    throw error;
-  } finally {
-    db.close();
-  }
+  });
 }

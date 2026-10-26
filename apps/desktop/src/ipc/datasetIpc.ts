@@ -2,7 +2,7 @@ import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
-import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -16,12 +16,18 @@ import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryResto
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
-import { assertSourcePathsNotHeld } from "../workspaces/datasetSourceCapture";
+import { assertSourcePathsNotHeld, assertSourcePathsNotDeferred, type SourceCaptureStatus } from "../workspaces/datasetSourceCapture";
 
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "resolveFiles" | "workspace">;
 type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
+
+/**
+ * On a computer that doesn't keep a workspace's Collections, the ones on its
+ * signed-in server, and where the others are.
+ */
+export interface ServerCollections { data: OwnerDatasetData; elsewhere: DatasetListElsewhere }
 
 class DatasetScopeError extends Error {
   constructor(cause: unknown) {
@@ -35,12 +41,18 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
+  /**
+   * The Collections on this computer's server when another computer keeps
+   * the workspace's own, or null. Null leaves the local store to admit or
+   * refuse, as it does for the computer that keeps them.
+   */
+  serverCollectionsFor?(workspace: W, signal: AbortSignal): Promise<ServerCollections | null>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
-  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<readonly { path: string }[]>;
+  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<SourceCaptureStatus>;
   /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
   withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
@@ -66,9 +78,9 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         catch (error) { throw new DatasetScopeError(error); }
       };
       current();
-      let heldFiles: readonly { path: string }[] = [];
+      let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
       const flushSourceCapture = async () => {
-        heldFiles = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+        sourceCapture = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
         current();
       };
       const withSourceAdapter = <T extends {}>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
@@ -78,7 +90,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
         captureSourceMetadata: input => {
           current();
-          assertSourcePathsNotHeld(heldFiles, input.paths);
+          assertSourcePathsNotHeld(sourceCapture.heldFiles, input.paths);
+          assertSourcePathsNotDeferred(sourceCapture.deferredWrites, input.paths);
           return adapter.captureSourceMetadata(input);
         },
       }));
@@ -138,9 +151,15 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (agent && agent.depth > 0 && (input.action === "approve" || input.action === "approveMigration")) throw new Error("Automations cannot approve Collection rules.");
       const approvalAgent = agent ? agent.approvalAgent ?? {kind:"agent" as const,label:null,labelSource:"agent-declared" as const} : undefined;
-      const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
-      current();
+      // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
+      let opened: Promise<LocalDatasetHost> | undefined;
+      const localHost = async () => {
+        const host = await (opened ??= dependencies.hostForWorkspace(operation.workspace, operation.signal));
+        current();
+        return host;
+      };
       if (input.action === "prepareRecovery") {
+        const host = await localHost();
         const sourcePath = input.sourcePath ?? await dependencies.chooseRecoveryFile?.(operation.workspace,operation.signal);
         current();
         if (!sourcePath) return { kind: "recovery-prepared" as const, recovery:null };
@@ -148,6 +167,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "recovery-prepared" as const, recovery };
       }
       if (input.action === "claimRecovery") {
+        const host = await localHost();
         if(input.sourceCursor.workspaceId!==input.workspaceId) throw new Error("This recovery belongs to another Collection.");
         const receipt = await host.claimRecovery(input); current();
         if (!receipt.targetCursor) throw new Error("Recovery has not activated this Collection. Retry recovery.");
@@ -184,9 +204,12 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor,datasetPath,...(sourceError ? { sourceError } : {})};
       }
-      if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
+      if (input.action === "discardRecovery") { await (await localHost()).discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
       const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
-      const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
+      // Creating, approving and recovering stay with the computer that keeps the Collections.
+      const server = readsData && dependencies.serverCollectionsFor ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal) : null;
+      current();
+      const data = server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
       const migrationAuthority = {
@@ -314,7 +337,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!("setGrant" in data) || !data.setGrant) throw new Error("Publish this Collection before managing shared access.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
       }
-      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current(); return { kind: "list" as const, ...await addressPage(result) }; }
+      if (input.action === "list") {
+        const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
+        return { kind: "list" as const, ...await addressPage(result), ...(server ? { elsewhere: server.elsewhere } : {}) };
+      }
       if (input.action === "describe") {
         const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };
         current(); return { kind: "description" as const, ...addressed(result) };
@@ -377,7 +403,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           return formFailure(error);
         }
       }
-      if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
+      if (input.action === "discard") { (await localHost()).discard(input.preparationId); return { kind: "discarded" as const }; }
       if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
         const approved = await data.approvedArtifacts(input.datasetId);
         current();
@@ -416,6 +442,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           throw error;
         }
       }
+      const host = await localHost();
       if (input.action === "approve") {
         const revision = await host.approve({ ...input, approvalAgent, signal: operation.signal });
         current();

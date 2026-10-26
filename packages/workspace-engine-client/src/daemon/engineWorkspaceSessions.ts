@@ -460,6 +460,29 @@ export class EngineWorkspaceSessions {
   }
 
   /**
+   * The current open of a workspace at `rootPath` that prepared its
+   * `.dohc/local`, once each open of one already under way settles, or null,
+   * for a caller that knows only the root. The engine binds one workspace to
+   * a root. Its `current` says whether that binding is still current, so the
+   * engine has held the folder since. Never opens.
+   */
+  async localStateOpenAt(rootPath: string): Promise<{ current(): boolean } | null> {
+    const workspaces: EngineWorkspace[] = [];
+    for (const [key, entry] of this.entries) {
+      if (entry.rootPath !== rootPath) continue;
+      workspaces.push(typeof key === "symbol"
+        ? { workspaceId: entry.workspaceId, rootPath, attachmentId: key }
+        : { workspaceId: entry.workspaceId, rootPath });
+    }
+    await Promise.all(workspaces.map((workspace) => this.openInProgress(workspace)));
+    for (const workspace of workspaces) {
+      const binding = this.currentBinding(workspace);
+      if (binding?.localStateReady) return { current: () => this.currentBinding(workspace) === binding };
+    }
+    return null;
+  }
+
+  /**
    * The workspace's binding while it is current: its open finished, and it is
    * not closing, retiring or rebuilding, and is on the current client. A new
    * open makes a new binding. Never opens or reconnects a workspace.

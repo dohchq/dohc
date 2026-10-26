@@ -1,9 +1,29 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it, vi } from "vitest";
 import { replayThroughShadow } from "./replay.ts";
+
+it("replays changed records in a 153-character workspace folder",()=>{
+  const parent=mkdtempSync(join(tmpdir(),"dohc-replay-"));
+  const workspaceRoot=join(parent,"w".repeat(153-parent.length-1));
+  expect(workspaceRoot).toHaveLength(153);
+  const directory=join(workspaceRoot,".dohc","local","datasets","workers","worker-00000000-0000-4000-8000-000000000001");
+  const source=new DatabaseSync(":memory:"),target=new DatabaseSync(":memory:");
+  try {
+    mkdirSync(directory,{recursive:true});
+    const schema="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT UNIQUE); INSERT INTO items VALUES(1,'a'),(2,'b');";
+    source.exec(schema);target.exec(schema);
+    const session=source.createSession();
+    try {
+      source.exec("UPDATE items SET value='temp' WHERE id=1; UPDATE items SET value='a' WHERE id=2; UPDATE items SET value='b' WHERE id=1;");
+      replayThroughShadow(target,{directory,tables:["items"],changeset:session.changeset(),databaseBytes:16*1024*1024},()=>{});
+    }finally{session.close();}
+    expect(target.prepare("SELECT * FROM items ORDER BY id").all()).toEqual([{id:1,value:"b"},{id:2,value:"a"}]);
+    expect(readdirSync(directory)).toEqual([]);
+  }finally{source.close();target.close();rmSync(parent,{recursive:true,force:true});}
+});
 
 it("rolls back canonical rows and cursor when the recovery commit fails",()=>{
   const directory=mkdtempSync(join(tmpdir(),"dohc-replay-fault-"));

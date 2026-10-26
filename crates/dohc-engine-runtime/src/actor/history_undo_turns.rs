@@ -304,11 +304,11 @@ impl ActorHandle {
         root: PathBuf,
         token: CancellationToken,
     ) -> Result<PendingPublication, RuntimeError> {
-        let db = self
-            .run(|store, _| Ok(store.database_path().to_path_buf()))
-            .await?;
+        // Read after the actor's earlier work.
+        self.run(|_, _| Ok(())).await?;
+        let held = self.location();
         tokio::task::spawn_blocking(move || {
-            let store = EngineStore::open_read_only(&db)?;
+            let store = HeldReader::open(held)?;
             store.read_with(|conn| pending_publication(conn, &ws, &operation, &root, &token))
         })
         .await
@@ -354,19 +354,25 @@ impl ActorHandle {
     pub(in crate::actor) async fn wait_undo_checkpoint(
         token: &crate::CancellationToken,
         since: &mut Option<std::time::Instant>,
-        wait: Arc<impl Fn() + Send + Sync + 'static>,
+        wait: Arc<impl Fn() -> dohc_engine_storage::CheckpointWait + Send + Sync + 'static>,
     ) -> Result<(), RuntimeError> {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if since.get_or_insert_with(std::time::Instant::now).elapsed()
-            >= std::time::Duration::from_secs(1)
-        {
-            return Err(StorageError::FileLocked.into());
-        }
-        tokio::task::spawn_blocking(move || wait())
+        let locked_since = *since.get_or_insert_with(std::time::Instant::now);
+        let checkpoint = tokio::task::spawn_blocking(move || wait())
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if checkpoint == dohc_engine_storage::CheckpointWait::Running {
+            // A PASSIVE checkpoint can still be copying or syncing pages.
+            // Only an idle or completed cycle can establish persistent contention.
+            *since = None;
+        } else if locked_since.elapsed() >= std::time::Duration::from_secs(1) {
+            return Err(StorageError::FileLocked.into());
+        }
         tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
@@ -408,7 +414,7 @@ impl ActorHandle {
             request.clone(),
             author.clone(),
         );
-        let (db, checkpoint) = self
+        let checkpoint = self
             .run_undo_turn(request.clone(), "admission", None, move |store, _| {
                 if store.is_passive() {
                     return Err(DomainError::InvalidInput {
@@ -416,17 +422,14 @@ impl ActorHandle {
                     }
                     .into());
                 }
-                Ok((
-                    store.database_path().to_path_buf(),
-                    Arc::new(store.checkpoint_cycle()),
-                ))
+                Ok(Arc::new(store.checkpoint_cycle()))
             })
             .await?;
-        let read_db = db.clone();
+        let held = self.location();
         let pending_root = root.clone();
         let pending_token = token.clone();
         let (mut inverse_store, prior, pending) = tokio::task::spawn_blocking(move || {
-            let store = EngineStore::open_read_only(&read_db)?;
+            let store = HeldReader::open(held)?;
             let (prior, pending) = store.read_with(|conn| -> Result<_, RuntimeError> {
                 let prior = load(conn, &w, &o, &r, a.as_deref())?;
                 let jobs = if prior.is_none() {
@@ -503,9 +506,9 @@ impl ActorHandle {
                 request.clone(),
                 author.clone(),
             );
-            let read_db = db.clone();
+            let held = self.location();
             let mut prepared = tokio::task::spawn_blocking(move || {
-                let mut store = EngineStore::open_read_only(&read_db)?;
+                let mut store = HeldReader::open(held)?;
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
                     .map_err(StorageError::corrupt_public)?;
@@ -728,9 +731,9 @@ impl ActorHandle {
                     Err(error) => return Err(error),
                 }
             }
-            let read_db = db.clone();
+            let held = self.location();
             tokio::task::spawn_blocking(move || {
-                let store = EngineStore::open_read_only(&read_db)?;
+                let store = HeldReader::open(held)?;
                 let (plan, cursor, _) = store
                     .read_with(|conn| {
                         load(
@@ -803,9 +806,9 @@ impl ActorHandle {
                 return Err(RuntimeError::Cancelled);
             }
             if prepared_cursor == plan.members.len() {
-                let p = plan.clone();
+                let (p, held) = (plan.clone(), self.location());
                 return tokio::task::spawn_blocking(move || {
-                    let store = EngineStore::open_read_only(&db)?;
+                    let store = HeldReader::open(held)?;
                     result(&store, &p, deduped)
                 })
                 .await

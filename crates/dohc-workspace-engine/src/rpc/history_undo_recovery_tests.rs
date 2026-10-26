@@ -396,10 +396,9 @@ async fn workspace_close_finishes_while_request_undo_waits_between_turns() {
     reached.await.unwrap();
     // Close queues its capture barrier while the inverse still owns that gate.
     let probe = service.capture_apply_probe.as_ref().unwrap();
-    probe.observe_next_apply_gate_wait();
     let closing_service = service.clone();
     let closing = tokio::spawn(async move { closing_service.workspace_close(Some(handle)).await });
-    probe.wait_until_apply_gate_waiting().await;
+    probe.wait_until_close_gate_waiting().await;
     release.send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), closing)
         .await

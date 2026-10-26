@@ -29,12 +29,14 @@ export function testPlan(packages) {
 }
 
 // Stop admitting work after failure, then let already-running commands close.
-export async function runBounded(tasks, execute, concurrency = 2) {
+// Once `more` resolves, one more command can run.
+export async function runBounded(tasks, execute, concurrency = 2, more) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Test concurrency must be a positive integer.");
   const pending = [...tasks], active = new Set(), resources = new Set();
-  let failure;
+  let failure, limit = concurrency;
+  let widening = more?.then(() => { limit += 1; widening = undefined; });
   while (pending.length || active.size) {
-    while (!failure && active.size < concurrency) {
+    while (!failure && active.size < limit) {
       const index = pending.findIndex(task => !task.resource || !resources.has(task.resource));
       if (index < 0) break;
       const [task] = pending.splice(index, 1);
@@ -46,7 +48,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
       active.add(work);
     }
     if (!active.size) break;
-    await Promise.race(active);
+    await Promise.race(widening ? [...active, widening] : active);
   }
   if (failure) throw failure;
 }
@@ -66,6 +68,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   // The first command to fail stops every lane from starting another.
   let failure;
   const databaseFinished = Promise.withResolvers();
+  const repositoryFree = Promise.withResolvers();
   function fail(error, name = "tests") {
     failure ??= error;
     stopper.stop(error?.step ?? name, error);
@@ -219,14 +222,18 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
           databasePending.delete(task.name);
           if (!databasePending.size) databaseFinished.resolve();
         }
-      }, report.concurrency);
+      }, report.concurrency, repositoryFree.promise);
       return tasks;
     }).catch(fail);
-    // Isolated scripts take over the repository lane without adding another
-    // concurrent command. Only the runtime packaging fixture rewrites dist.
+    // Isolated scripts, proofs, and then any package test that has not started
+    // take over the repository lane without adding another concurrent command.
+    // Only the runtime packaging fixture rewrites dist.
     const runRepository = async () => {
       await repositoryChecks;
       const tasks = await plan;
+      // Desktop-only release preflight shares a four-CPU hosted runner. Its
+      // Windows compiler owner must compile C# before its deadline expires.
+      if (onlyPackage === "@dohc/desktop") await packages;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: desktopRoot });
       }
@@ -240,6 +247,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
           return fail(error, "proofs");
         });
       }
+      repositoryFree.resolve();
     };
     // Every lane settles before cleanup, including after a sibling fails.
     const results = await Promise.allSettled([runRepository().catch(fail), packages]);

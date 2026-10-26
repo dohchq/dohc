@@ -83,6 +83,45 @@ describe("server automation draft declarations", () => {
 });
 
 describe("closing a settled revision", () => {
+  it.each(["untouched", "edited"])("settles an absent lineage on close only after an edit (%s)", async state => {
+    const edited = state === "edited";
+    const engine = new YdocLoopbackEngine();
+    const settle = vi.fn();
+    const onSettleError = vi.fn();
+    const provider = await openEngineYdocProviderSession({
+      transport: {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.settle) {
+            settle();
+            // The daemon refuses NoMarker until the first durable update.
+            if (!engine.requests.some(request => request.method === YDOC_METHOD.recordUpdate)) {
+              throw new DaemonRefusalError({
+                code: "INVALID_PARAMS", message: "workspace operation failed", retry: "no",
+              }, undefined);
+            }
+          }
+          return engine.sendRequest(request);
+        },
+      },
+      workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      contentKind: "plaintext", onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined, onSettleError,
+    });
+    expect(provider.head).toBe("absent");
+    expect(provider.lineage).toBe("absent");
+    if (edited) {
+      await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first edit")));
+    }
+
+    await expect(provider.close()).resolves.toBeUndefined();
+
+    expect(settle).toHaveBeenCalledTimes(edited ? 1 : 0);
+    expect(onSettleError).not.toHaveBeenCalled();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.close)).toHaveLength(1);
+  });
+
   async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
     const engine = seedPlaintextEngine("seed");
     const provider = await openEngineYdocProviderSession({
@@ -692,6 +731,7 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   const provider = await openEngineYdocProviderSession({
     transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
     workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    largeSeed: {workspaceId: "workspace-1", maxBytes: original.length},
     onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
   });
   const owner = provider.nativeOwner!;
@@ -817,6 +857,68 @@ describe("seeding an absent lineage", () => {
     ).rejects.toThrow("without a valid seed client id");
     expect(recordedUpdates(engine, true)).toEqual([]);
     adapter.dispose();
+  });
+
+  describe("a seed past the in-band cap", () => {
+    const longPath = "notes/long.md";
+    const content = "# Long\n\n" + "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    const largeSeed = { workspaceId: "workspace-1", maxBytes: 64 * 1024 };
+    const seedLongNote = () => {
+      const engine = new YdocLoopbackEngine();
+      engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: longPath, content, contentKind: "richdoc" });
+      return engine;
+    };
+    const openLong = (adapter: YdocLiveAdapter, withLargeSeed: boolean) =>
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: longPath,
+        contentKind: "richdoc",
+        ...(withLargeSeed ? { largeSeed } : {}),
+      });
+
+    it("reads it as a blob within the open's limit and seeds the same document", async () => {
+      expect(Buffer.byteLength(content)).toBeGreaterThan(48 * 1024);
+      const engine = seedLongNote();
+      const adapter = new YdocLiveAdapter(engine);
+      await expect(openLong(adapter, false)).rejects.toThrow("ydoc-seed-too-large");
+
+      const session = await openLong(adapter, true);
+      expect(engine.requests.filter((request) => request.method === "versionedText.readBlob")).toHaveLength(1);
+      expect(recordedUpdates(engine, true)).toHaveLength(1);
+      const opened = new Y.Doc();
+      Y.applyUpdate(opened, session.initialUpdate);
+      expect(ydocProjection.yDocToMarkdown(opened)).toBe(
+        ydocProjection.yDocToMarkdown(ydocProjection.markdownToYDoc(content)),
+      );
+      await session.close({ settle: false });
+      adapter.dispose();
+    });
+
+    it("refuses a blob that does not match the digest the open named", async () => {
+      const engine = seedLongNote();
+      const blobReads = new Set<number>();
+      const transport: EngineTransport = {
+        helloAck: engine.helloAck,
+        onEvent: (handler) => engine.onEvent(handler),
+        onBlob: (handler) =>
+          engine.onBlob((blob) => {
+            if (!blobReads.has(blob.requestId)) return handler(blob);
+            const bytes = new Uint8Array(blob.bytes);
+            bytes[0] = bytes[0]! ^ 1;
+            handler({ ...blob, bytes });
+          }),
+        async sendRequest(request) {
+          if (request.method === "versionedText.readBlob") blobReads.add(request.id);
+          return engine.sendRequest(request);
+        },
+      };
+      const adapter = new YdocLiveAdapter(transport);
+      await expect(openLong(adapter, true)).rejects.toThrow("does not match the digest");
+      expect(recordedUpdates(engine, true)).toEqual([]);
+      expect(engine.activeSessionIds()).toEqual([]);
+      adapter.dispose();
+    });
   });
 });
 
@@ -1330,6 +1432,57 @@ describe("YdocLiveAdapter", () => {
     });
     expect(result).toMatchObject({ seq: 1 });
     expect(session.doc.getText("plainText").toString()).toBe("xabc");
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // The state before an edit is encoded only when the note already holds a
+  // U+FFFD. One that arrives remotely between two local edits must count.
+  it("counts a remote U+FFFD that lands between two local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(1, "\uFFFD");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "b" });
+    expect(session.doc.getText("plainText").toString()).toBe("ba\uFFFD");
+    expect(engine.recordedUpdates).toHaveLength(2);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("rejects a masked split after a remote U+FFFD lands between local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "\uFFFD\uFFFD😀");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 2);
+        text.insert(1, "x");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
     expect(engine.recordedUpdates).toHaveLength(1);
 
     await session.close({ settle: true });
@@ -4471,8 +4624,8 @@ describe("YdocLiveAdapter", () => {
     // settle first, which is what covers it.
     await provider.close({ settle: true });
 
-    expect(settled.content).toBe("seed local");
-    expect(settled.projection).toEqual({
+    expect(settled?.content).toBe("seed local");
+    expect(settled?.projection).toEqual({
       contentKind: "plaintext",
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       destructive: false,

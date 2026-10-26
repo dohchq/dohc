@@ -1,6 +1,6 @@
 import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
-import { isCodeBlock, isCodeMark } from "./pmHelpers";
+import { documentChange, isCodeBlock, isCodeMark } from "./pmHelpers";
 // D4.8 (extended in D4.8b) — Wikilink rendering + autocomplete.
 //
 // Two coupled responsibilities in one plugin:
@@ -28,7 +28,7 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 //      path + close brackets.
 
 import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
-import { PluginKey } from '@tiptap/pm/state'
+import { PluginKey, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 
 export const wikilinkPluginKey = new PluginKey<WikilinkState>('dohc-wikilink')
@@ -85,11 +85,12 @@ const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
 // autocomplete) can reuse the same "don't fire inside code" rules
 // without re-deriving them.
 
-/** Pure: walk text nodes, return wikilink decoration ranges +
- *  resolved targets. Offsets are absolute doc coordinates. */
-export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
+/** Pure: walk one textblock's text nodes, return wikilink ranges +
+ *  resolved targets in absolute doc coordinates; `start` is where the
+ *  block's content starts. */
+function textblockWikilinkRanges(block: ProseMirrorNode, start: number): WikilinkRange[] {
   const ranges: WikilinkRange[] = []
-  doc.descendants((node, pos, parent) => {
+  block.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
     if (isCodeBlock(parent)) return
     if (node.marks.some(isCodeMark)) return
@@ -100,13 +101,45 @@ export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
       const raw = m[2]!
       const target = raw.replace(/\.md$/i, '')
       ranges.push({
-        from: pos + m.index,
-        to: pos + m.index + m[0].length,
+        from: start + pos + m.index,
+        to: start + pos + m.index + m[0].length,
         target,
       })
     }
   })
   return ranges
+}
+
+/** Pure: every wikilink range in the doc, in document order. */
+export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
+  const ranges: WikilinkRange[] = []
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return
+    ranges.push(...textblockWikilinkRanges(node, pos + 1))
+    return false
+  })
+  return ranges
+}
+
+/** Pure: the ranges after `tr`. Textblocks the transaction changed are
+ *  scanned again; every other range moves with the edit. A range whose
+ *  length changed lost or gained text, so it is dropped. */
+export function mapWikilinkRanges(
+  ranges: readonly WikilinkRange[],
+  tr: Transaction,
+): WikilinkRange[] {
+  const { textblocks, mapping } = documentChange(tr.before, tr.doc)
+  const first = textblocks[0]?.pos ?? 0
+  const last = textblocks.at(-1)
+  const end = last ? last.pos + last.node.nodeSize : 0
+  const rescanned = (pos: number) => pos > first && pos < end
+  const moved = ranges.flatMap((range) => {
+    const from = mapping.map(range.from, 1)
+    const to = mapping.map(range.to, -1)
+    return to - from === range.to - range.from && !rescanned(from) ? [{ ...range, from, to }] : []
+  })
+  const found = textblocks.flatMap(({ node, pos }) => textblockWikilinkRanges(node, pos + 1))
+  return [...moved, ...found].sort((a, b) => a.from - b.from)
 }
 
 /** Pure: detect an incomplete wikilink at the cursor. Looks at the
@@ -269,7 +302,7 @@ export function makeWikilinkPlugin(
         if (!tr.docChanged && !tr.selectionSet) return old
         return wikilinkState(
           newState.doc,
-          tr.docChanged ? computeWikilinkRanges(newState.doc) : old.ranges,
+          tr.docChanged ? mapWikilinkRanges(old.ranges, tr) : old.ranges,
           getKnownFiles(),
           newState.selection.from,
           tr.docChanged ? undefined : old,

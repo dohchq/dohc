@@ -153,6 +153,9 @@ type EngineDocOpenOutcome =
     }
   | { kind: "unavailable" }
   | { kind: "capture-held" }
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet.
+  | { kind: "outside-write-waiting" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
@@ -327,6 +330,9 @@ export type EngineDocLeaseSnapshot = {
     retry?: () => void;
   } | null;
   permanentFailure: { token: number } | null;
+  // The file changed outside dohc while this session held it, and whether
+  // the document then had edits no save carried.
+  changedOutside: { token: number; unsaved: boolean } | null;
   // The drafts holding edits a history replacement set aside, once the new
   // history shows.
   replacedDraftIds: readonly number[];
@@ -340,12 +346,15 @@ export type EngineDocLeaseSnapshot = {
 type EngineDocSession = {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => EngineDocLeaseSnapshot;
+  // Edits this editor made that main has not confirmed, asked at the moment.
+  unsavedEditsPending: () => boolean;
   start: () => void;
   dispose: () => Promise<void>;
   whenClosed: () => Promise<void>;
 };
 
 export type EngineDocLease = Omit<EngineDocSession, "start"> & {
+  workspaceId: string;
   documentKey: string;
   startAfter: (barrier: Promise<void> | undefined) => void;
   retain: () => void;
@@ -369,6 +378,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
+    changedOutside: null,
     replacedDraftIds: [],
     sceneRecoveryAssets: null,
   };
@@ -543,10 +553,24 @@ function createEngineDocSession(
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
+  // A change to the document from any origin, an agent's edit through main
+  // included, after main said nothing was unsaved.
+  let changedSinceCleanSignal = false;
+  const unsavedEditsPending = (): boolean =>
+    deliveryPending || localSeq.current > confirmedLocalSeq || changedSinceCleanSignal;
+  // The file changed outside dohc. Edits main has not confirmed are unsaved
+  // whatever main counted, so the document must not reload over them.
+  const noteChangedOutside = (unsaved: boolean): void => {
+    const current = snapshot.changedOutside;
+    if (current?.token === token && (current.unsaved || !unsaved)) return;
+    publish((latest) => ({ ...latest, changedOutside: { token, unsaved } }));
+  };
+
   const onDeliveryPendingChange = (pending: boolean): void => {
     deliveryPending = pending;
     if (pending) {
       pendingSavedSeq = null;
+      if (snapshot.changedOutside?.token === token) noteChangedOutside(true);
       return;
     }
     if (
@@ -1035,6 +1059,7 @@ function createEngineDocSession(
       captureDeletion(doc, cause);
       return;
     }
+    if (event.changedOutside) noteChangedOutside(event.changedOutside.unsaved || unsavedEditsPending());
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
@@ -1095,6 +1120,10 @@ function createEngineDocSession(
     detachSaveObserver?.();
     const onUpdate = () => {
       if (disposed) return;
+      if (snapshot.changedOutside?.token === token && !snapshot.changedOutside.unsaved) {
+        changedSinceCleanSignal = true;
+        noteChangedOutside(true);
+      }
       if (writesRefused.current) {
         if (recovery.snapshotBytes === null && deletionPending) {
           // A replacement installed a fresh recovery slot while the path
@@ -1308,6 +1337,7 @@ function createEngineDocSession(
     getSnapshot() {
       return snapshot;
     },
+    unsavedEditsPending,
     start() {
       if (started) return;
       started = true;
@@ -1355,6 +1385,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.captureHeld) {
               setOutcome({ kind: "capture-held" });
+            } else if (bound.outsideWriteWaiting) {
+              setOutcome({ kind: "outside-write-waiting" });
             } else if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.sharedWaiting) {
@@ -1528,6 +1560,7 @@ function createEngineDocLease(
   };
 
   lease = {
+    workspaceId: input.workspaceId,
     documentKey: stableDocumentKey,
     withClosedSession(work) {
       const generation = ++transitionGeneration;
@@ -1602,6 +1635,9 @@ function createEngineDocLease(
     getSnapshot() {
       return snapshot;
     },
+    unsavedEditsPending() {
+      return activeSession?.unsavedEditsPending() ?? false;
+    },
     startAfter(barrier) {
       if (started) return;
       started = true;
@@ -1663,9 +1699,18 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
   await Promise.all(leases.map((lease) => lease.dispose()));
 }
 
-/** Flush and close every pane for this document before changing its live mode. */
-export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>): Promise<void> {
-  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path));
+/**
+ * Flush and close every pane for this document before changing its live mode:
+ * the panes at its path, or with its object id, the panes bound to it at
+ * whatever path they opened it, and no pane of another document at its old path.
+ */
+export async function withClosedEngineDocSession(workspaceId: string, document: {path: string} | {objectId: string}, work: () => Promise<void>): Promise<void> {
+  const held = (lease: EngineDocLease) => {
+    if ("path" in document) return lease.documentKey === documentKey(workspaceId, document.path);
+    const {outcome} = lease.getSnapshot();
+    return lease.workspaceId === workspaceId && outcome?.kind === "bound" && outcome.objectId === document.objectId;
+  };
+  const leases = [...engineDocLeases.values()].filter(held);
   const close = (index: number): Promise<void> => index === leases.length ? work() : leases[index]!.withClosedSession(() => close(index + 1));
   await close(0);
 }

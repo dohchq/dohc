@@ -63,6 +63,9 @@ pub enum IngestOutcome {
     /// The capture driver asks for that scan once a session releases its
     /// lease.
     Deferred,
+    /// An outside write waits for the document session. Keep the prior
+    /// manifest entry so release retries it as a change to the recorded head.
+    WriteDeferred,
     /// The file was gone when the sink read it, and retiring its record waits
     /// for a live document session, as with [`RetireOutcome::Deferred`]. The
     /// manifest keeps the path's entry, so a later scan retires it.
@@ -196,6 +199,8 @@ pub struct CaptureApplyResult {
     /// The deferred paths whose record waits to be retired. Their manifest
     /// entries stay, so the next scan retires them.
     pub deferred_retires: Vec<String>,
+    /// Outside writes waiting for a session, with their prior manifest kept.
+    pub deferred_writes: Vec<String>,
     pub held_observations: Vec<HeldObservation>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
@@ -439,6 +444,7 @@ enum Applied {
     Retired,
     NotOwned,
     Deferred,
+    DeferredWrite,
     DeferredRetire,
     Held { size: u64, sha256: String },
 }
@@ -458,6 +464,7 @@ impl From<IngestOutcome> for Applied {
             IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
             IngestOutcome::NotOwned => Self::NotOwned,
             IngestOutcome::Deferred => Self::Deferred,
+            IngestOutcome::WriteDeferred => Self::DeferredWrite,
             IngestOutcome::RetireDeferred => Self::DeferredRetire,
             IngestOutcome::Held { size, sha256 } => Self::Held { size, sha256 },
         }
@@ -471,6 +478,7 @@ struct Receipt {
     failed_applies: Vec<String>,
     deferred_paths: Vec<String>,
     deferred_retires: Vec<String>,
+    deferred_writes: Vec<String>,
     held_observations: Vec<HeldObservation>,
 }
 
@@ -483,6 +491,7 @@ impl Receipt {
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
             deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
         }
     }
@@ -500,6 +509,10 @@ impl Receipt {
             Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
             Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
             Ok(Applied::Deferred) => self.deferred_paths.push(op.path().to_owned()),
+            Ok(Applied::DeferredWrite) => {
+                self.deferred_paths.push(op.path().to_owned());
+                self.deferred_writes.push(op.path().to_owned());
+            }
             Ok(Applied::DeferredRetire) => {
                 self.deferred_paths.push(op.path().to_owned());
                 self.deferred_retires.push(op.path().to_owned());
@@ -526,6 +539,7 @@ impl Receipt {
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
             deferred_retires: self.deferred_retires,
+            deferred_writes: self.deferred_writes,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: Some(boundary_path.to_owned()),
             degraded: true,
@@ -541,6 +555,7 @@ impl Receipt {
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
             deferred_retires: self.deferred_retires,
+            deferred_writes: self.deferred_writes,
             held_observations: self.held_observations,
             crashed_after_durable_boundary: None,
             degraded,

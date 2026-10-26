@@ -1,24 +1,36 @@
 import {
-  existingLocalStateFolder,
   localStateFolder,
   LocalStateUnavailableError,
+  readOwnedLocalStateFolder,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 
-// What dohc keeps for a workspace's Collections on this computer only: the
-// workers that hold a Collection's records while it is open, the files it
-// stages to export, restore or move a Collection, and offline copies of
-// Collections on a server. All of it can be made again, so it lives in
-// `.dohc/local`, which iCloud Drive skips. The Collections themselves stay in
-// `.dohc/datasets/state.sqlite`, which no path here leads to.
+// What dohc keeps for a workspace's Collections on this computer only, in
+// `.dohc/local`, which iCloud Drive skips. `datasets/state.sqlite`, with its
+// -wal and -shm, is the Collections store: the only copy of their records,
+// files, approvals and History. It can't be made again, so nothing removes
+// `datasets`. The rest can be made again: the workers that hold a
+// Collection's records while it is open, the files dohc stages to export,
+// restore or move a Collection, and offline copies of Collections on a server.
 
 const FOLDERS = {
+  store: { path: "datasets", what: "open this workspace's Collections" },
   workers: { path: "datasets/workers", what: "open this Collection's records" },
   exports: { path: "datasets/exports", what: "prepare this Collection's recovery file" },
   copies: { path: "dataset-copies", what: "open this Collection's offline copy" },
 } as const;
 
 export type LocalDatasetFolder = keyof typeof FOLDERS;
+
+/** The store's file name in its folder. */
+export const STORE_FILE = "state.sqlite";
+/** Where the store is, as a person finds it in the workspace. */
+export const STORE_PATH = `.dohc/local/${FOLDERS.store.path}/${STORE_FILE}`;
+/**
+ * Where the store was before `.dohc/local`. iCloud Drive syncs it, so only
+ * the computer that keeps the Collections moves a store from there, once.
+ */
+export const OLD_STORE_PATH = `.dohc/datasets/${STORE_FILE}`;
 
 /**
  * One of the Collection folders in `.dohc/local`, or a folder in it, for a
@@ -39,8 +51,11 @@ export async function localDatasetFolder(workspace: LocalStateWorkspace, folder:
   }
 }
 
-/** The export folder for a reader, or null when it is missing or not one only this user can change. */
-export async function existingLocalDatasetExports(rootPath: string): Promise<string | null> {
-  const dir = await existingLocalStateFolder(rootPath, FOLDERS.exports.path);
-  return dir === "unusable" ? null : dir;
+/**
+ * Reads the export folder with `read`, given the folder, or null when it is
+ * missing or not one only this user can change. Refuses as
+ * readOwnedLocalStateFolder does.
+ */
+export function readLocalDatasetExports<T>(rootPath: string, read: (dir: string | null) => Promise<T>): Promise<T> {
+  return readOwnedLocalStateFolder(rootPath, FOLDERS.exports.path, (dir) => read(dir === "unusable" ? null : dir));
 }

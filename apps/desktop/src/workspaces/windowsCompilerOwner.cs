@@ -1,13 +1,8 @@
-param([string]$NodeExecutable, [string]$RelayPath, [string]$Payload, [UInt64]$MemoryBytes, [UInt32]$MaxProcesses, [Int32]$TimeoutMs, [Int64]$InputBytes)
-$ErrorActionPreference = 'Stop'
-if ($PSVersionTable.PSVersion.Major -lt 5) { throw 'Compiler containment requires PowerShell 5 or later.' }
-if ($MemoryBytes -eq 0 -or $MaxProcesses -eq 0 -or $TimeoutMs -le 0 -or $InputBytes -lt 0) { throw 'Invalid compiler job bounds.' }
-
-# Same ownership and admission sequence as scripts/verification/windows-job.ps1.
-Add-Type -TypeDefinition @'
+// Same ownership and admission sequence as scripts/verification/windows-job.ps1.
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -54,6 +49,22 @@ public static class CompilerJob {
         }
         result.Append('\\', slashes * 2); result.Append('"'); return result.ToString();
     }
+    // Arguments: the installed Node, the relay, the base64 admission, then the memory, process, deadline and input bounds.
+    public static int Main(string[] args) {
+        Console.Error.WriteLine("[dohc-compiler] owner running");
+        try {
+            if (args.Length != 7) throw new ArgumentException("Invalid compiler job arguments.");
+            ulong memoryBytes = ulong.Parse(args[3], CultureInfo.InvariantCulture);
+            uint maxProcesses = uint.Parse(args[4], CultureInfo.InvariantCulture);
+            int timeoutMs = int.Parse(args[5], CultureInfo.InvariantCulture);
+            long inputBytes = long.Parse(args[6], CultureInfo.InvariantCulture);
+            if (memoryBytes == 0 || maxProcesses == 0 || timeoutMs <= 0 || inputBytes < 0) throw new ArgumentException("Invalid compiler job bounds.");
+            return Run(args[0], args[1], args[2], memoryBytes, maxProcesses, timeoutMs, inputBytes);
+        } catch (Exception error) {
+            Console.Error.WriteLine(error.ToString());
+            return 1;
+        }
+    }
     public static int Run(string node, string relay, string payload, ulong memoryBytes, uint maxProcesses, int timeoutMs, long inputBytes) {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -78,6 +89,7 @@ public static class CompilerJob {
                 try {
                     if (!AssignProcessToJobObject(job, child.Handle))
                         throw new Win32Exception(Marshal.GetLastWin32Error());
+                    Console.Error.WriteLine("[dohc-compiler] job assigned");
                     byte[] admission = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(Convert.FromBase64String(payload)) + "\n");
                     child.StandardInput.BaseStream.Write(admission, 0, admission.Length);
                     child.StandardInput.BaseStream.Flush();
@@ -113,6 +125,3 @@ public static class CompilerJob {
         } finally { CloseHandle(job); }
     }
 }
-'@
-try { exit [CompilerJob]::Run($NodeExecutable, $RelayPath, $Payload, $MemoryBytes, $MaxProcesses, $TimeoutMs, $InputBytes) }
-catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }

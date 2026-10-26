@@ -17,6 +17,7 @@ import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const engine = requireEngineBinaryOrSkip();
 const compile = createDatasetFixtureCompiler();
@@ -41,7 +42,7 @@ async function tripWorkspace(name: string) {
     const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
     await lifecycle.start();
     const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-    // The real engine's open prepares `.dohc/local`, where the host keeps its workers.
+    // The real engine's open prepares `.dohc/local`, where the host keeps its store and workers.
     readLocalStateFrom(sessions);
     const capture = createWorkspaceEngineCapture({ ...attached, rustEngineSessions: sessions, onError: () => undefined });
     const adapter = () => sessions.run(attached, async ({ client, workspace: handle }) => new VersionedLiveAdapter(client, handle, { workspaceId }));
@@ -59,7 +60,7 @@ async function tripWorkspace(name: string) {
   // `down`: the engine is unavailable to the app, as when the daemon is gone.
   const control = { wrap: (real: LocalCollectionEngine): LocalCollectionEngine => real, down: false };
   async function open() {
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId, workspaceRoot: root, attachmentId: attached.attachmentId, capacityBytes: 1024 * 1024, compile,
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId, workspaceRoot: root, attachmentId: attached.attachmentId, capacityBytes: 1024 * 1024, compile,
       collectionEngine: () => { if (control.down) throw new Error("The workspace engine is unavailable."); return control.wrap(running.binding); },
       collectionAuthor: async () => person });
     hosts.push(host);
@@ -70,10 +71,15 @@ async function tripWorkspace(name: string) {
     get capture() { return running.capture; },
     async approve() {
       const host = await open();
-      const prepared = await prepareLocalAppPublication({ workspaceId, appRoot: "trip" }, { adapter: await running.adapter(), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
+      const prepared = await prepareLocalAppPublication({ workspaceId, appRoot: "trip" }, { deferredWrites: [], adapter: await running.adapter(), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
       return { host, published: await host.apps.activate(prepared, signal()) };
     },
-    async restartEngine() { await running.stop(); running = await startEngine(); },
+    async restartEngine() {
+      await running.stop();
+      running = await startEngine();
+      // The desktop reconciles once the engine has opened the workspace again, as its store in `.dohc/local` needs.
+      await running.adapter();
+    },
     async close() {
       for (const host of hosts) await host.close();
       await running.stop();

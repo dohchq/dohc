@@ -4,9 +4,11 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { Play, Share2 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { Lock, Play, Share2 } from "lucide-react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
@@ -38,15 +40,15 @@ export function ViewActions(props: {
   const slot = useTabRowActionsSlot();
   const content = (
     <>
-      {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
+      {/* 28px: the widest mark (12px), its gap and an ellipsis. A grid of
           minmax(auto, max-content) columns, so its words set how wide it can
           grow and each item's own minimum how narrow: a label (min-w-0)
-          shrinks, and the row shrinks it to 25px before any tab name gives
+          shrinks, and the row shrinks it to 28px before any tab name gives
           way, while Try again keeps its natural width. */}
       {props.status ? (
         <div
           data-view-status=""
-          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[28px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
         >
           {props.status}
         </div>
@@ -159,6 +161,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  // Actions left of Try again.
+  children?: ReactNode;
 }) {
   return (
     <div
@@ -178,15 +182,148 @@ export function EngineMayHoldDocumentNotice(props: {
         {props.message ?? "dohc could not open this document for editing."}
         {!props.message && props.contentShown ? " It is read-only for now." : ""}
       </span>
-      <button
-        type="button"
-        onClick={props.onRetry}
-        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
-      >
-        Try again
-      </button>
+      <span className="flex shrink-0 items-center gap-3">
+        {props.children}
+        <button
+          type="button"
+          onClick={props.onRetry}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Try again
+        </button>
+      </span>
     </div>
   );
+}
+
+// Opens a read-only note in the system's app for the file.
+export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
+  const openExternally = () => {
+    void bridge()
+      .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+      .catch((error: unknown) =>
+        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+      );
+  };
+  return (
+    <button
+      type="button"
+      data-testid="lossy-note-open-externally"
+      onClick={openExternally}
+      className="whitespace-nowrap text-subtle hover:text-ink"
+    >
+      Open externally
+    </button>
+  );
+}
+
+// A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
+// app for the file, which edits it without dohc's editor.
+export function LossyNoteNotice(props: {
+  workspaceId: string;
+  path: string;
+  // The hash of the bytes the note was read from, which saving would rewrite.
+  contentHash: string | null;
+  onError?: ReportButtonError;
+  // Binds the editor for this open, after the person confirms the warning.
+  onEditAnyway?: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // Each opening of the warning asks History again: capture can record an
+  // outside edit after the note opened.
+  const [opened, setOpened] = useState(0);
+  // History keeps the original only when its latest moment for the file
+  // recorded these exact bytes. A path files.toml leaves out has none to
+  // restore. Neither has a file capture has not recorded yet, or an outside
+  // edit capture holds. History's own list for the file answers, as About's
+  // does, with its rules applied. Until it answers, the warning says nothing
+  // about History.
+  const asked = `${props.workspaceId}\u0000${props.path}\u0000${props.contentHash}\u0000${opened}`;
+  const [history, setHistory] = useState<{ asked: string; keeps: HistoryKeeps } | null>(null);
+  useEffect(() => {
+    if (!confirming) return;
+    let live = true;
+    void historyKeeps(props.workspaceId, props.path, props.contentHash)
+      .then((keeps) => {
+        if (live && keeps !== null) setHistory({ asked, keeps });
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [confirming, asked, props.workspaceId, props.path, props.contentHash]);
+  const historyLine = history?.asked !== asked ? null
+    : history.keeps === "kept" ? "History keeps the original."
+    : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
+    : "dohc could not confirm that History can restore the original.";
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        dohc can't edit this document yet without changing parts it can't show.
+      </span>
+      <span className="flex shrink-0 items-center gap-3">
+        <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
+        {props.onEditAnyway ? (
+          <button
+            type="button"
+            data-testid="lossy-note-edit-anyway"
+            onClick={() => {
+              setOpened((count) => count + 1);
+              setConfirming(true);
+            }}
+            className="whitespace-nowrap text-subtle hover:text-ink"
+          >
+            Edit anyway
+          </button>
+        ) : null}
+      </span>
+      {confirming && props.onEditAnyway ? (
+        <ConfirmDialog
+          title="Edit this document anyway?"
+          intent="danger"
+          confirmLabel="Edit anyway"
+          testId="lossy-note-edit-anyway-dialog"
+          cancelTestId="lossy-note-edit-anyway-cancel"
+          confirmTestId="lossy-note-edit-anyway-confirm"
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            props.onEditAnyway?.();
+          }}
+        >
+          <p className="mt-2 text-[13px] text-muted">
+            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
+            {historyLine ? ` ${historyLine}` : null}
+          </p>
+        </ConfirmDialog>
+      ) : null}
+    </div>
+  );
+}
+
+type HistoryKeeps = "kept" | "untracked" | "not-recorded";
+
+// Whether History's latest moment for the note holds the bytes `contentHash`
+// names; null when History can't say.
+async function historyKeeps(workspaceId: string, path: string, contentHash: string | null): Promise<HistoryKeeps | null> {
+  const chats = await bridge().listFileChats({ workspaceId, path });
+  if (!("fileObjectId" in chats)) return null;
+  if (chats.fileObjectId === null) return "untracked";
+  const moments = await bridge().listEngineMoments({ workspaceId, objectId: chats.fileObjectId, limit: 1 });
+  if (!("moments" in moments)) return null;
+  const latest = moments.moments[0];
+  if (latest === undefined || contentHash === null) return "not-recorded";
+  const read = await bridge().readEngineMoment({ workspaceId, momentId: latest.id });
+  if ("status" in read) return read.status === "untracked" ? "untracked" : null;
+  const text = read.moment?.afterText;
+  if (typeof text !== "string") return "not-recorded";
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex === contentHash ? "kept" : "not-recorded";
 }
 
 export function EngineArtifactAssetsInvalidNotice(props: {
