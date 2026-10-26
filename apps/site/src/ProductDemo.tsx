@@ -886,9 +886,10 @@ export function ProductDemo() {
             ) : (
               <EmptyEditorGroup
                 platform={window.dohcDesktop?.platform}
-                onNewFile={createDocument}
-                onOpenPalette={() => setPalette("commands")}
-                onOpenQuickOpen={() => setPalette("quick-open")}
+                create={{ markdown: createDocument }}
+                recent={recentPaths}
+                files={documents}
+                onOpen={openDocument}
               />
             )}
           </EditorGroupFrame>

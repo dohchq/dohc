@@ -116,6 +116,7 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_ydoc_outbox_refusals",
     "owner_live_stops",
     "sync_identity",
     "replication_log",
@@ -591,6 +592,8 @@ mod tests {
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) VALUES ('outbox','workspace','main','owner',?1,'owner.md','[\"owner.md\"]',0,?1,?1,2,'quarantined',0,NULL,1,'invalid-update',NULL,0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO owner_ydoc_outbox_refusals VALUES ('outbox','delivery','refusal-key')",[]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
@@ -632,6 +635,7 @@ mod tests {
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
             "live_owner_adoptions",
+            "owner_ydoc_outbox_refusals",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -729,6 +733,7 @@ mod tests {
         for table in [
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
+            "owner_ydoc_outbox_refusals",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
         ] {

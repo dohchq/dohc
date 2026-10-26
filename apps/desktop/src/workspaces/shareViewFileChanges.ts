@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, readdir, realpath, type FileHandle } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   validateUserMaterializePath,
   validateUserWritePath,
@@ -24,8 +24,9 @@ import {
   droppedEntryParent,
   importNameFor,
   ImportPathChangedError,
-  landsAsNamed,
+  ImportSkips,
   movePath,
+  nameSkip,
   openDroppedFile,
   resolveImportDestination,
   screenDroppedPaths,
@@ -34,12 +35,15 @@ import {
   type DroppedFolderCheck,
   type DroppedSource,
   type ImportCopyOutcome,
+  type ImportSkipReason,
   type ImportSource,
 } from "./workspaceFiles";
 import type { WorkspaceTextWriteResult } from "./workspaceAssets";
 import { readDiskContent, readOpenedDiskContent, type DiskTextState } from "./workspaceEngineCapture";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
+import { diskSpelling } from "./diskSpelling";
 
 // Internal file-change primitives for ShareViewFiles. Authority, lifecycle, and
 // workspace scheduling belong to that owner. This module handles only the
@@ -408,7 +412,7 @@ async function applyShareViewPathMove(
   // Every destination, before any of them is applied. A collision found half
   // way through would otherwise leave the files before it already moved.
   for (const move of moves) {
-    if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
+    if (held.has(move.to) || (!renamesInPlace && (await projectionHolds(input.rootPath, move.to)))) {
       throw new Error(`Destination already exists: ${move.to}`);
     }
   }
@@ -625,7 +629,7 @@ async function applyShareViewPathDelete(
  *
  * Everything the ordinary import decides is decided the same way — the same
  * drag-in screen, the same destination rule, the same collision ladder, the
- * same skipped count. What differs is the destination: content the engine
+ * same skip reasons. What differs is the destination: content the engine
  * cannot own is refused here, before anything lands, rather than copied to
  * disk and left there as a file no moment states.
  */
@@ -648,8 +652,9 @@ async function applyShareViewFileImport(
   );
   const screened =
     input.screenAgainstRoots === null
-      ? { usable: input.absolutePaths, refused: 0 }
+      ? { usable: input.absolutePaths, skips: new ImportSkips() }
       : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots, relDir);
+  const skips = screened.skips;
   const landedPath = (path: string) => (relDir === "" ? path : `${relDir}/${path}`);
   // Names already occupied, on both sides. The store is what a change is made
   // of; the projection can also hold a file the recipient put there by hand,
@@ -684,14 +689,14 @@ async function applyShareViewFileImport(
   // Every source whose name lands as it is spelled. The store holds files,
   // not folders, so a folder lands through the files in it, and one with no
   // file in it is skipped.
-  let skipped = screened.refused;
   const planned: { source: ImportSource; name: string }[] = [];
   for (const source of screened.usable) {
     const name = basename(typeof source === "string" ? source : source.source);
     const files = typeof source === "string" || source.entries === null
       || source.entries.some((entry) => !entry.folder);
-    if (!landsAsNamed(landedPath(name)) || !files) {
-      skipped += 1;
+    const unusable = nameSkip(landedPath(name)) ?? (files ? null : "no-files");
+    if (unusable !== null) {
+      skips.add(name, unusable);
       continue;
     }
     planned.push({ source, name });
@@ -701,13 +706,16 @@ async function applyShareViewFileImport(
   // read first, so one the engine cannot own claims no collision variant.
   const landings: { source: ImportSource; name: string }[] = [];
   for (const { source, name: wanted } of planned) {
-    if (!isFolderSource(source) && !isOwnable(await readSourceContent(source, landedPath(wanted)))) {
-      skipped += 1;
-      continue;
+    if (!isFolderSource(source)) {
+      const content = await readSourceContent(source, landedPath(wanted));
+      if (!isOwnable(content)) {
+        skips.add(wanted, contentSkip(content, wanted));
+        continue;
+      }
     }
     const name = await importNameFor(wanted, absDir, nameTaken);
     if (name === null) {
-      skipped += 1;
+      skips.add(wanted, "taken");
       continue;
     }
     claimed.add(name.toLowerCase());
@@ -725,6 +733,8 @@ async function applyShareViewFileImport(
 
   const imported: string[] = [];
   const changed: ShareViewChangedPath[] = [];
+  // A skip names what the person dropped, not the collision name it claimed.
+  const wantedName = new Map(planned.map(({ source, name }) => [source, name]));
   const write = async (name: string, content: OwnableContent) => {
     const path = landedPath(name);
     input.assertPathAllowed?.(path);
@@ -746,7 +756,7 @@ async function applyShareViewFileImport(
         // name, and holding every dropped file's bytes would cost memory.
         const content = await readSourceContent(source, landedPath(name));
         if (!isOwnable(content)) {
-          skipped += 1;
+          skips.add(wantedName.get(source) ?? name, contentSkip(content, name));
           continue;
         }
         await write(name, content);
@@ -763,7 +773,7 @@ async function applyShareViewFileImport(
         const path = `${name}/${entry.path}`;
         const content = await readDroppedContent(from, entry.identity, landedPath(path), droppedEntryParent(source, entry));
         if (!isOwnable(content)) {
-          skipped += 1;
+          skips.add(`${wantedName.get(source) ?? name}/${entry.path}`, contentSkip(content, path));
           continue;
         }
         await write(path, content);
@@ -783,13 +793,31 @@ async function applyShareViewFileImport(
       changed.map((change) => change.path),
     );
   }
-  return { imported, skipped };
+  return { imported, ...skips.outcome() };
 }
 
 type OwnableContent = Extract<DiskTextState, { kind: "text" | "binary" }>;
 
 function isOwnable(content: DiskTextState): content is OwnableContent {
   return content.kind === "text" || content.kind === "binary";
+}
+
+// Why the engine cannot own a file's content. Text that is not UTF-8 counts
+// against the limit for other files, so only a drawing is refused for its
+// bytes alone.
+function contentSkip(content: Exclude<DiskTextState, OwnableContent>, path: string): ImportSkipReason {
+  switch (content.kind) {
+    case "absent":
+    case "unreadable":
+      return "unreadable";
+    case "untracked-content":
+      switch (content.reason) {
+        case "oversized-text": return "too-large-text";
+        case "oversized-binary": return "too-large";
+        case "non-file": return "not-a-file";
+        case "non-utf8": return liveDocumentKindForPath(path) === "scene" ? "unreadable" : "too-large";
+      }
+  }
 }
 
 function isFolderSource(source: ImportSource): source is DroppedSource & { entries: DroppedEntry[] } {
@@ -1058,33 +1086,6 @@ async function projectionHolds(
 }
 
 /**
- * CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S.
- *
- * On a case-insensitive filesystem `docs/Plans` and `docs/plans` are one
- * directory, and `Note.md` and `note.md` are one file. Every seam here that
- * asks "is this the same entry?" or "is this name taken?" asks through this one
- * probe, because a string comparison answers those questions wrongly on exactly
- * the platform dohc ships on first — and two of the places that asked with
- * strings answered by destroying data.
- *
- * Both ends must resolve for them to BE the same entry. This helper serves only
- * per-file collision checks after the destination was proven occupied. A
- * missing or unreadable endpoint therefore returns false and keeps the
- * collision refusal closed.
- */
-async function sameProjectionEntry(
-  rootPath: string,
-  left: string,
-  right: string,
-): Promise<boolean> {
-  const [leftReal, rightReal] = await Promise.all([
-    realpath(join(rootPath, left)).catch(() => null),
-    realpath(join(rootPath, right)).catch(() => null),
-  ]);
-  return leftReal !== null && rightReal !== null && leftReal === rightReal;
-}
-
-/**
  * Resolve one physical identity snapshot for the whole top-level move.
  *
  * Relative path spelling cannot answer this on a case-insensitive filesystem
@@ -1103,9 +1104,8 @@ async function preflightProjectionMoveIdentity(
     input.rootPath,
     from,
   );
-  let source: string;
   try {
-    source = await realpath(sourceTarget);
+    await realpath(sourceTarget);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
@@ -1115,41 +1115,41 @@ async function preflightProjectionMoveIdentity(
     }
     throw error;
   }
+  const identityUnavailable = () => new Error(
+    `dohc did not rename ${from} to ${to}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
+  );
+  const source = await diskSpelling(input.rootPath, sourceTarget).catch(() => null);
+  if (source === null) throw identityUnavailable();
 
   const destinationTarget = await input.projection.resolvedTarget(
     input.rootPath,
     to,
   );
-  let destination: string;
-  try {
-    destination = await realpath(destinationTarget);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    // resolvedTarget already canonicalized every existing ancestor. The
-    // unresolved tail can therefore participate directly in containment.
-    destination = destinationTarget;
+  let ancestor = destinationTarget;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      await realpath(ancestor);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw identityUnavailable();
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
   }
+  // resolvedTarget resolves links in the existing ancestors, but Linux can
+  // keep their lookup case. Only the missing tail keeps its given spelling.
+  const storedAncestor = await diskSpelling(input.rootPath, ancestor).catch(() => null);
+  if (storedAncestor === null) throw identityUnavailable();
+  const destination = join(storedAncestor, ...missing);
   const renamesInPlace = source === destination;
   if (!renamesInPlace && isInside(source, destination)) {
     throw new Error(`Cannot move a path into itself: ${from}`);
   }
   return { renamesInPlace };
-}
-
-/**
- * Would this move land on something the projection already holds?
- *
- * The case-only carve-out `movePath` makes, for the same reason: the
- * destination "exists" because it IS the source, and refusing there would block
- * a rename the user plainly meant.
- */
-async function projectionOccupies(
-  rootPath: string,
-  move: { from: string; to: string },
-): Promise<boolean> {
-  if (!(await projectionHolds(rootPath, move.to))) return false;
-  return !(await sameProjectionEntry(rootPath, move.from, move.to));
 }
 
 /** Every path the share view's store holds, with the kind its projection needs. */

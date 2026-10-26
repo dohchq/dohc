@@ -688,7 +688,7 @@ describe("newest moment order", () => {
   it("retries an updating answer in the same workspace and returns the order", async () => {
     vi.useFakeTimers();
     const listEngineMoments = stubMoments(UPDATING, UPDATING, ready(7));
-    const read = readNewestMomentOrder("ws-1", () => true);
+    const read = readNewestMomentOrder("ws-1", () => true, () => false);
     await advance(100 + 250);
     await expect(read).resolves.toBe(7);
     expect(listEngineMoments).toHaveBeenCalledTimes(3);
@@ -699,7 +699,7 @@ describe("newest moment order", () => {
     vi.useFakeTimers();
     let current = true;
     const listEngineMoments = stubMoments(UPDATING, ready(7));
-    const read = readNewestMomentOrder("ws-1", () => current);
+    const read = readNewestMomentOrder("ws-1", () => current, () => true);
     await act(async () => { await Promise.resolve(); });
     current = false;
     await advance(2_000);
@@ -707,10 +707,19 @@ describe("newest moment order", () => {
     expect(listEngineMoments).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects in words when the ladder ends still updating", async () => {
+  it("answers nothing, without failing, when the ladder ends still updating while capture works", async () => {
     vi.useFakeTimers();
     const listEngineMoments = stubMoments(UPDATING, UPDATING, UPDATING, UPDATING, UPDATING);
-    const read = readNewestMomentOrder("ws-1", () => true);
+    const read = readNewestMomentOrder("ws-1", () => true, () => false);
+    await advance(2_000);
+    await expect(read).resolves.toBeNull();
+    expect(listEngineMoments).toHaveBeenCalledTimes(5);
+  });
+
+  it("rejects in words when the ladder ends still updating after capture failed", async () => {
+    vi.useFakeTimers();
+    const listEngineMoments = stubMoments(UPDATING, UPDATING, UPDATING, UPDATING, UPDATING);
+    const read = readNewestMomentOrder("ws-1", () => true, () => true);
     const rejected = expect(read).rejects.toThrow("Recent changes are still being added to History.");
     await advance(2_000);
     await rejected;
@@ -719,7 +728,7 @@ describe("newest moment order", () => {
 
   it("answers nothing while History's rules are unreadable", async () => {
     stubMoments({ status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });
-    await expect(readNewestMomentOrder("ws-1", () => true)).resolves.toBeNull();
+    await expect(readNewestMomentOrder("ws-1", () => true, () => true)).resolves.toBeNull();
   });
 });
 

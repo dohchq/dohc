@@ -155,6 +155,8 @@
   "desktop:list-owner-live-documents": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-owner-live-refusals": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:retry-owner-live-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:retry-owner-live-quarantine": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:save-owner-live-recovery-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-relay-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-relay-share-link": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:add-relay-share-link": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

@@ -43,6 +43,7 @@ import {
   MAX_ZIP_ENTRIES,
   MAX_ZIP_TOTAL_BYTES,
   ZIP_TOO_LARGE_REFUSAL,
+  type ImportCopyOutcome,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
@@ -238,7 +239,7 @@ export function createWorkspaceFilesIpc<
   function shareViewImportResult(
     workspaceId: string,
     outcome: ShareViewFileChangeOutcome,
-  ): { imported: string[]; skipped: number; interrupted?: true } {
+  ): ImportCopyOutcome {
     if (outcome.status === "committed") {
       if (outcome.projection === "pending") notifyRenderer({ workspaceId });
       if (
@@ -249,7 +250,7 @@ export function createWorkspaceFilesIpc<
       ) {
         throw new Error("Shared file import returned an invalid result.");
       }
-      return outcome.value as { imported: string[]; skipped: number };
+      return outcome.value as ImportCopyOutcome;
     }
     notifyRenderer({ workspaceId });
     console.error("[desktop] shared file import did not finish cleanly", outcome);

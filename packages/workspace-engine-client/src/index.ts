@@ -80,6 +80,9 @@ export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METH
 
 export {
   OwnerYDocOutbox,
+  OwnerYDocOutboxReadChangedError,
   parseLiveObjectBinding,
   type LiveObjectBinding,
+  type OwnerYDocOutboxEntry,
+  type OwnerYDocOutboxRecovery,
 } from "./ydoc/ownerYDocOutbox";

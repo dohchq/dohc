@@ -19,16 +19,15 @@ import {
   ABOUT_ROW,
   AboutNote,
   AccessChecked,
-  accessReasonForLane,
   AccessUnknown,
   LEVELS,
   SIGNED_OUT_ACCESS,
   useSectionRead,
   type AboutNotices,
-  type AccessContext,
   type AccessSetup,
   type AccessView,
 } from "./About";
+import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";
@@ -190,7 +189,7 @@ type Word = "damaged" | "ended" | "removed";
 
 function StatusWord(props: { word: Word }) {
   return (
-    <span data-testid="sharing-row-status" className="shrink-0 font-mono text-[11px] text-subtle">
+    <span data-testid="sharing-row-status" className="shrink-0 text-[11px] text-subtle">
       {props.word}
     </span>
   );
@@ -359,7 +358,7 @@ function GrantedRow(props: {
           aria-label={waiting.count > 1 ? `Review changes (${waiting.count})` : "Review changes"}
           title="Review changes"
           onClick={() => actions.reviewChanges(waiting.oldestProposalId)}
-          className="flex h-5 shrink-0 items-center gap-1 rounded-full border border-line bg-panel-2 px-1.5 font-mono text-[11px] text-muted hover:bg-hover hover:text-ink"
+          className="flex h-5 shrink-0 items-center gap-1 rounded-full border border-line bg-panel-2 px-1.5 text-[11px] tabular-nums text-muted hover:bg-hover hover:text-ink"
         >
           <FileDiff size={11} aria-hidden />
           {waiting.count}
@@ -534,7 +533,7 @@ function Section(props: {
         className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">
         {words.label}
         {known ? (
-          <span data-testid={`sharing-${lane}-count`} className="ml-auto font-mono text-[11px] font-normal normal-case tracking-normal">
+          <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">
             {countOf(lane, view.answer)}
           </span>
         ) : null}

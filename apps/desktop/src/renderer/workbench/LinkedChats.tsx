@@ -22,8 +22,8 @@ import {
   type AboutFile,
   type AboutNotices,
   type AboutSectionId,
-  type AccessContext,
 } from "./About";
+import type { AccessContext } from "./accessReason";
 import {
   ChatComposer,
   ChatMessageList,

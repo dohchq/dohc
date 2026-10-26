@@ -404,6 +404,9 @@ The relay refuses an edit whose check needs more than 128 MiB, or whose document
 Two validation processes run the checks, each with its own heap of up to 512 MiB.
 When a check runs out of that heap, the relay refuses the edit as too large and keeps running.
 An owner's refused edit is kept unapplied, and that document's later owner edits wait behind it.
+The owner can save a recovery copy of refused edits, even ones kept in an earlier copy of the workspace.
+If this build has not migrated that earlier copy, the session host copies it into `.recovery` in the session host's data folder and migrates the copy.
+That needs free space of twice the earlier copy's size. The session host removes the copy after the save, or after one idle minute.
 The session host checks a document in the same processes before it starts live editing on it, one document at a time, so edits always keep one process.
 When that check runs out of heap, the document shows Stopped by the server until its owner chooses Resume.
 These budgets exclude the validation processes' memory, the session host's document state, and OS socket buffers.

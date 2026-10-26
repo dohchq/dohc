@@ -35,6 +35,7 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
+import { accessReasonForLane, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
 import { MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
@@ -57,24 +58,8 @@ export type AboutNotices = {
   clear(identity: string): void;
 };
 
-// What explains an Access answer that covers nothing. `checking` waits for
-// the workspace's server connection to be read; it claims nothing.
-export type AccessReason = "checking" | "not-synced" | "signed-out" | "other-account" | "unexplained";
 export type AccessSetup = {
   reason: AccessReason;
-  openSyncSettings: () => void;
-  connect: () => void;
-};
-
-// What this computer knows about the workspace's server connection, from the
-// shell's cloud status: "checking" while it is read, and "unreadable" once
-// reading it failed, which the shell reports on its own.
-export type AccessFacts = {
-  cloud: { connected: boolean; workspaceSynced: boolean; workspaceSyncConnected: boolean } | "checking" | "unreadable";
-  shareView: boolean;
-};
-export type AccessContext = {
-  facts: AccessFacts;
   openSyncSettings: () => void;
   connect: () => void;
 };
@@ -88,19 +73,6 @@ export type AccessContext = {
 // or the list has not arrived. The renderer cannot tell those apart.
 export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
   return accessReasonForLane(facts, facts.shareView || isSharedWithMePath(path) ? "received" : "granted");
-}
-
-// The same cause for a whole list: the workspace's own shares, or the
-// account's received ones.
-export function accessReasonForLane(facts: AccessFacts, lane: "granted" | "received"): AccessReason {
-  const { cloud } = facts;
-  if (cloud === "checking") return "checking";
-  if (cloud === "unreadable") return "unexplained";
-  if (lane === "received") return cloud.connected ? "unexplained" : "signed-out";
-  if (!cloud.workspaceSynced) return "not-synced";
-  if (!cloud.connected) return "signed-out";
-  if (!cloud.workspaceSyncConnected) return "other-account";
-  return "unexplained";
 }
 
 // A row in a section, inset from the panel's edges like the drawing's rows.
@@ -163,7 +135,7 @@ export function AboutSection(props: {
         >
           <Icon size={12} strokeWidth={1.9} aria-hidden />
           {props.label}
-          <span className="ml-auto flex items-center gap-2 font-mono text-[11px] font-normal normal-case tracking-normal">
+          <span className="ml-auto flex items-center gap-2 text-[11px] font-normal tabular-nums normal-case tracking-normal">
             {props.count !== undefined ? (
               <span data-testid={`about-${props.id}-count`}>{props.count}</span>
             ) : null}
@@ -713,7 +685,7 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-2">
           <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
-          <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">
+          <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
             {formatShortTime(mention.message.createdAtMs)}
           </time>
         </span>
@@ -973,7 +945,7 @@ export function AboutHistoryView(props: {
                   <MomentAuthor moment={moment} fallback={FILE_MARK} />
                   <span className="min-w-0 flex-1 truncate">{engineMomentSummary(moment)}</span>
                   <span className="sr-only">{source}</span>
-                  <time dateTime={when.iso} title={when.label} className="shrink-0 font-mono text-[11px] text-subtle">
+                  <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
                     {formatShortTime(moment.recordedAtMs)}
                   </time>
                 </button>
@@ -1066,7 +1038,7 @@ function AccessRowView(props: { row: AccessRow }) {
       )}
       <span className="min-w-0 flex-1 truncate">{who}</span>
       {row.status !== "active" ? (
-        <span className="shrink-0 font-mono text-[11px] text-subtle">
+        <span className="shrink-0 text-[11px] text-subtle">
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
@@ -1186,7 +1158,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
           title={formatChatTime(answer.checkedAtMs).label}
-          className="shrink-0 font-mono text-[11px] text-subtle"
+          className="shrink-0 text-[11px] tabular-nums text-subtle"
         >
           {formatShortTime(answer.checkedAtMs)}
         </time>

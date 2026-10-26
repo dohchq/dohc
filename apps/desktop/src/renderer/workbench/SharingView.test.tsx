@@ -8,7 +8,7 @@ import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter } from "../shell/useShellError";
-import type { AccessFacts } from "./About";
+import type { AccessFacts } from "./accessReason";
 import { groupShares, SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
 type Lane = "granted" | "received";
