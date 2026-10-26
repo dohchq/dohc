@@ -1582,9 +1582,9 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         automation: None,
         now_ms,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
-    author_agent_id: None,
-    named_agent_ids: Vec::new(),
 }
 
 /// Store a post and return the claims its write took.

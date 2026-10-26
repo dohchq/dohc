@@ -53,9 +53,9 @@ fn start_thread(
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
-    author_agent_id: None,
-    named_agent_ids: Vec::new(),
 }
 
 fn send_msg(
@@ -82,9 +82,9 @@ fn send_msg(
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
-    author_agent_id: None,
-    named_agent_ids: Vec::new(),
 }
 
 // ------------------------------------------------------- channel round-trips
