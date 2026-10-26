@@ -1071,10 +1071,7 @@ describe("chatDispatchService", () => {
 
     await linkAgentReply(fixture, asked.thread.id, codexRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
-    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
-
-    expect(fixture.spawnCalls).toHaveLength(2);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
     const novaRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(novaRun.run).toMatchObject({ agentId: "default", command: fixture.runner.command });
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
@@ -1552,9 +1549,9 @@ describe("chatDispatchService", () => {
       authorUserId: "user_local",
       body: "Arrived after spawn.",
     });
-    const updatesBeforeFollowUpScan = fixture.runUpdatedWorkspaces.length;
+    // The request is written with the message, so the thread's next read,
+    // which a new message prompts, shows it.
     await fixture.service.scanWorkspace(WORKSPACE_ID);
-    expect(fixture.runUpdatedWorkspaces.length).toBeGreaterThan(updatesBeforeFollowUpScan);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRunId: expect.any(String),
       pendingCount: 1,
@@ -2519,6 +2516,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID,
         attachmentId,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
     ]);
@@ -2563,6 +2561,7 @@ describe("chatDispatchService", () => {
       {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
     ]);
@@ -2617,11 +2616,13 @@ describe("chatDispatchService", () => {
       {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
       {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
     ]);
@@ -2738,6 +2739,7 @@ describe("chatDispatchService", () => {
       {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
     ]);
@@ -2864,6 +2866,7 @@ describe("chatDispatchService", () => {
       {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: trigger.messageId,
+        agentId: "default",
         runId: interrupted.run.runId,
       },
     ]);
@@ -3801,25 +3804,25 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls).toEqual([]);
     });
 
-    it("asks for a person's own held message until the dialog opens, never for another person's, and again after a restrict", async () => {
+    it("asks for a person's held request until the dialog opens, never for a message that asked no agent, and again after a restrict", async () => {
       const fixture = await createFixture({ restricted: true });
       fixture.service.start();
-      const ask = async (authorUserId: string, body: string) => {
-        const message = await createAgentThread(fixture, { body, authorUserId });
+      const ask = async (body: string, origin?: "cli") => {
+        const message = await createAgentThread(fixture, { body, authorUserId: "user_local", ...(origin ? { origin } : {}) });
         void fixture.service.scanWorkspace(WORKSPACE_ID);
         return await fixture.service.waitsForTrust(WORKSPACE_ID, message.messageId);
       };
-      await expect(ask("user_other", "Theirs.")).resolves.toBe(false);
-      await expect(ask("user_local", "Mine.")).resolves.toBe(true);
+      await expect(ask("From the CLI.", "cli")).resolves.toBe(false);
+      await expect(ask("Mine.")).resolves.toBe(true);
       // A window that dropped that answer showed no dialog, so the next send asks.
-      await expect(ask("user_local", "Mine again.")).resolves.toBe(true);
+      await expect(ask("Mine again.")).resolves.toBe(true);
       fixture.service.trustAsked(WORKSPACE_ID);
-      await expect(ask("user_local", "After the dialog.")).resolves.toBe(false);
+      await expect(ask("After the dialog.")).resolves.toBe(false);
 
       await trustWorkspace(fixture);
-      await expect(ask("user_local", "Trusted now.")).resolves.toBe(false);
+      await expect(ask("Trusted now.")).resolves.toBe(false);
       await restrictWorkspace(fixture);
-      await expect(ask("user_local", "Restricted again.")).resolves.toBe(true);
+      await expect(ask("Restricted again.")).resolves.toBe(true);
     });
 
     it("tells the person again after a restrict-again that came while dispatch was paused", async () => {
