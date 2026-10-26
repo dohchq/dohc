@@ -40,14 +40,14 @@ it.each([false, true])("preserves shown copy state while a remount awaits sync s
   expect(localStorage.getItem(key)).toBe(saved);
 });
 
-it("shows one copy-record read failure with its cause, retries, and clears it on recovery", async () => {
+it("shows one kept-copy list failure with its cause, retries, and clears it on recovery", async () => {
   const user = userEvent.setup();
   const bridge = makeBridge(Promise.resolve(null));
   let readError: string | null = "C:\\workspace\\.dohc\\local\\outside-write-copies\\broken.json\nInvalid JSON";
   bridge.getSyncStatus.mockImplementation(async () => ({ ...SYNC_STATUS, outsideWriteCopies: [], outsideWriteCopyReadError: readError }));
   renderShell(bridge);
-  const title = "dohc could not read its copy records";
-  const message = "Check that dohc can read .dohc/local/outside-write-copies, then choose Try again.";
+  const title = "dohc could not list every kept copy";
+  const message = "To find a copy that isn't listed, look beside its file for (kept copy) in the name.";
   const toast = await screen.findByTestId("workspace-shell-error");
   expect(within(toast).getByText(title)).toBeTruthy();
   expect(within(toast).getByText(message)).toBeTruthy();
