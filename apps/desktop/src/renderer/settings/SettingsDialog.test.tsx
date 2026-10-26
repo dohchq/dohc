@@ -5,8 +5,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_USER_SETTINGS,
+  type DesktopUserSettings,
   type DesktopUserSettingsResult,
 } from "../../settings/userSettings";
+import { overlaySettings } from "../../settings/settingsFile";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -1163,6 +1165,40 @@ describe("SettingsDialog", () => {
     expect(button.disabled).toBe(true);
     await user.click(button);
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
+  // Main writes only what differs between `base` and the new settings, so the
+  // Undo has to start from the settings after the removal.
+  it("brings a removed agent back on Undo", async () => {
+    const user = userEvent.setup();
+    const codex = testAgent({ name: "Codex" });
+    let file: DesktopUserSettings = { ...DEFAULT_USER_SETTINGS, agents: { codex, default: testAgent({ name: "Nova" }) } };
+    const read = async (): Promise<DesktopUserSettingsResult> => ({ settings: file, source: "stored" });
+    vi.stubGlobal("dohcDesktop", {
+      ...bridge,
+      getUserSettings: read,
+      setUserSettings: async ({ settings, base }: { settings: DesktopUserSettings; base: DesktopUserSettings }) => {
+        file = overlaySettings({ ...file }, base, settings) as DesktopUserSettings;
+        return read();
+      },
+      orderAgents: async ({ order }: { order: string[] }) => {
+        const ids = Object.keys(file.agents);
+        const sorted = [...order.filter((id) => ids.includes(id)), ...ids.filter((id) => !order.includes(id))];
+        file = { ...file, agents: Object.fromEntries(sorted.map((id) => [id, file.agents[id]!])) };
+        return read();
+      },
+    });
+    const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onNotice={onNotice} onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Codex actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+    expect(Object.keys(file.agents)).toEqual(["default"]);
+
+    await act(async () => onNotice.mock.calls[0]![1]!());
+    await waitFor(() => expect(Object.keys(file.agents)).toEqual(["codex", "default"]));
+    expect(file.agents.codex).toEqual(codex);
+    expect(await screen.findByRole("button", { name: "Codex actions" })).toBeTruthy();
   });
 
   // A shared view materializes no settings file, so the engine reads as

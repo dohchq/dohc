@@ -269,8 +269,11 @@ it("removes an agent, and Undo puts it back where it was", async () => {
   const saved = onSave.mock.calls[0]![0];
   expect(Object.keys(saved.agents)).toEqual(["default", "terminal"]);
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  rerender({ settings: saved });
+  // The dialog hands down a new save after each one; the Undo goes through it.
+  const latestSave = vi.fn(async (_settings: DesktopUserSettings) => true);
+  rerender({ settings: saved, onSave: latestSave });
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"]));
-  expect(onSave.mock.calls[1]![0].agents).toEqual({ ...saved.agents, codex: SETTINGS.agents.codex });
+  expect(onSave).toHaveBeenCalledOnce();
+  expect(latestSave.mock.calls[0]![0].agents).toEqual({ ...saved.agents, codex: SETTINGS.agents.codex });
 });

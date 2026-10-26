@@ -352,9 +352,10 @@ export function AgentList(props: {
   onNotice?: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
-  // An Undo can come after later changes, so it starts from the settings as they are then.
-  const latest = useRef(settings);
-  latest.current = settings;
+  // An Undo can come after later changes, so it starts from the settings as they
+  // are then, and saves through the dialog's latest save, which diffs against them.
+  const latest = useRef({ settings, onSave });
+  latest.current = { settings, onSave };
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
@@ -444,10 +445,10 @@ export function AgentList(props: {
     const previous = fileOrder;
     const { [agent.id]: entry, ...agents } = settings.agents;
     if (!entry || !(await onSave({ ...settings, agents }))) return;
-    if (renaming === agent.id) setRenaming(null);
+    setRenaming((current) => (current === agent.id ? null : current));
     onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
-      const current = latest.current;
-      if (await onSave({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
+      const { settings: current, onSave: save } = latest.current;
+      if (await save({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
     })());
   };
 
