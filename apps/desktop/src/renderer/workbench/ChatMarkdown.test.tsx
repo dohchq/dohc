@@ -627,6 +627,24 @@ describe("the waiting text", () => {
     });
   }
 
+  // A definition's label holds at most 999 characters, and a tab counts the
+  // columns to its tab stop. Each lead and size puts the tab at another column.
+  // A list draws its marker, so the tree's text has none.
+  it("matches the tree for definition labels at the length limit", () => {
+    const mismatches: string[] = [];
+    const unmarked = (text: string) => words(text).filter((word) => word !== "•" && word !== "1.");
+    for (const lead of ["", " ", "  ", "   ", "> ", ">\t", "- ", "1. "]) {
+      for (const size of [994, 995, 996, 997, 998, 999, 1000]) {
+        const label = "a".repeat(size);
+        for (const body of [`${lead}[${label}\t]: https://example.com`, `${lead}[a\t${label.slice(1)}]: https://example.com`, `${lead}[${label}]: https://example.com`]) {
+          const tree = words(shown(parseChatMarkdown(body, []).tree as Node)).join(" ");
+          if (unmarked(stripMarkdown(body).text).join(" ") !== tree) mismatches.push(JSON.stringify({ lead, size, tab: body.indexOf("\t") }));
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
   // Different bodies of one line from a small alphabet and a fixed seed, so
   // every rule the alphabet reaches meets every other. Gives the mismatches.
   const fuzz = (alphabet: string[], count: number, seed: number) => {

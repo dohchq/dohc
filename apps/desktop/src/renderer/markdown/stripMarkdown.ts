@@ -169,7 +169,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 
   forEachLine((start, end) => {
     const at = indentEnd(start, end);
-    const close = definitionClose(at, end);
+    const close = definitionClose(start, at, end);
     if (close >= 0) defined.add(normalizeLabel(source.slice(at + 1, close)));
   });
   forEachLine((start, end, last) => {
@@ -214,12 +214,21 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     return next;
   }
 
-  // The "]" that ends a link reference definition's label at `at`, or -1. A
-  // blank label defines nothing.
-  function definitionClose(at: number, end: number): number {
+  // The "]" that ends a link reference definition's label at `at` on the line
+  // from `start`, or -1. A blank label defines nothing. A tab in the label
+  // counts the columns to its tab stop, as micromark counts it.
+  function definitionClose(start: number, at: number, end: number): number {
     if (at >= end || source.charCodeAt(at) !== OPEN_BRACKET) return -1;
     const close = find(CLOSE_BRACKET, at, end);
     if (close + 1 >= end || source.charCodeAt(close + 1) !== COLON || close - at - 1 > LABEL_MAX) return -1;
+    let column = 0;
+    let size = 0;
+    for (let next = start; next < close; next++) {
+      const width = source.charCodeAt(next) === TAB ? 4 - (column % 4) : 1;
+      column += width;
+      if (next > at) size += width;
+    }
+    if (size > LABEL_MAX) return -1;
     return normalizeLabel(source.slice(at + 1, close)) ? close : -1;
   }
 
@@ -355,7 +364,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     let tableRow = false;
     if (at < end && source.charCodeAt(at) === PIPE) tableRow = true;
     // A link reference definition shows nothing.
-    const definition = definitionClose(at, end) >= 0;
+    const definition = definitionClose(start, at, end) >= 0;
     if (!continues || opensBlock || quotes > paragraphQuotes || tableRow || definition || at >= end) {
       // The markers belong to this line, after the paragraph that ended.
       const own = pieces.splice(markers);
