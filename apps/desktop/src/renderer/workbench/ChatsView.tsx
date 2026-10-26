@@ -4604,7 +4604,7 @@ export function ChatsView(props: {
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
                     ) : null}
                     <button
                       type="button"
@@ -4932,7 +4932,7 @@ export function ChatsView(props: {
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 font-mono text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
+                    <span className="shrink-0 text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"
@@ -4974,7 +4974,7 @@ export function ChatsView(props: {
                       trailing={
                         <>
                           {dm.connected ? null : (
-                            <span className="shrink-0 font-mono text-[10px] text-subtle">ended</span>
+                            <span className="shrink-0 text-[10px] text-subtle">ended</span>
                           )}
                           <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
                         </>
@@ -5073,7 +5073,7 @@ export function ChatsView(props: {
                       {agentReady ? null : (
                         <span
                           data-testid="chats-my-agent-state"
-                          className="shrink-0 font-mono text-[10px] text-subtle"
+                          className="shrink-0 text-[10px] text-subtle"
                         >
                           not set up
                         </span>
@@ -5106,7 +5106,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="shrink-0 truncate font-mono text-[10px] text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
                             via {agent.owner}
                           </span>
                         }
