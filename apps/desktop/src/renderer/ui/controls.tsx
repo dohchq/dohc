@@ -21,7 +21,7 @@ const secondaryButtonClass =
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-[12px] leading-5 text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:outline-offset-1 disabled:opacity-50";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:outline-offset-1 disabled:opacity-50";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };

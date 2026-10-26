@@ -2009,7 +2009,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               {confirmDelete.map((path) => (
                 <li
                   key={path}
-                  className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
+                  className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
                 >
                   <span className="break-all">{path}</span>
                 </li>
