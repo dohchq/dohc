@@ -53,12 +53,14 @@ const rowId = (row: AgentListRow) => (row.kind === "agent" ? row.agent.id : row.
 
 /**
  * `order` with `id` back where it was: after the entry it followed, or in
- * front of the one after it when that entry is gone, or first.
+ * front of the one after it when that entry is gone, or first. It never goes
+ * ahead of `keep`, an agent chosen since that should go on waking automations.
  */
-function placeBack(order: readonly string[], id: string, before: string | undefined, after: string | undefined): string[] {
+function placeBack(order: readonly string[], id: string, before: string | undefined, after: string | undefined, keep?: string): string[] {
   const rest = order.filter((entry) => entry !== id);
-  const at = before !== undefined && rest.includes(before) ? rest.indexOf(before) + 1
+  let at = before !== undefined && rest.includes(before) ? rest.indexOf(before) + 1
     : after !== undefined && rest.includes(after) ? rest.indexOf(after) : 0;
+  if (keep !== undefined && rest.includes(keep)) at = Math.max(at, rest.indexOf(keep) + 1);
   return [...rest.slice(0, at), id, ...rest.slice(at)];
 }
 
@@ -482,7 +484,9 @@ export function AgentList(props: {
         onError?.(`Undo didn't move ${agent.name} because it isn't in your settings anymore.`);
         return;
       }
-      await onOrder(placeBack(order, agent.id, before, after), `dohc could not move ${agent.name} back.`);
+      // Unless it still wakes automations, it goes back behind the agent that does.
+      const waking = automationAgent(file.settings)?.id;
+      await onOrder(placeBack(order, agent.id, before, after, waking), `dohc could not move ${agent.name} back.`);
     })());
   };
 
@@ -517,7 +521,9 @@ export function AgentList(props: {
         keep(holder);
         return;
       }
-      const order = placeBack(agentListRows(current, file.agentProblems).map(rowId), agent.id, before, after);
+      // An agent that wasn't first doesn't take automations from the agent that wakes them now.
+      const waking = before === undefined ? undefined : automationAgent(current)?.id;
+      const order = placeBack(agentListRows(current, file.agentProblems).map(rowId), agent.id, before, after, waking);
       // Saved from the file just read, so main refuses it if the agent came back since.
       try {
         await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agent.id]: entry } }, base: current });
