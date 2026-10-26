@@ -210,8 +210,9 @@ describe("this computer's automation store", () => {
   // Node can't see who may change a folder on Windows, so there the store
   // trusts `.dohc/local` only while the engine's open holds it. The steps a
   // person allowed then say the workspace has not opened, not that nobody can
-  // read them, which would ask the person to reset every hold.
-  it("on Windows, reads nothing once no engine open holds .dohc/local, and the allowed steps say the workspace has not opened", async () => {
+  // read them, which would ask the person to reset every hold. Unfinished
+  // Stop and restore progress says so too, so it shows no false error.
+  it("on Windows, reads nothing once no engine open holds .dohc/local, and the allowed steps and unfinished restores say the workspace has not opened", async () => {
     const { opened, store } = await workspace();
     await engine.open(opened);
     await store().saveReachVerdicts(allowed);
@@ -224,6 +225,7 @@ describe("this computer's automation store", () => {
       expect(refused).toBeInstanceOf(AutomationStoreNotOpenedError);
       expect((refused as Error).message).toBe("dohc has not finished opening this workspace. Try again when it opens.");
       await expect(store().runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+      await expect(store().pendingRestores()).rejects.toBeInstanceOf(AutomationStoreNotOpenedError);
     } finally {
       Object.defineProperty(process, "platform", { value: platform });
     }
