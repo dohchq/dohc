@@ -57,7 +57,7 @@ Most strings do one of four jobs:
 | Ready: something new became usable | `Agent result, ready to review` |
 | Next: what the person can do | `Choose which copy to keep` |
 
-Every error and empty state needs a Next. A toast usually reports a Change. A status bar shows a State.
+Every error needs a Next, and so does an empty state when the person can act there. A toast usually reports a Change. A status bar shows a State.
 
 - Follow the instruction rules in `dohc-writing`: one instruction per sentence, 20 words or fewer.
 - Use the active voice and name who acted. Leave dohc out when the surface makes it obvious: `Saved`.
@@ -85,13 +85,13 @@ The sync strings show the standard: `A file changed on two machines`, `This mach
 
 ### Empty states
 
-Use `EmptyState`, with one line that says what is missing and what to do.
+Use `EmptyState`, with one line that says what is missing, and what to do when the person can act there.
 Check that the action exists on that surface before you name it.
 
 | Instead of | Write |
 | --- | --- |
-| `No results` | `No files match "budget". Try a shorter search.` |
-| `Nothing here yet` | `This folder is empty. Add a file to start.` |
+| `No results` | `No files match "budget".` |
+| `Nothing here yet` | `This folder is empty.` |
 
 ### Agents
 
@@ -292,7 +292,7 @@ A running agent shows a 6px round `bg-agent` dot.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
    Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
-5. Does each string do one job, and does every error and empty state give a Next?
+5. Does each string do one job, does every error give a Next, and does every empty state give one when the person can act there?
 6. Does every noun match the surrounding UI?
 7. Read each string as someone whose sync just failed. Does it help them?
 8. Would Notion or Linear ship it? If not, it is not done.

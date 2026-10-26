@@ -910,7 +910,7 @@ export function EngineHistoryView(props: {
   const partial = words.unavailable !== null || words.omitted !== null;
 
   // A known page with no rows. The caller renders this view only when it
-  // has a page: "No changes yet" states something about the workspace,
+  // has a page: "No changes yet." states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
@@ -944,7 +944,7 @@ export function EngineHistoryView(props: {
         </div>
       );
     }
-    return <EmptyState picture={EMPTY_ART.history} title="No changes yet" />;
+    return <EmptyState picture={EMPTY_ART.history} title="No changes yet." />;
   }
 
   return (

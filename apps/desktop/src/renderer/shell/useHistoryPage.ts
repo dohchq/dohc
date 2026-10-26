@@ -24,7 +24,7 @@ export type HistoryPage = {
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
-// and asked again. "No changes yet" is an assertion about the WORKSPACE, so
+// and asked again. "No changes yet." is an assertion about the WORKSPACE, so
 // only a read that answered may reach it. This says whether the newest read
 // answered at all. A commit only ends `updating`, because its read did
 // answer, and a retraction never touches it: the page and the read state

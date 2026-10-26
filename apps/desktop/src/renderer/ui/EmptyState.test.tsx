@@ -58,10 +58,10 @@ describe("EmptyState", () => {
 
   it("takes no hint, and no glyph or tone beside a picture", () => {
     // @ts-expect-error The one line says what is missing; there is no second line.
-    render(<EmptyState title="No changes yet" hint="Edits appear here." />);
+    render(<EmptyState title="No changes yet." hint="Edits appear here." />);
     // @ts-expect-error A picture never shares the state with a glyph.
-    render(<EmptyState picture={EMPTY_ART.history} icon={TriangleAlert} title="No changes yet" />);
+    render(<EmptyState picture={EMPTY_ART.history} icon={TriangleAlert} title="No changes yet." />);
     // @ts-expect-error A failure keeps its glyph; a picture has no tone.
-    render(<EmptyState picture={EMPTY_ART.history} tone="danger" title="No changes yet" />);
+    render(<EmptyState picture={EMPTY_ART.history} tone="danger" title="No changes yet." />);
   });
 });
