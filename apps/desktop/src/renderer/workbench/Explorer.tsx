@@ -469,6 +469,7 @@ function nextChangeId(): string {
 // entries main returned for it.
 type OpenMenu = {
   id: number;
+  workspaceId: string;
   kind: "file" | "folder" | "root";
   path?: string;
   at: { x: number; y: number };
@@ -600,10 +601,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // The newest menu request is the only one that may open; closing the menu
   // or leaving the workspace retires it.
   const menuRequests = useRequestSequence([workspaceId]);
-  // Advances only when this Explorer leaves its workspace. A notice or an
-  // Undo for workspace A checks it before it speaks or acts, so it can never
-  // land in workspace B.
-  const workspaceEpoch = useRequestSequence([workspaceId]);
+  // Closed while rendering, not in an effect: a menu opened in one workspace
+  // must never draw, or run a pick, in the next.
+  if (menu && menu.workspaceId !== workspaceId) setMenu(null);
   // Set when the Menu key or Shift+F10 opened the menu. The browser may
   // follow those keys with its own contextmenu event, which must not open a
   // second menu at the pointer.
@@ -1024,10 +1024,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Undo runs as a tree change of its own: drafts settle first, the row
   // moves back at once, and tabs follow it back. A refusal keeps its row in
-  // Notices with Try again.
+  // Notices with Try again. The shell runs it only while its workspace is
+  // open, so it still works after the side panel unmounts the Explorer.
   const undoChanges = useCallback(
-    (owner: { workspaceId: string; epoch: number }, recorded: readonly RecordedTreeChange[]): void => {
-      if (!workspaceEpoch.isCurrent(owner.epoch)) return;
+    (recorded: readonly RecordedTreeChange[]): void => {
       const byChange = new Map<string, RecordedTreeChange>();
       const inverse = recorded.map((entry): PendingTreeChange => {
         const id = nextChangeId();
@@ -1043,7 +1043,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         async (change) => {
           const entry = byChange.get(change.id)!;
           const result = await bridge().undoHistoryOperation({
-            workspaceId: owner.workspaceId,
+            workspaceId,
             operationId: entry.operationId,
           });
           if (!result.ok) throw new UndoRefused(result.reason, true);
@@ -1053,34 +1053,33 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               result.remaining.some((left) => left.retry),
             );
           }
+          // The change is undone, so no listing will confirm it.
+          setPending((current) => current.filter((pending) => pending.id !== entry.change.id));
           return entry;
         },
         {
           failed: (change, cause) => {
-            if (!workspaceEpoch.isCurrent(owner.epoch)) return;
             const entry = byChange.get(change.id)!;
             const refused = cause instanceof UndoRefused;
             onError(
               refused ? cause.message : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
               cause,
-              !refused || cause.retry ? () => undoChanges(owner, [entry]) : undefined,
+              !refused || cause.retry ? () => undoChanges([entry]) : undefined,
             );
           },
         },
       ).then((succeeded) => {
-        if (succeeded.length === 0 || !workspaceEpoch.isCurrent(owner.epoch)) return;
-        onNotice(undoneNotice(succeeded.map(({ result }) => result)));
+        if (succeeded.length > 0) onNotice(undoneNotice(succeeded.map(({ result }) => result)));
       });
     },
-    [onError, onNotice, runChanges, workspaceEpoch],
+    [onError, onNotice, runChanges, workspaceId],
   );
 
   // A finished rename, move or delete says so, with Undo while main can
   // reverse every change in it. Results that are not History operations,
   // such as a share view's, say nothing new.
   const announce = useCallback(
-    (owner: { workspaceId: string; epoch: number }, done: { change: PendingTreeChange; result: OperationAnswer | undefined }[]) => {
-      if (!workspaceEpoch.isCurrent(owner.epoch)) return;
+    (done: { change: PendingTreeChange; result: OperationAnswer | undefined }[]) => {
       const recorded = done.flatMap(({ change, result }) => {
         if (!undoableKind(change)) return [];
         const entry = recordedChange(change, result);
@@ -1088,9 +1087,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       });
       if (recorded.length === 0) return;
       const notice = doneNotice(recorded);
-      onNotice(notice.message, notice.undoable ? () => undoChanges(owner, recorded) : undefined);
+      onNotice(notice.message, notice.undoable ? () => undoChanges(recorded) : undefined);
     },
-    [onNotice, undoChanges, workspaceEpoch],
+    [onNotice, undoChanges],
   );
 
   const performMoves = useCallback(
@@ -1107,7 +1106,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         });
       }
       if (changes.length > 0) setSelection(new Set());
-      const owner = { workspaceId, epoch: workspaceEpoch.current() };
       void runChanges(changes, (change) =>
         change.kind === "file" || change.kind === "folder"
           ? bridge().moveWorkspacePath({
@@ -1116,9 +1114,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               toPath: change.toPath,
             })
           : Promise.resolve(undefined),
-      ).then((done) => announce(owner, done));
+      ).then(announce);
     },
-    [announce, runChanges, workspaceEpoch, workspaceId],
+    [announce, runChanges, workspaceId],
   );
 
   const commitRename = useCallback(
@@ -1130,7 +1128,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         setEditing(null);
         return;
       }
-      const owner = { workspaceId, epoch: workspaceEpoch.current() };
       void runChanges(
         [
           {
@@ -1152,9 +1149,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         },
         // Remove this input in the same commit that stages the renamed row.
         { afterBegin: () => setEditing(current => current === edit ? null : current) },
-      ).then((done) => announce(owner, done));
+      ).then(announce);
     },
-    [announce, runChanges, workspaceEpoch, workspaceId],
+    [announce, runChanges, workspaceId],
   );
 
   const commitCreate = useCallback(
@@ -1199,14 +1196,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         path,
       }));
       setSelection(new Set());
-      const owner = { workspaceId, epoch: workspaceEpoch.current() };
       void runChanges(changes, (change) =>
         "path" in change
           ? bridge().deleteWorkspacePath({ workspaceId, relativePath: change.path })
           : Promise.resolve(undefined),
-      ).then((done) => announce(owner, done));
+      ).then(announce);
     },
-    [announce, runChanges, workspaceEpoch, workspaceId, isFolderPath],
+    [announce, runChanges, workspaceId, isFolderPath],
   );
 
   // A delete goes to the trash with a recovery record, so it runs at once
@@ -1320,6 +1316,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       at: OpenMenu["at"],
     ) => {
       const request = menuRequests.next();
+      // Escape or a press anywhere before main answers retires this open, as
+      // either would close the menu once drawn.
+      const waiting = new AbortController();
+      const retire = () => {
+        if (menuRequests.isCurrent(request)) menuRequests.next();
+      };
+      window.addEventListener("pointerdown", retire, { capture: true, signal: waiting.signal });
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") retire();
+      }, { capture: true, signal: waiting.signal });
       void bridge()
         .readExplorerMenu({
           workspaceId,
@@ -1327,10 +1333,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           kind,
           pinned: pinnedRow,
         })
+        .finally(() => waiting.abort())
         .then(
           (entries) => {
             if (!menuRequests.isCurrent(request) || entries.length === 0) return;
-            setMenu({ id: request, kind, ...(path !== undefined ? { path } : {}), at, entries });
+            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), at, entries });
           },
           (cause) => {
             if (menuRequests.isCurrent(request)) {

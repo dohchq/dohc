@@ -2831,6 +2831,22 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  // The Explorer's notices and failures, held to their workspace rather than
+  // to the Explorer, which the side panel unmounts while the workspace stays
+  // open. Undo and Try again run only while that workspace is open here.
+  const explorerReports = useMemo(() => {
+    const owner = workspaceId;
+    const current = () => workspaceIdRef.current === owner;
+    const whileCurrent = (run?: () => void) => run && (() => { if (current()) run(); });
+    return {
+      onError: (message: string, cause?: unknown, retry?: () => void) => {
+        if (current()) reportFailureMessage(message, cause, whileCurrent(retry));
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (current()) showSuccessNotice(message, whileCurrent(undo));
+      },
+    };
+  }, [workspaceId, reportFailureMessage, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
@@ -4954,8 +4970,8 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={reportFailureMessage}
-        onNotice={showSuccessNotice}
+        onError={explorerReports.onError}
+        onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
     </>

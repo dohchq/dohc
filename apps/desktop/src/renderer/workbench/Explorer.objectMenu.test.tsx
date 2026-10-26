@@ -8,8 +8,8 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 
 // The Explorer's menu draws what main returns and nothing else, opens from
 // the pointer and from the keyboard, and gives focus back to its row. A
-// rename, move or delete main recorded says so with Undo, and neither the
-// notice nor its Undo can reach another workspace.
+// rename, move or delete main recorded says so with Undo, and a menu never
+// outlives its workspace.
 
 const RENAME: ExplorerMenuEntry = { kind: "item", label: "Rename", id: "rename" };
 const DELETE: ExplorerMenuEntry = { kind: "item", label: "Delete", id: "delete" };
@@ -97,6 +97,10 @@ function row(path: string): HTMLElement {
   return found;
 }
 
+function shownPaths(): (string | undefined)[] {
+  return screen.getAllByTestId("tree-row").map((candidate) => candidate.dataset.path);
+}
+
 // Each row's label, without the shortcut drawn after it.
 function labels(): (string | null | undefined)[] {
   return screen.getAllByRole("menuitem").map((item) => item.firstElementChild?.textContent);
@@ -158,6 +162,22 @@ describe("the Explorer's menu", () => {
     await act(async () => slow.resolve([RENAME]));
     expect(screen.getByRole("menu", { name: "plan.md" })).toBeTruthy();
     expect(screen.queryByRole("menuitem", { name: "Rename" })).toBeNull();
+  });
+
+  it("opens nothing when Escape or a press elsewhere comes before main answers", async () => {
+    render(<Explorer {...explorerProps()} />);
+    for (const dismiss of [
+      () => fireEvent.keyDown(row("notes.md"), { key: "Escape" }),
+      () => fireEvent.pointerDown(document.body),
+    ]) {
+      const late = deferred<ExplorerMenuEntry[]>();
+      bridge.readExplorerMenu.mockReturnValueOnce(late.promise);
+      fireEvent.contextMenu(row("notes.md"));
+      dismiss();
+      await act(async () => late.resolve([RENAME]));
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(row("notes.md"));
+    }
   });
 
   it.each([
@@ -279,6 +299,29 @@ describe("Undo after a rename, a move or a delete", () => {
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
   });
 
+  // Each Undo runs before a listing has shown its change, so the next
+  // listing looks as it did before the change.
+  it("shows what an immediate Undo put back once the next listing lands", async () => {
+    const props = explorerProps();
+    const view = render(<Explorer {...props} />);
+    fireEvent.click(row("plan.md"));
+    fireEvent.keyDown(row("plan.md"), { key: "Delete" });
+    const undoDelete = await noticeWithUndo(props, "Deleted plan.md");
+    expect(shownPaths()).not.toContain("plan.md");
+    act(() => undoDelete());
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
+    view.rerender(<Explorer {...props} files={[...props.files]} />);
+    expect(shownPaths()).toContain("plan.md");
+
+    await renameTo("notes.md", "ideas");
+    const undoRename = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    act(() => undoRename());
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Renamed ideas.md back to notes.md"));
+    view.rerender(<Explorer {...props} files={[...props.files]} />);
+    expect(shownPaths()).toContain("notes.md");
+    expect(shownPaths()).not.toContain("ideas.md");
+  });
+
   it("gives a drag-and-drop move the same Undo", async () => {
     const props = explorerProps();
     render(<Explorer {...props} />);
@@ -348,43 +391,15 @@ describe("Undo after a rename, a move or a delete", () => {
   });
 });
 
+// The shell holds notices and Undo to their workspace; the shell's own
+// tests cover that.
 describe("a workspace switch", () => {
-  it("drops workspace A's notice when its delete answers after the window moved to B", async () => {
-    const answer = deferred<{ trashed: boolean; operationId: string; undo: { available: true } }>();
-    bridge.deleteWorkspacePath.mockReturnValueOnce(answer.promise);
+  it("closes a menu left open, so it cannot act in workspace B", async () => {
     const props = explorerProps();
     const view = render(<Explorer {...props} />);
-    fireEvent.click(row("plan.md"));
-    fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalled());
+    fireEvent.contextMenu(row("notes.md"));
+    await screen.findByRole("menu", { name: "notes.md" });
     view.rerender(<Explorer {...props} workspaceId="workspace-b" />);
-    await act(async () => answer.resolve({ trashed: true, operationId: DELETED, undo: { available: true } }));
-    expect(props.onNotice).not.toHaveBeenCalled();
-  });
-
-  it("never runs workspace A's Undo in workspace B, nor reports its answer there", async () => {
-    const props = explorerProps();
-    const view = render(<Explorer {...props} />);
-    await renameTo("notes.md", "ideas");
-    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
-    view.rerender(<Explorer {...props} workspaceId="workspace-b" />);
-    act(() => undo());
-    await act(async () => {});
-    expect(bridge.undoHistoryOperation).not.toHaveBeenCalled();
-
-    // An Undo that was already running when the window moved stays silent.
-    const second = explorerProps({ onNotice: vi.fn(), onError: vi.fn() });
-    cleanup();
-    const again = render(<Explorer {...second} />);
-    await renameTo("notes.md", "ideas");
-    const undoAgain = await noticeWithUndo(second, "Renamed notes.md to ideas.md");
-    const answer = deferred<{ ok: false; reason: string }>();
-    bridge.undoHistoryOperation.mockReturnValueOnce(answer.promise);
-    act(() => undoAgain());
-    await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledOnce());
-    again.rerender(<Explorer {...second} workspaceId="workspace-b" />);
-    await act(async () => answer.resolve({ ok: false, reason: "Cannot undo the rename." }));
-    expect(second.onError).not.toHaveBeenCalled();
-    expect(second.onNotice).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 });
