@@ -4842,6 +4842,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             is_base_state: payload.is_base_state,
         };
         let base_payload = &payload;
+        let reader_resolver = cache.reader_resolver.clone();
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
                 op.origin_id.clone(),
@@ -4951,7 +4952,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op.origin_seq,
                 op.recorded_at_ms,
                 search_policy.as_ref(),
-                cache.reader_resolver.as_deref(),
+                reader_resolver.as_deref(),
             )? {
                 record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
                 return Ok(result);
@@ -5119,7 +5120,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op.origin_seq,
                 op.recorded_at_ms,
                 search_policy.as_ref(),
-                cache.reader_resolver.as_deref(),
+                reader_resolver.as_deref(),
             )?;
             Ok(YdocApplyResult {
                 deferred: false,
