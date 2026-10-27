@@ -1040,6 +1040,32 @@ describe("PropertiesPanel", () => {
     }
   });
 
+  it("drops typed list items when another device adds the same name, and writes nothing", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags: [kyoto, food]\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    const sync = () => act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+      setFrontmatterValue(replica, "Tags", "x");
+      sync();
+      expect(screen.queryAllByTestId("property-duplicate")).not.toHaveLength(0);
+      replica.getMap("frontmatter").delete("Tags");
+      sync();
+      expect(propertyValue("tags")).toBe("kyoto, food");
+      await user.click(screen.getByLabelText("Property tags value"));
+      await user.tab();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food"] });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
   it("keeps a local file's typed list items when the file changes first", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -1101,7 +1127,7 @@ describe("PropertiesPanel", () => {
     expect(words?.getAttribute("role")).toBe("tooltip");
     expect(words?.hidden).toBe(true);
     expect(words?.textContent).toBe(
-      "['Kyoto, Japan', Osaka]dohc can't edit this list here because an item has a comma. Edit the file's text instead.",
+      "['Kyoto, Japan', Osaka]dohc can't edit this list because an item has a comma. Change it in another app, or ask an agent.",
     );
 
     await user.tab();
@@ -1116,7 +1142,7 @@ describe("PropertiesPanel", () => {
     const where = screen.getByLabelText("Property where value") as HTMLInputElement;
     await user.hover(where);
     expect(document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
-      "{lat: 35.5}dohc can't edit a value with named fields here. Edit the file's text instead.",
+      "{lat: 35.5}dohc can't edit a value with named fields. Change it in another app, or ask an agent.",
     );
     // Leaving a name saves the rows, which leaves the file as it was.
     for (const [written] of onChange.mock.calls) expect(written).toBe(body);

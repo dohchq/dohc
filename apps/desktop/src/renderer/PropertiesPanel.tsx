@@ -313,12 +313,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // The list being typed in: its row, the key it was read with, the list it
   // started from, and the text so far. It saves when the person leaves it or
   // presses Enter. Until then it sits apart from the rows, so a change to
-  // another property leaves it alone. Once its row moves or holds a newer
-  // list, the row shows what the document holds and the text is dropped.
+  // another property leaves it alone. Once its row moves, holds a newer list
+  // or shares its name, the row shows what the document holds and the text
+  // is dropped.
   const [listDraft, setListDraft] = useState<{ index: number; key: string; base: unknown; text: string } | null>(null);
+  const duplicates = duplicateKeySet(entries);
   function draftText(index: number): string | undefined {
     const entry = entries[index];
     return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
+      && !duplicates.has(entry.key.trim().toLowerCase())
       && sameFrontmatterValue(listDraft.base, entryValue(entry))
       ? listDraft.text
       : undefined;
@@ -368,7 +371,6 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }
 
   const isEmpty = entries.length === 0;
-  const duplicates = duplicateKeySet(entries);
 
   return (
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">

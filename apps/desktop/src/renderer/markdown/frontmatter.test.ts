@@ -105,7 +105,7 @@ describe("markdown frontmatter helpers", () => {
       "---",
       "",
     ].join("\n"));
-    const reason = (problem: string) => `dohc can't edit this list here because ${problem}. Edit the file's text instead.`;
+    const reason = (problem: string) => `dohc can't edit this list because ${problem}. Change it in another app, or ask an agent.`;
 
     expect(entries.map(({ key, value, list, readOnly }) => ({ key, value, list, readOnly }))).toEqual([
       { key: "places", value: "['Kyoto, Japan', Osaka]", list: undefined, readOnly: reason("an item has a comma") },
@@ -127,7 +127,7 @@ describe("markdown frontmatter helpers", () => {
         key: "where",
         value: "{lat: 35.5, lng: 135.7}",
         list: undefined,
-        readOnly: "dohc can't edit a value with named fields here. Edit the file's text instead.",
+        readOnly: "dohc can't edit a value with named fields. Change it in another app, or ask an agent.",
       },
     ]);
   });
