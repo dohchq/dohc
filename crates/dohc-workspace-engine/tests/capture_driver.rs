@@ -2642,7 +2642,11 @@ async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write
         Some("No open session.\n")
     );
 
-    for text in ["First outside write.\n", "A new outside write.\n"] {
+    for (text, held) in [
+        ("First outside write.\n", "Still held.\n"),
+        // Not the first round's recorded text, which matches the head and holds nothing.
+        ("A new outside write.\n", "Held again.\n"),
+    ] {
         let opened = call(
             &transport,
             &handle,
@@ -2662,7 +2666,7 @@ async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write
         );
 
         // A second write and full scan leave the path deferred without another wake.
-        write_file(scratch.path(), "note.md", b"Still held.\n");
+        write_file(scratch.path(), "note.md", held.as_bytes());
         assert_eq!(
             reconcile(&transport, &handle).await["deferredWrites"],
             json!(["note.md"])
@@ -2686,7 +2690,7 @@ async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write
             read_text(&transport, &handle, 5, "note.md")
                 .await
                 .as_deref(),
-            Some("Still held.\n")
+            Some(held)
         );
     }
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
