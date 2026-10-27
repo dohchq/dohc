@@ -1215,6 +1215,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ? "My agent"
       : normalizeNonempty(requiredString(params, "name", "invalid-channel-name"), "invalid-channel-name");
     const channelSlug = isDefault ? "my-agent" : `my-agent-${agentId}`;
+    const channelId = requiredString(params, "channelId");
+    if (state.channels.has(channelId)) throw new Error("target-exists");
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     // A group an earlier build named like this chat keeps its name and moves
     // to a slug no agent chat can have.
     const group = [...state.channels.values()].find((channel) => channel.slug === channelSlug);
@@ -1222,9 +1225,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
       const taken = new Set([...state.channels.values()].map((channel) => channel.slug));
       group.slug = collisionSlug(taken, channelSlug, group.channelId);
     }
-    const channelId = requiredString(params, "channelId");
-    if (state.channels.has(channelId)) throw new Error("target-exists");
-    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const channel: ChatChannel & { wireId: string | null } = {
       workspaceId: workspace,
       channelId,
