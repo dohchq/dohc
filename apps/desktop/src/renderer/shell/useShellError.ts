@@ -445,7 +445,7 @@ export function useShellError(workspaceId: string) {
         const prior = current.find(error => error.id === notice.noticeId);
         const reason = notice.detail?.split("\n")[0];
         const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
-        // The change synced without its author, so there is nothing to try again.
+        // Sync has moved past the refused saves, so there is nothing to try again.
         const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
         const path = notice.target?.path;
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),

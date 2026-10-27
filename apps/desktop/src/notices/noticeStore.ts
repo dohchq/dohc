@@ -193,7 +193,7 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
 // Names the file, cut to fit a title, and says "a file" for a name a title
 // can't hold.
 function unattributedTitle(path: string | null | undefined): string {
-  const [lead, tail] = ["One History entry for ", " has no author"];
+  const [lead, tail] = ["Some author names for ", " did not sync"];
   if (!path) return `${lead}a file${tail}`;
   // Room for the name between its two quotes.
   const room = NOTICE_TITLE_MAX_CHARS - lead.length - tail.length - 2;
@@ -741,11 +741,11 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
-          // The file synced; one History entry lost its author.
+          // Says only what holds for every refused save: its author names did not sync.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = attributionRefused
-            ? "dohc could not confirm who made it. The file syncs as usual, and its other History entries keep their authors."
+            ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
             : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId

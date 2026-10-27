@@ -1288,18 +1288,18 @@ it("names the current file for a terminal binding refusal without suggesting syn
   expect(row!.body).not.toContain("try sync again");
 });
 
-it("says one History entry has no author, without suggesting sync again", async () => {
+it("says some author names did not sync, for one or more saves, without suggesting sync again", async () => {
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
     noticeId: "sync-refusal-unattributed", originId: "host", originSeq: 1,
-    refusalCoordinates: [{ originId: "host", originSeq: 1 }],
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }, { originId: "host", originSeq: 2 }],
     reason: "dohc could not verify who changed this file. The file will share without author names.",
     document: { versionId: "main", path: "n.md", objectId: "object-a", lineageClaimId: "lineage", conflictId: null },
   }] }];
   const first = await computer(null, { refusalNotices });
   const [row] = (await first.store.list()).notices;
   expect(row).toMatchObject({
-    title: "One History entry for “n.md” has no author",
-    body: "dohc could not confirm who made it. The file syncs as usual, and its other History entries keep their authors.",
+    title: "Some author names for “n.md” did not sync",
+    body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
     target: { path: "n.md" },
   });
 });
@@ -1317,11 +1317,11 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   const first = await computer(null, { refusalNotices });
   const titles = (await first.store.list()).notices.map(row => row.title);
   expect(titles).toHaveLength(3);
-  expect(titles).toContain("One History entry for a file has no author");
-  expect(titles).toContain("One History entry for “n.md” has no author");
+  expect(titles).toContain("Some author names for a file did not sync");
+  expect(titles).toContain("Some author names for “n.md” did not sync");
   const cut = titles.find(title => title.includes("…"))!;
   expect([...cut]).toHaveLength(120);
-  expect(cut).toMatch(/^One History entry for “a+…” has no author$/u);
+  expect(cut).toMatch(/^Some author names for “a+…” did not sync$/u);
 });
 
 it("keeps the refusals it words for itself equal to the engine's", () => {
