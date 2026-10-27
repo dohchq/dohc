@@ -92,7 +92,7 @@ async function harness() {
   let preferredName: string | undefined = "Before";
   const effects: Array<{ kind: string; value: unknown; persisted: DesktopUserSettings }> = [];
   const persisted = () => JSON.parse(readFileSync(join(stateDirectory, userSettingsStore.USER_SETTINGS_FILE), "utf8")) as DesktopUserSettings;
-  const setCachedPreferredName = vi.fn((value: string | undefined) => {
+  const setCachedNames = vi.fn((value: string | undefined) => {
     preferredName = value;
     effects.push({ kind: "name", value, persisted: persisted() });
   });
@@ -108,7 +108,7 @@ async function harness() {
   const openPath = vi.fn<(path: string) => Promise<string>>(async () => "");
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
-    stateDir: () => stateDirectory, setCachedPreferredName,
+    stateDir: () => stateDirectory, setCachedNames,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
@@ -128,7 +128,7 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
+    zoom: capability.stepWindowZoom, setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -245,7 +245,7 @@ describe("registered settings IPC", () => {
       // the file rather than saving into it.
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
       // Every change puts the whole file into effect, the zoom step included.
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
+      expect(h.setCachedNames.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });

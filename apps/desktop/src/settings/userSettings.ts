@@ -64,7 +64,8 @@ export const DEFAULT_AGENT_ID = "default";
 // Agents are kept by id, so a mistake in one entry turns off only that agent.
 // An id starts with a letter, so the agents keep the order the file lists them in.
 // Its dashes are single and inside it, so its chat's slug keeps the id as it is.
-export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.");
+export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.")
+  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.");
 
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,

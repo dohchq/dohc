@@ -292,10 +292,11 @@ export function createWorkspaceEngineIpc<
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
-    // Runs dohc started use the Settings name of the agent they ran. Other agents use their handshake label.
+    // Your agents use the Settings name of their id, as record History does, with or without a run.
+    // Another person's runs show as "Agent". Their other agents use their handshake label.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         presentations,

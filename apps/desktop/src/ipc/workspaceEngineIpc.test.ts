@@ -194,7 +194,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
-  const displayName = vi.fn((_agentId: string): string | undefined => "You");
+  // Settings lists one agent, "agent", named "You".
+  const displayName = vi.fn((agentId: string): string | undefined => agentId === "agent" ? "You" : undefined);
   const syncProjection = vi.fn(async (_workspace: RegistryEntry, status: SyncStatusResult) => status);
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   let missingAdapter = false;
@@ -582,7 +583,7 @@ describe("workspace engine IPC registrations", () => {
         entry(8, { ...automation, automationRun: { claimId: "claim-here", automationName: "Stamp the finish date" } }),
         entry(7, { ...automation, automationRun: { claimId: "claim-gone", automationName: "Old name" } }),
         entry(6, automation),
-        entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
+        entry(5, { authorOriginId: "agent", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
         entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
@@ -845,7 +846,7 @@ describe("workspace engine IPC registrations", () => {
     const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
       .moments.map((moment) => moment.agentAuthorName);
     await expect(names()).resolves.toEqual(["You", "Agent"]);
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(names()).resolves.toEqual(["ice@example.com", "Agent"]);
     h.capture.readMoment.mockResolvedValue({
       protected: false,
@@ -861,7 +862,7 @@ describe("workspace engine IPC registrations", () => {
     });
   });
 
-  it("uses Settings only for dohc runs and handshake names for other agents", async () => {
+  it("uses Settings names for your agents and handshake names for other agents", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
       moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
@@ -874,7 +875,7 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
@@ -897,12 +898,13 @@ describe("workspace engine IPC registrations", () => {
     const settingsNames = new Map([["nova", "Nova"], ["codex", "Codex"]]);
     h.displayName.mockImplementation((agentId) => settingsNames.get(agentId));
     h.capture.listMoments.mockResolvedValue({
-      moments: [{ agentId: "nova", agentRunId: "run-1" }, { agentId: "codex", agentRunId: "run-2" }].map((run, index) => ({
+      // Codex's last change came through dohc's command line, which records no run id.
+      moments: [{ agentId: "nova", agentRunId: "run-1" }, { agentId: "codex", agentRunId: "run-2" }, { agentId: "codex" }].map((run, index) => ({
         id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         authors: [{ kind: "agent", onBehalfOf: "person-local", ...run }],
       })),
-      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+      nextCursor: null, latestMomentOrder: 2, activeVersionId: "main", ...historyPageFields,
     });
     const recordChange = (historyId: number, authorOriginId: string): CollectionGetRecordResult["history"][number] => ({
       historyId, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
@@ -918,11 +920,11 @@ describe("workspace engine IPC registrations", () => {
       const record = GetCollectionRecordHistoryResult.parse(await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" }));
       return [...moments.moments.map((moment) => moment.agentAuthorName), ...record.entries.map(({ author }) => author?.kind === "agent" ? author.name : null)];
     };
-    await expect(names()).resolves.toEqual(["Nova", "Codex", "Nova", "Codex"]);
+    await expect(names()).resolves.toEqual(["Nova", "Codex", "Codex", "Nova", "Codex"]);
     // A rename shows at once, and an agent removed from Settings keeps its id.
     settingsNames.set("codex", "Kit");
     settingsNames.delete("nova");
-    await expect(names()).resolves.toEqual(["nova", "Kit", "nova", "Kit"]);
+    await expect(names()).resolves.toEqual(["nova", "Kit", "Kit", "nova", "Kit"]);
   });
 
   it("restores as the person signed in here, never one the renderer names, and History names them", async () => {

@@ -45,7 +45,8 @@ export function createSettingsIpc<
   },
 >(dependencies: {
   stateDir(): string;
-  setCachedPreferredName(preferredName: string | undefined, agents: readonly Agent[]): void;
+  /** Your name and your agents, as History and chat name them. */
+  setCachedNames(preferredName: string | undefined, agents: readonly Agent[]): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
   // The theme the OS draws dohc's menus, dialogs, and window background in.
   applyThemeMode(themeMode: ThemeMode): void;
@@ -69,7 +70,7 @@ export function createSettingsIpc<
 }) {
   const {
     stateDir,
-    setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
+    setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds,
   } = dependencies;
@@ -87,7 +88,7 @@ export function createSettingsIpc<
   // The windows must match whatever zoom level, theme and spellcheck are in
   // the file, however they got there.
   function takeEffect(settings: DesktopUserSettings): void {
-    setCachedPreferredName(settings.profile.preferredName, listAgents(settings));
+    setCachedNames(settings.profile.preferredName, listAgents(settings));
     applyZoomLevelToWindows(settings.appearance.zoomLevel);
     applyThemeMode(settings.appearance.themeMode);
     setSpellCheckerEnabled(settings.editor.spellcheck);
