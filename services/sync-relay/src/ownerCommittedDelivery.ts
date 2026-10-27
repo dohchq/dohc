@@ -189,7 +189,6 @@ export class OwnerCommittedDelivery {
       if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
-      if (adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
       const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
       if (settlementPending(settled)) return settled;

@@ -3494,6 +3494,10 @@ export function createWorkspaceEngineCapture(
             assertCurrent();
             return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
           },
+          onSettlementWanted: (handler: () => void) => {
+            assertCurrent();
+            return owner.onSettlementWanted(() => {if (current === captured && !closed) handler();});
+          },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
           resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },

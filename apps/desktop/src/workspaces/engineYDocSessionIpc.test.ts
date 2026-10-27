@@ -518,7 +518,7 @@ describe("engine Y.Doc IPC adapter", () => {
   function claimHarness(initialClaim: string | null) {
     let providerClaim = initialClaim;
     const resync = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: () => () => {}, sessionId: "native-existing",
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: () => () => {}, sessionId: "native-existing",
       flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(() => resync.promise)};
     const provider = providerSession({nativeOwner, objectId: "object", versionId: "main"});
     Object.defineProperty(provider, "lineageClaimId", {get: () => providerClaim});
@@ -582,7 +582,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
-    const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
       sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
     await h.ipc.open(new FakeSender(7), openPayload);
@@ -597,7 +597,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
@@ -628,7 +628,7 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
     const owner = await h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});

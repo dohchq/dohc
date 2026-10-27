@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
-import { EngineClient, FrameDecoder, FrameType, encodeFrame, DEFAULT_MAX_BLOB_BYTES, NATIVE_RESTORE_STATUS, type Frame } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient, EngineRequestError, FrameDecoder, FrameType, encodeFrame, DEFAULT_MAX_BLOB_BYTES, NATIVE_RESTORE_STATUS, type Frame } from "@dohc/workspace-engine-client/daemon";
 import { DeviceCreditWindow } from "@dohc/service-http";
 import { deviceLiveHostReceive, type DeviceControlLimits, type DeviceLiveHostStart } from "@dohc/live-session-contract/device-control";
 import { parseCanonicalAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
@@ -20,6 +20,7 @@ export interface ExistingOwnerSession {
   finishHandoff(adopted: boolean): Promise<void>;
   remoteApplied(update: Uint8Array): Promise<void>;
   onDurableLocalChange(handler: () => void): () => void;
+  onSettlementWanted(handler: () => void): () => void;
 }
 
 export interface ExistingOwnerDeviceConfig {
@@ -49,7 +50,7 @@ interface Operation {
   timer: ReturnType<typeof setTimeout>; streams: Attachment[]; charge: number;
 }
 interface Registration { nativeId: number; binding: LiveObjectBinding; owner: ExistingOwnerSession; adopted: boolean; adopting?: boolean; outboxId?: string; handoffTimer?: ReturnType<typeof setTimeout>;
-  stopChanges?: () => void; dirty?: boolean; }
+  stopChanges?: () => void; dirty?: boolean; settlementWanted?: boolean; }
 
 function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error("Invalid device owner integer.");
@@ -120,12 +121,14 @@ export function startExistingOwnerDeviceTransport(options: {
       try {
         for (;;) {
           check();
-          const registration = [...registrations.values()].find(entry => entry.adopted && entry.dirty);
+          const registration = [...registrations.values()].find(entry => entry.adopted && (entry.dirty || entry.settlementWanted));
           if (!registration) break;
           if (operations.size > 0) break;
           registration.owner.assertCurrent();
-          registration.dirty = false;
-          await send({type: "event", name: "liveApplication.ownerOutboxChanged", seq: integer(++eventSeq, 1), sessionGeneration: 1,
+          const change = registration.dirty === true;
+          if (change) registration.dirty = false;
+          else registration.settlementWanted = false;
+          await send({type: "event", name: change ? "liveApplication.ownerOutboxChanged" : "liveApplication.settlementWanted", seq: integer(++eventSeq, 1), sessionGeneration: 1,
             payload: {registrationId: registration.nativeId, binding: registration.binding}}, retired.signal);
           // A change while this notification drains leaves dirty set for the next pass.
         }
@@ -135,11 +138,17 @@ export function startExistingOwnerDeviceTransport(options: {
   };
   const observeOwner = (registration: Registration) => {
     if (registration.stopChanges) return;
-    registration.stopChanges = registration.owner.onDurableLocalChange(() => {
+    const stopChanges = registration.owner.onDurableLocalChange(() => {
       if (closed || registrations.get(registration.nativeId) !== registration) return;
       try {registration.owner.assertCurrent(); registration.dirty = true; notifyChanges();}
       catch {stop();}
     });
+    const stopSettlement = registration.owner.onSettlementWanted(() => {
+      if (closed || registrations.get(registration.nativeId) !== registration) return;
+      try {registration.owner.assertCurrent(); registration.settlementWanted = true; notifyChanges();}
+      catch {stop();}
+    });
+    registration.stopChanges = () => {stopChanges(); stopSettlement();};
   };
   const registrationFor = (operation: Operation): Registration => {
     const registration = registrations.get(integer(operation.params.registrationId,1));
@@ -347,8 +356,14 @@ export function startExistingOwnerDeviceTransport(options: {
         } else if (operation.method === "liveApplication.settle") {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const params = configRecord(operation.params,["registrationId","terminalReceipt"]);
-          result = (await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,terminalReceipt: params.terminalReceipt as never,
-            ownerSessionId: registration.owner.nativeSessionId } },signal)).result;
+          try {
+            result = (await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,terminalReceipt: params.terminalReceipt as never,
+              ownerSessionId: registration.owner.nativeSessionId } },signal)).result;
+          } catch (error) {
+            const reason = error instanceof EngineRequestError ? error.wireError?.message : undefined;
+            if (reason !== "markdown-write-held" && reason !== "markdown-witness-check-pending") throw error;
+            result = {status: "pending", reason};
+          }
           owner.assertCurrent();
         } else throw new Error("Owner device method is unavailable.");
       }

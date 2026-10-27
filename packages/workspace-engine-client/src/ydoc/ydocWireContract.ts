@@ -262,6 +262,7 @@ const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
   mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
   mutableStruct({sessionId: Schema.String, resyncRequired: Schema.Literal(true)}),
+  mutableStruct({sessionId: Schema.String, settlementWanted: Schema.Literal(true)}),
 ]);
 
 const YdocResultSchemas = {

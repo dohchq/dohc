@@ -57,3 +57,24 @@ it("does not retry a refused pass without a new durable change", async () => {
   queue.wake(r.value); await failed.promise; await Promise.resolve(); await Promise.resolve();
   queue.pump(); await Promise.resolve(); expect(run).toHaveBeenCalledTimes(1); queue.close();
 });
+
+it("retains a settle request beside changes before and during an outbox pass", async () => {
+  const r = registration(), entered = deferred<void>(), release = deferred<boolean>(), settled = deferred<void>();
+  const calls: string[] = [];
+  const queue = new OwnerOutboxWake({canRun: () => true, onError: error => {throw error;},
+    async run(_registration, kind) {
+      calls.push(kind);
+      if (calls.length === 1) {entered.resolve(); return release.promise;}
+      if (kind === "settle") settled.resolve();
+      return false;
+    }});
+  queue.wake(r.value);
+  queue.wake(r.value, "settle");
+  await entered.promise;
+  queue.wake(r.value);
+  queue.wake(r.value, "settle");
+  release.resolve(false);
+  await settled.promise;
+  expect(calls).toEqual(["change", "change", "settle"]);
+  queue.close();
+});

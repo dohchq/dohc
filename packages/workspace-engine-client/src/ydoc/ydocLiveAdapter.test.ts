@@ -376,6 +376,20 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await reopened.close();
 });
 
+it("forwards settlement requests only to their open native session", async () => {
+  const engine = seedPlaintextEngine("seed"), adapter = new YdocLiveAdapter(engine);
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const wanted = vi.fn(), changed = vi.fn();
+  session.onSettlementWanted(wanted); session.onDurableLocalChange(changed);
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1,
+    payload: {sessionId: "another-session", settlementWanted: true}});
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 101, sessionGeneration: 1,
+    payload: {sessionId: session.sessionId, settlementWanted: true}});
+  expect(wanted).toHaveBeenCalledOnce(); expect(changed).not.toHaveBeenCalled();
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
+  await session.evict(); adapter.dispose();
+});
+
 it("resyncs a native invalidation into an open provider without losing its durable local edit", async () => {
   const engine = seedPlaintextEngine("seed");
   const adapter = new YdocLiveAdapter({

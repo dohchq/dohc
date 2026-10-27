@@ -1217,6 +1217,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           assertCurrent();
           return native.onDurableLocalChange(handler);
         },
+        onSettlementWanted: (handler: () => void) => {
+          assertCurrent();
+          return native.onSettlementWanted(handler);
+        },
         prepareHandoff: async (signal: AbortSignal) => {
           assertCurrent(); signal.throwIfAborted();
           if (owned.ownerHandoff) throw new Error("Owner handoff is already active.");

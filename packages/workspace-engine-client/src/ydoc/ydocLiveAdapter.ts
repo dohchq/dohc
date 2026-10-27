@@ -14,6 +14,7 @@ import {
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
+  isMarkdownWriteHeldRefusal,
   isYdocSessionNotFoundRefusal,
   WorkspaceDaemonRequester,
   type DaemonRequesterClient,
@@ -682,6 +683,7 @@ export class YdocAdapterSession {
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
+  private readonly settlementWantedListeners = new Set<() => void>();
   private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
@@ -1166,8 +1168,14 @@ export class YdocAdapterSession {
       // the wire code alone reads terminal.
       if (isYdocRemoteUpdatesPendingRefusal(error)) {
         await this.resync();
-        raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+        try {
+          raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+        } catch (retryError) {
+          if (isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
+          throw retryError;
+        }
       } else {
+        if (isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
         throw error;
       }
     }
@@ -1189,6 +1197,15 @@ export class YdocAdapterSession {
   onDurableLocalChange(handler: () => void): () => void {
     this.durableLocalChangeListeners.add(handler);
     return () => this.durableLocalChangeListeners.delete(handler);
+  }
+
+  onSettlementWanted(handler: () => void): () => void {
+    this.settlementWantedListeners.add(handler);
+    return () => this.settlementWantedListeners.delete(handler);
+  }
+
+  requestSettlement(): void {
+    if (!this.closed) this.notifyListeners(this.settlementWantedListeners, undefined);
   }
 
   onLocalUpdateAcknowledged(handler: (id: string, lane: "journal" | "owner-outbox") => void): () => void {
@@ -1424,6 +1441,7 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
     this.acknowledgedDoc.destroy();
@@ -1451,6 +1469,7 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
     this.acknowledgedDoc.destroy();
@@ -1845,6 +1864,10 @@ export class YdocLiveAdapter {
       const payload = decodeYdocRemoteUpdatePayload(event.payload);
       const session = this.sessions.get(payload.sessionId);
       if (session === undefined) return;
+      if ("settlementWanted" in payload) {
+        session.requestSettlement();
+        return;
+      }
       if ("resyncRequired" in payload) {
         session.markStale(new YdocResyncNeededError({reason: "native-state-changed", event}));
         return;

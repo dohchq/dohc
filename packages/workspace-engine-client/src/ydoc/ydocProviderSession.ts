@@ -115,6 +115,7 @@ export interface EngineYdocProviderSession {
     flush(): Promise<void>;
     applyRemoteUpdate(update: Uint8Array): Promise<void>;
     onDurableLocalChange(handler: () => void): () => void;
+    onSettlementWanted(handler: () => void): () => void;
     /** Resolves once a resync the engine requested has landed, and at once if none is pending. */
     resyncIfNeeded(): Promise<void>;
   };
@@ -432,6 +433,7 @@ export async function openEngineYdocProviderSession(
     nativeOwner: {
       get sessionId() { return session.sessionId; },
       onDurableLocalChange: handler => session.onDurableLocalChange(handler),
+      onSettlementWanted: handler => session.onSettlementWanted(handler),
       async flush() {
         if (closed) throw new Error("Owner session is closed.");
         await journalChain;
