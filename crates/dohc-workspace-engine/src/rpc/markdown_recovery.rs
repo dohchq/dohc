@@ -149,4 +149,4 @@ fn notify_sessions(sessions: &Mutex<HashMap<String, YdocSession>>, handle: &Work
 
 #[cfg(test)]
 #[path = "markdown_recovery_tests.rs"]
-mod tests;
+pub(super) mod tests;

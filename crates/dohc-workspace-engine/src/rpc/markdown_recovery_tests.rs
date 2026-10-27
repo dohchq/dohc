@@ -64,7 +64,7 @@ async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_sessi
         let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
         let open = service.open(Some(&handle)).unwrap();
         let gate = open.session_ops.lock().await;
-        let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(&scratch))));
+        let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(&scratch, "witness-safe"))));
         open.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(reader.clone())))
             .await.unwrap();
         let changed_key = key.clone();
@@ -128,7 +128,7 @@ async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_sessi
     }
 }
 
-fn witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
+pub(in crate::rpc) fn witness_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
     let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
     assert!(output.status.success());
@@ -137,7 +137,7 @@ fn witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
     runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
     let mut manifest = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
     let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
-        .replace("MANIFEST", &manifest.to_string()).replace("MODE", "\"witness-safe\"");
+        .replace("MANIFEST", &manifest.to_string()).replace("MODE", &serde_json::to_string(mode).unwrap());
     let bundle = scratch.path().join("reader.cjs");
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
