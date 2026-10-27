@@ -239,3 +239,64 @@ fn markdown_hold_delayed_drain_cleanup_survives_restart_and_keeps_the_refusal() 
     f.assert_absent();
     assert!(!crate::list_refusal_notices(&f.store, "ws").unwrap().is_empty());
 }
+
+#[test]
+fn markdown_hold_deferred_base_waits_for_the_recovery_lease_and_keeps_its_claim_after_drain() {
+    let mut f = Fixture::new();
+    f.store.write_with(&NoFaults, |tx| tx.execute(
+        "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','held-object',1000)",
+        []).map_err(SyncError::persist)).unwrap();
+    dohc_engine_collab::ensure_marker(&mut f.store, &f.key, ContentKind::Richdoc,
+        dohc_engine_collab::Regime::Replicated, &NoFaults, 1000).unwrap();
+    let op = f.op(0, &f.doc.encode_full_state(), true);
+    assert!(matches!(apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults,
+        &AlwaysLive).unwrap().primary, ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })));
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    assert!(matches!(crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+        &mut f.store, &mut f.cache, &f.key, &AlwaysLive, &NoFaults), Err(SyncError::LiveDocumentBindingActive)));
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+        &mut f.store, &mut f.cache, &f.key, &NoLiveLeases, &NoFaults).unwrap();
+    assert_eq!(drained.drained, 1);
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 0);
+    f.assert_absent();
+    assert_eq!(f.pending().len(), 1);
+    assert_eq!(f.pending()[0].kind, Kind::SyncProjection);
+    let persisted = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+    assert!(persisted.has_markdown_witness());
+    assert!(persisted.project(ContentKind::Richdoc).unwrap().content.contains("Accepted base text"));
+}
+
+#[test]
+fn markdown_hold_winning_base_replacement_retains_unsafe_metadata_without_publishing_a_file() {
+    for deferred in [false, true] {
+        let mut f = Fixture::new();
+        let local = Ydoc::wire();
+        local.richdoc_append_paragraph("Accepted base text");
+        let local_base = local.encode_full_state();
+        dohc_engine_collab::claim_base_at_relay(&mut f.store, &f.key, ContentKind::Richdoc, &local_base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(), &NoFaults, 1000).unwrap();
+        f.store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET path=?1", [PATH])
+            .map_err(SyncError::persist)).unwrap();
+        let mut op = f.op(0, &f.doc.encode_full_state(), true);
+        op.relay_seq = Some(10);
+        let leases: &dyn LeaseProbe = if deferred { &AlwaysLive } else { &NoLiveLeases };
+        assert!(matches!(apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, leases)
+            .unwrap().primary, ApplyDisposition::Applied(_)));
+        if deferred {
+            let drained = drain_deferred_ydoc_for_key(&mut f.store, &mut f.cache, &f.key, &NoFaults).unwrap();
+            assert_eq!(drained.drained, 1);
+            assert_eq!(drained.lineage_replacements.len(), 1);
+            assert!(drained.lineage_replacements[0].recovered_paths.is_empty());
+        }
+        f.assert_absent();
+        assert_eq!(f.store.table_row_count("conflicts").unwrap(), 0);
+        assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+        assert_eq!(f.pending().len(), 1);
+        assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 0);
+        let persisted = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+        assert!(persisted.has_markdown_witness());
+        assert!(persisted.project(ContentKind::Richdoc).unwrap().content.contains("Accepted base text"));
+    }
+}
