@@ -266,6 +266,21 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await screenshots(page, info, "after-save-notices");
     });
 
+    await test.step("stopping the current live document keeps the set-aside typing listed", async () => {
+      await notice.getByRole("button", {name: "Open Live documents", exact: true}).click();
+      await expect(live).toBeVisible();
+      const current = live.getByTestId(`live-document-row-${PATH}`);
+      await current.getByRole("button", {name: `Stop live editing for ${PATH}`, exact: true}).click();
+      await expect(current.getByRole("button", {name: `Resume live editing for ${PATH}`, exact: true})).toBeEnabled({timeout: 60_000});
+      await expect(kept.getByRole("button")).toHaveText(["Save recovery copy"]);
+      await expect(kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true})).toBeEnabled();
+      await expectCliKeptEdits();
+      await live.getByRole("button", {name: "Close", exact: true}).click();
+      await expect(live).toHaveCount(0);
+      await page.getByTestId("notice-center-toggle").click();
+      await expect(notice).toBeVisible();
+    });
+
     await test.step("dismissing the notice hides only its row and leaves the edits available in Live documents and the CLI", async () => {
       await notice.getByRole("button", {name: "Dismiss notice", exact: true}).click();
       await expect(notice).toHaveCount(0);
