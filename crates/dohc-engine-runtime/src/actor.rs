@@ -623,12 +623,10 @@ impl Drop for LinkDrainHold {
     }
 }
 
-fn wait_for_reader<R>(
+fn pending_reader_preparation<R>(
     result: &Result<R, RuntimeError>,
-    attempt: usize,
-    recovery: Arc<MarkdownRecoverySignal>,
-) -> impl std::future::Future<Output = bool> + Send + 'static {
-    let pending = match result {
+) -> Option<dohc_engine_collab::markdown_write_safety::PendingPreparation> {
+    match result {
         Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(pending)))
         | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownReaderPending(
             pending,
@@ -648,7 +646,15 @@ fn wait_for_reader<R>(
             key: key.clone(), path: path.clone(), pending: pending.clone(),
         }),
         _ => None,
-    };
+    }
+}
+
+fn wait_for_reader<R>(
+    result: &Result<R, RuntimeError>,
+    attempt: usize,
+    recovery: Arc<MarkdownRecoverySignal>,
+) -> impl std::future::Future<Output = bool> + Send + 'static {
+    let pending = pending_reader_preparation(result);
     async move {
         let Some(pending) = pending else {
             return false;

@@ -179,7 +179,7 @@ impl ActorHandle {
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
+        let result = self.run_blocking(move |store, cache| {
             reconcile_collections_on_store(
                 store,
                 cache,
@@ -194,7 +194,17 @@ impl ActorHandle {
                 &token,
                 committed.as_deref(),
             )
-        })
+        });
+        if let Some(pending) = super::pending_reader_preparation(&result) {
+            let recovery = self.markdown_recovery.clone();
+            tokio::spawn(async move {
+                pending.resolve().await;
+                recovery.request();
+            });
+            self.request_markdown_recovery();
+            return Ok(CollectionReconciliation::default());
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
