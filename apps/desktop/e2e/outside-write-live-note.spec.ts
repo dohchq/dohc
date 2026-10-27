@@ -142,7 +142,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         await expect(page.getByTestId("changed-outside-notice")).toContainText("This file changed outside dohc.");
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-          await page.screenshot({ path: testInfo.outputPath(`banner-${theme}.png`) });
+          await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`banner-${theme}.png`) });
         }
         await record("4-before-reload", await snapshot());
         await page.getByTestId("changed-outside-notice").getByRole("button", { name: "Reload" }).click();
@@ -153,7 +153,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         }, { timeout: 75_000, intervals: [1_000] }).toBe(true);
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-          await page.screenshot({ path: testInfo.outputPath(`reload-wait-${theme}.png`) });
+          await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`reload-wait-${theme}.png`) });
         }
         reload = { attempted: true };
       } else {
@@ -206,7 +206,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         await expect(listFailureRow).toContainText("To find a copy that isn't listed, look beside its file for (kept copy) in the name.");
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-          await page.screenshot({ path: testInfo.outputPath(`copy-failure-${theme}.png`) });
+          await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`copy-failure-${theme}.png`) });
         }
         await record("4-copy-failed", { recordsPath, ...await snapshot() });
         await unlink(recordsPath);
@@ -263,12 +263,12 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       if (variant === "open-reload") {
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-          await page.screenshot({ path: testInfo.outputPath(`reload-kept-copy-${theme}.png`) });
+          await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`reload-kept-copy-${theme}.png`) });
         }
       }
       for (const theme of ["light", "dark"] as const) {
         await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-        await page.screenshot({ path: testInfo.outputPath(`toast-${theme}.png`) });
+        await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`toast-${theme}.png`) });
       }
       await page.getByTestId("notice-center-toggle").click();
       const row = page.locator("[data-notice-row]").filter({ hasText: `Kept a copy of ${PATH}` }).filter({ hasText: copyPath });
@@ -278,7 +278,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       await expect(row).not.toContainText("History");
       for (const theme of ["light", "dark"] as const) {
         await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-        await page.screenshot({ path: testInfo.outputPath(`notices-${theme}.png`) });
+        await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`notices-${theme}.png`) });
       }
       await row.getByRole("button", { name: "Open copy", exact: true }).click();
       await expect(editor(page)).toContainText("AGENT-1");
