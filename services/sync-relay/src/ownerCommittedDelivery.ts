@@ -124,16 +124,29 @@ export class OwnerCommittedDelivery {
       // A resumed registration repeats this empty settle if its reply was lost.
       if (!adopted.settled && progress.adoptionTerminal !== null &&
         isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
-        const response = await c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
-          registrationId,terminalReceipt: {...progress.adoptionTerminal},
-        }},signal);
-        check(); latest.assertCurrent();
-        const settled = settlementResult(response.result,progress.adoptionTerminal);
-        if (!settled.materialized) {
-          if (settle) return settled;
-          return {kind: "pending",reason: SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+        // One recovered ACK moves past the cut. Later applications replay in
+        // applyPending under its event budget, without repeating the cut settle.
+        const next = this.#store.nextOwnerApplication(latest);
+        if (next) {
+          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},next.metadata.accepted.receipt,signal);
+          check(); latest.assertCurrent();
+          if (ack) {
+            this.#store.acknowledgeOwnerDeliveryApplication(latest,ack);
+            progress = this.#store.ownerDeliveryProgress(latest);
+          }
         }
-        adopted.settled = settled;
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+          const response = await c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
+            registrationId,terminalReceipt: {...progress.adoptionTerminal},
+          }},signal);
+          check(); latest.assertCurrent();
+          const settled = settlementResult(response.result,progress.adoptionTerminal);
+          if (!settled.materialized) {
+            if (settle) return settled;
+            return {kind: "pending",reason: SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+          }
+          adopted.settled = settled;
+        }
       }
       let appliedCount = 0;
       // Set inside applyPending, so declared wide for the reads after it.
