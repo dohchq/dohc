@@ -224,6 +224,7 @@ pub(super) fn baseline(
         None,
         super::ydoc::SettlementKind::Document,
         false,
+        None,
     );
     match outcome.and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller) {
         Ok(_) => {}

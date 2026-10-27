@@ -1502,6 +1502,7 @@ fn settle_audited(
         None,
         super::ydoc::SettlementKind::Document,
         false,
+        None,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
     let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;

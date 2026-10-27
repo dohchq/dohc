@@ -161,6 +161,8 @@ async fn setup() -> (
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+        
+            None,
         )
         .await
         .unwrap();
@@ -627,6 +629,8 @@ async fn deleted_file_with_already_durable_typing_is_covered_without_a_notice() 
             12,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
+        
             None,
         )
         .await

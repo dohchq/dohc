@@ -33,6 +33,8 @@ use dohc_engine_storage::{
     hex_sha256, put_binary_blob,
 };
 use dohc_engine_sync::{SharingDeclined, ydoc_update_payload};
+use dohc_engine_collab::markdown_write_safety::{self, MarkdownConversionConsent, MarkdownWriteSafety};
+use dohc_engine_collab::markdown_write_obligations::{self as write_obligations, Kind as WriteObligationKind, Obligation as WriteObligation};
 use rusqlite::{OptionalExtension, params};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -936,6 +938,7 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         restore_generation: Option<i64>,
+        conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
             ydoc_settle_on_store(
@@ -959,6 +962,7 @@ impl ActorHandle {
                 restore_generation,
                 SettlementKind::Document,
                 true,
+                conversion_consent.as_deref(),
             )
         })
         .await
@@ -979,6 +983,7 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         restore_generation: Option<i64>,
+        conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
             ydoc_settle_on_store(
@@ -1002,6 +1007,7 @@ impl ActorHandle {
                 restore_generation,
                 SettlementKind::Document,
                 true,
+                conversion_consent.as_deref(),
             )
         })
         .await
@@ -2641,6 +2647,7 @@ pub(super) fn ydoc_settle_on_store(
     restore_generation: Option<i64>,
     kind: SettlementKind,
     use_reader: bool,
+    conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2730,6 +2737,7 @@ pub(super) fn ydoc_settle_on_store(
         }
     }
     reconcile_author_coverage(store, key, now_ms, faults)?;
+    let witness_resolver = doc_cache.reader_resolver.clone();
     let reader_resolver = if use_reader {
         doc_cache.reader_resolver.clone()
     } else {
@@ -2760,7 +2768,7 @@ pub(super) fn ydoc_settle_on_store(
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
     let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
-    let projection = if use_reader {
+    let mut projection = if use_reader {
         project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
     } else {
         project_ydoc_on_store(store, key, doc, content_kind)
@@ -3054,6 +3062,27 @@ pub(super) fn ydoc_settle_on_store(
             projection,
         })));
     }
+    if let Some(override_text) = settled_content_override.as_deref() {
+        let source_preserving = projection.markdown_write_safety == MarkdownWriteSafety::SourcePreserving
+            && override_text == projection.content;
+        let audited_restore = live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
+        let adoption = kind == SettlementKind::CollectionAdoption && head_probe.as_ref().is_some_and(|head| {
+            let split = |text: &str| dohc_engine_domain::collections::markdown_frontmatter_json_with_body(text)
+                .map_or((serde_json::json!({}), text.to_owned()), |(fields, body)| (fields, body.to_owned()));
+            let (fields, body) = split(override_text);
+            fields == doc.frontmatter_json() && body == split(&head.text).1
+        });
+        if !(source_preserving || audited_restore || adoption) {
+            return Err(CollabError::FrontmatterEditRefused.into());
+        }
+        projection.markdown_write_safety = MarkdownWriteSafety::SourcePreserving;
+    }
+    if markdown_write_safety::holds(&projection.markdown_write_safety,
+        projection.witness_source_sha256.as_deref(), probe_sha.as_deref())
+        && markdown_write_safety::check_witness(doc, key, path, witness_resolver.as_deref())? {
+        projection.markdown_write_safety = MarkdownWriteSafety::SafeWitness;
+    }
+    let checkpoint_sha256 = hex_sha256(&doc.encode_full_state());
     let Projection {
         content: ydoc_projected_text,
         content_kind: projected_content_kind,
@@ -3103,6 +3132,44 @@ pub(super) fn ydoc_settle_on_store(
             .map(|snapshot| snapshot.blob_sha256.clone());
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
+        let current_doc = if live_audit.is_some() { None } else {
+            Some(dohc_engine_collab::load_doc_in(tx, key)?)
+        };
+        let write_doc = current_doc.as_ref().unwrap_or(doc);
+        let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+        if current_marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+            return Err(CollabError::LineageWriteStale {
+                expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: current_marker.lineage_claim_id,
+            }.into());
+        }
+        let reference = write_doc.markdown_source_reference();
+        let current_witness_sha = reference.as_ref().filter(|reference| write_doc.markdown_source(reference).is_some())
+            .map(|reference| reference.source_sha256.as_str());
+        if current_witness_sha != witness_source_sha256.as_deref() {
+            return Err(CollabError::MarkdownReaderUnavailable.into());
+        }
+        let holds = markdown_write_safety::holds(&markdown_write_safety, current_witness_sha, current_sha.as_deref())
+            && !markdown_write_safety::check_witness(write_doc, key, path, witness_resolver.as_deref())?;
+        let uses_consent = holds && live_audit.is_none() && conversion_consent.is_some_and(|consent|
+            consent.permits(key, session_id, current_marker.lineage_claim_id.as_deref(), restore_generation,
+                current_witness_sha, current_sha.as_deref()));
+        let obligation = WriteObligation {
+            order: 0, key: key.clone(), lineage_claim_id: current_marker.lineage_claim_id.clone().unwrap_or_default(),
+            operation_id: session_id.to_owned(),
+            kind: if live_audit.is_some() { WriteObligationKind::AuditedSettle }
+                else if kind == SettlementKind::CollectionAdoption { WriteObligationKind::CollectionAdoption }
+                else if session_id == "link-rewrite-baseline" { WriteObligationKind::LinkBaseline }
+                else { WriteObligationKind::Session },
+            path: path.to_owned(),
+            retry_inputs: serde_json::json!({"expectedHeadSha256": expected_head_sha,
+                "restoreGeneration": restore_generation, "useReader": use_reader}),
+            held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: current_sha.clone(),
+            settled_cut: None, settled_head_sha256: None,
+        };
+        if holds && !uses_consent {
+            write_obligations::record_in(tx, &obligation, now_ms)?;
+            return Ok((None, false));
         }
         let preimage = if bootstrap_absent {
             Preimage::Absent
@@ -3188,6 +3255,16 @@ pub(super) fn ydoc_settle_on_store(
         .map_err(|error| {
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
+        if uses_consent {
+            write_obligations::record_in(tx, &WriteObligation {
+                kind: WriteObligationKind::WitnessRefresh,
+                settled_cut: Some(current_marker.head_update_seq),
+                settled_head_sha256: Some(result.snapshot.blob_sha256.clone()),
+                held_checkpoint_sha256: None, held_head_sha256: None,
+                ..obligation.clone()
+            }, now_ms)?;
+        }
+        write_obligations::complete_in(tx, &obligation, now_ms)?;
         if let Some(audit) = live_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
@@ -3231,12 +3308,21 @@ pub(super) fn ydoc_settle_on_store(
             path,
             content_kind == ContentKind::Richdoc,
         )?;
-        Ok((result, reconcile_required))
+        Ok((Some((result, reconcile_required)), uses_consent))
     })?;
-    let (write, collection_reconcile_required) = match outcome {
+    let (settlement, uses_consent) = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
+    let Some((write, collection_reconcile_required)) = settlement else {
+        return Err(RuntimeError::MarkdownWriteHeld {
+            key: key.clone(), path: path.to_owned(), head_sha256: probe_sha,
+            checkpoint_sha256,
+        });
+    };
+    if uses_consent && let Some(consent) = conversion_consent {
+        consent.committed();
+    }
     // NO cancellation checks past this point: the settle marker committed
     // with the moment above, so a Cancelled return here would report failure
     // for a settle the lineage already records — and close(settle:false)

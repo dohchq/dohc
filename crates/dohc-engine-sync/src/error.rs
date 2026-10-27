@@ -23,6 +23,13 @@ impl std::fmt::Display for ObservedBytes {
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("markdown-write-held")]
+    MarkdownWriteHeld {
+        key: dohc_engine_collab::DocKey,
+        path: String,
+        head_sha256: Option<String>,
+        checkpoint_sha256: String,
+    },
     #[error("dohc is checking this file. Try again.")]
     MarkdownWitnessCheckPending {
         key: dohc_engine_collab::DocKey,
@@ -150,6 +157,7 @@ impl SyncError {
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
+            | SyncError::MarkdownWriteHeld { .. }
             | SyncError::LiveDocumentBindingActive
             | SyncError::InputTooLarge { .. }
             | SyncError::UnsupportedOperation
@@ -176,6 +184,7 @@ impl SyncError {
     pub const fn code(&self) -> &'static str {
         match self {
             SyncError::MarkdownReaderPending(_) => "retryable-state",
+            SyncError::MarkdownWriteHeld { .. } => "markdown-write-held",
             SyncError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),

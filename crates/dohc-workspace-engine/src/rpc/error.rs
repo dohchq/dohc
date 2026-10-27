@@ -652,6 +652,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::MarkdownWriteHeld { .. }
         | SyncError::LiveDocumentBindingActive
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation

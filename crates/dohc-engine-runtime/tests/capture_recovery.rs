@@ -511,6 +511,8 @@ async fn directory_blocked_or_cancelled_settlement_needs_recovery_only_for_later
                         ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
                         CancellationToken::new(),
                         None,
+                    
+                        None,
                     )
                     .await
                     .is_err()

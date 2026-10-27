@@ -276,7 +276,10 @@ pub(crate) fn clear_lineage_in_tx(
          AND (substr(p.reason_message,1,length(?6))=?6 \
            OR substr(p.reason_message,1,length(?7))=?7 \
            OR substr(p.reason_message,1,length(?8))=?8 \
-           OR p.reason_message IN (?9,?10)) AND EXISTS( \
+            OR p.reason_message IN (?9,?10,?11)) \
+          AND (p.reason_message != ?11 OR NOT EXISTS(SELECT 1 FROM markdown_write_obligations o \
+            WHERE o.workspace_id=?1 AND o.version_id=?5 AND o.object_id=?2 AND o.lineage_claim_id=?3 \
+              AND o.completed=0 AND o.held_checkpoint_sha256 IS NOT NULL)) AND EXISTS( \
          SELECT 1 FROM replication_log r WHERE r.workspace_id=p.workspace_id \
          AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq \
          AND COALESCE(json_extract(r.payload_json,'$.objectId'), \
@@ -294,6 +297,7 @@ pub(crate) fn clear_lineage_in_tx(
             RetainedUpdateRefusal::ProjectionTooLarge(dohc_engine_collab::ContentKind::Scene).message_prefix(),
             RetainedUpdateRefusal::ContentKindMismatch.message_prefix(),
             RetainedUpdateRefusal::InvalidContentKind.message_prefix(),
+            "markdown-write-held",
         ],
     )
     .map_err(SyncError::persist)?;

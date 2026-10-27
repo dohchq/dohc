@@ -425,6 +425,7 @@ fn apply_deferred_base(
     faults: &dyn FaultInjector,
     search_policy: Option<&SearchPolicySnapshot>,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<Option<YdocLineageReplacement>, SyncError> {
     let incoming_doc = dohc_engine_collab::Ydoc::wire();
     incoming_doc
@@ -478,7 +479,7 @@ fn apply_deferred_base(
         };
         if let Some(result) = preserve_incomplete_base_in_tx(
             tx, &key, &payload, &incoming_doc, relay_seq, &origin_id, origin_seq,
-            recorded_at_ms, search_policy,
+            recorded_at_ms, search_policy, resolver,
         )? {
             record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, result.conflicts_opened)?;
             dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id).map_err(SyncError::Storage)?;
@@ -627,7 +628,7 @@ fn apply_deferred_base(
                 recovered_paths,
             }));
         }
-        project_and_write_in_tx(
+        project_retaining_markdown_hold_in_tx(
             tx,
             &key,
             &payload.path,
@@ -637,6 +638,7 @@ fn apply_deferred_base(
             origin_seq,
             recorded_at_ms,
             search_policy,
+            resolver,
         )?;
         Ok(losing_claim_id.map(|_| YdocLineageReplacement {
             winner_lineage_claim_id: winner_claim_id,
@@ -1136,6 +1138,7 @@ fn drain_deferred_ydoc(
                 faults,
                 search_policy.as_ref(),
                 recovery_leases,
+                cache.reader_resolver.as_deref(),
             )? {
                 lineage_replacements.push(replacement);
             }
@@ -1382,6 +1385,20 @@ fn drain_deferred_ydoc(
             }
             Ok(TxnOutcome::Committed(_)) => {}
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
+            Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
+                match store.write_with(faults, |tx| {
+                    if let Some(leases) = recovery_leases { require_recovery_closed(tx, key, leases)?; }
+                    record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
+                        origin_id: drain_origin.to_owned(), origin_seq: drain_seq,
+                        provisional_author: false, actor_origin_id: payload.actor_origin_id.clone(),
+                        attribution: payload.attribution.clone(),
+                    }, payload_recorded_at)
+                })? {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+                }
+                projection_refusal = Some(deferred_ydoc_refusal(key, drain_origin, drain_seq, "markdown-write-held"));
+            }
             // These rows are already ACKed and therefore cannot be retried
             // from the relay. If an identity pin now blocks projection,
             // retaining the marker would wedge every later drain. The CRDT
@@ -1514,6 +1531,7 @@ fn project_final_drained_doc(
             search_policy,
             faults,
             recovery_leases,
+            cache.reader_resolver.as_deref(),
         );
         return Ok(Some((projected, marker.content_kind)));
     }
@@ -1540,6 +1558,7 @@ fn project_final_drained_doc(
         search_policy,
         faults,
         recovery_leases,
+        cache.reader_resolver.as_deref(),
     );
     Ok(Some((projected, kind)))
 }
@@ -1558,6 +1577,7 @@ fn write_final_drained_projection(
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<TxnOutcome<crate::BaseOrigination>, SyncError> {
     store.write_with(faults, |tx| {
         if let Some(leases) = recovery_leases {
@@ -1575,6 +1595,7 @@ fn write_final_drained_projection(
             drain_seq,
             payload_recorded_at,
             search_policy,
+            resolver,
         )?;
         if projection_coordinates.len() > 1 {
             crate::live_audit::annotate_drained_projection_in_tx(
@@ -3088,6 +3109,7 @@ fn preserve_incomplete_base_in_tx(
     origin_seq: i64,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<Option<YdocApplyResult>, SyncError> {
     let Some(marker) =
         dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
@@ -3268,7 +3290,7 @@ fn preserve_incomplete_base_in_tx(
     )
     .map_err(map_collab_hard_error)?;
     if open {
-        project_and_write_in_tx(
+        project_retaining_markdown_hold_in_tx(
             tx,
             key,
             &payload.path,
@@ -3278,6 +3300,7 @@ fn preserve_incomplete_base_in_tx(
             origin_seq,
             now_ms,
             search_policy,
+            resolver,
         )?;
     }
     Ok(Some(YdocApplyResult {
@@ -4089,6 +4112,103 @@ fn require_resolved_local_settlement(
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MarkdownProjectionRetry {
+    origin_id: String,
+    origin_seq: i64,
+    provisional_author: bool,
+    actor_origin_id: Option<String>,
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
+}
+
+fn record_markdown_hold_in_tx(
+    tx: &rusqlite::Transaction<'_>, error: &SyncError,
+    inputs: MarkdownProjectionRetry, now_ms: i64,
+) -> Result<(), SyncError> {
+    let SyncError::MarkdownWriteHeld { key, path, head_sha256, checkpoint_sha256 } = error else {
+        return Err(local_corruption("expected a held Markdown projection"));
+    };
+    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
+        .ok_or_else(|| local_corruption("held Markdown projection has no lineage"))?;
+    dohc_engine_collab::markdown_write_obligations::record_in(tx,
+        &dohc_engine_collab::markdown_write_obligations::Obligation {
+            order: 0, key: key.clone(), lineage_claim_id: marker.lineage_claim_id.unwrap_or_default(),
+            operation_id: format!("{}:{}", inputs.origin_id, inputs.origin_seq),
+            kind: dohc_engine_collab::markdown_write_obligations::Kind::SyncProjection,
+            path: path.clone(), retry_inputs: serde_json::to_value(inputs).map_err(SyncError::corrupt)?,
+            held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: head_sha256.clone(),
+            settled_cut: None, settled_head_sha256: None,
+        }, now_ms).map_err(map_collab_hard_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_retaining_markdown_hold_in_tx(
+    tx: &rusqlite::Transaction<'_>, key: &DocKey, path: &str, doc: &dohc_engine_collab::Ydoc,
+    content_kind: ContentKind, origin_id: &str, origin_seq: i64, now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+) -> Result<bool, SyncError> {
+    tx.execute_batch("SAVEPOINT markdown_base_projection").map_err(SyncError::persist)?;
+    match project_and_write_in_tx(tx, key, path, doc, content_kind, origin_id, origin_seq, now_ms,
+        search_policy, resolver) {
+        Ok(_) => {
+            tx.execute_batch("RELEASE markdown_base_projection").map_err(SyncError::persist)?;
+            Ok(false)
+        }
+        Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
+            tx.execute_batch("ROLLBACK TO markdown_base_projection; RELEASE markdown_base_projection")
+                .map_err(SyncError::persist)?;
+            record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
+                origin_id: origin_id.to_owned(), origin_seq, provisional_author: false,
+                actor_origin_id: None, attribution: None,
+            }, now_ms)?;
+            crate::apply::persist_refusal(tx, &deferred_ydoc_refusal(key, origin_id, origin_seq, "markdown-write-held"))?;
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Retry the original projection and its remaining audit and sharing work together.
+pub fn retry_markdown_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    owed: &dohc_engine_collab::markdown_write_obligations::Obligation,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    search_policy: Option<&SearchPolicySnapshot>, now_ms: i64,
+) -> Result<crate::BaseOrigination, SyncError> {
+    let key = &owed.key;
+    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
+        .ok_or_else(|| local_corruption("held Markdown projection has no lineage"))?;
+    if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
+        || marker.path.as_deref() != Some(&owed.path) {
+        return Err(SyncError::RetryableState { reason: "ydoc-lineage-changed" });
+    }
+    require_unfenced_lineage(tx, key)?;
+    dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(map_collab_hard_error)?;
+    let inputs: MarkdownProjectionRetry = serde_json::from_value(owed.retry_inputs.clone()).map_err(SyncError::corrupt)?;
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_collab_hard_error)?;
+    if doc.has_pending_dependencies() {
+        return Err(SyncError::RetryableState { reason: "missing Y.Doc dependencies" });
+    }
+    let created = project_and_write_in_tx(tx, key, &owed.path, &doc, marker.content_kind,
+        &inputs.origin_id, inputs.origin_seq, now_ms, search_policy, resolver)?;
+    if created && inputs.provisional_author {
+        let moment = ydoc_apply_moment_id(key, &owed.path, &inputs.origin_id, inputs.origin_seq);
+        tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+            VALUES ('sync-ydoc-provisional-author:'||json_array(?1,?2,?3),?4,?5,?6,'sync-ydoc-provisional-author') \
+            ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash,result_seq=excluded.result_seq,\
+            committed_at=excluded.committed_at WHERE engine_requests.kind='sync-ydoc-provisional-author'",
+            params![key.workspace_id,key.version_id,key.object_id,moment,inputs.origin_seq,now_ms])
+            .map_err(SyncError::persist)?;
+    }
+    let sharing = crate::originate_ydoc_base_in_tx(tx,key,&owed.path,inputs.actor_origin_id.as_deref(),
+        inputs.attribution.as_ref(),now_ms)?;
+    dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms).map_err(map_collab_hard_error)?;
+    crate::refusal_notices::clear_lineage_in_tx(tx, &key.workspace_id,&key.version_id,&key.object_id,&owed.lineage_claim_id)?;
+    Ok(sharing)
+}
+
 /// Returns whether this projection created a History moment.
 #[allow(clippy::too_many_arguments)]
 pub fn project_and_write_in_tx(
@@ -4101,33 +4221,15 @@ pub fn project_and_write_in_tx(
     origin_seq: i64,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<bool, SyncError> {
     require_resolved_local_settlement(tx, key, now_ms)?;
     let current = validate_ydoc_identity(tx, key, path)?;
-    if content_kind == dohc_engine_collab::ContentKind::Richdoc {
-        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
-            tx,
-            &key.workspace_id,
-            &key.version_id,
-            &key.object_id,
-            &doc.frontmatter_json(),
-        )
-        .map_err(map_domain_hard_error)?;
-    }
-    let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
+    let mut projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
     let lineage: Option<String> = tx.query_row(
         "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
     ).optional().map_err(SyncError::corrupt)?.flatten();
-    if let Some(lineage) = lineage {
-        crate::refusal_notices::clear_lineage_in_tx(
-            tx,
-            &key.workspace_id,
-            &key.version_id,
-            &key.object_id,
-            &lineage,
-        )?;
-    }
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
     // the conflict preserves. Coalesce the incoming side to the freshest
@@ -4225,6 +4327,28 @@ pub fn project_and_write_in_tx(
         )
         .map_err(SyncError::persist)?;
         return Ok(false);
+    }
+    use dohc_engine_collab::markdown_write_safety::{self, MarkdownWriteSafety};
+    let head_sha256 = current.snapshot.as_ref().map(|snapshot| snapshot.blob_sha256.as_str());
+    if markdown_write_safety::holds(&projection.markdown_write_safety,
+        projection.witness_source_sha256.as_deref(), head_sha256) {
+        if !markdown_write_safety::check_witness(doc, key, path, resolver).map_err(map_collab_hard_error)? {
+            return Err(SyncError::MarkdownWriteHeld {
+                key: key.clone(), path: path.to_owned(), head_sha256: head_sha256.map(ToOwned::to_owned),
+                checkpoint_sha256: hex_sha256(&doc.encode_full_state()),
+            });
+        }
+        projection.markdown_write_safety = MarkdownWriteSafety::SafeWitness;
+    }
+    if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+            tx, &key.workspace_id, &key.version_id, &key.object_id, &doc.frontmatter_json(),
+        ).map_err(map_domain_hard_error)?;
+    }
+    if let Some(lineage) = lineage {
+        crate::refusal_notices::clear_lineage_in_tx(
+            tx, &key.workspace_id, &key.version_id, &key.object_id, &lineage,
+        )?;
     }
     let preimage = current
         .snapshot
@@ -4814,6 +4938,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op.origin_seq,
                 op.recorded_at_ms,
                 search_policy.as_ref(),
+                cache.reader_resolver.as_deref(),
             )? {
                 record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
                 return Ok(result);
@@ -4971,7 +5096,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 });
             }
             // A fresh base-only replica gets its FILE, not just CRDT rows.
-            project_and_write_in_tx(
+            let held = project_retaining_markdown_hold_in_tx(
                 tx,
                 &claim_key,
                 &base_path,
@@ -4981,10 +5106,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op.origin_seq,
                 op.recorded_at_ms,
                 search_policy.as_ref(),
+                cache.reader_resolver.as_deref(),
             )?;
             Ok(YdocApplyResult {
                 deferred: false,
-                reason: None,
+                reason: held.then_some("markdown-write-held"),
                 conflicts_opened: 0,
                 lineage_replacement: replaced.then_some(YdocLineageReplacement {
                     winner_lineage_claim_id,
@@ -5248,6 +5374,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     op.origin_seq,
                     op.recorded_at_ms,
                     search_policy.as_ref(),
+                    gate_cache.reader_resolver.as_deref(),
                 ) {
                     Ok(created) => {
                         if created && provisional_author {
@@ -5277,6 +5404,18 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         tx.execute_batch("RELEASE dohc_ydoc_projection")
                             .map_err(SyncError::persist)?;
                         crate::apply::MutationOutcome::Applied(applied)
+                    }
+                    Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
+                        tx.execute_batch("ROLLBACK TO dohc_ydoc_projection; RELEASE dohc_ydoc_projection")
+                            .map_err(SyncError::persist)?;
+                        record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
+                            origin_id: op.origin_id.clone(), origin_seq: op.origin_seq,
+                            provisional_author, actor_origin_id: payload.actor_origin_id.clone(),
+                            attribution: payload.attribution.clone(),
+                        }, op.recorded_at_ms)?;
+                        crate::apply::MutationOutcome::RefusedRetainingMutation {
+                            reason: "markdown-write-held".to_owned(),
+                        }
                     }
                     Err(SyncError::InvalidInput { reason }) => {
                         tx.execute_batch(

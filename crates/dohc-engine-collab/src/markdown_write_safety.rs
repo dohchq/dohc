@@ -3,6 +3,41 @@ use dohc_engine_reader::{CheckMarkdownWitness, Failure, Outcome, Reader};
 use std::{collections::VecDeque, sync::{Arc, Mutex}};
 use tokio::sync::OnceCell;
 
+pub struct MarkdownConversionConsent {
+    key: DocKey,
+    session_id: String,
+    lineage_claim_id: Option<String>,
+    restore_generation: Option<i64>,
+    source_sha256: String,
+    head_sha256: Option<String>,
+    consumed: std::sync::atomic::AtomicBool,
+}
+
+impl MarkdownConversionConsent {
+    pub fn new(key: DocKey, session_id: String, lineage_claim_id: Option<String>,
+        restore_generation: Option<i64>, source_sha256: String, head_sha256: Option<String>) -> Self {
+        Self { key, session_id, lineage_claim_id, restore_generation, source_sha256, head_sha256,
+            consumed: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    pub fn permits(&self, key: &DocKey, session_id: &str, lineage_claim_id: Option<&str>,
+        restore_generation: Option<i64>, source_sha256: Option<&str>, head_sha256: Option<&str>) -> bool {
+        !self.is_consumed() && self.key == *key && self.session_id == session_id
+            && self.lineage_claim_id.as_deref() == lineage_claim_id
+            && self.restore_generation == restore_generation
+            && Some(self.source_sha256.as_str()) == source_sha256
+            && self.head_sha256.as_deref() == head_sha256
+    }
+
+    pub fn is_consumed(&self) -> bool {
+        self.consumed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn committed(&self) {
+        self.consumed.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub use crate::ydoc::MarkdownWriteSafety;
 
 #[derive(Debug, Clone)]

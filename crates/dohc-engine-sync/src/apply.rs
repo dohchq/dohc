@@ -471,6 +471,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         SyncError::Storage(_)
         | SyncError::MarkdownReaderPending(_)
         | SyncError::MarkdownWitnessCheckPending { .. }
+        | SyncError::MarkdownWriteHeld { .. }
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }

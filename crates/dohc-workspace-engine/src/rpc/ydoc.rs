@@ -739,6 +739,8 @@ impl EngineService {
                         Arc::new(NoFaults),
                         cancellation.token(),
                         None,
+                    
+                        None,
                     )
                     .await
                     .map_err(map_runtime)?
@@ -1708,6 +1710,8 @@ impl EngineService {
                                 Arc::new(NoFaults),
                                 CancellationToken::new(),
                                 restore,
+                            
+                                None,
                             )
                             .await
                         {
@@ -1909,6 +1913,8 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
                 session.restore_generation,
+            
+                None,
             )
             .await
             .map_err(map_runtime)?;
