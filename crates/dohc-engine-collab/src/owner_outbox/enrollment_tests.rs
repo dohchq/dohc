@@ -2083,11 +2083,11 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
     });
     let mut accepted = Vec::new();
     while let Some(next) = cursor {
-        let page = match read_pending_page(&store, "workspace", &row.outbox_id, Some(next), 7).unwrap()
-        {
-            OwnerOutboxPageResult::Page(page) => page,
-            _ => panic!("unchanged snapshot"),
-        };
+        let page =
+            match read_pending_page(&store, "workspace", &row.outbox_id, Some(next), 7).unwrap() {
+                OwnerOutboxPageResult::Page(page) => page,
+                _ => panic!("unchanged snapshot"),
+            };
         accepted.extend(page.bytes);
         cursor = page.next_cursor;
     }
@@ -2102,7 +2102,11 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
         .read_with(|conn| open_draft_in(conn, &next, 2))
         .unwrap();
     assert_eq!(bounded(&current.doc).unwrap(), host);
-    assert!(!current.doc.canonical_content().to_string().contains("TYPED"));
+    assert!(!current
+        .doc
+        .canonical_content()
+        .to_string()
+        .contains("TYPED"));
     assert!(super::super::retry(
         &mut store,
         "workspace",
@@ -2272,7 +2276,9 @@ fn restore_fenced_discovery_excludes_the_current_generation() {
         .unwrap();
     assert!(matches!(
         store.write_with(&NoFaults, |tx| {
-            release::release_in_tx(tx, &observed.binding, Some(0), None, 22, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(tx, &observed.binding, Some(0), None, 22, |_, _, _, _, _| {
+                Ok(())
+            })
         }),
         Err(OwnerOutboxError::RestorePending)
     ));

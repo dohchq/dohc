@@ -22,12 +22,12 @@ mod native_source;
 pub mod publication;
 mod recovery;
 pub mod release;
-pub use recovery::{list_restore_fenced_in, OwnerOutboxRestoreFenced};
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
     OwnerOutboxNativeSource, OwnerOutboxSource,
 };
+pub use recovery::{list_restore_fenced_in, OwnerOutboxRestoreFenced};
 
 pub fn has_adopted_owner_in(
     conn: &Connection,

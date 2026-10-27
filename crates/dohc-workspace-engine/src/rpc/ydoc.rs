@@ -504,7 +504,12 @@ fn restore_fenced_page(
     max_frame_bytes: usize,
 ) -> Result<Value, WireError> {
     let corrupt = |_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
-    let too_large = || WireError::new(ErrorCode::LimitExceeded, "owner-outbox-page-exceeds-wire-limit");
+    let too_large = || {
+        WireError::new(
+            ErrorCode::LimitExceeded,
+            "owner-outbox-page-exceeds-wire-limit",
+        )
+    };
     let mut bytes = 256usize;
     let fetched = rows.len();
     let mut queues = Vec::new();
@@ -513,11 +518,7 @@ fn restore_fenced_page(
     for row in rows {
         let row_bytes = serde_json::to_vec(&row).map_err(corrupt)?.len();
         let cursor_bytes = serde_json::to_vec(&row.outbox_id).map_err(corrupt)?.len();
-        if bytes
-            .saturating_add(row_bytes)
-            .saturating_add(cursor_bytes)
-            > max_frame_bytes
-        {
+        if bytes.saturating_add(row_bytes).saturating_add(cursor_bytes) > max_frame_bytes {
             truncated = true;
             break;
         }
@@ -4342,11 +4343,15 @@ mod tests {
             .collect();
         let id = dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
         let wire_bytes = |result| {
-            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response { id, result }))
-                .unwrap()
-                .len()
+            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response {
+                id,
+                result,
+            }))
+            .unwrap()
+            .len()
         };
-        let budget = 256 + serde_json::to_vec(&rows[0]).unwrap().len()
+        let budget = 256
+            + serde_json::to_vec(&rows[0]).unwrap().len()
             + serde_json::to_vec(&rows[0].outbox_id).unwrap().len();
         let first = restore_fenced_page(rows.clone(), 3, budget).unwrap();
         assert_eq!(first["queues"].as_array().unwrap().len(), 1);
