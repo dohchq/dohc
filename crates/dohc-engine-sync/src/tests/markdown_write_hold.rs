@@ -1,7 +1,7 @@
 use super::*;
 use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
 use dohc_engine_collab::markdown_write_obligations::{self as obligations, Kind};
-use yrs::{Map, ReadTxn, Transact};
+use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 
 const PATH: &str = "notes/held.md";
 const ORIGIN: &str = "held-peer";
@@ -299,4 +299,66 @@ fn markdown_hold_winning_base_replacement_retains_unsafe_metadata_without_publis
         assert!(persisted.has_markdown_witness());
         assert!(persisted.project(ContentKind::Richdoc).unwrap().content.contains("Accepted base text"));
     }
+}
+
+#[test]
+fn markdown_hold_provisional_pull_recovers_its_audit_and_base_check_after_restart() {
+    let mut f = Fixture::new();
+    f.base();
+    let doc = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+    let clear = doc.clear_markdown_source_witness();
+    f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+        tx, &f.key, &clear, None, None, 2000)).unwrap();
+    for owed in f.pending() {
+        assert_eq!(f.store.write_with(&NoFaults, |tx| crate::retry_markdown_projection_in_tx(
+            tx, &owed, None, None, 2001)).unwrap(), TxnOutcome::Committed(BaseOrigination::NothingToDo));
+    }
+    let saved = VersionedTextStore::new(&mut f.store).read_text("ws", "main", PATH).unwrap().unwrap();
+    let jobs = f.store.table_row_count("materialization_jobs").unwrap();
+    let doc = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+    let wire = yrs::Doc::new();
+    wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+    let before = wire.transact().state_vector();
+    let meta = wire.get_or_insert_map("meta");
+    meta.insert(&mut wire.transact_mut(), "dohcMarkdownSource", "Mismatched imported source bytes");
+    meta.insert(&mut wire.transact_mut(), "dohcMarkdownSourceSha256", saved.blob_sha256.as_str());
+    meta.insert(&mut wire.transact_mut(), "dohcMarkdownSourceProjectionSha256", "f".repeat(64));
+    doc.apply(&wire.transact().encode_state_as_update_v1(&before)).unwrap();
+    doc.richdoc_append_paragraph("A provisional visitor edit must retain its audit");
+    let op = f.op(1, &doc.encode_full_state(), false);
+    let result = apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, &NoLiveLeases).unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Refused(ReplicationRefusal {
+        reason: RefusalReason::InvalidInput { ref reason }, ..
+    }) if reason == "markdown-write-held"));
+    let owed = f.pending().remove(0);
+    assert_eq!(owed.retry_inputs["provisionalAuthor"], true);
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(f.store.table_row_count("materialization_jobs").unwrap(), jobs);
+    assert_eq!(f.store.table_row_count("live_device_settlements").unwrap(), 0);
+    assert!(!f.scratch.path().join(PATH).exists());
+    let still_saved = VersionedTextStore::new(&mut f.store).read_text("ws", "main", PATH).unwrap().unwrap();
+    assert_eq!(still_saved.blob_sha256, saved.blob_sha256);
+    assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
+    drop(f.store);
+    f.store = EngineStore::open(&f.db, 3000).unwrap();
+    f.cache = WriterDocCache::new();
+    assert_eq!(f.pending().len(), 1);
+    let doc = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+    let clear = doc.clear_markdown_source_witness();
+    f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+        tx, &f.key, &clear, None, None, 3001)).unwrap();
+    let sequence = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+    assert_eq!(f.store.write_with(&NoFaults, |tx| crate::retry_markdown_projection_in_tx(
+        tx, &owed, None, None, 3002)).unwrap(), TxnOutcome::Committed(BaseOrigination::NothingToDo));
+    assert!(f.pending().is_empty());
+    let moment = crate::ydoc_apply::ydoc_apply_moment_id(&f.key, PATH, ORIGIN, 1);
+    let audit: (String, i64) = f.store.read_with(|conn| conn.query_row(
+        "SELECT payload_hash,result_seq FROM engine_requests WHERE kind='sync-ydoc-provisional-author'", [],
+        |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+    assert_eq!(audit, (moment, 1));
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 2);
+    assert_eq!(dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq, sequence);
+    let saved = VersionedTextStore::new(&mut f.store).read_text("ws", "main", PATH).unwrap().unwrap();
+    assert_eq!(saved.text.matches("A provisional visitor edit must retain its audit").count(), 1);
+    assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
 }
