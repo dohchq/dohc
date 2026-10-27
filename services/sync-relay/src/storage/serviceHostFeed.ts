@@ -9,6 +9,8 @@ import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
 /** The op kinds that name one live document, and so may belong to a hosted one. */
 export const HOSTED_DOCUMENT_OP_KINDS = ["moment.append", "ydoc.update", "live.audit.application", "live.audit.settlement", "live.audit.base"] as const;
 const INDEX = "idx_sync_relay_log_hosted_documents";
+const CONFLICT_EFFECT_INDEX = "idx_sync_relay_log_conflict_effects";
+const CONFLICT_EFFECT_WHERE = "op_kind='moment.append' AND json_type(payload_json, '$.conflictId')='text'";
 const KINDS = HOSTED_DOCUMENT_OP_KINDS.map(kind => `'${kind}'`).join(",");
 const OBJECT = `CASE op_kind WHEN 'live.audit.settlement' THEN json_extract(payload_json, '$.record.binding.objectId')
   WHEN 'live.audit.base' THEN json_extract(payload_json, '$.record.checkpoint.binding.objectId')
@@ -16,6 +18,8 @@ const OBJECT = `CASE op_kind WHEN 'live.audit.settlement' THEN json_extract(payl
 
 export function initializeServiceHostFeedIndex(db: SqliteDb): void {
   db.exec(`CREATE INDEX IF NOT EXISTS ${INDEX} ON sync_relay_log(workspace_id, ${OBJECT}, relay_seq) WHERE op_kind IN (${KINDS})`);
+  db.exec(`CREATE INDEX IF NOT EXISTS ${CONFLICT_EFFECT_INDEX} ON sync_relay_log(workspace_id, json_extract(payload_json, '$.objectId'), relay_seq)
+    WHERE ${CONFLICT_EFFECT_WHERE}`);
 }
 
 export interface ServiceHostFeedScope {
@@ -93,10 +97,10 @@ export function latestServiceHostDocumentUpdate(storage: StorageContext, input: 
 
 /** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */
 export function hasServiceHostConflictEffect(storage: StorageContext, input: {workspaceId: string; objectId: string}): boolean {
-  return !!storage.db.prepare(`SELECT 1 FROM sync_relay_log AS effect INDEXED BY ${INDEX}
-    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='moment.append' AND relay_seq>?
+  return !!storage.db.prepare(`SELECT 1 FROM sync_relay_log AS effect INDEXED BY ${CONFLICT_EFFECT_INDEX}
+    WHERE workspace_id=? AND json_extract(payload_json, '$.objectId')=? AND relay_seq>? AND ${CONFLICT_EFFECT_WHERE}
       AND json_extract(payload_json, '$.versionId')='main'
-      AND json_type(payload_json, '$.conflictId')='text' AND length(json_extract(payload_json, '$.conflictId'))>0
+      AND length(json_extract(payload_json, '$.conflictId'))>0
       AND json_type(payload_json, '$.conflictEffectIndex')='integer' AND json_extract(payload_json, '$.conflictEffectIndex')>=0
       AND EXISTS(SELECT 1 FROM sync_relay_log AS parent WHERE parent.workspace_id=effect.workspace_id AND parent.origin_id=effect.origin_id
         AND parent.origin_seq=effect.origin_seq-json_extract(effect.payload_json, '$.conflictEffectIndex')-1
