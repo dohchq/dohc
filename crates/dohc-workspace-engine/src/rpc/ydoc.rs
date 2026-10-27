@@ -2169,6 +2169,7 @@ impl EngineService {
                     lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
+                    record_facts: Vec::new(),
                 },
                 Some(draft.descriptor),
             ),
