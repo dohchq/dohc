@@ -193,13 +193,13 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
 // Names the file, cut to fit a title, and says "a file" for a name a title
 // can't hold.
 function unattributedTitle(path: string | null | undefined): string {
-  const lead = "dohc could not confirm who changed ";
-  if (!path) return `${lead}a file`;
+  const [lead, tail] = ["One History entry for ", " has no author"];
+  if (!path) return `${lead}a file${tail}`;
   // Room for the name between its two quotes.
-  const room = NOTICE_TITLE_MAX_CHARS - lead.length - 2;
+  const room = NOTICE_TITLE_MAX_CHARS - lead.length - tail.length - 2;
   const name = [...path.slice(path.lastIndexOf("/") + 1)];
-  const title = `${lead}“${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
-  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a file`;
+  const title = `${lead}“${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”${tail}`;
+  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a file${tail}`;
 }
 
 const RelayRow = z.object({
@@ -741,11 +741,11 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
-          // The change synced; only its author's name did not.
+          // The file synced; one History entry lost its author.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = attributionRefused
-            ? "The change still syncs. History shows it without an author."
+            ? "dohc could not confirm who made it. The file syncs as usual, and its other History entries keep their authors."
             : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId

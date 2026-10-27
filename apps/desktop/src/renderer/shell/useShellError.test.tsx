@@ -224,14 +224,14 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
-  it("opens History for a change that synced without its author instead of retrying sync", () => {
+  it("opens History for an entry without its author instead of retrying sync", () => {
     const retry = vi.fn();
     const openHistory = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "dohc could not verify who changed this file. The file will share without author names.";
     const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
-      recipientShareId: null, senderKind: null, senderLabel: null, title: "dohc could not confirm who changed “n.md”",
-      body: "The change still syncs. History shows it without an author.", detail: `${reason}\nWorkspace: ws-a`,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "One History entry for “n.md” has no author",
+      body: "dohc could not confirm who made it. The file syncs as usual, and its other History entries keep their authors.", detail: `${reason}\nWorkspace: ws-a`,
       target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
     act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
     expect(result.current.shellErrors[0]).toMatchObject({

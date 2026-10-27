@@ -1288,7 +1288,7 @@ it("names the current file for a terminal binding refusal without suggesting syn
   expect(row!.body).not.toContain("try sync again");
 });
 
-it("says a change synced without its author, without suggesting sync again", async () => {
+it("says one History entry has no author, without suggesting sync again", async () => {
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
     noticeId: "sync-refusal-unattributed", originId: "host", originSeq: 1,
     refusalCoordinates: [{ originId: "host", originSeq: 1 }],
@@ -1298,8 +1298,8 @@ it("says a change synced without its author, without suggesting sync again", asy
   const first = await computer(null, { refusalNotices });
   const [row] = (await first.store.list()).notices;
   expect(row).toMatchObject({
-    title: "dohc could not confirm who changed “n.md”",
-    body: "The change still syncs. History shows it without an author.",
+    title: "One History entry for “n.md” has no author",
+    body: "dohc could not confirm who made it. The file syncs as usual, and its other History entries keep their authors.",
     target: { path: "n.md" },
   });
 });
@@ -1317,11 +1317,11 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   const first = await computer(null, { refusalNotices });
   const titles = (await first.store.list()).notices.map(row => row.title);
   expect(titles).toHaveLength(3);
-  expect(titles).toContain("dohc could not confirm who changed a file");
-  expect(titles).toContain("dohc could not confirm who changed “n.md”");
+  expect(titles).toContain("One History entry for a file has no author");
+  expect(titles).toContain("One History entry for “n.md” has no author");
   const cut = titles.find(title => title.includes("…"))!;
   expect([...cut]).toHaveLength(120);
-  expect(cut).toMatch(/^dohc could not confirm who changed “a+…”$/u);
+  expect(cut).toMatch(/^One History entry for “a+…” has no author$/u);
 });
 
 it("keeps the refusals it words for itself equal to the engine's", () => {
