@@ -1071,3 +1071,74 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
     assert!(saved.contains("Accepted text remains available") && saved.contains("A replacement lineage edit"));
     f.supervisor.close(&f.db).unwrap();
 }
+
+#[tokio::test]
+async fn markdown_hold_owner_only_debt_survives_restart_at_an_already_settled_terminal() {
+    let mut f = Fixture::new().await;
+    f.adopt().await;
+    let (owner, host) = f.audited_host().await;
+    let first = f.audited_settle(&host, Some(f.consent())).await.unwrap();
+    assert_eq!(first.terminal_cursor, 0);
+    let key = f.key.clone();
+    let (update, source_sha) = f.actor.run(move |store, cache| {
+        refresh_markdown_witnesses_on_store(store, cache, &key, 20)?;
+        let snapshot = VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap();
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        let wire = yrs::Doc::new();
+        wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+        let before = wire.transact().state_vector();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &snapshot.text)?;
+        doc.richdoc_append_paragraph("Private owner edit while the relay is offline");
+        wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+        let update = wire.transact().encode_state_as_update_v1(&before);
+        Ok((update, snapshot.blob_sha256))
+    }).await.unwrap();
+    f.actor.ydoc_record_update(f.key.clone(), "note.md".into(), ContentKind::Richdoc, Regime::Replicated,
+        update, None, None, Some(f.claim.clone()), false, None, Some("offline-owner-edit".into()),
+        21, Arc::new(NoFaults), CancellationToken::new(), Some(0)).await.unwrap();
+    let grant = f.actor.ydoc_conversion_consent(f.key.clone(), "note.md".into(), "owner-session".into(),
+        Some(f.claim.clone()), None, source_sha.clone(), CancellationToken::new()).await.unwrap();
+    assert!(matches!(f.settle(false, Some(grant.clone())).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    assert!(!grant.is_consumed());
+    let owed = f.actor.markdown_recovery_candidates("w".into()).await.unwrap().remove(0).obligation;
+    let retry: write_obligations::AuditedRetry = serde_json::from_value(owed.retry_inputs.clone()).unwrap();
+    assert_eq!(retry.terminal_cursor, first.terminal_cursor);
+    let covered = retry.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+        assert!(!store.read_with(|conn| covered.covered_in(conn))?);
+        assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+        Ok(())
+    }).await.unwrap();
+    let path = f.scratch.path().join("note.md");
+    let bytes = std::fs::read(&path).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    drop(grant);
+    drop(host);
+    drop(owner);
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 30).unwrap().actor;
+    let root = f.scratch.path().to_owned();
+    assert!(!f.actor.recover_markdown_write(owed, root.clone(), Arc::new(RecoveryRoot(root.clone())),
+        LeaseRegistry::new(), Arc::new(()), 31, CancellationToken::new()).await.unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, WriteObligationKind::AuditedSettle);
+        let current: write_obligations::AuditedRetry = serde_json::from_value(owed[0].retry_inputs.clone()).unwrap();
+        assert_eq!((current.terminal_cursor, current.head_update_seq), (retry.terminal_cursor, retry.head_update_seq));
+        assert!(!store.read_with(|conn| current.covered_in(conn))?);
+        assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+        assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert!(doc.project(ContentKind::Richdoc)?.content.contains("Private owner edit while the relay is offline"));
+        assert_eq!(VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap().blob_sha256, source_sha);
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
