@@ -1107,14 +1107,14 @@ const LONG_NOTICE = {
 };
 
 // A row with two worded actions: they sit under its text, not beside its title.
-const SETTINGS_NOTICE = {
-  id: "workspace-settings-file",
-  tone: "danger" as const,
-  title: "dohc ignored accent in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
   body: "",
   Icon: AlertTriangle,
-  actions: [{ label: "Open settings file", onClick: noop }, { label: "Try again", onClick: noop }],
-  copyText: "dohc ignored accent in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
   onDismiss: noop,
 };
 
@@ -1740,7 +1740,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={SETTINGS_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
