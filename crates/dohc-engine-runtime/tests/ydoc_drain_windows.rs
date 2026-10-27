@@ -43,6 +43,12 @@ fn applied_update_rows(db: &std::path::Path) -> i64 {
 /// A captured head, a replicated base, and one update parked behind a live
 /// lease — the state a crashed session leaves for a later drain to apply.
 async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
+    seed_parked_update_kind(scratch, false).await
+}
+
+async fn seed_parked_update_kind(scratch: &ScratchDir, markdown: bool) -> DocKey {
+    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+    let source = if markdown { "Imported source\n" } else { "before" };
     let db = engine_db_path(scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -52,7 +58,7 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
                 workspace_id: WS.to_owned(),
                 version_id: "main".to_owned(),
                 path: PATH.to_owned(),
-                text: "before".to_owned(),
+                text: source.to_owned(),
                 metadata_origin: "capture".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -70,12 +76,18 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     let object_id = written.snapshot.object_id.clone();
     supervisor.close(&db).expect("close actor");
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
-    std::fs::write(scratch.path().join(PATH), "before").expect("disk preimage");
+    std::fs::write(scratch.path().join(PATH), source).expect("disk preimage");
 
     let key = DocKey::new(WS, "main", &object_id).expect("key");
     let mut store = EngineStore::open(&db, 100).expect("open store");
     let doc = dohc_engine_collab::Ydoc::wire();
-    doc.plaintext_insert(0, "before");
+    if markdown {
+        doc.rewrite_content_to_markdown_preserving_source(dohc_engine_collab::ContentKind::Richdoc, source)
+            .unwrap();
+    } else {
+        doc.plaintext_insert(0, source);
+    }
+    let kind = if markdown { "richdoc" } else { "plaintext" };
     let base_bytes = doc.encode_full_state();
     let base_sha = store.put_binary_blob(&base_bytes).expect("base blob");
     let base = ReplicationEnvelope {
@@ -90,7 +102,7 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
             "versionId": "main",
             "objectId": object_id,
             "path": PATH,
-            "contentKind": "plaintext",
+            "contentKind": kind,
             "updateBlobSha256": base_sha.clone(),
             "lineageClaimId": base_sha.clone(),
             "isBaseState": true
@@ -106,7 +118,17 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     )
     .expect("apply verified base");
 
-    let update_bytes = doc.plaintext_insert(6, " parked");
+    let update_bytes = if markdown {
+        let wire = yrs::Doc::new();
+        wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+        wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(),
+            "dohcMarkdownSource", "A source that does not match its recorded digest");
+        doc.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
+        doc.richdoc_append_paragraph("Accepted parked Markdown edit");
+        doc.encode_full_state()
+    } else {
+        doc.plaintext_insert(6, " parked")
+    };
     let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
     let envelope = ReplicationEnvelope {
         settlement_admission: None,
@@ -120,7 +142,7 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
             "versionId": "main",
             "objectId": object_id,
             "path": PATH,
-            "contentKind": "plaintext",
+            "contentKind": kind,
             "updateBlobSha256": blob_sha,
             "lineageClaimId": base_sha,
             "isBaseState": false
@@ -138,6 +160,66 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     drop(store);
     assert_eq!(deferred_rows(&db), 1, "the envelope starts parked");
     key
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn markdown_hold_open_resync_and_close_keep_the_file_and_consume_only_parked_rows() {
+    use dohc_engine_collab::{ContentKind, Ydoc, markdown_write_obligations};
+    use dohc_engine_storage::hex_sha256;
+    for operation in ["open", "resync", "close"] {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let key = seed_parked_update_kind(&scratch, true).await;
+        let path = scratch.path().join(PATH);
+        let bytes = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let (claim, counts) = {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            let claim = dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap().lineage_claim_id;
+            let counts = ["moments", "materialization_jobs", "live_device_settlements"]
+                .map(|table| store.table_row_count(table).unwrap());
+            (claim, counts)
+        };
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 200).unwrap().actor;
+        let update = match operation {
+            "open" => actor.ydoc_open_state(WS.into(), 201, true, Some(key.clone()), "main".into(),
+                PATH.into(), Some(ContentKind::Richdoc), CancellationToken::new()).await.unwrap().initial_update,
+            "resync" => actor.ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+                .await.unwrap().initial_update,
+            _ => {
+                actor.ydoc_close_session_materialized(scratch.path().to_owned(), key.clone(), Arc::new(()),
+                    201, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
+                actor.ydoc_open_state(WS.into(), 202, true, Some(key.clone()), "main".into(),
+                    PATH.into(), Some(ContentKind::Richdoc), CancellationToken::new()).await.unwrap().initial_update
+            }
+        };
+        let doc = Ydoc::wire();
+        doc.apply(&update).unwrap();
+        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content
+            .matches("Accepted parked Markdown edit").count(), 1);
+        assert!(doc.has_markdown_witness());
+        assert_eq!(deferred_rows(&db), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        supervisor.close(&db).unwrap();
+        let actor = supervisor.open(&db, 203).unwrap().actor;
+        let reopened = actor.ydoc_resync(key.clone(), claim, CancellationToken::new(), None).await.unwrap();
+        assert_eq!(reopened.head_blob_sha256.as_deref(), Some(hex_sha256(&bytes).as_str()));
+        let doc = Ydoc::wire();
+        doc.apply(&reopened.initial_update).unwrap();
+        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content
+            .matches("Accepted parked Markdown edit").count(), 1);
+        {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(["moments", "materialization_jobs", "live_device_settlements"]
+                .map(|table| store.table_row_count(table).unwrap()), counts);
+            assert!(!store.read_with(|conn| markdown_write_obligations::pending_in(conn, WS)).unwrap().is_empty());
+            assert!(dohc_engine_sync::list_refusal_notices(&store, WS).unwrap().iter()
+                .any(|notice| notice.reason == "markdown-write-held"));
+        }
+        supervisor.close(&db).unwrap();
+    }
 }
 
 /// #1009 (open window): the post-lease open runs its conflict freeze before
