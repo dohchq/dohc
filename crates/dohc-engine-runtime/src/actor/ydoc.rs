@@ -2696,6 +2696,105 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    let result = ydoc_settle_attempt_on_store(store, doc_cache, root_dir, key, path,
+        content_kind, drain_deferred, expected_lineage_claim_id, expected_head_sha.clone(),
+        settled_content_override, session_id, self_writes, now_ms, faults, token,
+        root_guard, live_audit, restore_generation, kind, use_reader, conversion_consent);
+    if super::pending_reader_preparation(&result).is_some() {
+        // Persist the retry before the async driver starts the requested preparation.
+        let head = dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
+        match store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+            let marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+            if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: marker.lineage_claim_id,
+                }.into());
+            }
+            let mut owed = WriteObligation {
+                order: 0, key: key.clone(), lineage_claim_id: marker.lineage_claim_id.clone().unwrap_or_default(),
+                operation_id: session_id.to_owned(), kind: settlement_obligation_kind(kind, session_id, live_audit.is_some()),
+                path: path.to_owned(),
+                retry_inputs: live_audit.map_or_else(|| serde_json::json!({
+                    "expectedHeadSha256":head,"restoreGeneration":restore_generation,"useReader":use_reader,
+                }), |audit| audit.markdown_retry_inputs()),
+                held_checkpoint_sha256: None, held_head_sha256: head.clone(),
+                source_sha256: None, settled_head_sha256: None,
+            };
+            if live_audit.is_none() {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(tx, key, restore_generation)?;
+                if let Some(retry) = write_obligations::AuditedRetry::adopted_owner_in(tx, key, marker.head_update_seq)? {
+                    owed.kind = WriteObligationKind::AuditedSettle;
+                    owed.operation_id = retry.operation_id();
+                    owed.retry_inputs = serde_json::to_value(retry).map_err(StorageError::persist_public)?;
+                }
+            }
+            // A preparation retry must not erase a previously confirmed hold or its dismissal identity.
+            if let Some(previous) = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                .find(|row| row.key == *key && row.lineage_claim_id == owed.lineage_claim_id
+                    && row.kind == owed.kind && row.operation_id == owed.operation_id) {
+                owed.held_checkpoint_sha256 = previous.held_checkpoint_sha256;
+                owed.held_head_sha256 = previous.held_head_sha256;
+            }
+            if owed.kind == WriteObligationKind::AuditedSettle {
+                write_obligations::record_audited_in(tx, &owed, now_ms)?;
+            } else {
+                write_obligations::record_in(tx, &owed, now_ms)?;
+            }
+            Ok(())
+        })? {
+            TxnOutcome::Committed(()) => {},
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    } else if matches!(&result, Ok(YdocSettleOutcome::Settled(_))) && live_audit.is_none() {
+        // Equality and replay can complete a preparation intent without entering the write transaction.
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
+        for owed in owed.into_iter().filter(|owed| owed.key == *key
+            && owed.lineage_claim_id == expected_lineage_claim_id.unwrap_or("")
+            && owed.operation_id == session_id
+            && owed.kind == settlement_obligation_kind(kind, session_id, false)) {
+            match store.write_with(&NoFaults, |tx| write_obligations::complete_in(tx, &owed, now_ms))? {
+                TxnOutcome::Committed(()) => {},
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+    }
+    result
+}
+
+fn settlement_obligation_kind(kind: SettlementKind, session_id: &str, audited: bool) -> WriteObligationKind {
+    if audited { WriteObligationKind::AuditedSettle }
+    else if kind == SettlementKind::CollectionAdoption { WriteObligationKind::CollectionAdoption }
+    else if session_id.starts_with("collection-relation-cleanup:") { WriteObligationKind::RelationCleanup }
+    else if session_id == "owner-live-stop" { WriteObligationKind::OwnerStop }
+    else if session_id == "link-rewrite-baseline" { WriteObligationKind::LinkBaseline }
+    else { WriteObligationKind::Session }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_settle_attempt_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    root_dir: &std::path::Path,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    drain_deferred: bool,
+    expected_lineage_claim_id: Option<&str>,
+    expected_head_sha: Option<String>,
+    settled_content_override: Option<String>,
+    session_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+    live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+    restore_generation: Option<i64>,
+    kind: SettlementKind,
+    use_reader: bool,
+    conversion_consent: Option<&MarkdownConversionConsent>,
+) -> Result<YdocSettleOutcome, RuntimeError> {
     #[cfg(any(test, feature = "fault-injection"))]
     MARKDOWN_BEFORE_SETTLE.with(|slot| slot.borrow_mut().take())
         .map(|check| check(store)).transpose()?;
@@ -3220,12 +3319,7 @@ pub(super) fn ydoc_settle_on_store(
         let mut obligation = WriteObligation {
             order: 0, key: key.clone(), lineage_claim_id: current_marker.lineage_claim_id.clone().unwrap_or_default(),
             operation_id: session_id.to_owned(),
-            kind: if live_audit.is_some() { WriteObligationKind::AuditedSettle }
-                else if kind == SettlementKind::CollectionAdoption { WriteObligationKind::CollectionAdoption }
-                else if session_id.starts_with("collection-relation-cleanup:") { WriteObligationKind::RelationCleanup }
-                else if session_id == "owner-live-stop" { WriteObligationKind::OwnerStop }
-                else if session_id == "link-rewrite-baseline" { WriteObligationKind::LinkBaseline }
-                else { WriteObligationKind::Session },
+            kind: settlement_obligation_kind(kind, session_id, live_audit.is_some()),
             path: path.to_owned(),
             retry_inputs: if let Some(audit) = live_audit { audit.markdown_retry_inputs() } else {
                 serde_json::json!({"expectedHeadSha256": expected_head_sha,

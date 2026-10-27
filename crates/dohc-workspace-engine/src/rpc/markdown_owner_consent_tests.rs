@@ -177,7 +177,10 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             assert_eq!(store.table_row_count("moments")?, 1);
             assert_eq!(store.table_row_count("materialization_jobs")?, 0);
             assert_eq!(store.table_row_count("live_device_settlements")?, 0);
-            assert!(store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))?.is_empty());
+            let owed = store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, markdown_write_obligations::Kind::AuditedSettle);
+            assert!(owed[0].held_checkpoint_sha256.is_none());
             let head = VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap();
             assert_eq!(head.text, rollback_source);
             assert_eq!(head.blob_sha256, hex_sha256(rollback_source.as_bytes()));

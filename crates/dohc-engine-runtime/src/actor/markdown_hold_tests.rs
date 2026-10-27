@@ -232,7 +232,10 @@ async fn markdown_hold_consent_rollback_retries_after_witness_and_journal_prepar
                 assert_eq!(store.table_row_count("moments")?, 1);
                 assert_eq!(store.table_row_count("materialization_jobs")?, 0);
                 assert_eq!(store.table_row_count("live_device_settlements")?, 0);
-                assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+                let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+                assert_eq!(owed.len(), 1);
+                assert_eq!(owed[0].kind, WriteObligationKind::Session);
+                assert!(owed[0].held_checkpoint_sha256.is_none());
                 checked.store(true, std::sync::atomic::Ordering::Release);
                 Ok(())
             })));
@@ -308,7 +311,8 @@ async fn markdown_hold_audited_consent_rolls_back_pending_journal_then_commits_o
     f.actor.run(move |_, _| {
         MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |conn| {
             assert!(!consent.is_consumed());
-            assert_eq!(write_obligations::pending_in(conn, "w")?.len(), 1);
+            let owed = write_obligations::pending_in(conn, "w")?;
+            assert_eq!(owed.iter().filter(|row| row.kind == WriteObligationKind::WitnessRefresh).count(), 1);
             assert_eq!(conn.query_row("SELECT count(*) FROM live_device_settlements", [],
                 |row| row.get::<_, i64>(0)).unwrap(), 1);
             MARKDOWN_BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(move |store| {
@@ -316,7 +320,10 @@ async fn markdown_hold_audited_consent_rolls_back_pending_journal_then_commits_o
                 assert_eq!(store.table_row_count("moments")?, 1);
                 assert_eq!(store.table_row_count("materialization_jobs")?, 0);
                 assert_eq!(store.table_row_count("live_device_settlements")?, 0);
-                assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+                let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+                assert_eq!(owed.len(), 1);
+                assert_eq!(owed[0].kind, WriteObligationKind::AuditedSettle);
+                assert!(owed[0].held_checkpoint_sha256.is_none());
                 checked.store(true, std::sync::atomic::Ordering::Release);
                 Ok(())
             })));
@@ -350,7 +357,8 @@ async fn markdown_hold_audited_stale_and_conflict_rollbacks_leave_consent_availa
         f.actor.run(move |_, _| {
             MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |conn| {
                 assert!(!consent.is_consumed());
-                assert_eq!(write_obligations::pending_in(conn, "w")?.len(), 1);
+                let owed = write_obligations::pending_in(conn, "w")?;
+                assert_eq!(owed.iter().filter(|row| row.kind == WriteObligationKind::WitnessRefresh).count(), 1);
                 Err(if stale { DomainError::ConflictStaleTarget.into() }
                     else { DomainError::InvalidInput { reason: "ydoc-conflict-open" }.into() })
             })));
@@ -360,7 +368,10 @@ async fn markdown_hold_audited_stale_and_conflict_rollbacks_leave_consent_availa
         assert!(!grant.is_consumed());
         f.unchanged().await;
         f.actor.run(|store, _| {
-            assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, WriteObligationKind::AuditedSettle);
+            assert!(owed[0].held_checkpoint_sha256.is_none());
             Ok(())
         }).await.unwrap();
         assert!(f.audited_settle(&host, Some(grant.clone())).await.unwrap().materialized);
@@ -715,7 +726,10 @@ async fn markdown_hold_third_preparation_stays_pending_without_consuming_consent
     assert!(!grant.is_consumed());
     f.unchanged().await;
     f.actor.run(|store, _| {
-        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, WriteObligationKind::Session);
+        assert!(owed[0].held_checkpoint_sha256.is_none());
         Ok(())
     }).await.unwrap();
     pending.resolve().await;

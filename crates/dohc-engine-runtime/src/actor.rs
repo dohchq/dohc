@@ -659,6 +659,7 @@ fn wait_for_reader<R>(
         let Some(pending) = pending else {
             return false;
         };
+        recovery.wake.notify_one();
         if attempt < 2 {
             pending.resolve().await;
             true
