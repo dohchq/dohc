@@ -1357,7 +1357,7 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
-  it("writes a list property still being typed when the tab switches from the keyboard", async () => {
+  it("writes a list property left just before its tab switches", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
       truncated: false,
@@ -1369,8 +1369,9 @@ describe("markdown editor unmount flush", () => {
     await screen.findByTestId("view-markdown");
     await waitForEditable();
     await screen.findByTestId("properties-panel");
-    // Focus stays in the pill: no blur and no Enter before the view goes.
     await user.type(screen.getByLabelText("Property tags value"), ", nara");
+    // The shell leaves the field before a shortcut switches the tab.
+    act(() => screen.getByLabelText("Property tags value").blur());
     view.unmount();
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({

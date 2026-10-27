@@ -17,7 +17,7 @@ import {
 } from "./workbench/workbenchState";
 import { makeBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
-const requested = vi.hoisted(() => ({ path: "", seedInvalidApp: false }));
+const requested = vi.hoisted(() => ({ path: "", seedInvalidApp: false, left: [] as string[] }));
 vi.mock("./workbench/workbenchState", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./workbench/workbenchState")>();
   return {
@@ -44,7 +44,11 @@ vi.mock("./workbench/Explorer", () => ({
 // Keep the shell, its navigation callbacks and its authority gates real.
 // Leaf markers identify which component the switch actually mounts.
 vi.mock("./FileInspector", () => ({
-  FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
+  FileInspector: (props: { path: string }) => (
+    <div data-testid="file-inspector" data-path={props.path}>
+      <input aria-label={`Field in ${props.path}`} onBlur={() => requested.left.push(props.path)} />
+    </div>
+  ),
 }));
 vi.mock("./workbench/GraphView", () => ({
   GraphView: () => <div data-testid="graph-view" />,
@@ -197,6 +201,31 @@ describe("shell tab surfaces", () => {
     field.remove();
     act(() => bridge.emitMenuCommand("next-tab"));
     await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+  });
+
+  it("leaves a field in the open file before a shortcut switches or closes its tab, as a click does", async () => {
+    const tabs = ["a.txt", "b.txt"];
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: tabs.map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    requested.left = [];
+
+    const field = pane.getByLabelText("Field in a.txt");
+    field.focus();
+    fireEvent.keyDown(field, { key: "Tab", ctrlKey: true });
+    await waitFor(() => expect(pane.getByTestId("file-inspector").dataset.path).toBe("b.txt"));
+    expect(requested.left).toEqual(["a.txt"]);
+
+    pane.getByLabelText("Field in b.txt").focus();
+    act(() => bridge.emitMenuCommand("close-tab"));
+    await waitFor(() => expect(pane.queryByTestId(editorTabTestId("b.txt"))).toBeNull());
+    expect(requested.left).toEqual(["a.txt", "b.txt"]);
   });
 
   it.each(["darwin", "win32"] as const)("closes the last tab, then on macOS the window (%s)", async (platform) => {

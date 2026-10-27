@@ -461,6 +461,15 @@ function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
   return current.groupId === focus.groupId && current.tab === focus.tab;
 }
 
+// A click on a tab moves focus first, so a field that saves when left, such
+// as a list property, saves before its tab goes. A shortcut leaves focus in
+// the field, and removing a focused field fires no blur, so it leaves first.
+function leaveEditorField(): void {
+  const field = document.activeElement;
+  if ((field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)
+    && field.closest('[data-testid="file-inspector"]')) field.blur();
+}
+
 function InvalidSitePathFallback({
   activeTab,
   onClose,
@@ -3533,6 +3542,7 @@ export function DesktopWorkspaceShell(props: {
     const group = activeGroup(current);
     const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
     if (tab) {
+      leaveEditorField();
       void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
@@ -3548,7 +3558,9 @@ export function DesktopWorkspaceShell(props: {
     (step: 1 | -1) => {
       const group = activeGroup(wbRef.current);
       const path = adjacentTabPath(group, step);
-      if (path !== null) activateEditorTab(group.id, path);
+      if (path === null) return;
+      leaveEditorField();
+      activateEditorTab(group.id, path);
     },
     [activateEditorTab],
   );
@@ -4405,9 +4417,15 @@ export function DesktopWorkspaceShell(props: {
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
-      "new-file": () => openNewPage(""),
+      "new-file": () => {
+        leaveEditorField();
+        openNewPage("");
+      },
       "new-file-at-path": () => setNewFileOpen(true),
-      "new-drawing": () => void createUntitledDrawing(),
+      "new-drawing": () => {
+        leaveEditorField();
+        void createUntitledDrawing();
+      },
       "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
       "quick-open": () => setQuickOpenOpen(true),
