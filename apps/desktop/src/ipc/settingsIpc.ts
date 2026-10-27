@@ -190,6 +190,8 @@ export function createSettingsIpc<
       return rendererUserSettingsResult(await readCachedUserSettingsFile(stateDir()));
     },
 
+    reloadUserSettings,
+
     setUserSettings: async (input) => {
       return saveUserSettings(() =>
         writeUserSettingsFile(stateDir(), input.settings, input.base));
@@ -283,6 +285,6 @@ export function createSettingsIpc<
 
   return {
     ...handlers,
-    watchUserSettingsFile, reloadUserSettings, stepWindowZoom,
+    watchUserSettingsFile, stepWindowZoom,
   };
 }

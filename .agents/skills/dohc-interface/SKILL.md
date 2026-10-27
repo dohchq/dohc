@@ -149,7 +149,7 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 - Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
-- Give a message about something the person can retry a **Try again** control on the toast and the row. Leave it out when dohc already reads the thing again on every change, such as the settings file it watches.
+- Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - Closing a toast keeps its row. Dismissing the row removes it.

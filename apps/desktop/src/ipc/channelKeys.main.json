@@ -178,6 +178,7 @@
   "refreshShareMounts",
   "refreshSharedView",
   "reloadRenderer",
+  "reloadUserSettings",
   "requestDmAgain",
   "resetAutomationHolds",
   "resetUserSettings",

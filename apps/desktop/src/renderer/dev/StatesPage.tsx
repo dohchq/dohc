@@ -1115,6 +1115,7 @@ const COLLECTIONS_WAITING_NOTICE = {
   Icon: AlertTriangle,
   actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
   copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
   onDismiss: noop,
 };
 

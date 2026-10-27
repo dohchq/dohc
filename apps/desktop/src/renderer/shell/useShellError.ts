@@ -574,19 +574,19 @@ export function useShellError(workspaceId: string) {
   );
 
   // One row per settings file: a newer read replaces it, and a read with
-  // nothing to report clears it. Try again, for a file dohc does not watch,
-  // reads it again; the action opens it.
+  // nothing to report clears it. Try again reads the file again; the action
+  // opens it.
   const showSettingsFileNotice = useCallback(
     (
       kind: SettingsFileKind,
       message: string | null,
-      steps: { retry?: () => void; open: () => void },
+      steps: { retry: () => void; open: () => void },
     ) => {
       if (message === null) clearKind(kind);
       else {
         push({
           message,
-          retry: steps.retry ?? null,
+          retry: steps.retry,
           action: { label: "Open settings file", run: steps.open },
           kind,
         });

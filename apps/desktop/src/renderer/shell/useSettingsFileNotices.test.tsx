@@ -234,7 +234,7 @@ describe("useSettingsFileNotices", () => {
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
-  it("opens each file from its row, and Try again reads the workspace file again", async () => {
+  it("opens each file from its row, and Try again reads it again", async () => {
     const broken: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
@@ -248,6 +248,7 @@ describe("useSettingsFileNotices", () => {
           "Error invoking remote method 'desktop:open-user-settings-file': Error: dohc could not open /s/dohc-settings.json. No app. Open the file in a text editor.",
         );
       }),
+      reloadUserSettings: vi.fn(async () => user([{ key: "accent", reason: "unknown" }])),
     };
     vi.stubGlobal("dohcDesktop", bridge);
     const { result } = renderHook(() => {
@@ -265,10 +266,8 @@ describe("useSettingsFileNotices", () => {
     const row = (kind: string) => result.current.shellErrors.find((error) => error.kind === kind)!;
     for (const kind of ["user-settings-file", "workspace-settings-file"]) {
       expect(row(kind).action?.label).toBe("Open settings file");
+      expect(row(kind).retry).not.toBeNull();
     }
-    // dohc applies every save to the user file, so only the workspace row retries.
-    expect(row("user-settings-file").retry).toBeNull();
-    expect(row("workspace-settings-file").retry).not.toBeNull();
 
     act(() => result.current.runShellErrorAction(row("workspace-settings-file").id));
     expect(bridge.openWorkspaceSettingsFile).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
@@ -283,14 +282,14 @@ describe("useSettingsFileNotices", () => {
       ));
 
     // Try again on a file that still says the same thing brings its row back.
-    act(() => result.current.retryShellError(row("workspace-settings-file").id));
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(row("workspace-settings-file")).toBeDefined());
+    act(() => result.current.retryShellError(row("user-settings-file").id));
+    await waitFor(() => expect(bridge.reloadUserSettings).toHaveBeenCalledOnce());
+    await waitFor(() => expect(row("user-settings-file")).toBeDefined());
 
     // The person repairs the workspace file; Try again clears its row.
     bridge.getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
     act(() => result.current.retryShellError(row("workspace-settings-file").id));
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(result.current.shellErrors.some((error) => error.kind === "workspace-settings-file")).toBe(false));
   });
