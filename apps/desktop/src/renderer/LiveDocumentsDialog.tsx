@@ -134,7 +134,6 @@ function isMutation(work: Work): work is Extract<Work, { kind: "stop" | "resume"
 }
 
 const rowIdentity = (row: LiveDocumentRow) => row.saveOnly ? `${row.path}\n${row.incident}` : row.path;
-const rowTestId = (row: LiveDocumentRow) => `live-document-row-${row.path}${row.saveOnly ? `-${row.incident}` : ""}`;
 
 // Each response refreshes current documents and retained queues. The newest
 // row replaces the same path or retained incident; stopped history stays.
@@ -628,7 +627,7 @@ export function LiveDocumentsDialog({
             {state.rows.map((row) => (
               <li
                 key={rowIdentity(row)}
-                data-testid={rowTestId(row)}
+                data-testid={`live-document-row-${row.path}${row.saveOnly ? `-${row.incident}` : ""}`}
                 data-live-document-path={row.path}
                 data-live-document-save-only={row.saveOnly ? "" : undefined}
                 aria-current={row.path === reveal ? "true" : undefined}

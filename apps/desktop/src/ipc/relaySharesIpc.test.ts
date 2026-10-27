@@ -373,7 +373,7 @@ describe("owner live document enrollment", () => {
       reason: "restore-fenced", storedOn: "this-computer" as const, recovery: "paused" as const, saveOnly: true as const, incident})));
     const listed = await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
     expect(listed).toEqual({documents: [{path: "note.md", objectId: "object", status: "ready", canResume: false},
-      ...["old-1", "old-2"].map(incident => ({path: "note.md", objectId: "object", status: "ready", canResume: false,
+      ...["old-1", "old-2"].map(incident => ({path: "note.md", objectId: "object", status: "paused", canResume: false,
         quarantine: "paused", storedOn: "this-computer", incident, saveOnly: true}))], nextCursor: null});
     h.request.mockResolvedValue({ok: true, documents: [], nextCursor: null});
     expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toMatchObject({documents: [

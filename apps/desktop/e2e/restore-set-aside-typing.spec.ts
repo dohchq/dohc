@@ -117,6 +117,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     {workspaceId: workspace.workspaceId, recipientEmail, path: PATH});
     // Opening the note first gives enrollment its owner lineage.
     await openNote(page);
+    await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", {timeout: 60_000});
     const share = await shareForEdit(recipientAccount.email);
     await expect.poll(async () => {
       const listed = await page.evaluate(workspaceId =>

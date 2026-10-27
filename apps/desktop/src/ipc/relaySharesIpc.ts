@@ -352,7 +352,7 @@ export function createRelaySharesIpcHandlers<
           ...(quarantine.earlier ? {earlier: true} : {})});
       }
       const retained = quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId,
-        status: documents.get(row.path)?.objectId === row.objectId ? documents.get(row.path)!.status : "unavailable",
+        status: "paused",
         canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true}));
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...retained], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

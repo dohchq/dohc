@@ -175,12 +175,17 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
   const listed = new Map<string, string>();
   // A queue's head never changes without a new draft revision or size, except
   // for a Try again grant, which is never cached. The base is never needed.
-  const readFacts = async (draft: Pick<OwnerYDocDraftDescriptor, "binding" | "pendingBytes"> & {outboxId: string; revision?: number}): Promise<HeadFacts> => {
+  const readFacts = async (draft: Pick<OwnerYDocDraftDescriptor, "binding" | "pendingBytes"> & {outboxId: string; revision?: number}): Promise<HeadFacts | string> => {
     const key = `${draft.revision ?? "retained"}:${draft.pendingBytes}`, cached = heads?.get(draft.outboxId);
     listed.set(draft.outboxId, key);
     if (cached?.key === key) return cached.facts;
     const head = await outbox.readDeliveryHead(draft.outboxId, draft.binding)
-      .catch((error: unknown) => {if (error instanceof TypeError) return outbox.readHead(draft.outboxId); throw error;});
+      .catch((error: unknown) => {if (error instanceof TypeError) return outbox.readHead(draft.outboxId); throw error;})
+      .catch((error: unknown) => {
+        if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(draft.binding)) throw error;
+        return error.message.slice(0, 128) || "unknown";
+      });
+    if (typeof head === "string") return head;
     const facts = {state: head.state, reason: head.quarantineReason, binding: head.binding,
       headDeliveryId: head.entry?.deliveryId ?? null, retryDeliveryId: head.retryDeliveryId};
     if (facts.retryDeliveryId === null) heads?.set(draft.outboxId, {key, facts}); else heads?.delete(draft.outboxId);
@@ -198,10 +203,7 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
         if (draft.state !== "quarantined" || draft.outboxId === null) continue;
         // The engine refusing one queue's head, as while an accepted update
         // waits on a missing dependency, leaves the other queues usable.
-        const head = await readFacts({...draft, outboxId: draft.outboxId}).catch((error: unknown) => {
-          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(draft.binding)) throw error;
-          return error.message.slice(0, 128) || "unknown";
-        });
+        const head = await readFacts({...draft, outboxId: draft.outboxId});
         if (typeof head === "string") {
           found.push({objectId: draft.binding.objectId, path: draft.binding.currentPath, reason: head,
             outboxId: draft.outboxId, binding: draft.binding, headDeliveryId: null, recovery: "unreadable"});
@@ -221,10 +223,7 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
     do {
       const page = await outbox.listRestoreFenced({after: retainedAfter, limit: 64});
       for (const queue of page.queues) {
-        const head = await readFacts(queue).catch((error: unknown) => {
-          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(queue.binding)) throw error;
-          return error.message.slice(0, 128) || "unknown";
-        });
+        const head = await readFacts(queue);
         if (typeof head === "string") {
           found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: head,
             outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: null, recovery: "unreadable", saveOnly: true});
