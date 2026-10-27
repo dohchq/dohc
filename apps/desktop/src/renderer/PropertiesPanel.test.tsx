@@ -997,6 +997,27 @@ describe("PropertiesPanel", () => {
     }
   });
 
+  it("shows another device's newer list in place of typed items, and writes nothing over it", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags: [kyoto, food]\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+      setFrontmatterValue(replica, "tags", ["paris"]);
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      expect(propertyValue("tags")).toBe("paris");
+      await user.tab();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["paris"] });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
   it("keeps a local file's typed list items when the file changes first", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -1009,6 +1030,20 @@ describe("PropertiesPanel", () => {
     await user.tab();
 
     expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: ready\n---\n\nBody\n");
+  });
+
+  it("shows a local file's newer list in place of typed items, and writes nothing over it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags: [kyoto, food]\n---\n\nBody\n";
+    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
+    await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+    rerender(<PropertiesPanel body={body.replace("[kyoto, food]", "[paris]")} onChange={onChange} />);
+    expect(propertyValue("tags")).toBe("paris");
+    await user.tab();
+
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("shows why a list or map can't be edited, with its whole value, to the keyboard as well as the pointer", async () => {
