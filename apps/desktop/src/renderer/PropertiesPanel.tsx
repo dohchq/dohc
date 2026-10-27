@@ -310,20 +310,26 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
-  // The list being typed in: the key it was read with, the list it started
-  // from, and the text so far. It saves when the person leaves it or presses
-  // Enter. Until then it sits apart from the rows, so a change to another
-  // property leaves it alone, and a newer list under its key replaces it.
-  const [listDraft, setListDraft] = useState<{ key: string; base: unknown; text: string } | null>(null);
-  const draftKey = (entry: FrontmatterEntry) => entry.sourceKey ?? entry.key;
-  const draftFor = (entry: FrontmatterEntry): string | undefined =>
-    entry.list && listDraft?.key === draftKey(entry) && sameFrontmatterValue(listDraft.base, entry.rawValue)
+  // The list being typed in: its row, the key it was read with, the list it
+  // started from, and the text so far. It saves when the person leaves it or
+  // presses Enter. Until then it sits apart from the rows, so a change to
+  // another property leaves it alone. Once its row moves or holds a newer
+  // list, the row shows what the document holds and the text is dropped.
+  const [listDraft, setListDraft] = useState<{ index: number; key: string; base: unknown; text: string } | null>(null);
+  function draftText(index: number): string | undefined {
+    const entry = entries[index];
+    return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
+      && sameFrontmatterValue(listDraft.base, entry.rawValue)
       ? listDraft.text
       : undefined;
+  }
+  useLayoutEffect(() => {
+    if (listDraft && draftText(listDraft.index) === undefined) setListDraft(null);
+  });
 
   function setValue(index: number, value: string) {
     const entry = entries[index];
-    if (entry?.list) setListDraft({ key: draftKey(entry), base: entry.rawValue, text: value });
+    if (entry?.list) setListDraft({ index, key: entry.sourceKey ?? entry.key, base: entry.rawValue, text: value });
     else commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
@@ -331,7 +337,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // the list as it was written.
   function settleList(index: number) {
     const entry = entries[index];
-    const text = entry && draftFor(entry);
+    const text = draftText(index);
     setListDraft(null);
     if (!entry || text === undefined || sameFrontmatterValue(listItems(text), entry.rawValue)) return;
     commit(entries.map((row, i) => (i === index ? { ...row, value: text } : row)));
@@ -408,7 +414,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <input
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
-                  value={draftFor(entry) ?? entry.value}
+                  value={draftText(index) ?? entry.value}
                   // A value longer than the pill ends in an ellipsis; its
                   // tooltip holds all of it.
                   title={entry.value || undefined}

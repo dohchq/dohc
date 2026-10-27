@@ -1018,6 +1018,28 @@ describe("PropertiesPanel", () => {
     }
   });
 
+  it("drops typed list items once another device moves their row, and writes nothing", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nowner: Sam\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+      replica.getMap("frontmatter").delete("owner");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      expect(propertyValue("tags")).toBe("kyoto, food");
+      expect(propertyValue("status")).toBe("draft");
+      await user.tab();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food"], status: "draft" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
   it("keeps a local file's typed list items when the file changes first", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
