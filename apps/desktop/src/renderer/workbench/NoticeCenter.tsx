@@ -188,8 +188,12 @@ const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
   "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
 // A row's first line is as tall as its tallest control, so a title that
-// wraps leaves its controls where they were.
+// wraps leaves its controls where they were. It holds only icon controls;
+// worded actions get a line under the text, so they never squeeze the title.
 const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
+const ROW_ACTIONS_CLASS = "-ml-1.5 mt-1 flex flex-wrap items-center gap-1";
+const ROW_ACTION_CLASS =
+  "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 aria-busy:opacity-50";
 
 // A row counts as read once the pointer or keyboard focus rests on it this
 // long: longer than crossing a row on the way to another, about when a
@@ -596,7 +600,7 @@ export function WorkspaceErrorToast(props: {
         </button>
       ) : null}
       </div> : null}
-      {error.filePaths === undefined || error.filePaths.length > 0 ? <CopyButton
+      {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
         key={error.id}
         iconOnly
         pinName
@@ -654,17 +658,6 @@ export function LocalNoticeRow(props: {
             <div className="flex min-w-0 items-start gap-2">
               {text.title}
               <span className={ROW_CONTROLS_CLASS}>
-                {(notice.actions ?? []).map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    disabled={action.disabled}
-                    onClick={() => props.onAction(action)}
-                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                  >
-                    {action.label}
-                  </button>
-                ))}
                 {notice.copyText !== undefined && !notice.filePaths?.length ? (
                   <CopyButton
                     iconOnly
@@ -707,6 +700,21 @@ export function LocalNoticeRow(props: {
                   <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
                     testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
                 ) : null}
+              </div>
+            ) : null}
+            {notice.actions?.length ? (
+              <div className={ROW_ACTIONS_CLASS}>
+                {notice.actions.map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    disabled={action.disabled}
+                    onClick={() => props.onAction(action)}
+                    className={ROW_ACTION_CLASS}
+                  >
+                    {action.label}
+                  </button>
+                ))}
               </div>
             ) : null}
             {notice.timeMs !== undefined ? (
@@ -1158,7 +1166,7 @@ export function NoticeCenter(props: {
         title: crashReport.title,
         body: crashReport.body,
         ...(props.onSendCrashReport
-          ? { action: { label: "Send report", onClick: props.onSendCrashReport } }
+          ? { actions: [{ label: "Send report", onClick: props.onSendCrashReport }] }
           : {}),
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
         onRead: () => setClosedCrashRevision(crashReport.revision),
@@ -1205,7 +1213,8 @@ export function NoticeCenter(props: {
           ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
           : {}),
         timeMs: error.atMs,
-        copyText: error.filePaths?.length === 0 ? undefined : error.details,
+        // A success has nothing to report, so it has nothing to copy.
+        copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
         copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
@@ -2165,39 +2174,6 @@ export function NoticeCenter(props: {
                                 <div className="flex min-w-0 items-start gap-2">
                                   {text.title}
                                   <span className={ROW_CONTROLS_CLASS}>
-                                    {runNow ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
-                                        aria-busy={running || undefined}
-                                        disabled={runningKey !== null}
-                                        onClick={runNow}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                                      >
-                                        {running ? "Starting…" : "Run now"}
-                                      </button>
-                                    ) : null}
-                                    {retry ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
-                                        onClick={retry}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                                      >
-                                        Try again
-                                      </button>
-                                    ) : null}
-                                    {openNotice ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-open`}
-                                        aria-busy={busy || undefined}
-                                        onClick={openNotice}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50"
-                                      >
-                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
-                                      </button>
-                                    ) : null}
                                     {copies ? (
                                       <CopyButton
                                         iconOnly
@@ -2224,6 +2200,43 @@ export function NoticeCenter(props: {
                                   </span>
                                 </div>
                                 {text.body}
+                                {runNow || retry || openNotice ? (
+                                  <div className={ROW_ACTIONS_CLASS}>
+                                    {runNow ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                        aria-busy={running || undefined}
+                                        disabled={runningKey !== null}
+                                        onClick={runNow}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        {running ? "Starting…" : "Run now"}
+                                      </button>
+                                    ) : null}
+                                    {retry ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                        onClick={retry}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        Try again
+                                      </button>
+                                    ) : null}
+                                    {openNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-open`}
+                                        aria-busy={busy || undefined}
+                                        onClick={openNotice}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                                 <p className="m-0 mt-1 flex min-w-0 gap-2 text-[10px] text-subtle">
                                   <time dateTime={new Date(notice.createdAtMs).toISOString()}>
                                     {relativeTime(notice.createdAtMs)}

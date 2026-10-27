@@ -3,7 +3,7 @@ import { mkdir, readFile, rename } from "node:fs/promises";
 import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
-import { SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
+import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
@@ -188,6 +188,18 @@ function coordinateKey(coordinate: RefusalCoordinate): string {
 function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinate[]): RefusalCoordinate[] {
   const keys = new Set(removed.map(coordinateKey));
   return rows.filter(row => !keys.has(coordinateKey(row)));
+}
+
+// Names the file last, cut to fit a title, so a row's two-line clamp cuts only
+// the name. A name a title can't hold is left out.
+function unattributedTitle(path: string | null | undefined): string {
+  const lead = "Some author names did not sync";
+  const name = [...(path?.slice(path.lastIndexOf("/") + 1) ?? "")];
+  if (!name.length) return lead;
+  // Room for the name between its two quotes.
+  const room = NOTICE_TITLE_MAX_CHARS - lead.length - " for ".length - 2;
+  const title = `${lead} for “${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
+  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
 const RelayRow = z.object({
@@ -729,15 +741,20 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          // Says only what holds for every refused save: its author names did not sync.
+          const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = bindingChanged
+          const body = attributionRefused
+            ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
+            : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller, then try sync again." : "Review the file, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
-            title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
+            title: attributionRefused ? unattributedTitle(document?.path)
+              : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
             target,
