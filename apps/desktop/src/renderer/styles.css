@@ -587,13 +587,6 @@ body {
   padding-left: 0;
 }
 
-/* Hanging markers live in the gutter, so nudge the hover +/⋮ cluster further
- * left to stay clear of them. -56px still fits inside the editor's 56px
- * horizontal padding at every pane width. */
-.dohc-notion-editor > :is(ul, ol) .dohc-block-affordance {
-  left: -56px;
-}
-
 /* Task lists exist in two DOM shapes: TipTap's TaskList/TaskItem attrs
  * (data-type) and the markdown-parsed form where the li carries only
  * data-checked. --dohc-task-ul/-li match BOTH so the styling can never go
@@ -626,9 +619,8 @@ body {
 }
 
 /* Top-level task lists: text on the content edge, checkbox hanging in the
- * gutter (task lists carry no block affordance, so nothing collides there).
- * Repeated with the attribute selectors because the plain `> ul` rule above
- * loses specificity to the base task-list rule. */
+ * gutter. Repeated with the attribute selectors because the plain `> ul`
+ * rule above loses specificity to the base task-list rule. */
 .dohc-notion-editor > ul[data-type="taskList"],
 .dohc-notion-editor > ul:has(> li[data-checked]) {
   padding-left: 0;
@@ -703,8 +695,7 @@ body {
 
 /* Top-level quotes: text on the content edge, the accent bar hanging in the
  * gutter as a ::before (a negative margin would defeat the `> *` auto-margin
- * centering). Its -12px offset keeps it clear of the hover ⋮ handle, whose
- * right edge sits at -10px. Nested quotes keep the classic inside bar. */
+ * centering). Nested quotes keep the classic inside bar. */
 .dohc-notion-editor > blockquote {
   position: relative;
   border-left: 0;
@@ -907,19 +898,49 @@ body {
   position: relative;
 }
 
+/* The hover +/⋮ cluster ends 10px left of the text edge, and a further
+ * --dohc-block-hang left of it where the next block hangs a marker,
+ * checkbox or bar into the gutter. Where the gutter has no room for both
+ * buttons side by side and 8px beside the pane's edge, + stacks above ⋮. */
 .dohc-block-affordance {
+  --dohc-block-hang: 0px;
   position: absolute;
   top: auto;
-  left: max(
-    8px,
-    calc(50% - (var(--dohc-editor-measure) / 2) - 48px)
+  right: calc(
+    min(100% - 56px, 50% + var(--dohc-editor-measure) / 2) + 10px + var(--dohc-block-hang)
+  );
+  width: clamp(
+    18px,
+    max(56px, 50% - var(--dohc-editor-measure) / 2) - 18px - var(--dohc-block-hang),
+    38px
   );
   transform: translateY(0.2em);
   z-index: 3;
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 2px;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+/* The block's hang, from blockControls.tsx, keeps the cluster 6px clear of
+ * the mark on the block's first line: a bullet or a one-digit number, a
+ * number of two digits, a checkbox, or the quote bar. */
+.dohc-block-affordance[data-hang="marker"] {
+  --dohc-block-hang: 13px;
+}
+
+.dohc-block-affordance[data-hang="number"] {
+  --dohc-block-hang: 23px;
+}
+
+.dohc-block-affordance[data-hang="checkbox"] {
+  --dohc-block-hang: 19px;
+}
+
+.dohc-block-affordance[data-hang="bar"] {
+  --dohc-block-hang: 8px;
 }
 
 .dohc-block-affordance.is-visible,
