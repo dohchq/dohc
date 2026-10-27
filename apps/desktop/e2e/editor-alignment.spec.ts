@@ -266,6 +266,20 @@ test("every block type's text sits on one shared left content edge", async () =>
     const narrowEdge = (await measure(page)).edges.paragraph;
     expect(narrowEdge).not.toBeNull();
     expectClustersClear(await measureClusters(page), narrowEdge!);
+
+    // There the cluster stacks + above ⋮, and a one-item list's ⋮ runs below
+    // its line, over the next block's hidden cluster. The shown ⋮ takes the
+    // click there.
+    await page.locator(".dohc-notion-editor > ol:not([start])").hover();
+    const handleOnTop = await page.evaluate(() => {
+      let node = document.querySelector(".dohc-notion-editor > ol:not([start])")?.previousElementSibling ?? null;
+      while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
+      const handle = node?.querySelector(".dohc-block-handle");
+      if (!handle) throw new Error("list has no handle");
+      const rect = handle.getBoundingClientRect();
+      return handle.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.bottom - 0.5));
+    });
+    expect(handleOnTop).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

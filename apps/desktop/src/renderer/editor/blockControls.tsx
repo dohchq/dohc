@@ -118,10 +118,9 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
 function gutterHang(node: ProseMirrorNode): string | null {
   switch (node.type.name) {
     case "bulletList":
-      return "marker";
+      return "bullet";
     case "orderedList":
-      // A one-digit first number hangs as far as a bullet.
-      return String(node.attrs.start ?? 1).length > 1 ? "number" : "marker";
+      return "number";
     case "taskList":
       return "checkbox";
     case "blockquote":
@@ -151,6 +150,8 @@ function buildBlockControlDecorations(
   doc.forEach((node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
     const hang = gutterHang(node);
+    // A numbered list hangs as many digits as its first number has.
+    const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
     decorations.push(
       Decoration.widget(
         pos,
@@ -159,6 +160,7 @@ function buildBlockControlDecorations(
           wrap.className = "dohc-block-affordance";
           wrap.setAttribute("contenteditable", "false");
           if (hang) wrap.dataset.hang = hang;
+          if (digits) wrap.style.setProperty("--dohc-block-digits", String(digits));
 
           const plus = document.createElement("button");
           plus.type = "button";
@@ -233,8 +235,8 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        // A block that changes kind gets new controls, with its hang.
-        { side: -1, key: `dohc-block-controls-${ownerKey}-${hang}`, ownerKey },
+        // A block that changes kind or digits gets new controls, with its hang.
+        { side: -1, key: `dohc-block-controls-${ownerKey}-${hang}-${digits}`, ownerKey },
       ),
     );
   });
