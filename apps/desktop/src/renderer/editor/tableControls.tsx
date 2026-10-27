@@ -1131,7 +1131,7 @@ function configureGripDrag(
   button: HTMLButtonElement,
   band: TableBand,
   index: number,
-  cellPos: number,
+  cellPos: WidgetPos,
 ): void {
   button.draggable = false;
   const hostWindow = ownerWindow(view.dom);
@@ -1184,7 +1184,8 @@ function configureGripDrag(
 
   const beginPointerDrag = (event: PointerEvent): TableDragState | null => {
     const tableElement = button.closest("table");
-    if (!tableElement || !pointerSession) return null;
+    const sourceCellPos = cellPos();
+    if (!tableElement || !pointerSession || sourceCellPos === undefined) return null;
     runtime.closeMenu?.();
     runtime.closeMenu = null;
     const preview = createTableDragPreview(view, band, index);
@@ -1192,7 +1193,7 @@ function configureGripDrag(
     const drag: TableDragState = {
       band,
       index,
-      cellPos,
+      cellPos: sourceCellPos,
       tableElement,
       sourceButton: button,
       scrollContainer: findVerticalScrollContainer(view),
@@ -1328,7 +1329,7 @@ function configureRowResize(
   runtime: TableControlsRuntime,
   view: EditorView,
   button: HTMLButtonElement,
-  rowPos: number,
+  rowPos: WidgetPos,
   rowIndex: number,
 ): void {
   const hostWindow = ownerWindow(view.dom);
@@ -1415,7 +1416,8 @@ function configureRowResize(
     if (view.editable === false || event.button !== 0) return;
     const rowElement = button.closest<HTMLTableRowElement>("tr");
     const tableElement = button.closest<HTMLTableElement>("table");
-    if (!rowElement || !tableElement) return;
+    const currentRowPos = rowPos();
+    if (!rowElement || !tableElement || currentRowPos === undefined) return;
     stopEditorMouseEvent(event);
     runtime.cancelPointer?.();
     const measuredHeight = rowElement.getBoundingClientRect().height;
@@ -1424,7 +1426,7 @@ function configureRowResize(
       Math.round(measuredHeight || Number(rowElement.dataset.rowHeight) || MIN_ROW_HEIGHT),
     );
     runtime.activeRowResize = {
-      rowPos,
+      rowPos: currentRowPos,
       rowIndex,
       rowElement,
       tableElement,
@@ -1463,19 +1465,22 @@ function configureRowResize(
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     stopEditorMouseEvent(event);
     const rowElement = button.closest<HTMLTableRowElement>("tr");
-    if (!rowElement) return;
+    const currentRowPos = rowPos();
+    if (!rowElement || currentRowPos === undefined) return;
     const current = Math.max(
       MIN_ROW_HEIGHT,
       Math.round(rowElement.getBoundingClientRect().height || MIN_ROW_HEIGHT),
     );
     const direction = event.key === "ArrowDown" ? 1 : -1;
     const amount = event.shiftKey ? 10 : 2;
-    setTableRowHeight(view, rowPos, Math.max(MIN_ROW_HEIGHT, current + direction * amount));
+    setTableRowHeight(view, currentRowPos, Math.max(MIN_ROW_HEIGHT, current + direction * amount));
   });
 
   button.addEventListener("dblclick", (event) => {
     stopEditorMouseEvent(event);
-    setTableRowHeight(view, rowPos, null);
+    const currentRowPos = rowPos();
+    if (currentRowPos === undefined) return;
+    setTableRowHeight(view, currentRowPos, null);
     announceTableDrag(view, `Row ${rowIndex + 1} height reset to fit its content.`);
   });
 }
@@ -1483,7 +1488,7 @@ function configureRowResize(
 function buildRowResizeHandle(
   runtime: TableControlsRuntime,
   view: EditorView,
-  rowPos: number,
+  rowPos: WidgetPos,
   rowIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1502,7 +1507,7 @@ function buildRowResizeHandle(
 function buildColumnGrip(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: WidgetPos,
   colIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1521,8 +1526,10 @@ function buildColumnGrip(
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
-    selectColumn(view, cellPos);
-    openGripMenu(runtime, view, button, columnMenuItems(cellPos), "column");
+    const currentCellPos = cellPos();
+    if (currentCellPos === undefined) return;
+    selectColumn(view, currentCellPos);
+    openGripMenu(runtime, view, button, columnMenuItems(currentCellPos), "column");
   });
   return button;
 }
@@ -1530,7 +1537,7 @@ function buildColumnGrip(
 function buildRowGrip(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: WidgetPos,
   rowIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1549,8 +1556,10 @@ function buildRowGrip(
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
-    selectRow(view, cellPos);
-    openGripMenu(runtime, view, button, rowMenuItems(cellPos), "row");
+    const currentCellPos = cellPos();
+    if (currentCellPos === undefined) return;
+    selectRow(view, currentCellPos);
+    openGripMenu(runtime, view, button, rowMenuItems(currentCellPos), "row");
   });
   return button;
 }
@@ -1558,7 +1567,7 @@ function buildRowGrip(
 function buildTableMenuButton(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: WidgetPos,
 ): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -1570,7 +1579,9 @@ function buildTableMenuButton(
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    focusCell(view, cellPos);
+    const currentCellPos = cellPos();
+    if (currentCellPos === undefined) return;
+    focusCell(view, currentCellPos);
     openGripMenu(runtime, view, button, tableMenuItems(), "table");
   });
   return button;
@@ -1584,7 +1595,7 @@ function buildTableMenuButton(
 // cell-anchored widget can only span its own cell via CSS, so
 // sizeAppendStrips stretches each strip to the full table edge with inline
 // offsets.
-function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTMLElement {
+function buildAppendColumnButton(view: EditorView, lastColCellPos: WidgetPos): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-append dohc-table-append--col";
@@ -1595,12 +1606,13 @@ function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTML
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    appendColumn(view, lastColCellPos);
+    const cellPos = lastColCellPos();
+    if (cellPos !== undefined) appendColumn(view, cellPos);
   });
   return button;
 }
 
-function buildAppendRowButton(view: EditorView, lastRowCellPos: number): HTMLElement {
+function buildAppendRowButton(view: EditorView, lastRowCellPos: WidgetPos): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-append dohc-table-append--row";
@@ -1611,7 +1623,8 @@ function buildAppendRowButton(view: EditorView, lastRowCellPos: number): HTMLEle
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    appendRow(view, lastRowCellPos);
+    const cellPos = lastRowCellPos();
+    if (cellPos !== undefined) appendRow(view, cellPos);
   });
   return button;
 }
@@ -1620,12 +1633,23 @@ function isTableNode(node: { type: { name: string } }): boolean {
   return node.type.name === "table";
 }
 
+// A control reads its document position when it's used. Its widget key holds
+// no position, so ProseMirror keeps the control's DOM when text before the
+// table moves, and a position captured at build time would go stale.
+type WidgetPos = () => number | undefined;
+
+// Places a widget at `pos` for a control that acts on `anchor`.
 function widgetDecoration(
   pos: number,
-  toDOM: (view: EditorView) => HTMLElement,
+  anchor: number,
+  toDOM: (view: EditorView, anchorPos: WidgetPos) => HTMLElement,
   key: string,
 ): Decoration {
-  return Decoration.widget(pos, toDOM, {
+  const offset = pos - anchor;
+  return Decoration.widget(pos, (view, getPos) => toDOM(view, () => {
+    const widgetPos = getPos();
+    return widgetPos === undefined ? undefined : widgetPos - offset;
+  }), {
     side: -1,
     key,
     ignoreSelection: true,
@@ -1663,8 +1687,9 @@ function buildTableControlDecorations(
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildColumnGrip(runtime, view, cellPos, colIndex),
-          `dohc-table-col-${cellPos}`,
+          cellPos,
+          (view, anchorPos) => buildColumnGrip(runtime, view, anchorPos, colIndex),
+          `dohc-table-col-${colIndex}`,
         ),
       );
     }
@@ -1675,8 +1700,9 @@ function buildTableControlDecorations(
     decorations.push(
       widgetDecoration(
         topLeftCellPos + 1,
-        (view) => buildTableMenuButton(runtime, view, topLeftCellPos),
-        `dohc-table-menu-${pos}`,
+        topLeftCellPos,
+        (view, anchorPos) => buildTableMenuButton(runtime, view, anchorPos),
+        "dohc-table-menu",
       ),
     );
 
@@ -1686,8 +1712,9 @@ function buildTableControlDecorations(
     decorations.push(
       widgetDecoration(
         topRightCellPos + 1,
-        (view) => buildAppendColumnButton(view, topRightCellPos),
-        `dohc-table-append-col-${pos}`,
+        topRightCellPos,
+        (view, anchorPos) => buildAppendColumnButton(view, anchorPos),
+        "dohc-table-append-col",
       ),
     );
 
@@ -1703,8 +1730,9 @@ function buildTableControlDecorations(
         decorations.push(
           widgetDecoration(
             cellPos + 1,
-            (view) => buildRowGrip(runtime, view, cellPos, rowIndex),
-            `dohc-table-row-${cellPos}`,
+            cellPos,
+            (view, anchorPos) => buildRowGrip(runtime, view, anchorPos, rowIndex),
+            `dohc-table-row-${rowIndex}`,
           ),
         );
       }
@@ -1713,14 +1741,14 @@ function buildTableControlDecorations(
       // own that logical slot, but each editable row still needs its own
       // height control and row node position.
       if (rowResizeEnabled && rowNode.childCount > 0) {
-        const currentRowPos = rowPos;
         const resizeCellPos = rowPos + 1;
         decorations.push(
           widgetDecoration(
             resizeCellPos + 1,
-            (view) =>
-              buildRowResizeHandle(runtime, view, currentRowPos, rowIndex),
-            `dohc-table-row-resize-${currentRowPos}`,
+            rowPos,
+            (view, anchorPos) =>
+              buildRowResizeHandle(runtime, view, anchorPos, rowIndex),
+            `dohc-table-row-resize-${rowIndex}`,
           ),
         );
       }
@@ -1733,8 +1761,9 @@ function buildTableControlDecorations(
     decorations.push(
       widgetDecoration(
         bottomLeftCellPos + 1,
-        (view) => buildAppendRowButton(view, bottomLeftCellPos),
-        `dohc-table-append-row-${pos}`,
+        bottomLeftCellPos,
+        (view, anchorPos) => buildAppendRowButton(view, anchorPos),
+        "dohc-table-append-row",
       ),
     );
 
@@ -1831,9 +1860,9 @@ export function makeTableControlsPlugin(
     hovered = null;
   };
 
-  // Re-assertable: decorations rebuild on every doc change, dropping the
-  // class from the freshly built grips, so the plugin view's update() calls
-  // this again for the still-hovered table.
+  // Re-assertable: a change inside a table rebuilds its grips, dropping the
+  // class, so the plugin view's update() calls this again for the
+  // still-hovered table.
   const applyHover = (): void => {
     if (!hovered) return;
     hovered.table
@@ -1961,8 +1990,8 @@ export function makeTableControlsPlugin(
             runtime.closeMenu();
             runtime.closeMenu = null;
           }
-          // Doc changes rebuild the grip widgets (dropping `is-active`) and
-          // can change table boxes (added/removed rows): re-stretch every
+          // A change inside a table rebuilds its grips (dropping `is-active`)
+          // and can change its box (added/removed rows): re-stretch every
           // strip and restore the hovered handles without waiting for the
           // next mousemove.
           if (docChanged) sizeAllAppendStrips(view);
