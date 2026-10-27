@@ -2759,6 +2759,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <PropertiesPanel body={LONG_PILL} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a list: its items, with commas">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\ntags:\n  - kyoto\n  - food\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a list it can't edit: a lock, and why on hover or focus">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />

@@ -13,6 +13,7 @@ import {
   setFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
+import { parseFrontmatter } from "./markdown/frontmatter";
 import {
   EDGE_DISPLAY,
   EDGE_FRONTMATTER,
@@ -21,13 +22,8 @@ import {
   recordedYDoc,
 } from "./markdown/frontmatter.edge-fixture";
 
-// A text input shows its value on one line.
 function propertyValue(key: string): string {
   return (screen.getByLabelText(`Property ${key} value`) as HTMLInputElement).value;
-}
-
-function oneLine(text: string): string {
-  return text.replaceAll("\n", "");
 }
 
 // The properties each change touches. A change inside a shared value reports
@@ -787,7 +783,7 @@ describe("PropertiesPanel", () => {
     }
   });
 
-  it("shows shared-type frontmatter as YAML and edits only the changed property", async () => {
+  it("shows shared-type frontmatter as one line of YAML and edits only the changed property", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc(EDGE_MARKDOWN);
     const frontmatter = doc.getMap("frontmatter");
@@ -802,7 +798,7 @@ describe("PropertiesPanel", () => {
     try {
       render(<PropertiesPanel ydoc={doc} />);
       for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
-        expect(propertyValue(key), key).toBe(oneLine(text));
+        expect(propertyValue(key), key).toBe(text);
       }
 
       await user.clear(screen.getByLabelText("Property status value"));
@@ -837,7 +833,7 @@ describe("PropertiesPanel", () => {
           <ForwardsOnCommit from={replica} to={doc} />
         </>,
       );
-      expect(propertyValue("settings")).toBe(oneLine("constructor: kept\npinned: true"));
+      expect(propertyValue("settings")).toBe("{constructor: kept, pinned: true}");
 
       replicaSettings.set("note", "later");
       act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
@@ -883,13 +879,136 @@ describe("PropertiesPanel", () => {
     render(<PropertiesPanel body={body} onChange={onChange} />);
     expect(propertyValue("__proto__")).toBe("top-proto");
     for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
-      expect(propertyValue(key), key).toBe(oneLine(text));
+      expect(propertyValue(key), key).toBe(text);
     }
 
     await user.clear(screen.getByLabelText("Property status value"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
 
     expect(onChange).toHaveBeenLastCalledWith(body.replace("status: draft", "status: ready"));
+  });
+
+  it("saves a list's items when the person leaves it, not on each keystroke", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n";
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    expect(propertyValue("tags")).toBe("kyoto, food");
+
+    await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+    expect(onChange).not.toHaveBeenCalled();
+    await user.tab();
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith(body.replace("  - food\n", "  - food\n  - ramen\n"));
+  });
+
+  it("keeps each list item text when Enter saves it, trimmed and without blank items", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags:\n  - kyoto\n---\n\nBody\n";
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.clear(input);
+    await user.type(input, " 2026,yes , null,, ~, 1.0, ramen ,{Enter}");
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const written = onChange.mock.lastCall?.[0] as string;
+    expect(written).toBe(
+      "---\ntags:\n  - '2026'\n  - yes\n  - 'null'\n  - '~'\n  - '1.0'\n  - ramen\n---\n\nBody\n",
+    );
+    expect(parseFrontmatter(written).meta.tags).toEqual(["2026", "yes", "null", "~", "1.0", "ramen"]);
+  });
+
+  it("writes nothing when a list edit leaves the same items, so the list stays as written", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.clear(input);
+    await user.type(input, "kyoto ,food, ,");
+    await user.tab();
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(propertyValue("tags")).toBe("kyoto, food");
+  });
+
+  it("saves an empty list when an edit leaves no items", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\nstatus: draft\n---\n\nBody\n"} onChange={onChange} />);
+
+    await user.clear(screen.getByLabelText("Property tags value"));
+    await user.type(screen.getByLabelText("Property tags value"), " , {Enter}");
+
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags: []\nstatus: draft\n---\n\nBody\n");
+  });
+
+  it("saves a live document's list as its items, and writes nothing when they're the same", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      const input = screen.getByLabelText("Property tags value");
+      const before = Y.encodeStateAsUpdate(doc);
+
+      await user.clear(input);
+      await user.type(input, "kyoto ,food,");
+      await user.tab();
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      expect(propertyValue("tags")).toBe("kyoto, food");
+
+      const changed = trackChangedProperties(frontmatter);
+      await user.type(input, ", 2026");
+      expect(changed).toEqual(new Set());
+      await user.keyboard("{Enter}");
+
+      expect(changed).toEqual(new Set(["tags"]));
+      expect(frontmatterMapValues(frontmatter).tags).toEqual(["kyoto", "food", "2026"]);
+      expect(yDocToMarkdown(doc)).toBe("---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody");
+      expect(propertyValue("tags")).toBe("kyoto, food, 2026");
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("shows why a list or map can't be edited, with its whole value, to the keyboard as well as the pointer", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\nplaces: [\"Kyoto, Japan\", Osaka]\nwhere: {lat: 35.5}\n---\n\nBody\n";
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    const places = screen.getByLabelText("Property places value") as HTMLInputElement;
+    const words = document.getElementById(places.getAttribute("aria-describedby") ?? "");
+
+    expect(places.value).toBe("['Kyoto, Japan', Osaka]");
+    expect(places.readOnly).toBe(true);
+    expect(places.parentElement?.querySelector("svg[class*='lucide-lock']")).not.toBeNull();
+    // A screen reader reads the reason with the value even while it is hidden.
+    expect(words?.getAttribute("role")).toBe("tooltip");
+    expect(words?.hidden).toBe(true);
+    expect(words?.textContent).toBe(
+      "['Kyoto, Japan', Osaka]dohc can't edit this list here because an item has a comma. Edit the file's text instead.",
+    );
+
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(places);
+    expect(words?.hidden).toBe(false);
+    await user.keyboard("x");
+    expect(places.value).toBe("['Kyoto, Japan', Osaka]");
+    await user.keyboard("{Escape}");
+    expect(words?.hidden).toBe(true);
+
+    const where = screen.getByLabelText("Property where value") as HTMLInputElement;
+    await user.hover(where);
+    expect(document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
+      "{lat: 35.5}dohc can't edit a value with named fields here. Edit the file's text instead.",
+    );
+    // Leaving a name saves the rows, which leaves the file as it was.
+    for (const [written] of onChange.mock.calls) expect(written).toBe(body);
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {
