@@ -984,3 +984,90 @@ fn markdown_hold_plaintext_with_partial_witness_metadata_needs_no_markdown_check
     assert_eq!(store.table_row_count("moments").unwrap(), 1);
     assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w")).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn markdown_hold_outside_head_change_refuses_the_old_consent_without_losing_edits() {
+    let f = Fixture::new().await;
+    let grant = f.consent();
+    f.actor.run(|store, _| {
+        VersionedTextStore::new(store).write_text(&WriteText {
+            workspace_id: "w".into(), version_id: "main".into(), object_id: "note".into(),
+            path: "note.md".into(), text: "Outside change\n".into(), moment_id: "outside".into(),
+            metadata_origin: "capture".into(), metadata_summary: None, metadata_correlation_id: None,
+            author_json: None, now_ms: 20, request_id: None,
+        }, &NoFaults)?;
+        Ok(())
+    }).await.unwrap();
+    let path = f.scratch.path().join("note.md");
+    std::fs::write(&path, "Outside change\n").unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert!(matches!(f.settle(false, Some(grant.clone())).await,
+        Err(RuntimeError::Domain(DomainError::ConflictStaleTarget))));
+    assert!(!grant.is_consumed());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "Outside change\n");
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap().blob_sha256,
+            hex_sha256(b"Outside change\n"));
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        assert_eq!(store.table_row_count("live_device_settlements")?, 0);
+        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_grant() {
+    let f = Fixture::new().await;
+    let grant = f.consent();
+    assert!(matches!(f.settle(false, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    let owed = f.actor.markdown_recovery_candidates("w".into()).await.unwrap().remove(0).obligation;
+    let key = f.key.clone();
+    let next_claim = f.actor.run(move |store, cache| {
+        let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
+        store.write_with(&NoFaults, |tx| dohc_engine_collab::record_base_coordinate_in_tx(tx,
+            dohc_engine_collab::BaseCoordinateRecord {
+                key: &key, lineage_claim_id: marker.lineage_claim_id.as_deref().unwrap(),
+                origin_id: "old-base", origin_seq: 0, relay_seq: Some(20), now_ms: 20,
+            }))?;
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        doc.richdoc_append_paragraph("A replacement lineage edit");
+        let base = doc.encode_full_state();
+        let result = dohc_engine_collab::claim_base_at_relay(store, &key, ContentKind::Richdoc, &base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("new-base", 0, 10)?, &NoFaults, 21)?;
+        assert!(matches!(result, TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })));
+        cache.remove(&key);
+        Ok(dohc_engine_collab::read_marker(store, &key)?.unwrap().lineage_claim_id.unwrap())
+    }).await.unwrap();
+    assert_ne!(next_claim, f.claim);
+    assert!(matches!(f.settle(false, Some(grant.clone())).await,
+        Err(RuntimeError::Collab(CollabError::LineageWriteStale { .. }))));
+    let root = f.scratch.path().to_owned();
+    assert!(f.actor.recover_markdown_write(owed, root.clone(), Arc::new(RecoveryRoot(root.clone())),
+        LeaseRegistry::new(), Arc::new(()), 22, CancellationToken::new()).await.unwrap());
+    assert!(f.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty());
+    let modified = std::fs::metadata(root.join("note.md")).unwrap().modified().unwrap();
+    assert!(matches!(f.actor.ydoc_settle(root.clone(), f.key.clone(), "note.md".into(), ContentKind::Richdoc,
+        Some(next_claim.clone()), Some(hex_sha256(f.source.as_bytes())), "owner-session".into(),
+        Arc::new(()), 23, Arc::new(NoFaults), CancellationToken::new(), None, Some(grant.clone())).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })));
+    assert!(!grant.is_consumed());
+    f.unchanged().await;
+    assert_eq!(std::fs::metadata(root.join("note.md")).unwrap().modified().unwrap(), modified);
+    let fresh = f.actor.ydoc_conversion_consent(f.key.clone(), "note.md".into(), "owner-session".into(),
+        Some(next_claim.clone()), None, hex_sha256(f.source.as_bytes()), CancellationToken::new()).await.unwrap();
+    assert!(f.actor.ydoc_settle(root.clone(), f.key.clone(), "note.md".into(), ContentKind::Richdoc,
+        Some(next_claim), Some(hex_sha256(f.source.as_bytes())), "owner-session".into(), Arc::new(()), 24,
+        Arc::new(NoFaults), CancellationToken::new(), None, Some(fresh.clone())).await
+        .unwrap().settled().unwrap().materialized);
+    assert!(fresh.is_consumed());
+    assert!(!grant.is_consumed());
+    let saved = std::fs::read_to_string(root.join("note.md")).unwrap();
+    assert!(saved.contains("Accepted text remains available") && saved.contains("A replacement lineage edit"));
+    f.supervisor.close(&f.db).unwrap();
+}
