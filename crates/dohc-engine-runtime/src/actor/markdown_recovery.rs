@@ -56,12 +56,18 @@ impl ActorHandle {
                 let head = VersionedTextStore::new(store).read_text(&workspace, &key.version_id, &obligation.path)?;
                 let restore = store.read_with(|conn| dohc_engine_collab::live_update_application::restore_generation(conn, key))?;
                 let resolver = cache.reader_resolver.as_ref().map(|resolver| Arc::as_ptr(resolver) as usize);
+                let materialized = if obligation.kind == Kind::WitnessRefresh {
+                    obligation.settled_head_sha256.as_deref().map(|sha|
+                        store.read_with(|conn| super::ydoc::refresh_head_materialized_in(conn, key, &obligation.path, sha)))
+                        .transpose()?
+                } else { None };
                 let fingerprint = hex_sha256(serde_json::json!({
                     "checkpoint": checkpoint.as_deref().map(hex_sha256),
                     "head": head.as_ref().map(|head| &head.blob_sha256),
                     "marker": marker.map(|marker| (marker.lineage_claim_id, marker.path, marker.head_update_seq)),
                     "restore": restore, "resolver": resolver, "inputs": obligation.retry_inputs,
                     "refreshHead": obligation.settled_head_sha256,
+                    "materialized": materialized,
                 }).to_string().as_bytes());
                 candidates.push(MarkdownRecoveryCandidate { obligation, fingerprint });
             }

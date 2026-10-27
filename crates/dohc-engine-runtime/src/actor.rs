@@ -700,6 +700,7 @@ impl ActorHandle {
             let work = work.clone();
             let result = self.run(move |store, cache| work(store, cache)).await;
             if !wait_for_reader(&result, attempt, self.markdown_recovery.clone()).await {
+                if result.is_ok() { self.markdown_recovery.wake.notify_one(); }
                 return result;
             }
         }

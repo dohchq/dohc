@@ -516,7 +516,7 @@ export const FileInspector = memo(function FileInspector(
   // as its source. A session that records another source, as when another
   // pane reloads a change made outside dohc into the shared session, needs
   // its own check and consent.
-  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null; headSha256: string | null | undefined } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
   // A session that binds a different note from the one checked, as when the
@@ -544,7 +544,8 @@ export const FileInspector = memo(function FileInspector(
   });
   useEffect(() => setBound(engine.available), [engine.available]);
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
-  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
+    && (!engine.available || engine.headSha256 === editAnyway.headSha256);
   useEffect(() => {
     if (consented && !editingAnyway) {
       setEditAnyway(null);
@@ -876,7 +877,7 @@ export const FileInspector = memo(function FileInspector(
             lossyNote={lossyNote}
             onEditAnyway={() => {
               const source = typeof boundSource === "string" ? boundSource : contentHash;
-              setEditAnyway({ open: lossyOpen, source });
+              setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash });
               if (engine.available && source) {
                 void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
                   allowLossySourceSha256: source }).catch((error: unknown) => {

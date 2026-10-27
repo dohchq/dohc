@@ -682,6 +682,7 @@ export class YdocAdapterSession {
   private pendingRecordBytes = 0;
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
+  private readonly headChangedListeners = new Set<(headSha256: string | null) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
   private readonly settlementWantedListeners = new Set<() => void>();
   private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
@@ -1182,6 +1183,7 @@ export class YdocAdapterSession {
     const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
     this.headSha256 = result.sha256;
+    this.notifyListeners(this.headChangedListeners, this.headSha256);
     return result;
   }
 
@@ -1192,6 +1194,11 @@ export class YdocAdapterSession {
   onRemoteUpdate(handler: (update: Uint8Array) => void): () => void {
     this.remoteUpdateListeners.add(handler);
     return () => this.remoteUpdateListeners.delete(handler);
+  }
+
+  onHeadChanged(handler: (headSha256: string | null) => void): () => void {
+    this.headChangedListeners.add(handler);
+    return () => this.headChangedListeners.delete(handler);
   }
 
   onDurableLocalChange(handler: () => void): () => void {
@@ -1364,6 +1371,7 @@ export class YdocAdapterSession {
           continue;
         }
         this.staleError = null;
+        this.notifyListeners(this.headChangedListeners, this.headSha256);
         if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);
         return update;
       }

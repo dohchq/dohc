@@ -925,6 +925,35 @@ impl ActorHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_conversion_consent(
+        &self, key: DocKey, path: String, session_id: String,
+        lineage_claim_id: Option<String>, restore_generation: Option<i64>, source_sha256: String,
+        token: CancellationToken,
+    ) -> Result<Arc<MarkdownConversionConsent>, RuntimeError> {
+        self.run(move |store, _| {
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
+            if marker.path.as_deref() != Some(path.as_str()) || marker.lineage_claim_id != lineage_claim_id {
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+            store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(conn, &key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(conn, &key, restore_generation)
+            })?;
+            let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
+            let reference = doc.markdown_source_reference().filter(|reference|
+                reference.source_sha256 == source_sha256 && doc.markdown_source(reference).is_some());
+            if reference.is_none() { return Err(CollabError::MarkdownReaderUnavailable.into()); }
+            let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &path)?;
+            if head.as_ref().is_some_and(|head| head.object_id != key.object_id) {
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+            Ok(Arc::new(MarkdownConversionConsent::new(key, session_id, lineage_claim_id,
+                restore_generation, source_sha256, head.map(|head| head.blob_sha256))))
+        }).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_settle(
         &self,
         root_dir: PathBuf,
@@ -3475,9 +3504,6 @@ pub(super) fn ydoc_settle_on_store(
     };
     let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
         .then(|| projection.content.clone());
-    if materialized && let Err(error) = refresh_markdown_witnesses_on_store(store, doc_cache, key, now_ms) {
-        eprintln!("engine: Markdown witness refresh retained: {error}");
-    }
     Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
@@ -3577,7 +3603,7 @@ pub(super) fn refresh_markdown_witnesses_on_store(
 #[path = "markdown_refresh_tests.rs"]
 mod markdown_refresh_tests;
 
-fn refresh_head_materialized_in(
+pub(super) fn refresh_head_materialized_in(
     conn: &rusqlite::Connection, key: &DocKey, path: &str, sha256: &str,
 ) -> Result<bool, CollabError> {
     conn.query_row(

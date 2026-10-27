@@ -445,6 +445,7 @@ function createEngineDocSession(
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  let currentHeadSha256: string | null | undefined;
   const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
     objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
@@ -542,7 +543,7 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
-    headSha256: bound.headSha256,
+    headSha256: currentHeadSha256 === undefined ? bound.headSha256 : currentHeadSha256,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -1038,7 +1039,12 @@ function createEngineDocSession(
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
-    if (disposed || event.sessionId !== sessionId) return;
+    if (disposed || event.sessionId !== sessionId || event.workspaceId !== workspaceId || event.path !== path) return;
+    if (event.headSha256 !== undefined) {
+      currentHeadSha256 = event.headSha256;
+      publish(current => ({ ...current, outcome: current.outcome?.kind === "bound"
+        ? { ...current.outcome, headSha256: event.headSha256 } : current.outcome }));
+    }
     refusedDoc = event.editRefusal !== undefined ? (binding?.doc ?? null) : null;
     if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {

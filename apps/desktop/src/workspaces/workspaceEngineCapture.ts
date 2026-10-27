@@ -586,6 +586,7 @@ export interface WorkspaceEngineCapture {
     path: string;
     assertRecordWritable?: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
@@ -2340,6 +2341,7 @@ export function createWorkspaceEngineCapture(
     onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
@@ -2760,6 +2762,9 @@ export function createWorkspaceEngineCapture(
               recordedStateVector = Y.encodeStateVector(recordedDoc);
               updatesCounted += 1;
               input.onRemoteUpdate(update);
+            },
+            onHeadChanged: head => {
+              if (!closed && current === opened) input.onHeadChanged?.(head);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
               const editorVisible = refusedEditorVisible;
@@ -4786,6 +4791,7 @@ export function createWorkspaceEngineCapture(
             if (!localAcknowledgement) noteUpdate();
             input.onRemoteUpdate(update);
           },
+          onHeadChanged: input.onHeadChanged,
           onLineageReplaced: (update, recoveredPaths) => {
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);

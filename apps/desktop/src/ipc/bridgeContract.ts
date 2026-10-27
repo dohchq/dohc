@@ -7076,6 +7076,7 @@ export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  headSha256: z.string().min(1).nullable().optional(),
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),

@@ -159,6 +159,7 @@ function saveFailureReason(absolutePath: string, failure: unknown, shared: boole
 }
 
 interface SessionEvent {
+  headSha256?: string | null;
   readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
@@ -686,11 +687,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let lastEvent: SessionEvent | null = null;
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         const emit = (event: SessionEvent): void => {
+          if (provider?.headSha256 !== undefined) event = { ...event, headSha256: provider.headSha256 };
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.headSha256 === event.headSha256 &&
             lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
@@ -741,6 +744,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
+            },
+            onHeadChanged: headSha256 => {
+              publish(() => emit({ ...(lastEvent ?? { state: "settling", seq: 0 }), headSha256 }));
             },
             onLineageReplaced: (update, recoveredPaths) => {
               lastEvent = null;

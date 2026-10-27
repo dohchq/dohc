@@ -1938,13 +1938,13 @@ impl EngineService {
         };
         if let Some(source) = params.allow_lossy_source_sha256 {
             let (_, view) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            let consent = open.actor.ydoc_conversion_consent(view.key, view.path,
+                params.session_id.clone(), view.lineage_claim_id, view.restore_generation, source,
+                cancellation.token()).await.map_err(map_runtime)?;
             let mut sessions = lock(&self.sessions);
             let session = sessions.get_mut(&params.session_id)
                 .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
-            session.conversion_consent.get_or_insert_with(|| Arc::new(MarkdownConversionConsent::new(
-                view.key, params.session_id.clone(), view.lineage_claim_id, view.restore_generation,
-                source, view.last_settled_sha.or(view.open_head_sha),
-            )));
+            session.conversion_consent = Some(consent);
         }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session.author_settlement.changed_inputs();

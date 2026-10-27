@@ -85,6 +85,7 @@ export interface EngineYdocProviderSessionOptions {
   // Forwarded to the adapter: reads a seed past the in-band cap as a blob.
   largeSeed?: LargeSeedReading;
   onRemoteUpdate: (update: Uint8Array) => void;
+  onHeadChanged?: (headSha256: string | null) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onLocalUpdateAcknowledged?: (idempotencyKey: string, lane: "journal" | "owner-outbox") => void;
@@ -378,6 +379,9 @@ export async function openEngineYdocProviderSession(
     options.onRemoteUpdate(update);
     requestSettle();
   });
+  const unsubscribeHead = session.onHeadChanged(head => {
+    if (!closed) options.onHeadChanged?.(head);
+  });
   const unsubscribeRemoteError = session.onRemoteApplyError((error) => {
     noteDocumentChange();
     options.onRemoteApplyError?.(error);
@@ -419,6 +423,7 @@ export async function openEngineYdocProviderSession(
     cancelSettle?.();
     cancelSettle = null;
     unsubscribeRemote();
+    unsubscribeHead();
     unsubscribeRemoteError();
     unsubscribeResync();
     unsubscribeReplacement();
