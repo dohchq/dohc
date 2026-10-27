@@ -482,6 +482,51 @@ it("ends a wait on a close that keeps the workspace once a close for good starts
   await sessions.closeAll();
 });
 
+it("ends a wait at once when a close for good starts while a close that keeps the workspace waits for an open", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("retire-opening", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  const held = deferred<void>();
+  client.holdOpen = held.promise;
+  const opening = sessions.run(workspace, async () => undefined);
+  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  const retiring = sessions.closeWorkspace(workspace);
+  // At once, while the open is still held: the deadline is a minute.
+  await waited;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  held.resolve();
+  await Promise.allSettled([opening, closing]);
+  await retiring;
+  expect(sessions.currentBinding(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
+it("removes the workspace on a close for good when the close it waited for fails", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("retire-after-failed-close", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  const held = deferred<void>();
+  client.holdClose = held.promise;
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  const retiring = sessions.closeWorkspace(workspace);
+  held.reject(new Error("close failed"));
+  await expect(closing).rejects.toThrow("close failed");
+  await retiring;
+  client.holdClose = null;
+  // A later run opens the workspace again instead of finding it retiring.
+  await sessions.run(workspace, async () => undefined);
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
+  await sessions.closeAll();
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });

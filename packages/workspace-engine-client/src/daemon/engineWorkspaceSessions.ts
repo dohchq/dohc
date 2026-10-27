@@ -1075,11 +1075,14 @@ export class EngineWorkspaceSessions {
       if (entry.closing) {
         // A close for good ends a wait on a close that keeps the workspace
         // now, not once that close settles.
-        if (retire && entry.reopening) {
+        if (retire && !entry.retiring) {
+          entry.retiring = true;
           entry.reopening = false;
           this.wakeOpenWaiters(entry);
         }
-        await entry.closing;
+        // That close reports its own failure. This one still removes the
+        // entry, so no live entry stays marked as retiring.
+        await entry.closing.catch(() => undefined);
         continue;
       }
 
