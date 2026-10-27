@@ -90,6 +90,10 @@ import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory.js";
 import { RestoreHistoryBudget } from "./liveAcceptedHistory.js";
 import { liveValidation } from "../liveValidation.js";
 import { createShareReadQueries } from "../shareReadQueries.js";
+import {OwnerCommittedDelivery} from "../ownerCommittedDelivery.js";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {attachLiveJournalHistory,createLiveJournalHistoryAuthority} from "./liveJournalHistory.js";
 const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 const policy = {
@@ -384,7 +388,74 @@ it("starts a later proof at the Markdown its predecessor verified, not at the ba
 // owner_publication exports these states and the outgoing preimage. The relay
 // assigns its own journal coordinates and authorship to the same updates.
 const handoverEvidence = process.env.DOHC_HANDOVER_PUBLICATION_EVIDENCE;
-it.skipIf(!handoverEvidence).each(["changed", "unchanged", "changed-preserved", "unchanged-preserved",
+it.each([false,true])("settles the cut before a receipt in the adoption pass, restart=%s", async restart => {
+  const f = registered();
+  const history = createLiveJournalHistoryAuthority({namespace: "handover-test",reconciled: true});
+  attachLiveJournalHistory(f.storage as StorageContext,history);
+  try {
+    f.write(db => db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES ('sync_relay_live_update_journal',6)").run());
+    const first = publication(f,"handover");
+    await prepare(f,[first.op]);
+    expect(append(f,[first.op]).settlementRefusals).toBeUndefined();
+    expect(first.receipt.journalCursor).toBe(7);
+    let fileDigest = f.input.evidence.projectedMarkdownSha256, terminal = first.receipt, requestId = 0;
+    let next: ReturnType<typeof publication> | undefined, failSettle = restart;
+    const methods: string[] = [];
+    const client = {
+      async sendRequest(input: Parameters<EngineClient["sendRequest"]>[0]) {
+        methods.push(input.method);
+        if(input.method === "liveApplication.register")return {id: input.id,result: {registrationId: 1}};
+        if(input.method === "liveApplication.ownerState")return {id: input.id,result: {
+          adoptionId: "handover",expectedLocalSequence: 1,throughCursor: null,sessionId: "session"}};
+        if(input.method === "liveApplication.ownerOutbox") {
+          // A collaborator keeps typing while this delivery pass drains the outbox.
+          next ??= publication(f,"typed-through-handover",7,fileDigest,1);
+          return {id: input.id,result: {outboxId: null,pendingBytes: 0,state: "active",retryDeliveryId: null}};
+        }
+        expect(input.method).toBe("liveApplication.settle");
+        if(failSettle){failSettle = false;throw new Error("relay restarted before empty settle");}
+        const empty = terminal.journalCursor === 7;
+        fileDigest = empty ? first.markdownSha : next!.markdownSha;
+        return {id: input.id,result: {status: "settled",settlement: {
+          settlementId: empty ? null : next!.record.settlementId,previousCursor: 7,terminalCursor: terminal.journalCursor,
+          applicationCount: empty ? 0 : 1,localYDocSequence: empty ? 1 : 2,momentId: empty ? "cut" : "typed-through-handover",
+          markdownDigest: fileDigest,materialized: true,collectionReconcileRequired: false,
+        }}};
+      },
+      async sendLiveOwnerAdoption(input: Parameters<EngineClient["sendLiveOwnerAdoption"]>[0]) {
+        return {id: input.id,result: {status: "adopted",adoption: {
+          adoptionId: "handover",localYDocSequence: 1,terminalCursor: 7,adoptionReplayed: false,
+        }}};
+      },
+      async sendLiveApplication(input: Parameters<EngineClient["sendLiveApplication"]>[0],event: Parameters<EngineClient["sendLiveApplication"]>[1]) {
+        terminal = event.metadata.accepted.receipt;
+        return {id: input.id,result: {status: "applied",ack: {...terminal,localYDocSequence: 2,applicationReplayed: false}}};
+      },
+    } as unknown as EngineClient;
+    const consumer = () => new OwnerCommittedDelivery(f.storage,history,{
+      client,workspace: "handle",host: f.input.host,deadlineMs: 1000,nextRequestId: () => ++requestId,
+      bounds: {maxBytes: 1_000_000,maxEvents: 100},
+      ownerAdmission: {trustedAccount: () => ({accountId: "owner",name: "Owner"}),shares: new Map([["workspace","share"]]),
+        maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),validate: () => {throw new Error("Empty outbox");}},
+    });
+    let delivery = consumer();
+    if(restart) {
+      await expect(delivery.drain(f.input.evidence.document)).rejects.toThrow("relay restarted");
+      expect(methods).not.toContain("liveApplication.ownerOutbox");
+      delivery = consumer();
+    }
+    expect(await delivery.drain(f.input.evidence.document)).toMatchObject({kind: "done",terminalReceipt: {journalCursor: 8}});
+    expect(methods.indexOf("liveApplication.settle")).toBeLessThan(methods.indexOf("liveApplication.ownerOutbox"));
+    expect(next!.payload.payloadBeforeBlobSha256).toBe(first.markdownSha);
+    await delivery.settle(f.input.evidence.document);
+    await prepare(f,[next!.op]);
+    expect(append(f,[next!.op]).settlementRefusals).toBeUndefined();
+    expect(next!.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.doc.getMap("frontmatter").get("title")).toBe("typed-through-handover");
+    expect(refusedChecks()).toEqual([]);
+  } finally {f.close();}
+});
+it.skipIf(!handoverEvidence).each(["changed", "unchanged", "changed-preserved", "unchanged-preserved", "changed-html",
   "changed-refused", "unchanged-refused", "changed-preserved-refused", "unchanged-preserved-refused"])("accepts the engine's %s handover preimage after a reload", async variant => {
   const evidence = JSON.parse(readFileSync(join(handoverEvidence!, `${variant}.json`), "utf8")) as {
     baselineBytes: number[]; handoverBytes: number[]; nextBytes: number[]; intermediateBytes?: number[];

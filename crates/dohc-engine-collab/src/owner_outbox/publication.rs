@@ -194,10 +194,10 @@ fn prove(
                 }
                 // A handover with no new edits has no settlement row. Its accepted
                 // projection still proves the next publication's predecessor.
-                match crate::live_update_application::read_adoption_predecessor_in(
-                    conn, key, namespace, binding, remaining,
+                match crate::live_update_application::adoption_contains_predecessor_in(
+                    conn, key, namespace, binding, digest, remaining,
                 ) {
-                    Ok(Some(predecessor)) if predecessor == digest => return Ok(true),
+                    Ok(true) => return Ok(true),
                     Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
                         budget_exhausted = true;
                         return Err(OwnerOutboxError::Frozen);

@@ -392,6 +392,7 @@ export class ServiceActivationDriver {
     // another binding reactivates on a later pass.
     if(!held.activationPending && this.#invalidated(held,document!))return fenced;
     try{
+      // The consumer materializes any retained handover cut before draining edits.
       const outcome=await held.consumer.drain(document!,signal);check();
       if(outcome.kind!=="done")return outcome;
       if(held.activationPending){

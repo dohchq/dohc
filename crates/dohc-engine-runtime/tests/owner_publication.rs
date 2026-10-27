@@ -27,9 +27,6 @@ impl Fixture {
     }
 
     fn with_source(size: usize, canonical: bool) -> Self {
-        let root = ScratchDir::new().unwrap();
-        let db = engine_db_path(&root).unwrap();
-        let mut store = EngineStore::open(&db, 0).unwrap();
         let source: serde_json::Value = serde_json::from_str(include_str!(
             "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
         ))
@@ -52,6 +49,13 @@ impl Fixture {
             text = doc.project(ContentKind::Richdoc).unwrap().content;
             bytes = doc.encode_full_state();
         }
+        Self::with_seed(text, bytes)
+    }
+
+    fn with_seed(text: String, bytes: Vec<u8>) -> Self {
+        let root = ScratchDir::new().unwrap();
+        let db = engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
@@ -207,11 +211,6 @@ impl Fixture {
         changes_content: bool,
         preserved_source: bool,
     ) -> OwnerAdoptionCut {
-        let key = DocKey::new("workspace", "main", "object").unwrap();
-        let limits = dohc_engine_collab::OwnerOutboxLimits {
-            max_pending_bytes: 1_000_000,
-            max_pending_age_ms: 100_000,
-        };
         self.doc
             .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
             .unwrap();
@@ -231,6 +230,15 @@ impl Fixture {
                 .unwrap();
         }
         let update = self.doc.encode_full_state();
+        self.accepted_handover_update(cursor, update)
+    }
+
+    fn accepted_handover_update(&mut self, cursor: i64, update: Vec<u8>) -> OwnerAdoptionCut {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let limits = dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        };
         let dohc_engine_storage::TxnOutcome::Committed(recorded) =
             dohc_engine_collab::record_local_update(
                 &mut self.store,
@@ -2800,32 +2808,191 @@ async fn settling_straight_after_a_handover_records_and_publishes_nothing() {
 
 #[tokio::test]
 async fn the_settlement_after_an_empty_one_starts_at_a_changed_handover_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, true).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, true, false)
+        .await;
+}
+
+#[tokio::test]
+async fn the_handover_settle_keeps_the_new_owners_unaccepted_edit() {
+    let mut f = Fixture::with_source(0, true);
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    f.record(
+        &actor,
+        f.doc.frontmatter_set("status", "still typing").unwrap(),
+        "typing",
+        20,
+    )
+    .await;
+    let empty = f.settle(&handle, Some(receipt)).await;
+    assert!(empty.materialized);
+    assert_eq!(empty.settlement_id, None);
+    assert_eq!(f.file(), "owner edit");
+    assert_eq!(
+        f.store
+            .read_with(|conn| conn.query_row(
+                "SELECT count(*) FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        1
+    );
+    let receipt = f.accept_pending(&actor, &handle, 8).await;
+    let settled = f.settle(&handle, Some(receipt)).await;
+    assert_eq!((settled.previous_cursor, settled.terminal_cursor), (7, 8));
+    assert!(f.file().contains("still typing"));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn the_handover_settle_refuses_an_unfolded_file_change() {
+    let mut f = Fixture::with_source(0, true);
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let text = "A file change still awaiting capture.";
+    std::fs::write(f.root.path().join(&f.binding.current_path), text).unwrap();
+    let error = handle
+        .settle(
+            Some(receipt),
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), "conflict-stale-target");
+    assert_eq!(f.file(), text);
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
 }
 
 #[tokio::test]
 async fn the_settlement_after_an_empty_one_starts_at_an_unchanged_handover_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, true).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, true, false)
+        .await;
 }
 
 #[tokio::test]
 async fn a_changed_handover_preserves_its_markdown_source_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false, false)
+        .await;
 }
 
 #[tokio::test]
 async fn an_unchanged_handover_preserves_its_markdown_source_across_a_reload() {
-    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, false).await;
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, false, false)
+        .await;
+}
+
+#[tokio::test]
+async fn a_frontmatter_handover_proves_the_settled_html_source_after_the_file_advances() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false, true)
+        .await;
 }
 
 async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(
     changes_content: bool,
     canonical: bool,
+    html: bool,
 ) {
     use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
-    let mut f = Fixture::with_source(0, canonical);
+    let mut f = if html {
+        let snapshot = "---\ntitle: old\n---\n\nHello <b>hidden</b> world\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, snapshot)
+            .unwrap();
+        let original = doc.project(ContentKind::Richdoc).unwrap().content;
+        let mut f = Fixture::with_seed(original, doc.encode_full_state());
+        for (object, path, text, moment) in [
+            ("schema", "notes/.collection.json", "{}", "schema"),
+            (
+                "object",
+                f.binding.current_path.as_str(),
+                snapshot,
+                "before-handover",
+            ),
+        ] {
+            dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: moment.into(),
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 3,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        std::fs::write(f.root.path().join(&f.binding.current_path), snapshot).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?1",
+                    [hex_sha256(snapshot.as_bytes())],
+                )
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        f
+    } else {
+        Fixture::with_source(0, canonical)
+    };
     let key = DocKey::new("workspace", "main", "object").unwrap();
-    let cut = f.edit_accepted_before_handover_with_source(7, changes_content, !canonical);
+    let cut = if html {
+        let snapshot = f.file();
+        assert_ne!(snapshot, f.text);
+        let source = snapshot.replace("title: old", "title: new");
+        f.doc
+            .frontmatter_set_preserving_markdown_source("title", "new", &source)
+            .unwrap();
+        let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        assert_eq!(f.doc.preserved_markdown_source(&projection), None);
+        assert_eq!(
+            f.doc
+                .settled_markdown_source(&projection, || Ok::<_, ()>(Some(snapshot.clone())))
+                .unwrap(),
+            Some(source)
+        );
+        f.accepted_handover_update(7, f.doc.encode_full_state())
+    } else {
+        f.edit_accepted_before_handover_with_source(7, changes_content, !canonical)
+    };
     let handover_bytes = f.doc.encode_full_state();
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
@@ -2852,7 +3019,11 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
     if !canonical {
         let projected = f.doc.project(ContentKind::Richdoc).unwrap().content;
         assert_ne!(empty.markdown_digest, hex_sha256(projected.as_bytes()));
-        assert_eq!(f.doc.preserved_markdown_source(&projected), Some(f.file()));
+        if html {
+            assert_eq!(f.doc.preserved_markdown_source(&projected), None);
+        } else {
+            assert_eq!(f.doc.preserved_markdown_source(&projected), Some(f.file()));
+        }
     }
     assert_eq!(recorded_settlements(&f.store), (0, 0));
     assert_eq!(
@@ -2935,7 +3106,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
             owner_publication_prefix(&f.store, "workspace", &[canonical_before], 1_000_000)
                 .unwrap()
                 .allowed_ops,
-            0
+            usize::from(html)
         );
     }
     let mut unaccepted = op.clone();
@@ -2955,11 +3126,15 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
             "nextBytes": f.doc.encode_full_state(),
             "payload": op.payload,
         });
-        let name = match (changes_content, canonical) {
-            (true, true) => "changed.json",
-            (false, true) => "unchanged.json",
-            (true, false) => "changed-preserved.json",
-            (false, false) => "unchanged-preserved.json",
+        let name = if html {
+            "changed-html.json"
+        } else {
+            match (changes_content, canonical) {
+                (true, true) => "changed.json",
+                (false, true) => "unchanged.json",
+                (true, false) => "changed-preserved.json",
+                (false, false) => "unchanged-preserved.json",
+            }
         };
         std::fs::write(
             PathBuf::from(directory).join(name),

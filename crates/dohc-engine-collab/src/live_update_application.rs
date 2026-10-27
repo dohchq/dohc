@@ -27,7 +27,7 @@ const SAFE: i64 = 9_007_199_254_740_991;
 mod accepted_history;
 mod publication;
 pub(crate) use publication::{
-    read_adoption_predecessor_in, read_native_accepted_cut_in, read_native_accepted_in,
+    adoption_contains_predecessor_in, read_native_accepted_cut_in, read_native_accepted_in,
     read_native_applied_cursor_in, read_restore_predecessor_in, require_restore_registration_in,
 };
 mod ack_read;

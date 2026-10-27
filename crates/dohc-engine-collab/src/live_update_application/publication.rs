@@ -85,14 +85,15 @@ fn native_accepted(
     Ok(Some((held, history.doc)))
 }
 
-/// The accepted projection at this binding's original owner handover.
-pub(crate) fn read_adoption_predecessor_in(
+/// Whether the predecessor renders this binding's accepted owner handover.
+pub(crate) fn adoption_contains_predecessor_in(
     conn: &Connection,
     key: &DocKey,
     namespace: &str,
     binding: &LiveObjectBinding,
+    digest: &str,
     remaining: &mut usize,
-) -> Result<Option<String>, ApplicationError> {
+) -> Result<bool, ApplicationError> {
     let mut budget = Budget {
         remaining: *remaining,
     };
@@ -104,13 +105,13 @@ pub(crate) fn read_adoption_predecessor_in(
             |row| row.get(0),
         ).optional().map_err(read_sql)?;
         let Some(cursor) = cursor else {
-            return Ok(None);
+            return Ok(false);
         };
         let Some(held) = registration_in(conn, key, &mut budget)? else {
-            return Ok(None);
+            return Ok(false);
         };
         if held.namespace != namespace || held.binding != *binding {
-            return Ok(None);
+            return Ok(false);
         }
         current_in(conn, &held, &mut budget)?;
         let history = accepted_history::read_inner(
@@ -122,11 +123,16 @@ pub(crate) fn read_adoption_predecessor_in(
             accepted_history::HistoryPurpose::Native,
         )?;
         let projection = history.doc.project(crate::ContentKind::Richdoc)?.content;
-        let markdown = history
-            .doc
-            .preserved_markdown_source(&projection)
-            .unwrap_or(projection);
-        Ok(Some(hex_sha256(markdown.as_bytes())))
+        if let Some(source) = history.doc.preserved_markdown_source(&projection) {
+            return Ok(hex_sha256(source.as_bytes()) == digest);
+        }
+        // With a settled-only witness, the file's body chooses between the
+        // witness and the canonical projection. Both render this accepted cut.
+        Ok(hex_sha256(projection.as_bytes()) == digest
+            || history
+                .doc
+                .reprojected_markdown_source(&projection)
+                .is_some_and(|source| hex_sha256(source.as_bytes()) == digest))
     })();
     *remaining = budget.remaining;
     result
