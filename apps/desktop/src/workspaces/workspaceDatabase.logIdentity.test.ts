@@ -76,6 +76,24 @@ async function editFixture() {
   };
 }
 
+it("refuses append and restore handles that opened different files", async () => {
+  const { root, input } = await editFixture();
+  const parked = join(root, "parked.jsonl");
+  const open = vi.mocked(fs.open).getMockImplementation()!;
+  vi.mocked(fs.open).mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    if (args[1] === "r+") {
+      await fs.rename(input.logPath, parked);
+      await fs.writeFile(input.logPath, "replacement\n");
+    }
+    return open(...args);
+  });
+  await expect(editDatabaseAtPath(input)).rejects.toThrow(/changed while dohc opened it/);
+  expect(await fs.readFile(input.logPath, "utf8")).toBe("replacement\n");
+  expect(await fs.readFile(parked, "utf8")).toBe("");
+  await expect(fs.lstat(input.statePath)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+});
+
 it("refuses a junction swapped in while opening the log before opening state SQLite", async () => {
   const { root, directory, input } = await editFixture();
   const outside = join(root, "outside");
@@ -123,7 +141,7 @@ it("counts through the checked log handle when its name becomes a link before re
     return handle;
   });
   await expect(editDatabaseAtPath(input)).rejects.toThrow(/link.*must be a file/);
-  expect(fs.open).toHaveBeenCalledTimes(1);
+  expect(fs.open).toHaveBeenCalledTimes(2);
   const counter = new DatabaseSync(input.statePath);
   try {
     expect(counter.prepare("SELECT value FROM database_operation_state WHERE key = 'last_version'").get()?.value).toBe(41);
@@ -199,4 +217,5 @@ it.each(["edit", "sync"])("preserves rollback and the %s error when log close al
     ...input, edit: { ...input.edit, table: failure === "edit" ? "missing" : "items" },
   })).rejects.toThrow(failure === "edit" ? /no such table: missing/ : /log sync failed/);
   expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+  expect(await fs.readFile(input.logPath, "utf8")).toBe("");
 });
