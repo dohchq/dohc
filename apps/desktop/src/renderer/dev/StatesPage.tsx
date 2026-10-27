@@ -1106,6 +1106,19 @@ const LONG_NOTICE = {
   onDismiss: noop,
 };
 
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1728,6 +1741,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -3409,6 +3423,25 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
+  // Live editing beside the save state. It adds nothing while the server is
+  // named, a ring while dohc retries by itself, and a filled dot otherwise.
+  {
+    label: "server unreachable: live editing waits on it",
+    syncStatus: {
+      ...SYNCED_STATUS,
+      state: "sync-failed",
+      syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      ownerLiveDelivery: "retrying",
+    },
+    failedSaves: 0,
+  },
+  { label: "live editing retrying", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying" }, failedSaves: 0 },
+  {
+    label: "live editing paused for a reason",
+    syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying", ownerLiveDeliveryReason: "document-unavailable" },
+    failedSaves: 0,
+  },
+  { label: "live editing active", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "active" }, failedSaves: 0 },
 ];
 
 // `parts` renders only those parts, so a test renders only what it checks.

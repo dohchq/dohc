@@ -1907,7 +1907,10 @@ it("forgets a stopped document whose registration the engine refuses only once i
   const registered = () => o.calls(0).filter(method => method === "liveApplication.register").length;
   await o.depart(restarted);
   // Its replica still lists it departed, so it tries again, each time after a pull that started after its last try, and stays retained.
-  await vi.waitFor(() => expect(registered()).toBeGreaterThan(1));
+  // Count pulls, not time: four pulls on, a pull has followed the first try and the pass after it has tried again.
+  await o.nextPull();
+  await o.nextPull();
+  expect(registered()).toBeGreaterThan(1);
   expect(registered()).toBeLessThanOrEqual(o.pullCount() + 1);
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);

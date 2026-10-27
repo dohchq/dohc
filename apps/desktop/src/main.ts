@@ -111,6 +111,7 @@ import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
 import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { removeEarlierMarkedCopies, removeMarkedCopies, systemMarkedCopies } from "./workspaces/markedCopies";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceHeadingsIpcHandlers } from "./ipc/workspaceFilesIpc";
@@ -430,6 +431,7 @@ import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
+import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
@@ -3733,6 +3735,7 @@ async function openWorkspaceActivityForOperation(
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
     reconcileLocalCollectionApps(canonicalWorkspace);
+    resumeLinkRewrites(canonicalWorkspace, operation.signal);
   }
   return result;
 }
@@ -3742,6 +3745,16 @@ async function openWorkspaceActivityForOperation(
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
     .catch(error => { if (!(error instanceof CollectionsRefusalError)) console.warn("[desktop] local Collection app reconciliation:", error); });
+}
+
+function resumeLinkRewrites(workspace: EngineWorkspace & {readOnly?: boolean; shareView?: unknown}, signal: AbortSignal): void {
+  if (workspace.readOnly || workspace.shareView !== undefined) return;
+  void resumeWorkspaceLinkRewrites(workspace, {workspaceId: workspace.workspaceId, signal,
+    history: {rewriteHistoryLinks: input => withEngineAdapter(workspace, adapter => adapter.rewriteHistoryLinks(input)).then(result => {
+      if (!result) throw new Error("The workspace engine is not running.");
+      return result;
+    })},
+  }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
 }
 
 function openWorkspaceActivityWith(
@@ -5229,8 +5242,17 @@ const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
+    // A window's reads that came before this open, such as its settings, read again.
+    notifyRenderer({workspaceId});
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
+      reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+      automationHosts.open(workspaceId);
+      void lease.state.collectionAutomations.workspaceOpened();
+    });
+    if (workspace) void withPhysicalWorkspaceOperation(workspaceId, async operation => {
+      resumeLinkRewrites(operation.workspace, operation.signal);
+    }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -5812,6 +5834,9 @@ function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
   else window.once("show", offer);
 }
 
+// Files from other people open as marked copies in this run's folder.
+const markedCopies = systemMarkedCopies(stateDir());
+
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,
@@ -5870,6 +5895,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      void removeEarlierMarkedCopies(markedCopies);
       // Start retention even when Off. Never wait for measurement on startup.
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
@@ -5989,6 +6015,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopAutomationWakes: () => automationWakeConsumer.stop(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
+    removeMarkedCopies: () => removeMarkedCopies(markedCopies),
     settleYDocs: async () => {
       await settleYDocsAfterFileObservation(
       [flushTypingCheckpoints(), ...workspaceAuthorities.workspaceIds().map(workspaceId =>
@@ -6423,6 +6450,7 @@ function registerIpcHandlers(): void {
     app,
     dialog,
     shell,
+    markedCopies,
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,

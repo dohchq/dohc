@@ -776,6 +776,7 @@ const tooLarge = () =>
   new Error("This run's progress is too large for dohc to save, so it stopped. Narrow its Find steps, or split it into smaller automations.");
 
 export interface AutomationRunStore {
+  /** Throws AutomationStoreNotOpenedError before the host opens the workspace. */
   pendingRestores(): Promise<PendingRestore[]>;
   savePendingRestore(restore: PendingRestoreUpdate, whilePending?: string): Promise<void>;
   recordRestoreIntents(id: string, momentIds: readonly string[]): Promise<void>;
@@ -1349,7 +1350,7 @@ export function createAutomationRunStore(
     },
     pendingRestores() {
       return serial(async () => {
-        const known = await readRestores(true);
+        const known = parseRestores(await readStored("restoring.json", "throws"));
         if (known === null) throw new Error("dohc could not read unfinished Stop and restore progress. Reopen the workspace, then try again.");
         return structuredClone([...known.values()]);
       });

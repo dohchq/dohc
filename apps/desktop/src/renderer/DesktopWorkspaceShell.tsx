@@ -5462,8 +5462,8 @@ export function DesktopWorkspaceShell(props: {
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile]);
+      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView]);
   const hideWorkspaceError = useCallback((id: string) => {
     hideShellError(id);
     const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
@@ -5829,6 +5829,7 @@ export function DesktopWorkspaceShell(props: {
             <NoticeCenter
               workspaceId={workspaceId}
               syncStatus={syncStatus}
+              failedSaves={failedSaves}
               agentActive={agentActive}
               conflictSummaries={conflictSummaries}
               onOpenHistory={openHistoryView}

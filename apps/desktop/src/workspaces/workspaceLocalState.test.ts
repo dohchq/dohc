@@ -15,6 +15,7 @@ import {
   readOwnedLocalStateFolder,
 } from "./workspaceLocalState";
 import { readUiStateFile } from "./workspaceUiState";
+import { readWorkspaceSettingsFile } from "./workspaceSettingsFile";
 import { createTestScratch } from "./testTemp";
 
 // The folder a reader is given.
@@ -312,6 +313,18 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
     await sessions.closeWorkspaceBinding(workspace);
     expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+  });
+
+  it("says a settings read before an open read no file, not that the file is unusable", async () => {
+    const { workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "settings.local.json"), JSON.stringify({ privacy: { confirmExternalLinks: false } }));
+    expect(await readWorkspaceSettingsFile(workspace)).toMatchObject({ source: "recovered", notOpened: true });
+    await open();
+    const read = await readWorkspaceSettingsFile(workspace);
+    expect(read).toMatchObject({ source: "stored", settings: { privacy: { confirmExternalLinks: false } } });
+    expect(read).not.toHaveProperty("notOpened");
   });
 
   it("reads as before on other systems, with no open", async () => {

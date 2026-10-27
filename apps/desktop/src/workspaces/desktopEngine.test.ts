@@ -785,16 +785,16 @@ describe("desktop engine restart coordination", () => {
     let openId!: number;
     const client: EngineDaemonClient = {
       reportsProgress: () => true,
-      async sendRequest(request, _signal, onProgress) {
+      async sendRequest(request, _signal, onProgress, cancelSignal) {
         if (request.method === "workspace.open" && String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")) {
           openId = request.id;
+          cancelSignal?.addEventListener("abort", () => {void cancel(request.id);}, {once: true});
           onProgress?.();
           opened.resolve();
           return await new Promise<Response>(() => {});
         }
         return await f.client.sendRequest(request);
       },
-      cancelRequest: cancel,
       onEvent: handler => f.client.onEvent(handler),
       close: () => f.client.close(),
       waitForExit: () => f.client.waitForExit(),

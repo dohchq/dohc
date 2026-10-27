@@ -3526,6 +3526,24 @@ describe("EngineWorkspaceSessions", () => {
       expect(sleep).toHaveBeenCalled();
     });
 
+    it("stops waiting for a run marked abandonAtQuit, so its workspace closes", async () => {
+      const workspace = await tempWorkspace("workspace-abandon-at-quit");
+      const client = new MockClient("handle-abandon-at-quit");
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+      const started = deferred<void>();
+      const answer = deferred<string>();
+      const run = sessions.run(workspace, async () => {
+        started.resolve();
+        return await answer.promise;
+      }, { abandonAtQuit: true });
+      await started.promise;
+      sessions.beginShutdown();
+      await expect(run).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      await sessions.closeWorkspace(workspace);
+      expect(client.requests.map((request) => request.method)).toEqual(["workspace.open", "workspace.close"]);
+      answer.resolve("late");
+    });
+
     it("paces a live document's retry at quit, so a relaunching daemon can answer", async () => {
       // codex r17 P1. Quit used to make every non-region retry immediate, on
       // the reasoning that it is racing the quit timer. But the daemon it is
