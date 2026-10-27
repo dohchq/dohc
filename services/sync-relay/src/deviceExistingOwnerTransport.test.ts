@@ -1,12 +1,74 @@
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { WebSocket } from "ws";
-import { EngineClient,FrameDecoder,FrameType,encodeFrame } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient,EngineRequestError,FrameDecoder,FrameType,encodeFrame } from "@dohc/workspace-engine-client/daemon";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
 import type {NativeRestoreFence} from "./liveRestoreFence.js";
+
+it.each(["markdown-write-held", "markdown-witness-check-pending"])("keeps simultaneous change and consent wakes on the connection after %s", async reason => {
+  const messages: Record<string, unknown>[] = [];
+  const decoder = new FrameDecoder(1_048_576, 256 * 1024);
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const ws = {readyState: 1, bufferedAmount: 0, send(bytes: Buffer, options: {binary: boolean}, done: () => void) {
+    if (options.binary) decoder.push(bytes, frame => { messages.push(JSON.parse(frame.payload.toString())); });
+    else if (JSON.parse(bytes.toString()).type === "liveHost.transport") started();
+    done();
+  }} as unknown as WebSocket;
+  const limits = {maxPayloadBytes: 4096, maxPendingBytes: 2_000_000} as DeviceControlLimits;
+  const start = {type: "liveHost.start" as const, version: 1 as const, relayNamespace: "namespace", authToken: "A".repeat(43),
+    host: {hostId: "host", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection"}, receive: limits};
+  const changes = new Set<() => void>(), settlements = new Set<() => void>();
+  const owner = {nativeSessionId: "owner-session", assertCurrent: vi.fn(),
+    onDurableLocalChange(listener: () => void) { changes.add(listener); return () => changes.delete(listener); },
+    onSettlementWanted(listener: () => void) { settlements.add(listener); return () => settlements.delete(listener); },
+    prepareHandoff: vi.fn(async () => undefined), finishHandoff: vi.fn(async () => undefined), remoteApplied: vi.fn(async () => undefined)};
+  const native = vi.fn<EngineClient["sendRequest"]>(async request => {
+    if (request.method === "liveApplication.settle") throw new EngineRequestError(request.id, {code: "CONFLICT", message: reason, retry: "no"});
+    return {id: request.id, result: request.method === "liveApplication.register" ? {registrationId: 9}
+      : {adoptionId: "adoption", expectedLocalSequence: 2, throughCursor: 1, outboxId: null, pendingBytes: 0, outboxState: null, retryDeliveryId: null}};
+  });
+  const stop = vi.fn();
+  const transport = startExistingOwnerDeviceTransport({config: {
+    client: {ready: async () => undefined, sendRequest: native} as unknown as EngineClient,
+    workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], ownerFor: async () => owner,
+    maxQueuedBytes: 2_000_000, maxFrameBytes: 1_048_576, maxUploads: 2, maxRegistrations: 1, aggregateBytes: 200_000_000,
+    maxAdoptionBytes: 1_000_000, maxAdoptionEvents: 10, requestDeadlineMs: 30_000,
+  }, start, ws, limits, stop});
+  const send = (value: object) => transport.receive(encodeFrame(FrameType.Control, 0, Buffer.from(JSON.stringify(value)), 1_048_576));
+  const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+    currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
+  const events = () => messages.filter(message => message.type === "event");
+  try {
+    await ready;
+    send({type: "hello", protocolVersion: 2, authToken: start.authToken, capabilities: ["blobs"], maxFrameBytes: 1_048_576, lastSessionGeneration: null});
+    send({type: "request", id: 1, method: "liveApplication.register", workspace: "handle", params: {binding, resumeAdoptionId: "adoption"}});
+    await expect.poll(() => events().length).toBe(1);
+    expect(events()[0]).toMatchObject({name: "liveApplication.ownerOutboxChanged"});
+    messages.length = 0;
+    for (const listener of changes) listener();
+    for (const listener of settlements) listener();
+    await expect.poll(() => events().map(event => event.name)).toEqual([
+      "liveApplication.ownerOutboxChanged", "liveApplication.settlementWanted",
+    ]);
+    expect(events().map(event => event.payload)).toEqual([{registrationId: 9, binding}, {registrationId: 9, binding}]);
+    send({type: "request", id: 2, method: "liveApplication.settle", workspace: "handle", params: {registrationId: 9, terminalReceipt: null}});
+    await expect.poll(() => messages.find(message => message.id === 2)).toMatchObject({type: "response", result: {status: "pending", reason}});
+    expect(native.mock.calls.find(([request]) => request.method === "liveApplication.settle")?.[0].params)
+      .toEqual({registrationId: 9, terminalReceipt: null, ownerSessionId: "owner-session"});
+    expect(stop).not.toHaveBeenCalled();
+    // A later request uses the same connection and registration.
+    send({type: "request", id: 3, method: "liveApplication.register", workspace: "handle", params: {binding}});
+    await expect.poll(() => messages.find(message => message.id === 3)).toMatchObject({type: "response", result: {registrationId: 9}});
+    expect(native.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
+    expect(stop).not.toHaveBeenCalled();
+  } finally { await transport.close(); }
+  expect(changes.size).toBe(0);
+  expect(settlements.size).toBe(0);
+});
 
 it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])("releases cancelled %s capacity while its response is still backpressured",async method => {
   const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
