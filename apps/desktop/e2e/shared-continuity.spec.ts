@@ -54,7 +54,10 @@ const HA = "Agent edited while hosted.";
 const AGENT = "trip-agent";
 const HOSTED_AGENT = "trip-agent-hosted";
 const NEXT_AGENT = "trip-agent-after-restore";
-const PENDING_EDIT_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+// The document is shared, so the pending warning goes on to say someone may change the same blocks.
+const PENDING_EDIT_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit. " +
+  "The edit is saved. Someone may be changing this document at the same moment, and a change they make to the " +
+  "same blocks before your edit reaches them can still remove its text. Read the document to check it is there.";
 
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
