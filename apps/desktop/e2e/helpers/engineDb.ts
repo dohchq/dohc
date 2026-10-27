@@ -452,6 +452,15 @@ export function appliedServiceHostSeqs(rootPath: string, workspaceId: string): R
     .map((row) => [String(row.origin_id), Number(row.acked_seq)]))) ?? {};
 }
 
+// Each update the engine refused for the workspace's Notices, with its own reason.
+// A Notices row shows only one reason for all the refusals it folds together.
+export function noticedRefusals(rootPath: string, workspaceId: string): { originId: string; originSeq: number; reason: string }[] {
+  return withEngineDb(rootPath, (db) => db
+    .prepare("SELECT origin_id, origin_seq, reason_message FROM replication_pending_refusals WHERE workspace_id=? AND COALESCE(report_id,'') != 'direct-rpc'")
+    .all(workspaceId)
+    .map((row) => ({ originId: String(row.origin_id), originSeq: Number(row.origin_seq), reason: String(row.reason_message) }))) ?? [];
+}
+
 export function replicationOpKindCount(rootPath: string, opKind: string): number {
   return (
     withEngineDb(rootPath, (db) => {

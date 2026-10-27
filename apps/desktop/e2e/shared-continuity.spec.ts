@@ -11,7 +11,7 @@ import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeCon
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { readHistoryMoments } from "./helpers/history";
-import { appliedServiceHostSeqs, liveDocumentFold, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
+import { appliedServiceHostSeqs, liveDocumentFold, noticedRefusals, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
@@ -1165,8 +1165,10 @@ test("@self-host-activation-typing typing continues through self-host activation
     }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
     // #2789: the owner refuses some of the service host's activation updates
     // with this reason. Every other refusal still fails the test.
-    expect((await ownerNotices()).filter(notice => notice.kind === "sync-refusal" &&
-      notice.detail?.split("\n")[0] !== "ordinary update has no native live admission")).toEqual([]);
+    const refused = noticedRefusals(ownerTemp.rootPath, workspaceId);
+    expect(refused.filter(row => row.reason !== "ordinary update has no native live admission")).toEqual([]);
+    expect((await ownerNotices()).filter(notice => notice.kind === "sync-refusal" && !notice.refusalCoordinates?.every(coordinate =>
+      refused.some(row => row.originId === coordinate.originId && row.originSeq === coordinate.originSeq)))).toEqual([]);
     expect(refusedSettlementChecks(stack.relayOutput())).toEqual([]);
     await attachScreen(testInfo, recipient.page, "both people's typing reached the shared note");
   } catch (error) {
