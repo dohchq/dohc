@@ -47,7 +47,6 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
 }
 
 async fn seed_parked_update_kind(scratch: &ScratchDir, markdown: bool) -> DocKey {
-    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
     let source = if markdown { "Imported source\n" } else { "before" };
     let db = engine_db_path(scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -119,11 +118,6 @@ async fn seed_parked_update_kind(scratch: &ScratchDir, markdown: bool) -> DocKey
     .expect("apply verified base");
 
     let update_bytes = if markdown {
-        let wire = yrs::Doc::new();
-        wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
-        wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(),
-            "dohcMarkdownSource", "A source that does not match its recorded digest");
-        doc.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
         doc.richdoc_append_paragraph("Accepted parked Markdown edit");
         doc.encode_full_state()
     } else {
@@ -182,6 +176,8 @@ async fn markdown_hold_open_resync_and_close_keep_the_file_and_consume_only_park
         };
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 200).unwrap().actor;
+        actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+            Arc::new(dohc_engine_reader::Reader::new(Some(markdown_witness_reader(&scratch))))))).await.unwrap();
         let update = match operation {
             "open" => actor.ydoc_open_state(WS.into(), 201, true, Some(key.clone()), "main".into(),
                 PATH.into(), Some(ContentKind::Richdoc), CancellationToken::new()).await.unwrap().initial_update,
@@ -220,6 +216,26 @@ async fn markdown_hold_open_resync_and_close_keep_the_file_and_consume_only_park
         }
         supervisor.close(&db).unwrap();
     }
+}
+
+fn markdown_witness_reader(root: &ScratchDir) -> dohc_engine_reader::Config {
+    use dohc_engine_storage::hex_sha256;
+    let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+    let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+    assert!(output.status.success());
+    let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let node = std::path::PathBuf::from(runtime.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
+    runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
+    let mut manifest = serde_json::json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
+    let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
+        .replace("MANIFEST", &manifest.to_string()).replace("MODE", "\"witness-unsafe\"");
+    let bundle = root.path().join("reader.cjs");
+    std::fs::write(&bundle, &script).unwrap();
+    manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
+    manifest["sources"] = serde_json::json!([]);
+    let manifest_path = root.path().join("reader-manifest.json");
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    dohc_engine_reader::Config { node, bundle, manifest: manifest_path }
 }
 
 /// #1009 (open window): the post-lease open runs its conflict freeze before
