@@ -603,7 +603,7 @@ impl ActorHandle {
                         token.clone(),
                     );
                     let outcome = self
-                        .run(move |store, cache| {
+                        .run_with_reader_retry(move |store, cache| {
                             let usable = super::super::link_documents::baseline(
                                 store,
                                 cache,

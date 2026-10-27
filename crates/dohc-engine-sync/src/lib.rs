@@ -139,6 +139,7 @@ pub use ydoc_apply::{
     fold_resolution_into_ydoc_in_tx, live_session_has_drainable_deferred_ydoc,
     open_sync_conflict_for_object, prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx,
     project_ydoc_with_store, reconcile_imported_resulting_head_in_tx, reconcile_local_head_in_tx,
+    retry_markdown_projection_in_tx,
     reconcile_local_resulting_head_in_tx, reconcile_prepared_local_head_in_tx,
     retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
