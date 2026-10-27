@@ -651,3 +651,35 @@ async fn markdown_hold_absent_head_without_reader_source_still_reaches_the_sessi
     }).await.unwrap();
     f.supervisor.close(&f.db).unwrap();
 }
+
+#[tokio::test]
+async fn markdown_hold_witness_verdict_reuses_source_identity_across_edits_but_rechecks_a_new_import() {
+    let f = Fixture::new().await;
+    let reader = Arc::new(Reader::new(Some(super::super::reader_tests::fake_reader(&f.scratch, "witness-unsafe"))));
+    f.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(reader.clone()))).await.unwrap();
+    for index in 0..2 {
+        assert!(matches!(f.settle(false, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+        assert_eq!(reader.dispatch_count(), 1);
+        let key = f.key.clone();
+        f.actor.run(move |store, _| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            let update = doc.richdoc_append_paragraph(&format!("Later accepted edit {index}"));
+            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 21))?;
+            Ok(())
+        }).await.unwrap();
+    }
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        let update = doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "A different import\n")?;
+        store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 22))?;
+        Ok(())
+    }).await.unwrap();
+    let key = f.key.clone();
+    assert!(!f.actor.run_with_reader_retry(move |store, cache| {
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        Ok(markdown_write_safety::check_witness(&doc, &key, "note.md", cache.reader_resolver.as_deref())?)
+    }).await.unwrap());
+    assert_eq!(reader.dispatch_count(), 2);
+    f.supervisor.close(&f.db).unwrap();
+}

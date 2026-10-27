@@ -1,5 +1,5 @@
 import {beforeEach, expect, it, vi} from "vitest";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
@@ -185,6 +185,23 @@ it("propagates a failed settlement and keeps the owner entry", async () => {
   expect(offered(f)).toEqual([declared(1),declared(2)]);
   expect(f.outboxAcks).toEqual([]);
   expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("resumes a held file settlement without reconnecting or accepting the deliveries again", async () => {
+  const f = fixture({prefix: 1, owners: 2});
+  const settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(f.store.acknowledgeOwnerDeliveryApplication.mock.calls.map(([, ack]) => ack.journalCursor)).toEqual([1, 2, 3]);
+  f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
+    {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
+  expect(await f.consumer.settle(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 3, materialized: true});
+  expect(settled).toEqual([receipt(3)]);
+  expect(offered(f)).toEqual([declared(1), declared(2), declared(3)]);
+  expect(f.store.acknowledgeOwnerDeliveryApplication).toHaveBeenCalledTimes(3);
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
 });
 
 it("leaves an earlier unresolved file write to backoff without settling", async () => {

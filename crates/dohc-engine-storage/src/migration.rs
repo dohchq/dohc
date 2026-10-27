@@ -8143,6 +8143,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn markdown_write_obligations_upgrade_keeps_retry_and_refresh_debt_separate_from_dismissal() {
+        let dir = tempdir();
+        let path = dir.join("markdown-obligations.db");
+        let ctx = MigrationContext::current(1);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-markdown-write-obligations");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES('w','main');
+            INSERT INTO versions(workspace_id,version_id,name,kind,created_at_ms) VALUES('w','main','Main','main',1);")
+            .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO markdown_write_obligations
+            (workspace_id,version_id,object_id,lineage_claim_id,operation_id,kind,path,retry_inputs_json,
+             held_checkpoint_sha256,held_head_sha256,created_at_ms,updated_at_ms)
+            VALUES('w','main','note','claim','audited','audited-settle','note.md',
+             '{\"terminalCursor\":7,\"headUpdateSeq\":12}', 'checkpoint',NULL,2,2);
+            INSERT INTO markdown_write_obligation_notice_dismissals
+             SELECT obligation_order,'checkpoint',NULL FROM markdown_write_obligations;
+            INSERT INTO markdown_write_obligations
+            (workspace_id,version_id,object_id,lineage_claim_id,operation_id,kind,path,retry_inputs_json,
+             source_sha256,settled_head_sha256,created_at_ms,updated_at_ms)
+            VALUES('w','main','note','claim','session','witness-refresh','note.md','{}','source','converted',3,3);")
+            .unwrap();
+        drop(conn);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 });
+        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations WHERE completed=0", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(conn.query_row("SELECT json_extract(retry_inputs_json,'$.headUpdateSeq')
+            FROM markdown_write_obligations WHERE kind='audited-settle'", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 12);
+        assert_eq!(conn.query_row("SELECT source_sha256,settled_head_sha256
+            FROM markdown_write_obligations WHERE kind='witness-refresh'", [],
+            |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?))).unwrap(),
+            ("source".to_owned(),"converted".to_owned()));
+        conn.execute("DELETE FROM markdown_write_obligation_notice_dismissals", []).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations WHERE completed=0", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 2);
+        conn.execute("DELETE FROM versions WHERE workspace_id='w' AND version_id='main'", []).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
     fn tempdir() -> dohc_test_scratch::ScratchDir {
         dohc_test_scratch::ScratchDir::new_named("r04-mig").expect("mkdir")
     }
