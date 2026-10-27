@@ -103,7 +103,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
