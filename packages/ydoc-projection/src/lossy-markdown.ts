@@ -112,6 +112,11 @@ export function witnessKeepsMeaning(doc: Y.Doc): boolean {
   const sourceSha = meta.get('dohcMarkdownSourceSha256')
   const projectionSha = meta.get('dohcMarkdownSourceProjectionSha256')
   if (source === undefined && sourceSha === undefined && projectionSha === undefined) return true
+  return checkMarkdownWitness(source, sourceSha, projectionSha)
+}
+
+/** Check the saved source, independently of the document's later edits. */
+export function checkMarkdownWitness(source: unknown, sourceSha: unknown, projectionSha: unknown): boolean {
   if (typeof source !== 'string' || sourceSha !== sha256(source) || typeof projectionSha !== 'string') return false
   let canonical: string
   try {
