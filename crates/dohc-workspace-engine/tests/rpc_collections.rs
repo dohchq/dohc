@@ -3322,7 +3322,10 @@ struct ParkedRecordUpdate {
 
 const PARKED_REMOTE_ORIGIN: &str = "remote-parked-editor";
 
-async fn park_remote_status_update() -> ParkedRecordUpdate {
+async fn park_remote_status_update(
+    service: Option<Arc<EngineService>>,
+    base_relay_seq: i64,
+) -> ParkedRecordUpdate {
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -3367,7 +3370,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     drop(connection);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let service = Arc::new(EngineService::new());
+    let service = service.unwrap_or_else(|| Arc::new(EngineService::new()));
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = call_with_busy_retry(
         &transport,
@@ -3442,7 +3445,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
             &key,
             ContentKind::Richdoc,
             &base,
-            &BaseRelayCoordinate::new(base_origin, base_seq, 10).expect("base coordinate"),
+            &BaseRelayCoordinate::new(base_origin, base_seq, base_relay_seq)
+                .expect("base coordinate"),
             &NoFaults,
             10,
         ),
@@ -3625,7 +3629,7 @@ fn assert_no_automation_claims(scratch: &ScratchDir) {
 /// `workspace.close`, which skips the per-session drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_open_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     call(
         &parked.transport,
         &parked.handle,
@@ -3678,7 +3682,7 @@ async fn a_parked_update_drained_on_open_fires_record_events() {
 /// its record events on the daemon event channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_close_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let mut events = parked.service.events().subscribe();
     call(
         &parked.transport,
@@ -3706,7 +3710,7 @@ async fn a_parked_update_drained_on_close_fires_record_events() {
 /// record events, whose queue rows the drain already consumed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let mut events = parked.service.events().subscribe();
     let refused = parked
         .transport
@@ -3759,7 +3763,7 @@ fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let db = engine_db_path(&parked.scratch).expect("engine db");
     let mut events = parked.service.events().subscribe();
     let connection = rusqlite::Connection::open(&db).expect("fixture connection");
@@ -3870,7 +3874,7 @@ async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let db = engine_db_path(&parked.scratch).expect("engine db");
     // Retain a real blob response that owns the whole shared egress budget.
     let bytes = vec![7; dohc_engine_storage::MAX_BLOB_BYTES];
@@ -3963,13 +3967,127 @@ async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() 
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
+    let parked = park_remote_status_update(None, 20).await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    let object_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("record object");
+    // The foreign base matches the prefix's result. Its next update changes
+    // the field, so close has a record fact to emit after replacing the base.
+    let foreign = Ydoc::wire();
+    foreign
+        .rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {RECORD_ID}\nstatus: remote\n---\n\nAlpha\n"),
+        )
+        .expect("foreign base");
+    let base = store
+        .put_binary_blob(&foreign.encode_full_state())
+        .expect("foreign base blob");
+    let delta = foreign.frontmatter_set("status", "foreign").unwrap();
+    let delta_sha = store.put_binary_blob(&delta).expect("foreign delta blob");
+    for (seq, sha) in [(0, &base), (1, &delta_sha)] {
+        let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WORKSPACE_ID.to_owned(),
+            origin_id: "foreign-record-editor".to_owned(),
+            origin_seq: seq,
+            relay_seq: Some(11 + seq),
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main", "objectId": object_id, "path": "tasks/alpha.md",
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": base, "isBaseState": seq == 0,
+                "actorOriginId": "foreign-record-editor"
+            }),
+            recorded_at_ms: 300 + seq,
+        };
+        let applied = apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park foreign row behind the prefix");
+        assert!(matches!(
+            applied.primary,
+            ApplyDisposition::Applied(result) if result.deferred
+        ));
+    }
+    drop(store);
+    assert_eq!(deferred_update_rows(&parked.scratch), 3);
+    let mut events = parked.service.events().subscribe();
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let prefix = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&prefix);
+    assert_eq!(deferred_update_rows(&parked.scratch), 2);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    call(
+        &parked.transport,
+        &parked.handle,
+        301,
+        "ydoc.close",
+        json!({ "sessionId": parked.live_session_id, "settle": false }),
+    )
+    .await;
+    let foreign = wait_for_record_events(&mut events).await;
+    assert_eq!(foreign.len(), 2, "{foreign:?}");
+    assert_eq!(foreign[0].name, RECORD_FIELD_CHANGED_EVENT);
+    assert_eq!(foreign[1].name, RECORD_UPDATED_EVENT);
+    for notice in &foreign {
+        assert_eq!(notice.payload["recordId"], json!(RECORD_ID));
+        assert_eq!(
+            notice.payload["source"],
+            json!({ "originId": "foreign-record-editor", "originSeq": 1 })
+        );
+    }
+    assert_eq!(foreign[0].payload["field"], json!("status"));
+    assert_eq!(foreign[0].payload["previous"], json!("remote"));
+    assert_eq!(foreign[0].payload["next"], json!("foreign"));
+    assert_eq!(deferred_update_rows(&parked.scratch), 0);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
 /// and settle must leave a parked synced update queued. The next `ydoc.open`
 /// drains it and fires the events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     call(
         &parked.transport,
         &parked.handle,
