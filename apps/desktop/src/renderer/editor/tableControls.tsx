@@ -167,17 +167,17 @@ function createTableControlsRuntime(): TableControlsRuntime {
   };
 }
 
+// Tiptap's table view puts back each column that has a saved width, but a
+// column without one keeps the width the resize preview gave it.
 function clearColumnResizePreview(view: EditorView): void {
   view.state.doc.descendants((node, pos) => {
-    if (node.type.spec.tableRole !== "table") return true;
+    if (node.type.spec.tableRole !== "table") return !node.isTextblock;
     const dom = view.nodeDOM(pos) as HTMLElement | null;
     const columns = dom?.querySelectorAll<HTMLTableColElement>("colgroup > col");
     let column = 0;
     node.firstChild?.forEach((cell) => {
       for (let index = 0; index < cell.attrs.colspan; index++, column++) {
-        const col = columns?.[column];
-        const width = cell.attrs.colwidth?.[index];
-        if (col) col.style.width = width ? `${width}px` : "";
+        if (!cell.attrs.colwidth?.[index]) columns?.[column]?.style.removeProperty("width");
       }
     });
     return false;
@@ -1311,7 +1311,7 @@ function configureGripDrag(
       dragging: false,
       preview: null,
     };
-    runtime.cancelPointer = () => cancelPointerDrag();
+    runtime.cancelPointer = () => cancelPointerDrag("Table reorder cancelled.");
     try {
       button.setPointerCapture?.(event.pointerId);
     } catch {
@@ -2016,13 +2016,9 @@ export function makeTableControlsPlugin(
             docChanged && resize?.activeHandle === -1 &&
             columnResizingPluginKey.getState(prevState)?.dragging
           ) {
-            // Tiptap's table view restores the table size but leaves preview col widths.
             clearColumnResizePreview(view);
           }
-          if (docChanged && runtime.cancelPointer) {
-            if (runtime.activeDrag) announceTableDrag(view, "Table reorder cancelled.");
-            runtime.cancelPointer();
-          }
+          if (docChanged) runtime.cancelPointer?.();
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;
