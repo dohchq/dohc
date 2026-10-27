@@ -58,3 +58,44 @@ it("keeps a current connection when the requested editor is unavailable", async 
   try {const options = await connected.promise;await expect(options.existingOwner!.ownerFor({} as never)).rejects.toThrow("Existing owner is unavailable");expect(stop).not.toHaveBeenCalled();}
   finally {host.stop();await closed.promise;}
 });
+
+it("forwards edit and settlement hooks from the same owner session without reconnecting", async () => {
+  type Options = Parameters<typeof startDesktopOwnerHost>[0];
+  const connected = Promise.withResolvers<Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]>();
+  const closed = Promise.withResolvers<void>(), stop = vi.fn(() => closed.resolve());
+  transport.connect.mockImplementation(options => { connected.resolve(options); return {stop, closed: closed.promise}; });
+  const changes = new Set<() => void>(), settlements = new Set<() => void>();
+  const owner = {nativeSessionId: "opened-from-notice", assertCurrent: vi.fn(),
+    onDurableLocalChange(listener: () => void) { changes.add(listener); return () => changes.delete(listener); },
+    onSettlementWanted(listener: () => void) { settlements.add(listener); return () => settlements.delete(listener); },
+    prepareHandoff: vi.fn(async () => undefined), finishHandoff: vi.fn(async () => undefined), remoteApplied: vi.fn(async () => undefined)};
+  const ownerFor = vi.fn(async () => owner), onError = vi.fn();
+  const host = startDesktopOwnerHost({
+    config: {url: "wss://owner.test", credential: {}, control: {}, transport: {}, reconnectDelayMs: 10} as Options["config"],
+    bindings: async () => ({client: {} as Awaited<ReturnType<Options["bindings"]>>["client"],
+      workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], assertCurrent() {}}), ownerFor, onError,
+  });
+  let disposeChange = () => {}, disposeSettlement = () => {};
+  try {
+    const options = await connected.promise;
+    const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "note", lineageClaimId: "a".repeat(64),
+      currentPath: "note.md", selectorPaths: ["note.md"], restoreFenceGeneration: 1};
+    const captured = await options.existingOwner!.ownerFor(binding);
+    const changed = vi.fn(), settlementWanted = vi.fn();
+    disposeChange = captured.onDurableLocalChange(changed);
+    disposeSettlement = captured.onSettlementWanted(settlementWanted);
+    for (const notify of changes) notify();
+    for (const notify of settlements) notify();
+    expect(changed).toHaveBeenCalledOnce();
+    expect(settlementWanted).toHaveBeenCalledOnce();
+    expect(captured.nativeSessionId).toBe("opened-from-notice");
+    expect(ownerFor).toHaveBeenCalledExactlyOnceWith(binding);
+    expect(transport.connect).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  } finally {
+    disposeChange(); disposeSettlement(); host.stop(); await closed.promise;
+  }
+  expect(changes.size).toBe(0);
+  expect(settlements.size).toBe(0);
+});
