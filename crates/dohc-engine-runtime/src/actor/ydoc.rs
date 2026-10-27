@@ -3059,6 +3059,8 @@ pub(super) fn ydoc_settle_on_store(
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
+        markdown_write_safety,
+        witness_source_sha256,
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| -> Result<_, RuntimeError> {
@@ -3334,6 +3336,8 @@ pub(super) fn ydoc_settle_on_store(
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
+        markdown_write_safety,
+        witness_source_sha256,
     };
     let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
         .then(|| projection.content.clone());

@@ -9,6 +9,12 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
     #[error("dohc is checking this file. Try again.")]
+    MarkdownWitnessCheckPending {
+        key: crate::DocKey,
+        path: String,
+        pending: std::sync::Arc<crate::markdown_write_safety::PendingWitnessCheck>,
+    },
+    #[error("dohc is checking this file. Try again.")]
     MarkdownReaderPending(std::sync::Arc<crate::reader_resolver::PendingProof>),
     #[error("dohc could not verify this file. Try again.")]
     MarkdownReaderUnavailable,
@@ -228,6 +234,7 @@ impl CollabError {
     /// A stable machine-readable code.
     pub fn code(&self) -> &'static str {
         match self {
+            CollabError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             CollabError::MarkdownReaderPending(_) => "markdown-reader-pending",
             CollabError::MarkdownReaderUnavailable => "markdown-reader-unavailable",
             CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",

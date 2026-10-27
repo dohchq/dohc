@@ -3409,6 +3409,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               PRIMARY KEY (outbox_id, refusal_key)) STRICT;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 71,
+        id: "v2-markdown-write-obligations",
+        sql: include_str!("markdown_write_obligations.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4567,6 +4573,10 @@ mod tests {
             (
                 "v2-owner-outbox-retry",
                 "2ac9352889cc37f605b39b3e39fff5fe5611721fd7cdf369c4187a5d72e3aaeb",
+            ),
+            (
+                "v2-markdown-write-obligations",
+                "ba2d128e41440f920162dc065479cdfda771b6a14ed1f91dd4c0be49c798f232",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

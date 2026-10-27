@@ -595,7 +595,8 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
-        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
+        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable
+        | CollabError::MarkdownWitnessCheckPending { .. } => {
             ErrorCode::Internal
         }
         CollabError::ConfiguredByteBudgetExceeded
@@ -642,6 +643,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
         SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
+        SyncError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged

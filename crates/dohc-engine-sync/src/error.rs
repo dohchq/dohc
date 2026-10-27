@@ -24,6 +24,12 @@ impl std::fmt::Display for ObservedBytes {
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("dohc is checking this file. Try again.")]
+    MarkdownWitnessCheckPending {
+        key: dohc_engine_collab::DocKey,
+        path: String,
+        pending: std::sync::Arc<dohc_engine_collab::markdown_write_safety::PendingWitnessCheck>,
+    },
+    #[error("dohc is checking this file. Try again.")]
     MarkdownReaderPending(std::sync::Arc<dohc_engine_collab::reader_resolver::PendingProof>),
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
@@ -157,6 +163,7 @@ impl SyncError {
             // still coming.
             SyncError::Storage(_)
             | SyncError::MarkdownReaderPending(_)
+            | SyncError::MarkdownWitnessCheckPending { .. }
             | SyncError::SequenceGap
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
@@ -169,6 +176,7 @@ impl SyncError {
     pub const fn code(&self) -> &'static str {
         match self {
             SyncError::MarkdownReaderPending(_) => "retryable-state",
+            SyncError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",

@@ -626,7 +626,14 @@ fn wait_for_reader<R>(
             dohc_engine_collab::live_update_application::ApplicationError::Collab(
                 dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
             ),
-        )) => Some(pending.clone()),
+        )) => Some(dohc_engine_collab::markdown_write_safety::PendingPreparation::Reader(pending.clone())),
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending { pending, .. }))
+        | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { pending, .. }))
+        | Err(RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Collab(
+                dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { pending, .. },
+            ),
+        )) => Some(dohc_engine_collab::markdown_write_safety::PendingPreparation::Witness(pending.clone())),
         _ => None,
     };
     async move {

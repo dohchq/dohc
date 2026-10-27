@@ -3892,6 +3892,8 @@ fn project_ydoc_inner(
             };
             if let Some(source) = source {
                 projection.content = source;
+                projection.markdown_write_safety =
+                    dohc_engine_collab::ydoc::MarkdownWriteSafety::SourcePreserving;
             }
         }
         return Ok(projection);
@@ -3954,6 +3956,8 @@ pub(crate) fn project_scene_with_store(
         content_kind: dohc_engine_collab::ContentKind::Scene,
         source_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
         destructive: false,
+        markdown_write_safety: dohc_engine_collab::ydoc::MarkdownWriteSafety::NotMarkdown,
+        witness_source_sha256: None,
     })
 }
 
@@ -5810,6 +5814,8 @@ fn validate_retryable_ydoc_identity(
 pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
         CollabError::MarkdownReaderPending(pending) => SyncError::MarkdownReaderPending(pending),
+        CollabError::MarkdownWitnessCheckPending { key, path, pending } =>
+            SyncError::MarkdownWitnessCheckPending { key, path, pending },
         CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
             reason: "dohc could not verify this file. Try again.",
         },

@@ -38,6 +38,8 @@ pub mod replication;
 pub mod scene;
 mod scene_lifecycle;
 pub mod ydoc;
+pub mod markdown_write_safety;
+pub mod markdown_write_obligations;
 
 pub use doc_cache::{CacheStats, RemoteAppendProbe, WriterDocCache};
 pub use durable::{

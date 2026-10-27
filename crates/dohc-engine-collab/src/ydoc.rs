@@ -362,6 +362,14 @@ pub fn fresh_successor_base(
 /// a projector can mutate its source, so provenance records the state that
 /// produced the content and whether projection changed that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownWriteSafety {
+    NotMarkdown,
+    SourcePreserving,
+    SafeWitness,
+    UnsafeWitness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     /// The projected artifact content (well-formed UTF-8 by `String`).
     pub content: String,
@@ -376,6 +384,8 @@ pub struct Projection {
     /// (drops PM-invalid elements), which R11b's live adapter journals as an
     /// ordinary update. Recorded so a cross-engine settle can reconcile.
     pub destructive: bool,
+    pub markdown_write_safety: MarkdownWriteSafety,
+    pub witness_source_sha256: Option<String>,
 }
 
 /// Digests for exact Markdown source held in the Y.Doc's reserved engine
@@ -582,6 +592,14 @@ impl Ydoc {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let txn = self.doc.transact();
         meta.get(&txn, MARKDOWN_SOURCE_READER_META_KEY).is_some()
+    }
+
+    pub fn has_markdown_witness(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY]
+            .iter().any(|key| meta.get(&txn, *key).is_some())
     }
 
     /// Resolve exact Markdown only after its lightweight projection witness
@@ -977,6 +995,16 @@ impl Ydoc {
             content_kind,
             source_state_vector_sha256: crate::hex_sha256(&self.encode_state_vector()),
             destructive: false,
+            markdown_write_safety: if content_kind != ContentKind::Richdoc {
+                MarkdownWriteSafety::NotMarkdown
+            } else if self.has_markdown_witness() {
+                MarkdownWriteSafety::UnsafeWitness
+            } else {
+                MarkdownWriteSafety::SafeWitness
+            },
+            witness_source_sha256: self.markdown_source_reference()
+                .filter(|reference| self.markdown_source(reference).is_some())
+                .map(|reference| reference.source_sha256),
         })
     }
 
