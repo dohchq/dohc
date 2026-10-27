@@ -77,10 +77,10 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
   );
 }
 
-// Whether another row has this name, whatever its case.
+// Whether another row saves under this name, whatever its case.
 function nameTaken(index: number, key: string, entries: FrontmatterEntry[]): boolean {
   const name = key.trim().toLowerCase();
-  return name !== "" && entries.some((entry, i) => i !== index && editableKey(entry)?.toLowerCase() === name);
+  return name !== "" && entries.some((entry, i) => i !== index && propertyKey(entry)?.trim().toLowerCase() === name);
 }
 
 function shouldDeferKeyCommit(
@@ -126,12 +126,11 @@ function entryValue(entry: FrontmatterEntry): unknown {
   return entry.list ? listItems(entry.value) : entry.value;
 }
 
+// The key a row saves under. A name left as it was read keeps that exact key,
+// spaces included, and so does a name cleared or changed to a reserved one.
 function propertyKey(entry: FrontmatterEntry): string | null {
-  const key = editableKey(entry);
-  if (!key) {
-    return entry.sourceKey && !isReserved(entry.sourceKey) ? entry.sourceKey : null;
-  }
-  return key;
+  const key = entry.key === entry.sourceKey ? entry.key : (editableKey(entry) ?? entry.sourceKey);
+  return key && !isReserved(key) ? key : null;
 }
 
 function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> {
@@ -384,6 +383,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // Focus moves to the next pill, else the one before, else the +.
   function remove(index: number) {
     focusNext.current = index < entries.length - 1 ? index : index > 0 ? index - 1 : "add";
+    // A held name goes with its pill, or moves up with it.
+    if (heldName && heldName.index >= index) {
+      setHeldName(heldName.index === index ? null : { ...heldName, index: heldName.index - 1 });
+    }
     commit(entries.filter((_, i) => i !== index));
   }
 

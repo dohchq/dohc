@@ -522,6 +522,57 @@ describe("PropertiesPanel", () => {
     expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nOwner: Ada\nstatus: draft!\n---\n\nBody\n");
   });
 
+  it("keeps both of two names that differ only by spaces inside quotes", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={'---\nowner: Sam\n" owner ": Ada\nstatus: draft\n---\n\nBody\n'} />);
+
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe('---\nowner: Sam\n" owner ": Ada\nstatus: draft!\n---\n\nBody\n');
+  });
+
+  it("holds a name a property with a cleared name still saves under, so neither value is lost", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\na: one\nb: two\n---\n\nBody\n"} onChange={onChange} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.clear(screen.getByLabelText("Property 2 name"));
+    await user.type(screen.getByLabelText("Property 2 name"), "a");
+
+    const flag = screen.getByTestId("property-duplicate");
+    expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+    expect(onChange.mock.calls.filter(([written]) => !String(written).includes("a: one\nb: two\n"))).toEqual([]);
+  });
+
+  it("keeps a held name on its own pill when a pill before it is removed", async () => {
+    const user = userEvent.setup();
+    render(<PropertiesPanel body={"---\nowner: Sam\n---\n\nBody\n"} onChange={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "owner");
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByLabelText("Remove property 2"));
+
+    expect(screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value)).toEqual(["owner", "owner", ""]);
+    const flag = screen.getByTestId("property-duplicate");
+    expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+  });
+
+  it("drops a held name with its pill, so it doesn't move to the next new pill", async () => {
+    const user = userEvent.setup();
+    render(<PropertiesPanel body={"---\nowner: Sam\n---\n\nBody\n"} onChange={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 2 name"), "owner");
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByLabelText("Remove property 2"));
+
+    expect(screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value)).toEqual(["owner", ""]);
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+  });
+
   it.each([
     '{status: draft, score: .nan}',
     '&root {status: draft, score: .nan}',
@@ -1244,6 +1295,35 @@ describe("PropertiesPanel", () => {
       expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", phase: "draft" });
     } finally {
       replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("holds a live document's name that a property with a cleared name still saves under", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\na: one\nb: two\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "a");
+
+      expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ a: "one", b: "two" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps both of a live document's names that differ only by spaces inside quotes", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc('---\nowner: Sam\n" owner ": Ada\nstatus: draft\n---\n\nBody\n');
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.type(screen.getByLabelText("Property status value"), "!");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", " owner ": "Ada", status: "draft!" });
+    } finally {
       doc.destroy();
     }
   });
