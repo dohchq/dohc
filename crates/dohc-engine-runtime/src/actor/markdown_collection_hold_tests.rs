@@ -236,3 +236,177 @@ async fn markdown_hold_capture_preparation_hands_off_from_a_plain_thread_to_asyn
     assert_eq!(std::fs::read_to_string(root.join(PATH)).unwrap(), f.source);
     supervisor.close(&db).unwrap();
 }
+
+#[tokio::test]
+async fn markdown_hold_collection_driver_waits_for_witness_and_proof_before_one_write() {
+    let mut f = Fixture::new(false).await;
+    let expected_id: String = f.store.read_with(|conn| conn.query_row(
+        "SELECT record_id FROM collection_records WHERE file_path=?1", [PATH], |row| row.get(0))).unwrap();
+    f.store.write_with(&NoFaults, |tx| tx.execute(
+        "UPDATE collection_records SET adoption_state='pending' WHERE file_path=?1", [PATH])
+        .map_err(StorageError::persist_public)).unwrap();
+    let doc = f.doc();
+    let resolver = dohc_engine_collab::reader_resolver::ReaderResolver::new(
+        Arc::new(dohc_engine_reader::Reader::new(None)));
+    let proof = match f.store.read_with(|conn| dohc_engine_collab::reader_resolver::resolve(
+        conn, &f.key, &doc, &doc.project(ContentKind::Richdoc)?.content, Some(&resolver))) {
+        Err(CollabError::MarkdownReaderPending(proof)) => proof,
+        _ => panic!("expected a proof preparation request"),
+    };
+    let marker = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap();
+    let db = engine_db_path(&f.scratch).unwrap();
+    drop(f.store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 20).unwrap().actor;
+    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(
+        super::super::reader_tests::fake_reader(&f.scratch, "witness-safe"))));
+    actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(reader.clone())))
+        .await.unwrap();
+    actor.run(move |_, _| {
+        super::super::ydoc::MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |_| {
+            Err(CollabError::MarkdownReaderPending(proof).into())
+        })));
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(actor.ydoc_adopt_collection_record(f.key.clone(), PATH.into(), marker.lineage_claim_id.clone(),
+        f.scratch.path().to_owned(), LeaseRegistry::new(), Arc::new(()), None, 21,
+        CancellationToken::new(), None).await.unwrap().unwrap(), "settled");
+    assert_eq!(reader.dispatch_count(), 1);
+    let key = f.key.clone();
+    actor.run(move |store, _| {
+        assert_eq!(store.table_row_count("moments")?, 3);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+        assert!(store.read_with(|conn| obligations::pending_in(conn, "w"))?.is_empty());
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert_eq!(doc.frontmatter_json()["id"], expected_id);
+        assert_eq!(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq, marker.head_update_seq + 1);
+        Ok(())
+    }).await.unwrap();
+    let saved = std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap();
+    assert_eq!(saved.matches("Accepted text remains in the document").count(), 1);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_full_collection_reconciliation_keeps_adoption_pending_across_restart() {
+    let mut f = Fixture::new(false).await;
+    f.store.write_with(&NoFaults, |tx| tx.execute(
+        "UPDATE collection_records SET adoption_state='pending' WHERE file_path=?1", [PATH])
+        .map_err(StorageError::persist_public)).unwrap();
+    let db = engine_db_path(&f.scratch).unwrap();
+    drop(f.store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let mut actor = supervisor.open(&db, 20).unwrap().actor;
+    let root = f.scratch.path().to_owned();
+    let mut held_sequence = None;
+    for pass in 0..3 {
+        if pass == 2 {
+            supervisor.close(&db).unwrap();
+            actor = supervisor.open(&db, 22).unwrap().actor;
+        }
+        actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+            Arc::new(dohc_engine_reader::Reader::new(Some(super::super::reader_tests::fake_reader(
+                &f.scratch, "witness-unsafe"))))))).await.unwrap();
+        let result = actor.reconcile_collections("w".into(), "main".into(), root.clone(),
+            LeaseRegistry::new(), Arc::new(()), 23 + pass, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
+        assert!(result.changed_paths.is_empty());
+        assert_eq!(result.held_documents.len(), 1);
+        let key = f.key.clone();
+        let sequence = actor.run(move |store, _| {
+            assert_eq!(store.table_row_count("moments")?, 2);
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            let state: String = store.read_with(|conn| conn.query_row(
+                "SELECT adoption_state FROM collection_records WHERE file_path=?1", [PATH], |row| row.get(0))).unwrap();
+            assert_eq!(state, "pending");
+            let owed = store.read_with(|conn| obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, Kind::CollectionAdoption);
+            Ok(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq)
+        }).await.unwrap();
+        if let Some(before) = held_sequence { assert_eq!(sequence, before); }
+        held_sequence = Some(sequence);
+        assert_eq!(std::fs::read_to_string(root.join(PATH)).unwrap(), f.source);
+        assert_eq!(std::fs::metadata(root.join(PATH)).unwrap().modified().unwrap(), f.modified);
+    }
+    let key = f.key.clone();
+    actor.run(move |store, cache| {
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        dohc_engine_collab::record_local_update(store, cache, &key, &doc.clear_markdown_source_witness(),
+            dohc_engine_collab::LocalAppend::default(), &NoFaults, 30, |_, _, _| Ok(()))?;
+        Ok(())
+    }).await.unwrap();
+    for pass in 0..2 {
+        let result = actor.reconcile_collections("w".into(), "main".into(), root.clone(),
+            LeaseRegistry::new(), Arc::new(()), 31 + pass, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
+        assert!(result.held_documents.is_empty());
+        assert_eq!(result.changed_paths.len(), if pass == 0 { 1 } else { 0 });
+    }
+    actor.run(|store, _| {
+        assert_eq!(store.table_row_count("moments")?, 3);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+        assert!(store.read_with(|conn| obligations::pending_in(conn, "w"))?.is_empty());
+        Ok(())
+    }).await.unwrap();
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_relation_reconciliation_keeps_the_held_index_and_completes_a_safe_peer() {
+    let mut f = Fixture::new(true).await;
+    let peer_id = "rec_cccccccccccccccccccccccccc";
+    let peer_source = format!("---\nid: {peer_id}\nrelated: {TARGET}\n---\n\nSafe peer\n");
+    VersionedTextStore::new(&mut f.store).write_text(&WriteText {
+        workspace_id: "w".into(), version_id: "main".into(), object_id: "safe-peer".into(),
+        path: "tasks/b.md".into(), text: peer_source.clone(), moment_id: "safe-peer-source".into(),
+        metadata_origin: "test".into(), metadata_summary: None, metadata_correlation_id: None,
+        author_json: None, now_ms: 3, request_id: None,
+    }, &NoFaults).unwrap();
+    std::fs::write(f.scratch.path().join("tasks/b.md"), &peer_source).unwrap();
+    let peer_key = DocKey::new("w", "main", "safe-peer").unwrap();
+    let peer = Ydoc::wire();
+    peer.rewrite_content_to_markdown(ContentKind::Richdoc, &peer_source).unwrap();
+    peer.richdoc_append_paragraph("Safe accepted edit");
+    dohc_engine_collab::record_local_update(&mut f.store, &mut f.cache, &peer_key, &peer.encode_full_state(),
+        dohc_engine_collab::LocalAppend { marker: Some(dohc_engine_collab::MarkerCreation {
+            path: Some("tasks/b.md"), content_kind: ContentKind::Richdoc, regime: Regime::LocalOnly,
+        }), ..Default::default() }, &NoFaults, 4, |_, _, _| Ok(())).unwrap();
+    f.store.write_with(&NoFaults, |tx| {
+        reconcile_collections_in_tx(tx, "w", "main")?;
+        set_collection_adoption_state_in_tx(tx, "w", "main", "tasks/b.md", peer_id, "adopted")?;
+        Ok::<_, DomainError>(())
+    }).unwrap();
+    let mut held_sequence = None;
+    for pass in 0..2 {
+        let result = reconcile_collections_on_store(&mut f.store, &mut f.cache, "w", "main",
+            f.scratch.path(), None, &LeaseRegistry::new(), &(), 20 + pass, &NoFaults,
+            &CancellationToken::new(), None).unwrap();
+        assert_eq!(result.held_documents.len(), 1);
+        assert_eq!(result.changed_paths, if pass == 0 { vec!["tasks/b.md".to_owned()] } else { Vec::new() });
+        assert_eq!(std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap(), f.source);
+        assert_eq!(std::fs::metadata(f.scratch.path().join(PATH)).unwrap().modified().unwrap(), f.modified);
+        let indexed: i64 = f.store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM collection_record_fields WHERE record_id=?1 AND field_name='related'",
+            [RECORD], |row| row.get(0))).unwrap();
+        assert_eq!(indexed, 1);
+        let indexed_peer: i64 = f.store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM collection_record_fields WHERE record_id=?1 AND field_name='related'",
+            [peer_id], |row| row.get(0))).unwrap();
+        assert_eq!(indexed_peer, 0);
+        assert!(f.doc().frontmatter_json().get("related").is_none());
+        let sequence = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+        if let Some(before) = held_sequence { assert_eq!(sequence, before); }
+        held_sequence = Some(sequence);
+    }
+    let peer_saved = std::fs::read_to_string(f.scratch.path().join("tasks/b.md")).unwrap();
+    assert!(!peer_saved.contains("related:"));
+    assert!(peer_saved.contains("Safe accepted edit"));
+    let clear = f.doc().clear_markdown_source_witness();
+    f.append(&clear);
+    let result = reconcile_collections_on_store(&mut f.store, &mut f.cache, "w", "main",
+        f.scratch.path(), None, &LeaseRegistry::new(), &(), 25, &NoFaults,
+        &CancellationToken::new(), None).unwrap();
+    assert!(result.held_documents.is_empty());
+    assert_eq!(result.changed_paths, [PATH]);
+    assert!(f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap().is_empty());
+    assert!(!std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap().contains("related:"));
+}

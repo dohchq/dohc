@@ -3713,7 +3713,7 @@ mod markdown_refresh_tests;
 type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError>>;
 #[cfg(any(test, feature = "fault-injection"))]
 thread_local! {
-    static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
+    pub(super) static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
     static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&mut EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(any(test, feature = "fault-injection"))]
