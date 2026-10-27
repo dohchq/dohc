@@ -29,7 +29,6 @@ import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
-import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
@@ -1364,15 +1363,6 @@ function TableMenuSpecimen(props: { menuId: string }) {
   return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
 }
 
-// The section shows file text only. After `budget` is renamed `cost`, the
-// file holds the old name until the save lands.
-function AsWrittenSpecimen(props: { name: string }) {
-  return (
-    <div className="w-[420px] rounded-lg border border-line bg-bg">
-      <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
-    </div>
-  );
-}
 
 // A page's top matter on paper, at the editor's font size, as a document
 // pane holds it. The pane is the hover zone that shows a lone +.
@@ -1385,6 +1375,8 @@ function TopmatterSpecimen(props: { children: ReactNode }) {
 }
 
 const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+// An ID and a comment have no pill.
+const UNSHOWN = "---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n# Times are local (JST)\n---\n";
 const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
 
 // A reserved name shows only while a person types it, so the specimen types
@@ -2108,15 +2100,6 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
             <EditorGroupsSpecimen activeHasTabs={false} />
           </div>
-        </Specimen>
-      </Section>
-
-      <Section part="frontmatter-as-written" title="Frontmatter as written">
-        <Specimen label="rename saved">
-          <AsWrittenSpecimen name="cost" />
-        </Specimen>
-        <Specimen label="rename saving: the file keeps the old name">
-          <AsWrittenSpecimen name="budget" />
         </Specimen>
       </Section>
 
@@ -2877,6 +2860,40 @@ function Pane(props: { theme: "light" | "dark" }) {
               <PropertiesPanel body={"Q3 notes\n"} onChange={noop} />
             </TopmatterSpecimen>
           </div>
+        </Specimen>
+        <Specimen label="lines no pill shows: <> opens Source">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="<> hovered">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="properties-source"]`}>
+              <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="<> keyboard focus">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-visible" data-force-target={`[data-testid="properties-source"]`}>
+              <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="locked, with <>">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a note you can only view: no + or ×, and <>">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={UNSHOWN} onChange={noop} readOnly onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a note you can only view, every line a pill">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} readOnly onShowSource={noop} />
+          </TopmatterSpecimen>
         </Specimen>
       </Section>
 

@@ -365,11 +365,9 @@ describe("markdown document opening state", () => {
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
     );
 
-    // The properties draw where they will be, and the block as written starts
-    // closed, as it does once the properties take edits.
+    // The properties draw where they will be, so nothing moves once the
+    // document is ready.
     await screen.findByTestId("properties-panel");
-    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
-    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
     // The body draws with the editor's own rules (styles.css
     // .dohc-notion-editor): its column, type and block spacing. No block
     // carries a look of its own that would beat them.
@@ -383,7 +381,8 @@ describe("markdown document opening state", () => {
     );
     bind();
     await screen.findByTestId("markdown-source-toggle");
-    expect(asWritten()?.open).toBe(false);
+    // The page's icon shows every line, so the properties offer no Source.
+    expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {

@@ -374,13 +374,13 @@ test("renaming a property of a live document keeps its place and comments throug
   // One file with comments and quoting, and one in canonical form.
   const files = [
     {
-      path: "trip.md", to: "cost",
+      path: "trip.md", to: "cost", source: 1,
       written: '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
       renamed: '---\n# Monthly\ncost:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
     },
     {
-      // The properties show every line, so its section starts closed.
-      path: "plan.md", to: "yearly", collapsed: true,
+      // The pills show every line, so the properties offer no Source button.
+      path: "plan.md", to: "yearly", source: 0,
       written: "---\nbudget: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
       renamed: "---\nyearly: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
     },
@@ -390,15 +390,14 @@ test("renaming a property of a live document keeps its place and comments throug
   const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
   const names = (page: import("@playwright/test").Page) =>
     panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
-  const asWritten = (page: import("@playwright/test").Page) =>
-    page.locator('[data-testid="frontmatter-as-written"]:visible pre');
   try {
     await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
     desktop = await launchDesktopApp({workspace: temp});
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    for (const {path, to, renamed, collapsed} of files) {
+    for (const {path, to, renamed, source} of files) {
       await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
       await openEngineDoc(desktop.page, path);
+      await expect(panel(desktop.page).getByTestId("properties-source")).toHaveCount(source);
       const name = panel(desktop.page).getByLabel("Property 1 name");
       await expect(name).toHaveValue("budget");
       await name.fill("");
@@ -406,10 +405,6 @@ test("renaming a property of a live document keeps its place and comments throug
       await name.pressSequentially(to);
       await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
       expect(await names(desktop.page)).toEqual([to, "wifi"]);
-      // Once saved, the block shown as written is the file's. A closed section
-      // reads the file when a person opens it.
-      if (collapsed) await desktop.page.locator('[data-testid="frontmatter-as-written"]:visible summary').click();
-      await expect(asWritten(desktop.page)).toHaveText(renamed.slice(0, renamed.indexOf("---\n\n") + 3));
     }
     await quitDesktop(desktop);
 

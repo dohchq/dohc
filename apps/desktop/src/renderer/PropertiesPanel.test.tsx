@@ -1451,3 +1451,90 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); peer.destroy(); }
   });
 });
+
+describe("PropertiesPanel's Source button", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it.each([
+    ["names and values", "---\nstatus: Draft\nowner: Sam\n---\n"],
+    ["quoted values", "---\nstatus: \"Draft\"\nstart: '12:30'\n---\n"],
+    ["a title and an icon", "---\ntitle: Plan\nicon: 🎒\nowner: Sam\n---\n"],
+    ["an empty value", "---\nowner:\n---\n"],
+    ["a list as its items", "---\ntags:\n  - kyoto\n  - 'food'\n---\n"],
+    ["a list on one line", "---\ntags: [kyoto, food]\n---\n"],
+  ])("offers no Source button when the pills show every line: %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["a comment", "---\n# Times are local\nstatus: Draft\n---\n"],
+    ["a comment after a value", "---\nstatus: Draft # until Friday\n---\n"],
+    ["an ID", "---\nid: 01JD8K2V7QX4\nstatus: Draft\n---\n"],
+    ["named fields", "---\ntrip:\n  city: Kyoto\n---\n"],
+    ["a value over several lines", "---\nnote: |\n  one\n  two\n---\n"],
+    ["a comment between list items", "---\ntags:\n  - kyoto\n  # later\n  - food\n---\n"],
+    ["a list it can't edit", "---\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"],
+    ["a block that doesn't read", "---\n{owner: Sam, status: Draft}\n---\n"],
+  ])("opens Source from the properties when the block holds %s", async (_, body) => {
+    const user = userEvent.setup();
+    const onShowSource = vi.fn();
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={onShowSource} />);
+
+    const button = screen.getByTestId("properties-source");
+    expect(button.getAttribute("aria-label")).toBe("Show all properties in Source");
+    expect(button.getAttribute("title")).toBe("Show all properties in Source (Ctrl+/)");
+    await user.click(button);
+    expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a note you can only view as pills with no +, no × and no edits", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <PropertiesPanel
+        body={"---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n---\n\nBody\n"}
+        onChange={onChange}
+        readOnly
+        onShowSource={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryByTestId("property-remove")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+    await user.type(screen.getByLabelText("Property status value"), "x");
+    await user.type(screen.getByLabelText("Property 1 name"), "x");
+    await user.tab();
+    expect(propertyValue("status")).toBe("Draft");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing for a note you can only view with no properties", () => {
+    render(<PropertiesPanel body={"Body\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
+  });
+
+  it("offers Source, not an edit, for a block you can only view that doesn't read", () => {
+    render(<PropertiesPanel body={"---\n{owner: Sam}\n---\n\nBody\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-locked")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("follows a live document's kept text", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+      expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+      // The engine read the file again, and the comment is gone.
+      act(() => doc.getMap("meta").delete("dohcFrontmatterSource"));
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
+  });
+});
