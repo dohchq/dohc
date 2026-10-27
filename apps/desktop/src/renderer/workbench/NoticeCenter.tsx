@@ -22,7 +22,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
+import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 
 export type NoticeAction = {
   label: string;
@@ -428,10 +428,27 @@ function liveDeliveryCopy(
   }
   return {
     title: "Live editing retrying",
-    body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
+    body: "Your edits are saved on this device.",
     recovery: "retry",
     Icon: RefreshCw,
   };
+}
+
+// A retry dohc is still fixing by itself toasts and adds a row only once its
+// ring has shown in the title bar this long.
+const QUIET_RETRY_MS = 15_000;
+
+// Whether `key` has stayed the same, and not null, for `ms`. A key that
+// changes or clears starts the wait again.
+function useLasted(key: string | null, ms: number): boolean {
+  const [lasted, setLasted] = useState<string | null>(null);
+  if (lasted !== null && lasted !== key) setLasted(null);
+  useEffect(() => {
+    if (key === null || ms === 0) return;
+    const timer = setTimeout(() => setLasted(key), ms);
+    return () => clearTimeout(timer);
+  }, [key, ms]);
+  return key !== null && (ms === 0 || lasted === key);
 }
 
 // Owner live enrollment refusals: one workspace fact, however many shares it
@@ -716,6 +733,9 @@ export function NoticeCenter(props: {
   // activity bar.
   host?: NoticeHostPlacement;
   syncStatus: SyncStatusResult | null;
+  // Files in this workspace whose save failed. The title bar names them
+  // ahead of a disconnected server.
+  failedSaves?: number;
   agentActive: boolean;
   conflictSummaries: string[];
   onOpenHistory: () => void;
@@ -952,18 +972,29 @@ export function NoticeCenter(props: {
   // itself renders the same notice, and delivery that recovers to active (or
   // reports nothing at all) leaves no notice and no toast behind.
   // The workspace is part of the key: a dismissal answers one workspace's
-  // failure, so the same failure in another workspace is still news.
+  // failure, so the same failure in another workspace is still news. While
+  // the title bar names the server, the server's own toast and row report
+  // the outage, so live editing files nothing and its open toast closes.
+  // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
+  // shows; a named reason stays until someone acts, so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
-  const liveDeliveryKey =
+  const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
+  const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
+  const liveDeliveryKey = useLasted(
+    serverNamed ? null : liveRetryKey,
+    liveDeliveryReason ? 0 : QUIET_RETRY_MS,
+  )
+    ? liveRetryKey
+    : null;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);
   // Recovery forgets the dismissal, so the next failure is announced again
   // instead of staying silent behind an answer about an older one.
-  if (liveDeliveryKey === null && dismissedLiveDeliveryKey !== null) {
+  if (liveRetryKey === null && dismissedLiveDeliveryKey !== null) {
     setDismissedLiveDeliveryKey(null);
   }
   // Keyed, so an unchanged status keeps one copy object: the notice list and
@@ -973,7 +1004,7 @@ export function NoticeCenter(props: {
     [liveDeliveryKey, liveDeliveryReason],
   );
   // One report for the row and the toast, so a person who copies from either
-  // pastes the same facts — including when this state was first observed.
+  // pastes the same facts — including when the notice was raised.
   const liveDeliveryDetails = useMemo(
     () =>
       liveDelivery

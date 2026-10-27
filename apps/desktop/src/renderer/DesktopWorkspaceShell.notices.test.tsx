@@ -2742,26 +2742,34 @@ describe("owner live documents", () => {
     expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
   });
 
-  // The notice's Try again is main's own retry command, not a repaint.
+  // The notice's Try again is main's own retry command, not a repaint. A
+  // retry with no reason toasts once it has lasted 15 s.
   it("runs the live delivery retry command from the notice", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const retryingStatus: SyncStatusResult = {
-      ...SYNC_STATUS,
-      ownerLiveDelivery: "retrying",
-    };
-    bridge.openWorkspace = vi.fn(async () => retryingStatus);
-    bridge.getSyncStatus = vi.fn(async () => retryingStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeBridge(Promise.resolve(null));
+      const retryingStatus: SyncStatusResult = {
+        ...SYNC_STATUS,
+        ownerLiveDelivery: "retrying",
+      };
+      bridge.openWorkspace = vi.fn(async () => retryingStatus);
+      bridge.getSyncStatus = vi.fn(async () => retryingStatus);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
 
-    await user.click(
-      await screen.findByTestId("owner-live-delivery-toast-action"),
-    );
-    await waitFor(() =>
-      expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-      }),
-    );
+      await screen.findByTestId("owner-live-delivery-status");
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      await user.click(
+        await screen.findByTestId("owner-live-delivery-toast-action"),
+      );
+      await waitFor(() =>
+        expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
+          workspaceId: WORKSPACE.workspaceId,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // edges-05, share-09: a relay outage read "Saving…" for its whole length,

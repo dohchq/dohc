@@ -1212,6 +1212,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
 
 const unexplainedFor = (noun: AccessNoun) =>
   `Access information is unavailable for this ${noun}. This does not mean that no one has access.`;
+export const SIGNED_OUT_ACCESS = "Connect your server to check who has access.";
 const MISSING: Record<AccessNoun, string> = {
   file: "This file is no longer available at this path.",
   chat: "This chat is no longer in this workspace.",
@@ -1219,10 +1220,12 @@ const MISSING: Record<AccessNoun, string> = {
 
 // Why an answer covers nothing, in the words and the one action that can
 // change it. Only a cause dohc cannot name offers Try again. `testId` names
-// the surface; `unexplained` is what an answer dohc cannot explain means there.
+// the surface; `unexplained` is what an answer dohc cannot explain means
+// there, and `signedOut` what connecting would show there.
 export function AccessUnknown(props: {
   testId: string;
   unexplained: string;
+  signedOut: string;
   answer: AccessAnswer;
   setup: AccessSetup;
   onRetry: () => void;
@@ -1255,7 +1258,7 @@ export function AccessUnknown(props: {
       return (
         <AboutNote testId={`${testId}-unknown`} reason="signed-out" icon={LogIn}
           action={{ label: "Connect server", run: setup.connect }}>
-          Connect your server to check who has access.
+          {props.signedOut}
         </AboutNote>
       );
     // Settings' Sync and sharing says the same, and holds what resumes it.
@@ -1314,7 +1317,7 @@ export function AboutAccessView(props: {
           data-visibility={view.answer.visibility}
         >
           {empty === null ? (
-            <AccessUnknown testId="about-access" unexplained={unexplainedFor(noun)} noun={noun}
+            <AccessUnknown testId="about-access" unexplained={unexplainedFor(noun)} signedOut={SIGNED_OUT_ACCESS} noun={noun}
               answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>
