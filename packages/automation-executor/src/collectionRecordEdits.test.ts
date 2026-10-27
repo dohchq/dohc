@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { documentEditUpdate, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import {
@@ -354,9 +354,7 @@ it("refuses a field write when its safety read fails, though a session could ope
 it("refuses a field write when the session holds a lossy note the read did not see", async () => {
   const root = await createTestScratch("dohc-record-replaced-");
   await mkdir(join(root, "tasks"));
-  await writeFile(join(root, "tasks", "a.md"), "---\nstatus: open\n---\n\nPlain.\n");
-  // The file was replaced after the read: the session's document carries the
-  // replacement and its witness, as a seed of that file does.
+  // The file is absent, but the live session still carries the source witness.
   const replacement = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
   const lossy = markdownToYDoc(replacement);
   const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -375,6 +373,48 @@ it("refuses a field write when the session holds a lossy note the read did not s
   expect(log.order).not.toContain("settle");
   expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
   lossy.destroy();
+});
+
+it.each(["absent", "matching", "converted"] as const)("checks an edited witness against the %s head before an automation changes fields", async head => {
+  const root = await createTestScratch("dohc-record-witness-head-");
+  const source = "---\nstatus: open\n---\n\n<details>Hidden.</details>\n\nEditable.\n";
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  const witness = markdownToYDoc(source);
+  const meta = witness.getMap("meta");
+  meta.set("dohcMarkdownSource", source);
+  meta.set("dohcMarkdownSourceSha256", sha(source));
+  meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(witness)));
+  Y.applyUpdate(witness, documentEditUpdate(Y.encodeStateAsUpdate(witness), { replacement: "Unsettled tail." }, { keepBlocks: true })!);
+  await mkdir(join(root, "tasks"));
+  const file = join(root, "tasks", "a.md");
+  const fileText = head === "matching" ? source : "---\nstatus: open\n---\n\nConverted.\n";
+  if (head !== "absent") await writeFile(file, fileText);
+  const { session, log } = fakeSession();
+  Y.applyUpdate(log.doc, Y.encodeStateAsUpdate(witness));
+  const context = contextFor(root, session);
+  try {
+    const result = setCollectionRecordFields(context, {
+      recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
+    });
+    if (head === "converted") {
+      await expect(result).resolves.toMatchObject({replaced: {status: "open"}});
+      expect(log.journaled).toHaveLength(1);
+      expect(log.order).toEqual(["apply", "settle", "close"]);
+      expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
+    } else {
+      await expect(result).rejects.toThrow("parts it can't show");
+      expect(log.journaled).toEqual([]);
+      expect(log.order).not.toContain("settle");
+      expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+      expect(context.openedPaths).toEqual(head === "absent" ? ["tasks/a.md"] : []);
+    }
+    expect(yDocToMarkdown(log.doc)).toContain("Unsettled tail.");
+    if (head === "absent") await expect(readFile(file)).rejects.toMatchObject({code: "ENOENT"});
+    else expect(await readFile(file, "utf8")).toBe(fileText);
+  } finally {
+    witness.destroy();
+    log.doc.destroy();
+  }
 });
 
 /**
