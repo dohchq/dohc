@@ -194,10 +194,10 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
 // the name. A name a title can't hold is left out.
 function unattributedTitle(path: string | null | undefined): string {
   const lead = "Some author names did not sync";
-  if (!path) return lead;
+  const name = [...(path?.slice(path.lastIndexOf("/") + 1) ?? "")];
+  if (!name.length) return lead;
   // Room for the name between its two quotes.
   const room = NOTICE_TITLE_MAX_CHARS - lead.length - " for ".length - 2;
-  const name = [...path.slice(path.lastIndexOf("/") + 1)];
   const title = `${lead} for “${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
   return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }

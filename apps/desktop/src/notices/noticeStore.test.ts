@@ -1313,11 +1313,12 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   });
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [
     refusal("sync-refusal-long", 1, `notes/${long}`), refusal("sync-refusal-tab", 2, "notes/a\tb.md"), refusal("sync-refusal-short", 3, "notes/n.md"),
+    refusal("sync-refusal-folder", 4, "notes/"),
   ] }];
   const first = await computer(null, { refusalNotices });
   const titles = (await first.store.list()).notices.map(row => row.title);
-  expect(titles).toHaveLength(3);
-  expect(titles).toContain("Some author names did not sync");
+  expect(titles).toHaveLength(4);
+  expect(titles.filter(title => title === "Some author names did not sync")).toHaveLength(2);
   expect(titles).toContain("Some author names did not sync for “n.md”");
   const cut = titles.find(title => title.includes("…"))!;
   expect([...cut]).toHaveLength(120);
