@@ -224,7 +224,7 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
-  it("opens History for an entry without its author instead of retrying sync", () => {
+  it("opens History when author names did not sync, instead of retrying sync", () => {
     const retry = vi.fn();
     const openHistory = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
