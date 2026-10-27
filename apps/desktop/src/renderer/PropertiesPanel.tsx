@@ -21,6 +21,7 @@ import {
   listItems,
 } from "./markdown/frontmatter";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
+import { isComposingKey } from "./ui/keys";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
@@ -425,7 +426,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
                   onBlur={entry.list ? () => settleList(index) : undefined}
-                  onKeyDown={entry.list ? (event) => { if (event.key === "Enter") settleList(index); } : undefined}
+                  onKeyDown={entry.list ? (event) => { if (event.key === "Enter" && !isComposingKey(event)) settleList(index); } : undefined}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLayoutEffect, useState } from "react";
@@ -919,6 +919,21 @@ describe("PropertiesPanel", () => {
       "---\ntags:\n  - '2026'\n  - yes\n  - 'null'\n  - '~'\n  - '1.0'\n  - ramen\n---\n\nBody\n",
     );
     expect(parseFrontmatter(written).meta.tags).toEqual(["2026", "yes", "null", "~", "1.0", "ramen"]);
+  });
+
+  it("leaves a list unsaved while Enter only confirms an IME composition", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.type(input, ", きょうと");
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags:\n  - kyoto\n  - きょうと\n---\n\nBody\n");
   });
 
   it("writes nothing when a list edit leaves the same items, so the list stays as written", async () => {
