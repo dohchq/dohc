@@ -1071,6 +1071,7 @@ mod ydoc_drain;
 mod ydoc_live_echo;
 mod ydoc_projection_authors;
 mod ydoc_restore;
+mod markdown_write_hold;
 
 #[test]
 fn publication_budget_splits_batches_and_keeps_non_settlement_errors_retryable() {

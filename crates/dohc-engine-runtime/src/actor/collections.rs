@@ -1916,6 +1916,10 @@ enum CollectionRelationCleanupExecution {
     LeaseHeld,
 }
 
+#[cfg(test)]
+#[path = "markdown_collection_hold_tests.rs"]
+mod markdown_collection_hold_tests;
+
 #[allow(clippy::too_many_arguments)]
 fn cleanup_collection_relation_on_store(
     store: &mut EngineStore,
