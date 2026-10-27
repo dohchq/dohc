@@ -1,10 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="dohc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="48 48 928 928" role="img" aria-label="dohc">
   <title>dohc — Windows and Linux app icon</title>
-  <!-- The macOS icon's paper tile, filling more of the canvas as Windows and
-       Linux icons do. The tile keeps the graphite mark legible on light and
-       dark taskbars alike. scripts/render-icon.mjs renders it to icon.png
-       and icon.ico; icon.ico's sizes of 48px and under use the heavier
-       small-size mark and drop the grid. -->
+  <!-- The macOS icon's paper tile, filling the whole canvas as Windows app
+       icons do, with tighter corners than the Mac tile. A one-pixel edge
+       keeps the tile apart from light taskbars, and the graphite mark reads on
+       dark ones. scripts/render-icon.mjs renders it to icon.png and icon.ico;
+       icon.ico's sizes of 48px and under use the heavier small-size mark and
+       drop the grid. -->
   <style>
     .mark { stroke-width: 11; }
     .dot { r: 12; }
@@ -14,19 +15,16 @@
       <stop offset="0" stop-color="#fcfbf7"/>
       <stop offset="1" stop-color="#ebe8df"/>
     </linearGradient>
-    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
-      <stop offset="1" stop-color="#1c1b18" stop-opacity="0.1"/>
-    </linearGradient>
     <pattern id="grid" width="46.4" height="46.4" patternUnits="userSpaceOnUse" x="48" y="48">
       <path d="M46.4 0V46.4M0 46.4H46.4" fill="none" stroke="#1c1b18" stroke-opacity="0.045" stroke-width="2"/>
     </pattern>
-    <clipPath id="body"><rect x="48" y="48" width="928" height="928" rx="208.8"/></clipPath>
+    <clipPath id="body"><rect x="48" y="48" width="928" height="928" rx="185.6"/></clipPath>
   </defs>
-  <rect x="48" y="48" width="928" height="928" rx="208.8" fill="url(#paper)"/>
+  <rect x="48" y="48" width="928" height="928" rx="185.6" fill="url(#paper)"/>
   <g class="grid" clip-path="url(#body)"><rect x="48" y="48" width="928" height="928" fill="url(#grid)"/></g>
-  <rect x="50" y="50" width="924" height="924" rx="206.8" fill="none" stroke="url(#rim)" stroke-width="4"/>
+  <!-- Two pixels at every size, centred on the edge, so one shows inside. -->
+  <rect x="48" y="48" width="928" height="928" rx="185.6" fill="none" stroke="#1c1b18" stroke-opacity="0.2"
+    stroke-width="2" vector-effect="non-scaling-stroke" clip-path="url(#body)"/>
   <g transform="translate(195.8 140.4) scale(6.757)">
     <path class="mark" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
       fill="none" stroke="#2d342e" stroke-linejoin="round"/>
