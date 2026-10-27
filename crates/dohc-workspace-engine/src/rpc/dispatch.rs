@@ -531,7 +531,7 @@ impl EngineService {
                     .await?
             }
             "ydoc.ownerOutbox.listRestoreFenced" => {
-                self.owner_ydoc_outbox_list_restore_fenced(&ctx, request.workspace, request.params, id)
+                self.owner_ydoc_outbox_list_restore_fenced(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.ownerOutbox.acknowledge" => {

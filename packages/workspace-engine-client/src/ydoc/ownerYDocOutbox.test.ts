@@ -113,7 +113,7 @@ describe("OwnerYDocOutbox Try again", () => {
 
 describe("OwnerYDocOutbox restore-fenced discovery", () => {
   const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 3 };
-  const row = { outboxId: "old-queue", binding, pendingBytes: 12, oldestEntryAtMs: 5 };
+  const row = { outboxId: "old-queue", binding, pendingBytes: 12 };
   function requester(reply: JsonValue, requests: Request[] = []): DaemonRequesterClient {
     return { async sendRequest(request) {
       requests.push(request);

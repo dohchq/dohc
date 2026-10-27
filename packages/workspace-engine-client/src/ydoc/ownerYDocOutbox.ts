@@ -33,7 +33,6 @@ export interface OwnerYDocOutboxRestoreFenced {
   readonly outboxId: string;
   readonly binding: LiveObjectBinding;
   readonly pendingBytes: number;
-  readonly oldestEntryAtMs: number;
 }
 
 export interface OwnerYDocOutboxAppendInput {
@@ -338,14 +337,13 @@ export class OwnerYDocOutbox {
     let previous = input.after ?? "";
     const queues = raw.queues.map(value => {
       const row = record(value, "owner outbox recovery descriptor");
-      if (Object.keys(row).sort().join() !== "binding,oldestEntryAtMs,outboxId,pendingBytes") {
+      if (Object.keys(row).sort().join() !== "binding,outboxId,pendingBytes") {
         throw new TypeError("Invalid owner outbox recovery descriptor.");
       }
       const outboxId = stringField(row, "outboxId");
       if (outboxId <= previous) throw new TypeError("Owner outbox recovery cursor did not advance.");
       previous = outboxId;
-      return { outboxId, binding: parseLiveObjectBinding(row.binding), pendingBytes: wireInteger(row, "pendingBytes", 1),
-        oldestEntryAtMs: wireInteger(row, "oldestEntryAtMs") };
+      return { outboxId, binding: parseLiveObjectBinding(row.binding), pendingBytes: wireInteger(row, "pendingBytes", 1) };
     });
     const next = raw.next === null ? null : stringField(raw, "next");
     if (next !== null && (queues.length === 0 || next !== previous)) {

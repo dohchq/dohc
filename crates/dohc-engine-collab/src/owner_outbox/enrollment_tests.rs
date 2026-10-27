@@ -2050,7 +2050,6 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
     let row = &rows[0];
     assert_eq!(row.binding, observed.binding);
     assert!(row.pending_bytes > 0);
-    assert_eq!(row.oldest_entry_at_ms, Some(5));
     assert!(store
         .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&row.outbox_id), 1))
         .unwrap()
@@ -2197,6 +2196,118 @@ fn restore_fenced_discovery_excludes_other_quarantines() {
             "{reason}"
         );
     }
+}
+
+#[test]
+fn restore_fenced_discovery_survives_release() {
+    use super::super::{list_restore_fenced_in, read_pending, release};
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    let before = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap();
+    assert_eq!(before.len(), 1);
+    let key = key(&next).unwrap();
+    let stop = committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                release::request_in_tx(tx, &key, 30)?;
+                release::release_in_tx(tx, &next, Some(0), None, 31, |_, _, _, _, _| Ok(()))
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stop.state, "released");
+    assert!(store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &next))
+        .unwrap()
+        .is_none());
+    let after = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].outbox_id, before[0].outbox_id);
+    assert_eq!(after[0].binding, observed.binding);
+    assert_eq!(after[0].pending_bytes, before[0].pending_bytes);
+    assert!(!read_pending(&store, "workspace", &after[0].outbox_id)
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_the_current_generation() {
+    use super::super::{list_restore_fenced_in, release};
+    let (_dir, mut store, observed, ..) = enrolled_with_unsent_draft();
+    let outbox_id = store
+        .read_with(|conn| {
+            Ok::<_, OwnerOutboxError>(
+                super::super::draft::descriptor_for_key_in(conn, &key(&observed.binding)?)?
+                    .unwrap()
+                    .outbox_id
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id,
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
+    let key = key(&observed.binding).unwrap();
+    store
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 21))
+        .unwrap();
+    assert!(matches!(
+        store.write_with(&NoFaults, |tx| {
+            release::release_in_tx(tx, &observed.binding, Some(0), None, 22, |_, _, _, _, _| Ok(()))
+        }),
+        Err(OwnerOutboxError::RestorePending)
+    ));
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_zero_pending_bytes() {
+    use super::super::list_restore_fenced_in;
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(
+        store
+            .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+            .unwrap()
+            .len(),
+        1
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM owner_ydoc_outbox_entries", [])
+                .map_err(write_sql)?;
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+                [],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

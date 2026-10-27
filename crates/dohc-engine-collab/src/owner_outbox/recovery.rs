@@ -6,10 +6,9 @@ pub struct OwnerOutboxRestoreFenced {
     pub outbox_id: String,
     pub binding: LiveObjectBinding,
     pub pending_bytes: i64,
-    pub oldest_entry_at_ms: Option<i64>,
 }
 
-/// Lists old restore generations for recovery without reopening their delivery queues.
+/// Lists set-aside restore queues, including after Stop removes their binding.
 pub fn list_restore_fenced_in(
     conn: &Connection,
     workspace_id: &str,
@@ -29,10 +28,10 @@ pub fn list_restore_fenced_in(
          WHERE o.workspace_id=?1 AND o.outbox_id>?2 \
            AND o.state='quarantined' AND o.quarantine_reason='restore-fenced' \
            AND o.pending_bytes>0 \
-           AND EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
              WHERE b.workspace_id=o.workspace_id AND b.main_version_id=o.main_version_id \
                AND b.object_id=o.object_id \
-               AND json_extract(b.binding_json,'$.restoreFenceGeneration')>o.restore_fence_generation) \
+               AND json_extract(b.binding_json,'$.restoreFenceGeneration')<=o.restore_fence_generation) \
          ORDER BY o.outbox_id LIMIT ?3",
         )
         .map_err(read_sql)?;
@@ -49,7 +48,6 @@ pub fn list_restore_fenced_in(
             outbox_id: parent.outbox_id,
             binding: parent.binding,
             pending_bytes: parent.pending_bytes,
-            oldest_entry_at_ms: parent.oldest_entry_at_ms,
         })
     })
     .collect()
