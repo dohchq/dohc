@@ -46,6 +46,7 @@ import {
   type ImportCopyOutcome,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
+import { fileOrigin, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
 import { buildStoreZip, type ZipEntry } from "../workspaces/zipWriter";
 
@@ -77,6 +78,8 @@ export function createWorkspaceFilesIpc<
     ): Promise<{ canceled: boolean; filePath?: string }>;
   };
   shell: { openPath(path: string): Promise<string> };
+  // Where and how a file from another person becomes the copy the OS opens.
+  markedCopies: MarkedCopies;
   withRendererWorkspaceOperation<Result>(
     sender: Sender,
     workspaceId: string,
@@ -96,7 +99,7 @@ export function createWorkspaceFilesIpc<
   ): Promise<ReadWorkspaceTextResult>;
   assertWritableWorkspace(workspace: Workspace): void;
   shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change">;
-  listWorkspaces(): { rootPath: string }[];
+  listWorkspaces(): Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">[];
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   renderHtmlToPdf(html: string): Promise<Uint8Array>;
   notifyRenderer(input: { workspaceId: string }): void;
@@ -105,6 +108,7 @@ export function createWorkspaceFilesIpc<
     app,
     dialog,
     shell,
+    markedCopies,
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
@@ -604,20 +608,32 @@ export function createWorkspaceFilesIpc<
       // Resolve+contain first: only a real file inside the workspace can be
       // handed to the OS opener — never an arbitrary path or URL. window.open
       // remains fully denied; this is the only sanctioned external-open path.
+      // A file from another person reaches the opener as a marked, read-only
+      // copy.
       await ensureOwnedProjectionCurrent(
         operation.workspace,
         input.relativePath,
       );
-      const { realTarget } = await resolveWorkspaceFile(
-        operation.workspace.rootPath,
-        input.relativePath,
-        "read",
-      );
+      const { realTarget, readOnlyCopy } = await externalOpen(operation.workspace, input.relativePath);
+      const opened = readOnlyCopy ? await markedCopyOf(markedCopies, realTarget) : realTarget;
       operation.assertCurrent();
-      const error = await shell.openPath(realTarget);
+      const error = await shell.openPath(opened);
       if (error) throw new Error(error);
     },
+
+    // The file view's "Read-only copy", by the same rule as the open. It
+    // writes nothing: a file not yet on disk refuses, and the view shows no words.
+    readExternalOpen: async (input, { operation }) => {
+      const { readOnlyCopy } = await externalOpen(operation.workspace, input.relativePath);
+      return { readOnlyCopy };
+    },
   } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;
+
+  // Every file that isn't the person's own opens as a copy.
+  async function externalOpen(workspace: Workspace, relativePath: string) {
+    const { realTarget } = await resolveWorkspaceFile(workspace.rootPath, relativePath, "read");
+    return { realTarget, readOnlyCopy: await fileOrigin(workspace, listWorkspaces(), realTarget) !== "own" };
+  }
 }
 
 export function registerWorkspaceHeadingsIpcHandlers<
