@@ -18,6 +18,7 @@ import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
 import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason, moveBack, moveWord } from "./workspaceMoveRecovery";
+import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 import { ICloudCheckRefusal } from "./workspaceICloudOnly";
 import { WORKSPACE_TRASH } from "./workspaceTrash";
 
@@ -28,6 +29,7 @@ type PathChangeWorkspace = { workspaceId: string; rootPath: string; attachmentId
 export interface PathChangeOptions {
   capture: Pick<WorkspaceEngineCapture, "changePathsAs">;
   requestId: string;
+  linkRewrites?: LinkRewriteContext;
   trashItem(absolutePath: string): Promise<void>;
   // Tells open editors that the documents at or under a path are gone.
   markDeleted(path: string): void;
@@ -448,8 +450,10 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
       if (!recovery) return { ...changed, done: { ...done, ...await finishFolderMoveRecovery(workspace, operationId, from, to) } };
       const release = recovery.record && !recovery.noUndo ? options.onRecorded?.(done.toPath, operationId) : undefined;
       try {
-        const saved = await finishMoveRecovery(workspace, recovery, from, to, overwritten);
-        return { ...changed, done: { ...done, ...saved } };
+        const saved = await finishMoveRecovery(workspace, recovery, from, to, overwritten,
+          options.linkRewrites ? {requestId: `move-links:${operationId}`, author} : undefined);
+        if (saved.record && options.linkRewrites) scheduleLinkRewrite(workspace, saved.record, options.linkRewrites);
+        return { ...changed, done: { ...done, ...saved.recovery } };
       } finally { release?.(); }
     };
     const changed = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));

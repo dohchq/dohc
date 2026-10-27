@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  renderCliResult,
   renderGroups,
   renderGrep,
   renderInbox,
@@ -11,6 +12,13 @@ import {
   formatMessageHandle,
   renderThreadMarkdown,
 } from "./threadMarkdown";
+
+it("prints operation link progress and the committed History receipt", () => {
+  const operation = {ok: true as const, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", members: [], nextCursor: null};
+  expect(renderCliResult("historyOperation", {...operation, links: {state: "updating"}})).toBe("Updating links…");
+  expect(renderCliResult("historyOperation", {...operation, links: {state: "done", documents: 3, unchecked: ["source.md"], uncheckedCount: 2}}))
+    .toBe("Link updates committed in History: 3 documents. Disk writes follow.\n2 linking documents not checked.\nNot checked: source.md");
+});
 
 const engineering = {
   id: "ch_123",

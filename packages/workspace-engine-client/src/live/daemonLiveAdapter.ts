@@ -42,7 +42,7 @@ export interface DaemonWireError extends Omit<WireError, "code"> {
 }
 
 export interface DaemonRequesterClient {
-  sendRequest(request: Request): Promise<Response>;
+  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response>;
   readonly helloAck?: {
     readonly capabilities: readonly string[];
   };
@@ -493,6 +493,7 @@ export class WorkspaceDaemonRequester {
       workspace?: WorkspaceHandle;
       idempotencyKey?: string;
       deadlineMs?: number;
+      cancelSignal?: AbortSignal;
     },
   ): Promise<Response["result"]> {
     const id = this.allocateRequestId();
@@ -557,6 +558,7 @@ export class WorkspaceDaemonRequester {
       workspace?: WorkspaceHandle;
       idempotencyKey?: string;
       deadlineMs?: number;
+      cancelSignal?: AbortSignal;
     },
   ): Promise<Response["result"]> {
     let response: Response;
@@ -574,7 +576,7 @@ export class WorkspaceDaemonRequester {
           ? { deadlineMs: options.deadlineMs }
           : {}),
         params,
-      });
+      }, undefined, undefined, options?.cancelSignal);
     } catch (error) {
       const refusal = wireErrorFrom(error);
       if (refusal !== null) throw new DaemonRefusalError(refusal, error);

@@ -2690,16 +2690,16 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(changed.size).toBe(0);
   });
 
-  it("preserves the inner client's optional workspace-session capabilities through the wrap", () => {
+  it("preserves request cancellation and optional workspace-session capabilities through the wrap", async () => {
     const seen: string[] = [];
     const unsubscribe = () => undefined;
     const inner: EngineDaemonClient = {
-      sendRequest: () => Promise.reject(new Error("unused")),
+      sendRequest: async (request, _signal, _progress, cancelSignal) => {
+        cancelSignal?.addEventListener("abort", () => seen.push(`cancel:${request.id}`), {once: true});
+        return {id: request.id, result: null};
+      },
       close: () => undefined,
       helloAck: { capabilities: ["blobs"] },
-      cancelRequest: async (requestId) => {
-        seen.push(`cancel:${requestId}`);
-      },
       onBlob: () => {
         seen.push("onBlob");
         return unsubscribe;
@@ -2722,7 +2722,9 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.helloAck).toEqual({ capabilities: ["blobs"] });
     expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
     expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
-    void wrapped.cancelRequest?.(7);
+    const cancel = new AbortController();
+    await wrapped.sendRequest({id: 7, method: "history.rewriteLinks", params: {}}, undefined, undefined, cancel.signal);
+    cancel.abort();
     expect(seen).toEqual(["onEvent", "onBlob", "cancel:7"]);
   });
 
@@ -2739,7 +2741,6 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.helloAck).toBeUndefined();
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
-    expect(wrapped.cancelRequest).toBeUndefined();
   });
 });
 

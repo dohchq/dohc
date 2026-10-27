@@ -24,6 +24,9 @@ import { listFiles } from "../workspaces/workspaceFiles";
 import { shareViewWriteScopeOf, workspaceWriteRefusal, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
+import type { OperationHistory } from "../workspaces/workspaceHistoryOperations";
+import { saveRecoveryRecord } from "../workspaces/workspaceDeleteRecovery";
+import type { FileMoveRecoveryRecord } from "../workspaces/workspaceMoveRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { systemMarkedCopies, type MarkedCopies } from "../workspaces/markedCopies";
 import { isInside } from "../security/pathContainment";
@@ -34,7 +37,7 @@ type Workspace = RegistryEntry & { attachmentId: symbol };
 
 afterEach(() => vi.unstubAllEnvs());
 
-async function harness() {
+async function harness(history?: OperationHistory) {
   const rootPath = await createTestScratch("workspace-ipc-");
   const workspace: Workspace = {
     workspaceId: "workspace", rootPath, attachmentId: Symbol("attachment"),
@@ -78,7 +81,7 @@ async function harness() {
     read: async () => { throw new Error("unexpected shared read"); },
   };
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
-    historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => history ?? ({ resolveFiles: async () => {throw new Error("Unexpected file resolution");}, readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: trusted,
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
       assertCurrent: () => operation.assertCurrent(),
@@ -165,6 +168,57 @@ async function harness() {
 }
 
 describe("registered workspace file handlers", () => {
+  it.each([
+    {word: "rename", from: "../old.md", to: "../new.md"},
+    {word: "move", from: "../old.md", to: "archive/new.md"},
+    {word: "rename", from: "same.md", to: "same.md"},
+  ])("names a failed $word operation read accurately ($from → $to)", async ({word, from, to}) => {
+    const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>();
+    const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
+    const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const record: FileMoveRecoveryRecord = {operationId, from, to, entries: [from], tracked: true};
+    await openedLocalState(h.workspace);
+    await saveRecoveryRecord(h.workspace, record, "move");
+    await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, {workspaceId: "workspace", operationId}))
+      .resolves.toEqual({ok: false, reason: `Cannot read the ${word} operation. Its recovery paths are invalid.`});
+    expect(readHistoryPage).not.toHaveBeenCalled();
+  });
+
+  it.each(["share view", "untrusted sender"])("refuses an operation read from a %s before calling the engine", async caller => {
+    const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>();
+    const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
+    const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
+    if (caller === "share view") h.workspace.shareView = {} as Workspace["shareView"];
+    const reading = h.invoke(workspaceFileOperations.readHistoryOperation.channel,
+      {workspaceId: "workspace", operationId: "dohc-operation:11111111-1111-4111-8111-111111111111"}, caller !== "untrusted sender");
+    if (caller === "share view") await expect(reading).resolves.toEqual({ok: false, reason: "History operations require the owning workspace. Open it to continue."});
+    else await expect(reading).rejects.toThrow("untrusted");
+    expect(readHistoryPage).not.toHaveBeenCalled();
+  });
+
+  it.each(["updating", "done"] as const)("reads %s link updates through IPC with the person's floor", async state => {
+    const readHistoryPage = vi.fn<OperationHistory["readHistoryPage"]>(async () => ({moments: [], nextCursor: null}) as never);
+    const unexpected = async (): Promise<never> => { throw new Error("unexpected engine call"); };
+    const h = await harness({readHistoryPage, resolveFiles: unexpected, readHistoryOperation: unexpected, undoHistoryOperation: unexpected});
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    await mkdir(join(h.workspace.rootPath, ".dohc"), {recursive: true});
+    await writeFile(join(h.workspace.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "excluded/**"\ntracked = false\n');
+    const record: FileMoveRecoveryRecord = {operationId, from: "old.md", to: "new.md", entries: ["old.md"], tracked: true,
+      links: state === "updating" ? {state} : {state, documents: 2, unchecked: ["visible.md", "excluded/source.md", "../outside.md"], uncheckedCount: 3}};
+    await openedLocalState(h.workspace);
+    await saveRecoveryRecord(h.workspace, record, "move");
+    const payload = {workspaceId: "workspace", operationId};
+    await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, payload)).resolves.toMatchObject({ok: true,
+      links: state === "updating" ? {state} : {state, documents: 2, unchecked: ["visible.md", "excluded/source.md"], uncheckedCount: 3}});
+    expect(readHistoryPage).toHaveBeenCalledWith({workspaceId: "workspace", operationId, limit: 50});
+    readHistoryPage.mockClear();
+    await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, {...payload, workspaceId: "foreign"})).rejects.toThrow();
+    h.retireRenderer();
+    await expect(h.invoke(workspaceFileOperations.readHistoryOperation.channel, payload)).rejects.toThrow();
+    expect(readHistoryPage).not.toHaveBeenCalled();
+  });
+
   it("moves a file through the registered move channel", async () => {
     const h = await harness();
     await writeFile(join(h.workspace.rootPath, "before.md"), "move me");
@@ -267,7 +321,7 @@ describe("registered workspace file handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       workspaceFileOperations.listWorkspaceFiles.channel, workspaceFileOperations.createWorkspaceFile.channel, workspaceFileOperations.createWorkspaceFolder.channel,
-      workspaceFileOperations.duplicateWorkspaceFile.channel, workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
+      workspaceFileOperations.duplicateWorkspaceFile.channel, workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.readHistoryOperation.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
       workspaceFileOperations.openFileExternally.channel, workspaceFileOperations.readExternalOpen.channel,
@@ -380,7 +434,7 @@ describe("registered workspace file handlers", () => {
 
   it("screens dragged metadata and imports native picks", async () => {
     const h = await harness();
-    await mkdir(join(h.workspace.rootPath, ".dohc"));
+    await mkdir(join(h.workspace.rootPath, ".dohc"), {recursive: true});
     const metadata = join(h.workspace.rootPath, ".dohc", "private.json");
     await writeFile(metadata, "secret metadata");
     await expect(h.invoke(workspaceFileOperations.importWorkspaceFiles.channel, {

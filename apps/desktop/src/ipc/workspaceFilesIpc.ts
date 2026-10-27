@@ -293,6 +293,7 @@ export function createWorkspaceFilesIpc<
     duplicateWorkspaceFile: (input, {event}) => workspaceFileMutations.duplicateFile(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
+    readHistoryOperation: (input, { event }) => workspaceFileMutations.readHistoryOperation(event, input),
     undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),
     exportWorkspaceZip: async (input, { event }) => {
       const inactiveMessage =
