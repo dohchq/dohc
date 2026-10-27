@@ -64,7 +64,8 @@ impl Worker {
         }
         let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
         {
-            let digest = crate::wire::sha(&serde_json::to_vec(&manifest).map_err(|_| Failure::Unavailable)?);
+            let digest =
+                crate::wire::sha(&serde_json::to_vec(&manifest).map_err(|_| Failure::Unavailable)?);
             let mut state = shared.state.lock().unwrap();
             if state
                 .build_digest

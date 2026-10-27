@@ -32,11 +32,14 @@ pub(super) struct Session<R, W> {
 impl<R: Read, W: Write> Session<R, W> {
     pub fn prepare(&mut self, request: &PreparationRequest) -> Result {
         let PreparationRequest::Witness(request) = request else {
-            let PreparationRequest::Projection(request) = request else { unreachable!() };
+            let PreparationRequest::Projection(request) = request else {
+                unreachable!()
+            };
             return self.execute(request);
         };
         self.id += 1;
-        self.pipe.control(&json!({"id": self.id, "method": "check-markdown-witness",
+        self.pipe
+            .control(&json!({"id": self.id, "method": "check-markdown-witness",
             "source": Blob::of(&request.source), "sourceSha256": request.source_sha256,
             "projectionSha256": request.projection_sha256}))?;
         self.pipe.blob(1, &request.source)?;
@@ -51,15 +54,19 @@ impl<R: Read, W: Write> Session<R, W> {
             keeps_meaning: bool,
         }
         let reply: WitnessReply = self.pipe.json()?;
-        if reply.id != self.id || reply.kind != "witness-checked"
+        if reply.id != self.id
+            || reply.kind != "witness-checked"
             || reply.source_sha256 != request.source_sha256
-            || reply.projection_sha256 != request.projection_sha256 {
+            || reply.projection_sha256 != request.projection_sha256
+        {
             return Err(Failure::Crashed);
         }
         Ok(Outcome::WitnessChecked {
             source_sha256: reply.source_sha256,
             projection_sha256: reply.projection_sha256,
-            checker_identity: crate::wire::sha(&serde_json::to_vec(&self.manifest).map_err(|_| Failure::Unavailable)?),
+            checker_identity: crate::wire::sha(
+                &serde_json::to_vec(&self.manifest).map_err(|_| Failure::Unavailable)?,
+            ),
             keeps_meaning: reply.keeps_meaning,
         })
     }

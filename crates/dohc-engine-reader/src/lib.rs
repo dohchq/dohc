@@ -82,15 +82,21 @@ impl PreparationRequest {
     fn retained(&self) -> usize {
         match self {
             Self::Projection(request) => request.retained(),
-            Self::Witness(request) => request.source.capacity()
-                + request.source_sha256.capacity() + request.projection_sha256.capacity(),
+            Self::Witness(request) => {
+                request.source.capacity()
+                    + request.source_sha256.capacity()
+                    + request.projection_sha256.capacity()
+            }
         }
     }
     fn supersedes(&self, prior: &Self) -> bool {
         match (self, prior) {
-            (Self::Projection(a), Self::Projection(b)) => a.document == b.document && a.method == b.method,
-            (Self::Witness(a), Self::Witness(b)) => a.source_sha256 == b.source_sha256
-                && a.projection_sha256 == b.projection_sha256,
+            (Self::Projection(a), Self::Projection(b)) => {
+                a.document == b.document && a.method == b.method
+            }
+            (Self::Witness(a), Self::Witness(b)) => {
+                a.source_sha256 == b.source_sha256 && a.projection_sha256 == b.projection_sha256
+            }
             _ => false,
         }
     }
@@ -230,7 +236,10 @@ impl Reader {
     pub fn request(&self, request: Request) -> impl Future<Output = Result> + Send + use<> {
         self.enqueue(PreparationRequest::Projection(request))
     }
-    pub fn check_markdown_witness(&self, request: CheckMarkdownWitness) -> impl Future<Output = Result> + Send + use<> {
+    pub fn check_markdown_witness(
+        &self,
+        request: CheckMarkdownWitness,
+    ) -> impl Future<Output = Result> + Send + use<> {
         self.enqueue(PreparationRequest::Witness(request))
     }
     pub fn checker_identity(&self) -> Option<String> {
@@ -246,20 +255,27 @@ impl Reader {
         let bytes = request.retained();
         let too_large = match &request {
             PreparationRequest::Projection(request) => {
-                let metadata = [&request.current_path, &request.document.workspace_id,
-                    &request.document.main_version_id, &request.document.object_id,
-                    &request.document.lineage_claim_id];
-                request.source.len() > 2 * 1024 * 1024 || request.checkpoint.len() > wire::UPDATE
+                let metadata = [
+                    &request.current_path,
+                    &request.document.workspace_id,
+                    &request.document.main_version_id,
+                    &request.document.object_id,
+                    &request.document.lineage_claim_id,
+                ];
+                request.source.len() > 2 * 1024 * 1024
+                    || request.checkpoint.len() > wire::UPDATE
                     || metadata.iter().map(|s| s.len()).sum::<usize>() > 8192
             }
-            PreparationRequest::Witness(request) => request.source.len() > 2 * 1024 * 1024
-                || !wire::valid_sha(&request.source_sha256) || !wire::valid_sha(&request.projection_sha256)
-                || wire::sha(&request.source) != request.source_sha256,
+            PreparationRequest::Witness(request) => {
+                request.source.len() > 2 * 1024 * 1024
+                    || !wire::valid_sha(&request.source_sha256)
+                    || !wire::valid_sha(&request.projection_sha256)
+                    || wire::sha(&request.source) != request.source_sha256
+            }
         };
         let failure = if s.closed {
             Some(Failure::Unavailable)
-        } else if too_large || bytes > 64 * 1024 * 1024
-        {
+        } else if too_large || bytes > 64 * 1024 * 1024 {
             Some(Failure::TooLarge)
         } else {
             None
