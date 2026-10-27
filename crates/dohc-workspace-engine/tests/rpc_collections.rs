@@ -3868,6 +3868,101 @@ async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() {
+    let parked = park_remote_status_update().await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    // Retain a real blob response that owns the whole shared egress budget.
+    let bytes = vec![7; dohc_engine_storage::MAX_BLOB_BYTES];
+    let sha = hex_sha256(&bytes);
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    VersionedTextStore::new(&mut store)
+        .write_binary(
+            &dohc_engine_domain::WriteBinary {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "egress-budget-object".to_owned(),
+                path: "budget.bin".to_owned(),
+                bytes,
+                moment_id: "egress-budget-moment".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 300,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed budget blob");
+    drop(store);
+    let held = service_call_with_busy_retry(
+        parked.service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            300,
+            "versionedBinary.readBlob",
+            Some(parked.handle.clone()),
+            json!({ "workspaceId": WORKSPACE_ID, "sha256": sha }),
+        ),
+    )
+    .await
+    .expect("hold egress budget");
+    assert_eq!(
+        held.blob_egress.as_ref().unwrap().bytes.len(),
+        dohc_engine_storage::MAX_BLOB_BYTES
+    );
+    let mut events = parked.service.events().subscribe();
+    let error = service_call_with_busy_retry(
+        parked.service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            301,
+            "ydoc.resync",
+            Some(parked.handle.clone()),
+            json!({ "sessionId": parked.live_session_id }),
+        ),
+    )
+    .await
+    .expect_err("resync has no blob egress budget");
+    assert_eq!(error.code, ErrorCode::Overloaded);
+    assert_eq!(error.message, "blob-egress-capacity");
+    assert_eq!(deferred_update_rows(&parked.scratch), 0);
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    drop(held);
+
+    let (_, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        302,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).expect("retried state");
+    assert!(
+        doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("status: remote")
+    );
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
 /// and settle must leave a parked synced update queued. The next `ydoc.open`
