@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
@@ -403,8 +403,10 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
      WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
   ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
   const hostRoot = join(directory, "relay-deployment", "live-host");
+  // The relay makes a store's folder before the service host creates its engine database.
   const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-    .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+    .flatMap((file) => read(file, (db) => relay.map((change) => ({
       deliveryId: change.deliveryId,
       accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
           json_extract(metadata_json,'$.accepted') AS accepted, json_extract(metadata_json,'$.authorSnapshot') AS authorSnapshot FROM live_accepted_updates
@@ -426,7 +428,8 @@ function settlementEvidence(directory: string) {
   const hostRoot = join(directory, "relay-deployment", "live-host");
   return {
     host: readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-      .map((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => ({
+      .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+      .map((file) => read(file, (db) => ({
         settled: cursors(db, "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor"),
         heldForExport: Number(db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0),
         journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
