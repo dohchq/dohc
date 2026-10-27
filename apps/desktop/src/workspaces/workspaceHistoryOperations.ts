@@ -1,4 +1,4 @@
-import { caseOnlyMoveReason, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
+import { caseOnlyMoveReason, linkUndoRefusal, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { placeBack } from "./workspaceFileMoves";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -14,9 +14,10 @@ import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { waitForRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 import { stagedTrashEntry } from "./workspaceTrash";
+import { pauseLinkRewrite, scheduleLinkRewrite } from "./workspaceLinkRewrites";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol; readOnly?: boolean; shareView?: unknown }; signal?: AbortSignal; assertCurrent(): void };
-export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation">;
+export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "readHistoryOperation" | "undoHistoryOperation" | "resolveFiles"> & Partial<Pick<VersionedLiveAdapter, "rewriteHistoryLinks">>;
 export function createOperationHistory(withAdapter: <T>(work: (adapter: OperationHistory) => Promise<T>) => Promise<T | null>): OperationHistory {
   const requireResult = <T>(result: T | null): T => {
     if (result === null) throw new Error("The workspace engine is not running.");
@@ -26,6 +27,11 @@ export function createOperationHistory(withAdapter: <T>(work: (adapter: Operatio
     readHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.readHistoryOperation(input))),
     readHistoryPage: async input => requireResult(await withAdapter(adapter => adapter.readHistoryPage(input))),
     undoHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.undoHistoryOperation(input))),
+    resolveFiles: async input => requireResult(await withAdapter(adapter => adapter.resolveFiles(input))),
+    rewriteHistoryLinks: async input => requireResult(await withAdapter(adapter => {
+      if (!adapter.rewriteHistoryLinks) throw new Error("The workspace engine cannot update links.");
+      return adapter.rewriteHistoryLinks(input);
+    })),
   };
 }
 
@@ -85,15 +91,16 @@ async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise
   };
   return floor;
 }
-function personFloor(rootPath: string, word = "delete"): Floor {
+function personFloor(rootPath: string, word?: string, action: "read" | "undo" = "undo"): Floor {
+  const refusal = action === "read" ? word ? `Cannot read the ${word} operation.` : "Cannot read this operation." : `Cannot undo the ${word ?? "delete"}.`;
   return async (path, _entry, root = false) => {
     const checked = root ? validateUserWritePath(path) : validateUserMaterializePath(path, { platform: process.platform, allowIgnoredSegments: true });
-    if (!checked.ok || checked.normalized !== path) throw new Error(`Cannot undo the ${word}. Its recovery paths are invalid.`);
-    if (root) await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Undo path", access: "entry" });
+    if (!checked.ok || checked.normalized !== path) throw new Error(`${refusal} Its recovery paths are invalid.`);
+    if (root) await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: action === "read" ? "History path" : "Undo path", access: "entry" });
     else {
       const target = await realRelativeInRoot(rootPath, join(rootPath, path), true);
       if (!target.ok || target.relative !== path || !validateUserMaterializePath(target.relative, { platform: process.platform, allowIgnoredSegments: true }).ok) {
-        throw new Error(`Cannot undo the ${word}. ` + path + " now leads somewhere else.");
+        throw new Error(`${refusal} ` + path + " now leads somewhere else.");
       }
     }
   };
@@ -111,8 +118,8 @@ async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | 
   };
   await walk(staged, record.base);
 }
-async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Promise<void> {
-  const invalid = () => new Error(`Cannot undo the ${moveWord(record.from, record.to)}. Its recovery paths are invalid.`);
+async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor, action: "read" | "undo" = "undo"): Promise<void> {
+  const invalid = () => new Error(`Cannot ${action} the ${moveWord(record.from, record.to)}${action === "read" ? " operation" : ""}. Its recovery paths are invalid.`);
   if (record.from === record.to || record.from.startsWith(record.to + "/") || record.to.startsWith(record.from + "/")) throw invalid();
   const paths = "noUndo" in record ? [] : [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result => result?.restored ?? [])];
   for (const path of paths) if (path !== record.from) throw invalid();
@@ -133,7 +140,7 @@ function decodeCursor(cursor: string, workspaceId: string, operationId: string):
 function operationId(id: string): void {
   if (!HistoryOperationId.safeParse(id).success) throw new Error("Use an operation id from history list: dohc-operation: followed by a UUID.");
 }
-export async function readWorkspaceHistoryOperation(operation: Operation, input: { operationId: string; cursor?: string }, history: OperationHistory): Promise<z.infer<typeof HistoryOperationReadResult>> {
+export async function readWorkspaceHistoryOperation(operation: Operation, input: { operationId: string; cursor?: string }, history: OperationHistory, options: {agent: boolean}): Promise<z.infer<typeof HistoryOperationReadResult>> {
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
@@ -144,14 +151,24 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
       writable(operation);
       const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
       const move = cursor ? undefined : await readMoveRecovery(rootPath, input.operationId);
-      const floor = await agentFloor(rootPath, !record?.result);
-      if (move) await moveRecoveryFloor(move, floor);
+      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : personFloor(rootPath, move ? moveWord(move.from, move.to) : record ? "delete" : undefined, "read");
+      if (move) await moveRecoveryFloor(move, floor, "read");
+      let links = move && "links" in move && !move.engine && !move.progress && !move.result ? move.links : undefined;
+      if (links?.state === "done") {
+        const unchecked: string[] = [];
+        for (const path of links.unchecked) {
+          try { await floor(path); unchecked.push(path); }
+          catch { /* The count includes sources this caller cannot see. */ }
+        }
+        links = {...links, unchecked};
+      }
       if (record) await recoveryFloor(record, record.staged ? stagedTrashEntry(rootPath, record.staged) : undefined, floor);
       const result = await history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
       for (const member of result.moments) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
       if (!record && !move && !result.moments.length && !input.cursor) throw new Error("This operation is not in History.");
       operation.assertCurrent();
       return { ok: true as const, operationId: input.operationId,
+        ...(links ? {links} : {}),
         members: result.moments.map(member => ({ momentId: member.momentId, operation: member.operation, path: member.path, ...(member.beforePath ? { beforePath: member.beforePath } : {}) })),
         ...(record ? { withoutHistory: record.paths } : move && !("noUndo" in move) ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
     });
@@ -159,10 +176,14 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
 }
 export async function undoWorkspaceHistoryOperation(operation: Operation & { signal: AbortSignal }, input: { operationId: string }, author: MomentWriteAuthor,
   options: { history: OperationHistory; agent: boolean }): Promise<DeleteUndoResult> {
+  let release: (() => void) | undefined;
   try {
     writable(operation); operationId(input.operationId);
     const { workspace } = operation, { rootPath, workspaceId } = workspace;
-    await waitForRecovery(input.operationId, operation.signal);
+    const paused = pauseLinkRewrite(rootPath, input.operationId);
+    const recovery = waitForRecovery(input.operationId, operation.signal);
+    release = await paused;
+    await recovery;
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
@@ -185,10 +206,27 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
           deleted ||= member.operation === "delete";
           if (!floor && deleted) break;
         }
+        const writes = result.moments.filter(member => member.operation === "write");
+        if (floor && writes.length) {
+          const current = await options.history.resolveFiles({workspaceId, targets: writes.map(member => ({objectId: member.objectId})), signal: operation.signal});
+          for (const target of current.results) {
+            if (target.status === "invalid") throw new Error("Cannot undo this operation. dohc could not check its current paths.");
+            if (target.status === "found") await floor(target.path);
+          }
+        }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
-        const result = await options.history.undoHistoryOperation(input);
+        let result;
+        try { result = await options.history.undoHistoryOperation(input); }
+        catch (error) {
+          const refusal = linkUndoRefusal(error);
+          // These reasons name the operation; the other Undo refusals name workspace paths.
+          const path = refusal && !["Operation already undone", "Undo in progress", "operation unavailable", "active version changed"].includes(refusal[1]!) ? refusal[2] : undefined;
+          if (path && floor) try { await floor(path); }
+          catch (denied) { throw new Error(denied instanceof Error ? denied.message : "Cannot undo this operation.", {cause: error}); }
+          throw error;
+        }
         try { if (floor) for (const path of result.notRestored) await floor(path); }
         catch (error) { markChanged(); throw error; }
         return result;
@@ -215,5 +253,15 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     return failure(error, "undo");
+  } finally {
+    release?.();
+    if (release && !operation.signal.aborted && options.history.rewriteHistoryLinks) {
+      await withExclusiveWorkspaceOperation(operation.workspace.rootPath, async () => {
+        const record = await readMoveRecovery(operation.workspace.rootPath, input.operationId);
+        if (record && !("noUndo" in record)) scheduleLinkRewrite(operation.workspace, record, {
+          workspaceId: operation.workspace.workspaceId, signal: operation.signal, history: {rewriteHistoryLinks: input => options.history.rewriteHistoryLinks!(input)},
+        });
+      }, {markOnSuccess: false}).catch(() => undefined);
+    }
   }
 }

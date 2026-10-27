@@ -250,6 +250,8 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
+          linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
+            history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
       });
@@ -282,7 +284,7 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
+      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
       ...(dependencies.stopWorkspaceSync ? { stopSync: author =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {

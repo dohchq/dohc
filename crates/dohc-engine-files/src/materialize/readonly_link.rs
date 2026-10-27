@@ -18,6 +18,11 @@ struct Restore {
 
 const SUFFIX: &str = ".restore-attributes";
 
+pub(super) fn incoming_name(name: &str) -> Option<&str> {
+    name.strip_suffix(SUFFIX)
+        .or_else(|| name.strip_suffix(".restore-attributes-pending"))
+}
+
 fn journal(incoming: &Path) -> PathBuf {
     let mut name = incoming.as_os_str().to_owned();
     name.push(SUFFIX);
@@ -130,6 +135,8 @@ fn restore(path: &Path, record: &Restore) -> io::Result<()> {
 
 pub(super) fn recover_one(incoming: &Path, target: &Path) -> io::Result<()> {
     let path = journal(incoming);
+    #[cfg(feature = "fault-injection")]
+    dohc_engine_storage::capture_phase::count("publication_recovery_fs_calls", 1);
     match read(&path) {
         Ok(record) => {
             if record.incoming != incoming || record.target != target {
@@ -141,6 +148,8 @@ pub(super) fn recover_one(incoming: &Path, target: &Path) -> io::Result<()> {
         Err(err) => return Err(err),
     }
     // A crash during journal preparation changed no inode attributes.
+    #[cfg(feature = "fault-injection")]
+    dohc_engine_storage::capture_phase::count("publication_recovery_fs_calls", 1);
     remove_pending(&path.with_extension("restore-attributes-pending"))
 }
 

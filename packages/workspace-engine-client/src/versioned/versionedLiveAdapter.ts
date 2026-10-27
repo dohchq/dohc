@@ -249,7 +249,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async request<M extends VersionedMethod>(
     method: M,
     params: VersionedMethodParamsMap[M],
-    options?: { idempotencyKey?: string; deadlineMs?: number },
+    options?: { idempotencyKey?: string; deadlineMs?: number; cancelSignal?: AbortSignal },
   ): Promise<VersionedMethodResultMap[M]> {
     const raw = await this.requester.request(method, params, {
       workspace: this.workspace,
@@ -1203,9 +1203,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
   }
 
-  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryLinkRewriteResult> {
+  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor; cancelSignal?: AbortSignal}): Promise<HistoryLinkRewriteResult> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
+    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId, cancelSignal: input.cancelSignal});
   }
 
   async getMoment(input: {
