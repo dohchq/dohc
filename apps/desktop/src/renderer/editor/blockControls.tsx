@@ -1,5 +1,5 @@
 import { mapWidgetOwners } from "./widgetOwnership";
-import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
+import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -126,8 +126,12 @@ function gutterHang(node: ProseMirrorNode): string | null {
       return "checkbox";
     case "blockquote":
       return "bar";
+    case "callout":
+      return "frame";
+    case "table":
+      return "table";
     default:
-      return null;
+      return isCodeBlockNode(node) ? "frame" : null;
   }
 }
 

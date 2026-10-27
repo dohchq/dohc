@@ -564,13 +564,24 @@ describe("blockControls gutter coverage", () => {
           { type: "taskList", content: [items("taskList", { checked: false })] },
           { type: "blockquote", content: [{ type: "paragraph", content: text("Quote") }] },
           { type: "codeBlock", content: text("code") },
+          { type: "callout", content: [{ type: "paragraph", content: text("Note") }] },
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [{ type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] }],
+              },
+            ],
+          },
+          { type: "horizontalRule" },
         ],
       }),
     );
     const gutters = () =>
       Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"));
     expect(gutters().map((gutter) => gutter.dataset.hang)).toEqual([
-      undefined, "marker", "marker", "marker", "number", "checkbox", "bar", undefined,
+      undefined, "marker", "marker", "marker", "number", "checkbox", "bar", "frame", "frame", "table", undefined,
     ]);
 
     // A rebuild keeps the gutter of a block that keeps its kind. A block that

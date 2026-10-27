@@ -898,20 +898,21 @@ body {
   position: relative;
 }
 
-/* The hover +/⋮ cluster ends 10px left of the text edge, and a further
- * --dohc-block-hang left of it where the next block hangs a marker,
- * checkbox or bar into the gutter. Where the gutter has no room for both
- * buttons side by side and 8px beside the pane's edge, + stacks above ⋮. */
+/* The hover +/⋮ cluster ends 10px left of the text edge, or 6px left of
+ * --dohc-block-hang, how far the next block reaches left of its text into
+ * the gutter. Where the gutter has no room for both buttons side by side
+ * and 8px beside the pane's edge, + stacks above ⋮. */
 .dohc-block-affordance {
   --dohc-block-hang: 0px;
+  --dohc-block-gap: max(10px, var(--dohc-block-hang) + 6px);
   position: absolute;
   top: auto;
   right: calc(
-    min(100% - 56px, 50% + var(--dohc-editor-measure) / 2) + 10px + var(--dohc-block-hang)
+    min(100% - 56px, 50% + var(--dohc-editor-measure) / 2) + var(--dohc-block-gap)
   );
   width: clamp(
     18px,
-    max(56px, 50% - var(--dohc-editor-measure) / 2) - 18px - var(--dohc-block-hang),
+    max(56px, 50% - var(--dohc-editor-measure) / 2) - 8px - var(--dohc-block-gap),
     38px
   );
   transform: translateY(0.2em);
@@ -924,23 +925,42 @@ body {
   transition: opacity 120ms ease;
 }
 
-/* The block's hang, from blockControls.tsx, keeps the cluster 6px clear of
- * the mark on the block's first line: a bullet or a one-digit number, a
- * number of two digits, a checkbox, or the quote bar. */
+/* Each hang, named by blockControls.tsx, is where the block's first-line mark
+ * starts: a bullet's or one digit's ink, two digits' ink, the task checkbox's
+ * margin, the quote bar's offset. */
 .dohc-block-affordance[data-hang="marker"] {
-  --dohc-block-hang: 13px;
+  --dohc-block-hang: 17px;
 }
 
 .dohc-block-affordance[data-hang="number"] {
-  --dohc-block-hang: 23px;
+  --dohc-block-hang: 27px;
 }
 
 .dohc-block-affordance[data-hang="checkbox"] {
-  --dohc-block-hang: 19px;
+  --dohc-block-hang: 23px;
 }
 
 .dohc-block-affordance[data-hang="bar"] {
-  --dohc-block-hang: 8px;
+  --dohc-block-hang: 12px;
+}
+
+/* Framed blocks reach one block inset past the text edge once the gutter is
+ * wider than the editor's 56px padding. A table's wrapper reaches 22px
+ * further, for its row grips and ⋯ button. */
+.dohc-block-affordance[data-hang="frame"] {
+  --dohc-block-hang: clamp(
+    0px,
+    50% - var(--dohc-editor-measure) / 2 - 56px,
+    var(--dohc-editor-block-inset)
+  );
+}
+
+.dohc-block-affordance[data-hang="table"] {
+  --dohc-block-hang: clamp(
+    0px,
+    50% - var(--dohc-editor-measure) / 2 - 56px,
+    var(--dohc-editor-block-inset) + 22px
+  );
 }
 
 .dohc-block-affordance.is-visible,

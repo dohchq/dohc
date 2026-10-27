@@ -121,10 +121,11 @@ async function measure(page: import("@playwright/test").Page): Promise<BlockEdge
   });
 }
 
-// The hover +/⋮ cluster before each block that hangs a mark into the gutter.
-// Outside list markers draw no box, so the bullet's and numbers' left edges
-// are measured: Inter at 15px puts a bullet's or one digit's ink 17px left of
-// the text, and two digits' 26.5px.
+// The hover +/⋮ cluster before each block that reaches left of its text into
+// the gutter. Outside list markers draw no box, so the bullet's and numbers'
+// left edges are measured: Inter at 15px puts a bullet's or one digit's ink
+// 17px left of the text, and two digits' 26.5px. A table's mark is its
+// leftmost row grip or ⋯ button, which stay laid out while hidden.
 async function measureClusters(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     const editor = document.querySelector(".dohc-notion-editor");
@@ -135,19 +136,30 @@ async function measureClusters(page: import("@playwright/test").Page) {
       const rect = node?.getBoundingClientRect();
       return rect ? { left: rect.left, right: rect.right } : null;
     };
+    const left = (el: Element | null | undefined) => el?.getBoundingClientRect().left ?? null;
     const tasks = editor.querySelector(":scope > ul:has(> li[data-checked])");
     const quote = editor.querySelector(":scope > blockquote");
+    const pre = editor.querySelector(":scope > pre");
+    const callout = editor.querySelector(":scope > .dohc-callout");
+    const table = editor.querySelector(":scope > .tableWrapper");
+    const tableChrome = [...(table?.querySelectorAll(".dohc-table-grip--row, .dohc-table-menu-btn") ?? [])];
     return {
       editorLeft: editor.getBoundingClientRect().left,
       bullet: cluster(editor.querySelector(":scope > ul:not(:has(> li[data-checked]))")),
       ordered: cluster(editor.querySelector(":scope > ol:not([start])")),
       twoDigits: cluster(editor.querySelector(":scope > ol[start='10']")),
       task: cluster(tasks),
-      checkboxLeft: tasks?.querySelector("input[type='checkbox']")?.getBoundingClientRect().left ?? null,
+      checkboxLeft: left(tasks?.querySelector("input[type='checkbox']")),
       quote: cluster(quote),
       barLeft: quote
         ? quote.getBoundingClientRect().left + parseFloat(getComputedStyle(quote, "::before").left)
         : null,
+      code: cluster(pre),
+      codeLeft: left(pre),
+      callout: cluster(callout),
+      calloutLeft: left(callout),
+      table: cluster(table),
+      tableChromeLeft: tableChrome.length ? Math.min(...tableChrome.map((el) => el.getBoundingClientRect().left)) : null,
     };
   });
 }
@@ -161,6 +173,9 @@ function expectClustersClear(clusters: Awaited<ReturnType<typeof measureClusters
     twoDigits: edge - 26.5,
     task: clusters.checkboxLeft,
     quote: clusters.barLeft,
+    code: clusters.codeLeft,
+    callout: clusters.calloutLeft,
+    table: clusters.tableChromeLeft,
   };
   for (const [key, mark] of Object.entries(marks)) {
     const cluster = clusters[key as keyof typeof marks];
