@@ -158,7 +158,7 @@ describe("a dohc Codex run", () => {
     });
     expect(codexConfigFiles({}, "darwin", "/Users/sam")).toEqual({
       requirements: ["/etc/codex/requirements.toml"],
-      config: ["/etc/codex/config.toml", "/Users/sam/.codex/config.toml"],
+      config: ["/etc/codex/config.toml", "/Users/sam/.codex/config.toml", "/etc/codex/managed_config.toml"],
     });
   });
 });
@@ -180,6 +180,13 @@ describe("Codex without a saved login", () => {
     // The user config wins over the system config, and the system requirements win over both.
     expect(mayRun({ [SYSTEM]: "model_provider = 'azure'\n", [USER]: "model_provider = 'openai'\n" })).toBe(false);
     expect(mayRun({ [USER]: "model_provider = 'openai'\n", [REQUIREMENTS]: "model_provider = 'azure'\n" })).toBe(true);
+    // On Unix, the managed config wins over the user config.
+    const unix = codexConfigFiles({}, "linux", "/home/sam");
+    const files: Record<string, string> = {
+      "/home/sam/.codex/config.toml": "model_provider = 'openai'\n",
+      "/etc/codex/managed_config.toml": "model_provider = 'local'\n",
+    };
+    expect(codexMayRunWithoutLogin({}, unix, (path) => files[path] ?? missing(path))).toBe(true);
     // dohc runs Codex without --profile.
     expect(mayRun({ [USER]: "[profiles.work]\nmodel_provider = 'azure'\n" })).toBe(false);
   });
