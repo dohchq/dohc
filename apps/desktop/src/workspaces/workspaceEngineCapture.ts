@@ -1,4 +1,3 @@
-import { createDeferredWritePoller } from "./deferredWritePoller";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
@@ -506,6 +505,7 @@ export interface WorkspaceEngineCapture {
   beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
+  noteWriteDeferred(path: string): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
   observeFileEvents(events: readonly WatcherEvent[]): void;
@@ -1951,32 +1951,6 @@ export function createWorkspaceEngineCapture(
     changedOutside: () => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
-  let captureStarted = false;
-  const deferredWritePoller = createDeferredWritePoller({
-    read: async signal => {
-      const sessions = new Map(liveYDocSessions);
-      const engine = await engineStore();
-      signal.throwIfAborted();
-      const paths = await engine.deferredWrites(signal);
-      return paths.flatMap(path => {
-        const entry = sessions.get(path);
-        return entry ? [entry] : [];
-      });
-    },
-    changedOutside: entry => {
-      if (liveYDocSessions.get(entry.path) === entry) entry.changedOutside();
-    },
-    onError: error => onError("deferred outside writes", error),
-  });
-  function registerLiveYDocSession(path: string, entry: LiveYDocSession): void {
-    liveYDocSessions.set(path, entry);
-    deferredWritePoller.setActive(captureStarted);
-  }
-  function removeLiveYDocSession(path: string): void {
-    liveYDocSessions.delete(path);
-    deferredWritePoller.setActive(captureStarted && liveYDocSessions.size > 0);
-  }
-
   // Paths whose close released the file while capture still held a change
   // made outside dohc to it. An open of one waits for that change first.
   const outsideWritesUnrecorded = new Set<string>();
@@ -4340,6 +4314,7 @@ export function createWorkspaceEngineCapture(
           options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onHeldFiles?.(status.heldFiles);
+          for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy =
           status === undefined || (status.running && !status.degraded && !status.terminal);
@@ -4508,8 +4483,8 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
-        // Set by the capture health poll while capture holds a change made
-        // outside dohc to this file. The session keeps it until it closes.
+        // Set by capture events or the health poll while capture holds an
+        // outside change to this file. The session keeps it until it closes.
         let changedOutside = false;
         // Capture keeps a note's unsaved text in History when it records an
         // outside version, but has no such copy for a drawing's strokes. A
@@ -5541,7 +5516,7 @@ export function createWorkspaceEngineCapture(
               // failed. Lift the guard like a clean teardown (capture of the
               // path must resume; nothing holds the reservation).
               if (liveYDocSessions.get(input.path) === liveEntry) {
-                removeLiveYDocSession(input.path);
+                liveYDocSessions.delete(input.path);
               }
               // A replicated release succeeds over unsaved edits and keeps
               // them in the lineage. When the save was refused over a change
@@ -5632,7 +5607,7 @@ export function createWorkspaceEngineCapture(
                 quitEvictionFailure = null;
                 dischargedByEvict = true;
                 if (liveYDocSessions.get(input.path) === liveEntry) {
-                  removeLiveYDocSession(input.path);
+                  liveYDocSessions.delete(input.path);
                 }
                 return;
               } catch (evictError) {
@@ -5657,7 +5632,7 @@ export function createWorkspaceEngineCapture(
           // single-canonical reservation), so ordinary capture of this path
           // resumes for the next opener / external editor.
           if (liveYDocSessions.get(input.path) === liveEntry) {
-            removeLiveYDocSession(input.path);
+            liveYDocSessions.delete(input.path);
           }
           if (changedOutside && keepsTextInHistory && !shuttingDown) await recordOutsideWrite();
         };
@@ -5703,7 +5678,7 @@ export function createWorkspaceEngineCapture(
           // find — and a released session is not resurrected.
           if (registered === undefined && liveEntry.orphaned) {
             liveEntry.status = "failing-close";
-            registerLiveYDocSession(input.path, liveEntry);
+            liveYDocSessions.set(input.path, liveEntry);
           }
         };
         // ABSENT-HEAD CONTRACT (stated on WorkspaceEngineCapture.openYDocSession).
@@ -5827,7 +5802,7 @@ export function createWorkspaceEngineCapture(
         // guards a path that has no session. The absent-head refusals above
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
-        registerLiveYDocSession(input.path, liveEntry);
+        liveYDocSessions.set(input.path, liveEntry);
         // The editor's first save state, decided before it can show Saved.
         //
         // A document can open over an outside edit: write nothing and report
@@ -5972,9 +5947,11 @@ export function createWorkspaceEngineCapture(
 
   return {
     start() {
-      captureStarted = true;
-      deferredWritePoller.setActive(liveYDocSessions.size > 0);
       pollDaemonCaptureHealth();
+    },
+
+    noteWriteDeferred(path) {
+      if (!stopped && !shuttingDown) liveYDocSessions.get(path)?.changedOutside();
     },
 
     observeFileEvents(events) {
@@ -6384,7 +6361,6 @@ export function createWorkspaceEngineCapture(
     },
 
     beginShutdown() {
-      deferredWritePoller.stop();
       shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
@@ -8049,7 +8025,6 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
-      deferredWritePoller.stop();
       durableLocalListeners.clear();
       ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {

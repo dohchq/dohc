@@ -1017,16 +1017,6 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
   }],
 ];
 
-it("decodes the lightweight deferred-write snapshot without health fields", () => {
-  for (const deferredWrites of [[], ["notes/open.md"]]) {
-    const reply = { deferredWrites };
-    expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherDeferredWrites, reply)).toEqual(reply);
-  }
-  for (const deferredWrites of [undefined, null, [""], [1]]) {
-    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherDeferredWrites, { deferredWrites })).toThrow(ProtocolShapeError);
-  }
-});
-
 for (const [method, base] of holdReplies) {
   it(`decodes ${method} waiting paths and rejects malformed lists`, () => {
     const result = { ...base, heldFiles: [], deferredWrites: ["notes/open.md"] };

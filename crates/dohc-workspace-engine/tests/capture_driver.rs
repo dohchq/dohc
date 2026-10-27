@@ -16,8 +16,8 @@ use dohc_engine_sync::list_replication_ops;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_IMPORT_PROGRESS_EVENT, CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice, EngineEventReceiver,
-    EngineService, root_binding::write_root_binding,
+    CAPTURE_WRITE_DEFERRED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice,
+    EngineEventReceiver, EngineService, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -2588,73 +2588,104 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
         .await
         .expect("close");
 }
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn deferred_write_snapshots_follow_outside_edits_and_session_release() {
+async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write() {
+    async fn reconcile(
+        transport: &InProcessTransport<EngineService>,
+        handle: &WorkspaceHandle,
+    ) -> Value {
+        tokio::time::timeout(WAIT, async {
+            let mut result = call(transport, handle, 10, "capture.reconcile", json!({})).await;
+            loop {
+                assert_eq!(result["degraded"], json!(false), "{result}");
+                if result["settled"] == json!(true) {
+                    return result;
+                }
+                tokio::task::yield_now().await;
+                result = call(transport, handle, 11, "capture.flush", json!({})).await;
+            }
+        })
+        .await
+        .expect("capture settles")
+    }
+
+    fn deferred_events(events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>) -> Vec<Value> {
+        let mut payloads = Vec::new();
+        while let Ok(notice) = events.try_recv() {
+            if notice.name == CAPTURE_WRITE_DEFERRED_EVENT {
+                payloads.push(notice.payload);
+            }
+        }
+        payloads
+    }
+
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "note.md", b"Before.\n");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_until_capture_ready(&transport, &handle, 100).await;
-    let opened = call(
-        &transport,
-        &handle,
-        2,
-        "ydoc.open",
-        json!({ "versionId": "main", "path": "note.md", "contentKind": "plaintext" }),
-    )
-    .await;
-    for id in [3, 4] {
+
+    write_file(scratch.path(), "unheld.md", b"No open session.\n");
+    assert_eq!(
+        reconcile(&transport, &handle).await["deferredWrites"],
+        json!([])
+    );
+    assert!(deferred_events(&mut events).is_empty());
+    assert_eq!(
+        read_text(&transport, &handle, 2, "unheld.md").await.as_deref(),
+        Some("No open session.\n")
+    );
+
+    for text in ["First outside write.\n", "A new outside write.\n"] {
+        let opened = call(
+            &transport,
+            &handle,
+            3,
+            "ydoc.open",
+            json!({ "versionId": "main", "path": "note.md", "contentKind": "plaintext" }),
+        )
+        .await;
+        write_file(scratch.path(), "note.md", text.as_bytes());
         assert_eq!(
-            call(&transport, &handle, id, "watcher.deferredWrites", json!({})).await,
-            json!({ "deferredWrites": [] })
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!(["note.md"])
+        );
+        assert_eq!(
+            deferred_events(&mut events),
+            vec![json!({ "workspaceId": WORKSPACE_ID, "path": "note.md" })]
+        );
+
+        // A second write and full scan leave the path deferred without another wake.
+        write_file(scratch.path(), "note.md", b"Still held.\n");
+        assert_eq!(
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!(["note.md"])
+        );
+        assert!(deferred_events(&mut events).is_empty());
+
+        call(
+            &transport,
+            &handle,
+            4,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+        assert_eq!(
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!([])
+        );
+        assert!(deferred_events(&mut events).is_empty());
+        assert_eq!(
+            read_text(&transport, &handle, 5, "note.md").await.as_deref(),
+            Some("Still held.\n")
         );
     }
-
-    write_file(scratch.path(), "note.md", b"Written by an agent.\n");
-    call(&transport, &handle, 5, "capture.reconcile", json!({})).await;
-    tokio::time::timeout(WAIT, async {
-        loop {
-            let snapshot = call(&transport, &handle, 6, "watcher.deferredWrites", json!({})).await;
-            if snapshot == json!({ "deferredWrites": ["note.md"] }) {
-                break;
-            }
-            call(&transport, &handle, 7, "capture.flush", json!({})).await;
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("capture reports the outside write while the session holds it");
-    assert_eq!(
-        call(&transport, &handle, 8, "watcher.deferredWrites", json!({})).await,
-        json!({ "deferredWrites": ["note.md"] })
-    );
-
-    call(
-        &transport,
-        &handle,
-        9,
-        "ydoc.evict",
-        json!({ "sessionId": opened["sessionId"] }),
-    )
-    .await;
-    tokio::time::timeout(WAIT, async {
-        loop {
-            call(&transport, &handle, 10, "capture.flush", json!({})).await;
-            let snapshot = call(&transport, &handle, 11, "watcher.deferredWrites", json!({})).await;
-            if snapshot == json!({ "deferredWrites": [] }) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("capture clears the snapshot after session release");
-    assert_eq!(
-        read_text(&transport, &handle, 12, "note.md").await.as_deref(),
-        Some("Written by an agent.\n")
-    );
-    call(&transport, &handle, 13, "workspace.close", json!({})).await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2671,11 +2702,7 @@ async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
         )
         .await
         .expect("close");
-    for (id, method) in [
-        (4, "watcher.status"),
-        (5, "capture.flush"),
-        (6, "watcher.deferredWrites"),
-    ] {
+    for (id, method) in [(4, "watcher.status"), (5, "capture.flush")] {
         let stale = transport
             .call(
                 RequestContext::unbounded(),

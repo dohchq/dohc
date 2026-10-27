@@ -33,7 +33,6 @@ export const WORKSPACE_METHOD = {
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
-  watcherDeferredWrites: "watcher.deferredWrites",
   captureClearRecovery: "capture.clearRecovery",
   captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
@@ -478,7 +477,6 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
-  [WORKSPACE_METHOD.watcherDeferredWrites]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
   [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
@@ -1339,9 +1337,6 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
-  [WORKSPACE_METHOD.watcherDeferredWrites]: mutableStruct({
-    deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
-  }),
   [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
     // Outside writes waiting for the open document to release its lease.
     deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),

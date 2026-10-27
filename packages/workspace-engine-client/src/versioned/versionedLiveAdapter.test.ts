@@ -240,7 +240,6 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
-  { method: WORKSPACE_METHOD.watcherDeferredWrites, params: {} },
   { method: WORKSPACE_METHOD.captureClearRecovery, params: { momentId: "recovery" } },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
   { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
@@ -448,17 +447,6 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
-  it("reads only deferred paths and forwards cancellation on the workspace handle", async () => {
-    const controller = new AbortController();
-    const sendRequest = vi.fn(async (request: Request, _signal?: AbortSignal, _progress?: () => void, cancelSignal?: AbortSignal): Promise<Response> => {
-      expect(cancelSignal).toBe(controller.signal);
-      expect(request).toMatchObject({ method: "watcher.deferredWrites", workspace: WORKSPACE, params: {} });
-      return { id: request.id, result: { deferredWrites: ["notes/open.md"] } };
-    });
-    const adapter = new VersionedLiveAdapter({ sendRequest, close() {} }, WORKSPACE, { workspaceId: WORKSPACE });
-    expect(await adapter.deferredWrites(controller.signal)).toEqual(["notes/open.md"]);
-    expect(sendRequest).toHaveBeenCalledTimes(1);
-  });
   it("retries a held path with the real flush and retried result", async () => {
     const result = { deferredWrites: [], settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
     const requests: Request[] = [];

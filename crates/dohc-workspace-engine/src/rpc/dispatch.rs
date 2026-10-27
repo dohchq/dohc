@@ -598,7 +598,6 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
-            "watcher.deferredWrites" => self.watcher_deferred_writes(request.workspace)?,
             "capture.importRecovery" => {
                 Box::pin(self.capture_import_recovery(request.workspace, request.params)).await?
             }
@@ -1670,7 +1669,6 @@ mod tests {
             "versions.list",
             "versions.setActive",
             "watcher.status",
-            "watcher.deferredWrites",
             "workspace.close",
             "workspace.open",
             "ydoc.adoptCollectionRecord",

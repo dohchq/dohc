@@ -43,6 +43,7 @@ import {
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
+  type Event,
   VERSIONED_METHOD,
   type JsonValue,
   type Request,
@@ -65,6 +66,7 @@ import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery"
 import { createRelaySyncEngine } from "./relaySyncEngine";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
+import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -2032,7 +2034,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(discardUnsentState).not.toHaveBeenCalled();
   });
 
-  it("reports an outside write to an open note before the next health poll", async () => {
+  it.each(["event", "health poll"])("reports an outside write to an open note through the %s", async source => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "notes/a.md", "seed");
@@ -2041,10 +2043,9 @@ describe("workspaceEngineCapture batch capture", () => {
     const sessions = mockLiveSessions(loopback);
     const live = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     let paths: string[] = [];
-    const deferredWrites = vi.fn(async () => paths);
     const store = new Proxy(live, {
       get(target, property) {
-        if (property === "deferredWrites") return deferredWrites;
+        if (property === "watcherStatus") return async () => ({ running: true, degraded: false, terminal: false, deferredWrites: paths });
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -2059,24 +2060,42 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path, head: "present", lineage: "existing", unsettled: false,
           applyLocalUpdate: async () => undefined, evict: async () => undefined,
           settleNow: async () => undefined, close: async () => undefined,
-        } as unknown as EngineYdocProviderSession;
+        } as EngineYdocProviderSession;
       },
     });
+    let emit: (event: Event) => void = () => {};
+    const unsubscribe = bridgeWriteDeferred({ onEvent(handler) { emit = handler; return () => { emit = () => {}; }; } },
+      (workspaceId, path) => { if (workspaceId === WORKSPACE_ID) engine.noteWriteDeferred(path); });
+    const deferredEvent = (payload: JsonValue) => emit({ seq: 1, sessionGeneration: 1, name: CAPTURE_WRITE_DEFERRED_EVENT, payload });
     try {
       engine.start();
       await engine.flush();
-      expect(deferredWrites).not.toHaveBeenCalled();
       const session = await engine.openYDocSession({ path: "notes/a.md", onRemoteUpdate: () => undefined, onChangedOutside: changedOutside });
-      await vi.advanceTimersByTimeAsync(0);
-      paths = ["notes/a.md"];
-      await vi.advanceTimersByTimeAsync(500);
-      expect(changedOutside).toHaveBeenCalledWith(false);
+      deferredEvent({ workspaceId: "other", path: "notes/a.md" });
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: "closed.md" });
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: 1 });
+      deferredEvent(null);
+      expect(changedOutside).not.toHaveBeenCalled();
+      if (source === "event") {
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+        await vi.advanceTimersByTimeAsync(0);
+      } else {
+        paths = ["notes/a.md"];
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS - 1);
+        expect(changedOutside).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await engine.flush();
+      }
+      expect(changedOutside).toHaveBeenCalledExactlyOnceWith(false);
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+      expect(changedOutside).toHaveBeenCalledOnce();
       paths = [];
       await session.close();
-      const readsAfterClose = deferredWrites.mock.calls.length;
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(deferredWrites).toHaveBeenCalledTimes(readsAfterClose);
+      changedOutside.mockClear();
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+      expect(changedOutside).not.toHaveBeenCalled();
     } finally {
+      unsubscribe();
       await engine.stop();
       await live.close();
       vi.useRealTimers();
@@ -2098,7 +2117,6 @@ describe("workspaceEngineCapture batch capture", () => {
     const statusReads: string[][] = [];
     const store = new Proxy(live, {
       get(target, property) {
-        if (property === "deferredWrites") return async () => released ? [] : ["notes/a.md"];
         if (property === "watcherStatus") {
           return async () => {
             const deferredWrites = released ? [] : ["notes/a.md"];
