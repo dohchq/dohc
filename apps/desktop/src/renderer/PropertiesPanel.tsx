@@ -309,26 +309,31 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
+  // The list being typed in, by the key it was read with. It saves when the
+  // person leaves it or presses Enter. Until then it sits apart from the rows,
+  // so another device's change to any property leaves its text alone.
+  const [listDraft, setListDraft] = useState<{ key: string; text: string } | null>(null);
+  const draftKey = (entry: FrontmatterEntry) => entry.sourceKey ?? entry.key;
+
   function setValue(index: number, value: string) {
-    const next = entries.map((entry, i) => (i === index ? { ...entry, value } : entry));
-    // A list saves when the person leaves it or presses Enter, so its text
-    // stays as typed until then.
-    if (entries[index]?.list) setEntries(next);
-    else commit(next);
+    const entry = entries[index];
+    if (entry?.list) setListDraft({ key: draftKey(entry), text: value });
+    else commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
   // A list edit that leaves the same items writes nothing, so the file keeps
   // the list as it was written.
   function settleList(index: number) {
     const entry = entries[index];
-    if (!entry?.list || entry.value === entry.sourceValue) return;
-    const items = listItems(entry.value);
+    const draft = listDraft;
+    setListDraft(null);
+    if (!entry || draft?.key !== draftKey(entry)) return;
+    const items = listItems(draft.text);
     const before = entry.rawValue;
     if (Array.isArray(before) && items.length === before.length && items.every((item, i) => item === before[i])) {
-      setEntries(entries.map((row, i) => (i === index ? { ...row, value: row.sourceValue ?? row.value } : row)));
       return;
     }
-    commit(entries);
+    commit(entries.map((row, i) => (i === index ? { ...row, value: draft.text } : row)));
   }
 
   // Where focus goes once the pills render: a pill's name, or the +.
@@ -402,7 +407,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <input
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
-                  value={entry.value}
+                  value={entry.list && listDraft?.key === draftKey(entry) ? listDraft.text : entry.value}
                   // A value longer than the pill ends in an ellipsis; its
                   // tooltip holds all of it.
                   title={entry.value || undefined}

@@ -975,6 +975,42 @@ describe("PropertiesPanel", () => {
     }
   });
 
+  it("keeps a live document's typed list items when another device changes a property first", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+
+      setFrontmatterValue(replica, "status", "ready");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      expect(propertyValue("status")).toBe("ready");
+      expect(propertyValue("tags")).toBe("kyoto, food, ramen");
+      await user.tab();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food", "ramen"], status: "ready" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("keeps a local file's typed list items when the file changes first", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n";
+    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
+    await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+
+    rerender(<PropertiesPanel body={body.replace("draft", "ready")} onChange={onChange} />);
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen");
+    await user.tab();
+
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: ready\n---\n\nBody\n");
+  });
+
   it("shows why a list or map can't be edited, with its whole value, to the keyboard as well as the pointer", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
