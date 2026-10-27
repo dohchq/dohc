@@ -111,6 +111,46 @@ describe("OwnerYDocOutbox Try again", () => {
   });
 });
 
+describe("OwnerYDocOutbox restore-fenced discovery", () => {
+  const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 3 };
+  const row = { outboxId: "old-queue", binding, pendingBytes: 12, oldestEntryAtMs: 5 };
+  function requester(reply: JsonValue, requests: Request[] = []): DaemonRequesterClient {
+    return { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: reply };
+    } };
+  }
+
+  it("lists retained queues with their earlier binding and a continuation", async () => {
+    const requests: Request[] = [];
+    const client = outbox(requester({ queues: [row], next: row.outboxId }, requests));
+    expect(await client.listRestoreFenced({ after: "earlier", limit: 1 })).toEqual({ queues: [row], next: row.outboxId });
+    expect(requests).toMatchObject([{ workspace: WORKSPACE, method: "ydoc.ownerOutbox.listRestoreFenced", params: { after: "earlier", limit: 1 } }]);
+  });
+
+  it("accepts the final empty page", async () => {
+    expect(await outbox(requester({ queues: [], next: null })).listRestoreFenced()).toEqual({ queues: [], next: null });
+  });
+
+  it.each([0, 65, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid page size %s before sending", async limit => {
+    const requests: Request[] = [];
+    await expect(outbox(requester({}, requests)).listRestoreFenced({ limit })).rejects.toThrow(TypeError);
+    expect(requests).toEqual([]);
+  });
+
+  it.each([
+    { queues: [{ ...row, pendingBytes: 0 }], next: null },
+    { queues: [{ ...row, oldestEntryAtMs: null }], next: null },
+    { queues: [{ ...row, binding: { ...binding, restoreFenceGeneration: -1 } }], next: null },
+    { queues: [row, row], next: null },
+    { queues: [row], next: "another-queue" },
+    { queues: [], next: "old-queue" },
+    { queues: [row], next: null, extra: true },
+  ])("rejects malformed or unbounded discovery responses", async reply => {
+    await expect(outbox(requester(reply)).listRestoreFenced({ limit: 1 })).rejects.toThrow(TypeError);
+  });
+});
+
 describe("OwnerYDocOutbox receipt boundary", () => {
   it("forwards minimum and maximum safe receipt coordinates unchanged", async () => {
     const client = new RecordingRequester();
