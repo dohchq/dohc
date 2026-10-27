@@ -195,12 +195,7 @@ impl ActorHandle {
                 committed.as_deref(),
             )
         });
-        if let Some(pending) = super::pending_reader_preparation(&result) {
-            let recovery = self.markdown_recovery.clone();
-            tokio::spawn(async move {
-                pending.resolve().await;
-                recovery.request();
-            });
+        if super::pending_reader_preparation(&result).is_some() {
             self.request_markdown_recovery();
             return Ok(CollectionReconciliation::default());
         }

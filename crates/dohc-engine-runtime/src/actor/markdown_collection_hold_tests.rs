@@ -1,7 +1,7 @@
 use super::*;
 use dohc_engine_collab::markdown_write_obligations::{self as obligations, Kind};
 use dohc_engine_domain::WriteText;
-use dohc_engine_storage::NoFaults;
+use dohc_engine_storage::{NoFaults, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -174,4 +174,65 @@ async fn markdown_hold_link_baseline_reports_unusable_without_splicing_the_older
     assert!(super::super::link_documents::baseline(&mut f.store, &mut f.cache,
         f.scratch.path(), &f.key, PATH, &CancellationToken::new(), &(),
         |text| text.contains("other.md")).unwrap());
+}
+
+struct CaptureRoot(std::path::PathBuf);
+impl super::super::WorkspaceRootGuard for CaptureRoot {
+    fn validate(&self, root: &std::path::Path) -> Result<(), RuntimeError> {
+        assert_eq!(root, self.0);
+        assert!(root.is_dir());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn markdown_hold_capture_preparation_hands_off_from_a_plain_thread_to_async_recovery() {
+    let mut f = Fixture::new(false).await;
+    let expected_id: String = f.store.read_with(|conn| conn.query_row(
+        "SELECT record_id FROM collection_records WHERE workspace_id='w' AND version_id='main' AND file_path=?1",
+        [PATH], |row| row.get(0))).unwrap();
+    f.store.write_with(&NoFaults, |tx| tx.execute(
+        "UPDATE collection_records SET adoption_state='pending' WHERE file_path=?1", [PATH])
+        .map_err(StorageError::persist_public)).unwrap();
+    let db = engine_db_path(&f.scratch).unwrap();
+    drop(f.store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 20).unwrap().actor;
+    actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+        Arc::new(dohc_engine_reader::Reader::new(Some(super::super::reader_tests::fake_reader(
+            &f.scratch, "witness-unsafe"))))))).await.unwrap();
+    let root = f.scratch.path().to_owned();
+    let capture = actor.clone();
+    let capture_root = root.clone();
+    let epoch = actor.markdown_recovery_epoch();
+    let result = std::thread::spawn(move || capture.reconcile_collections_blocking_guarded(
+        "w".into(), "main".into(), capture_root.clone(), LeaseRegistry::new(), Arc::new(()),
+        21, Arc::new(NoFaults), Arc::new(CaptureRoot(capture_root)), None)).join().unwrap().unwrap();
+    assert!(result.changed_paths.is_empty());
+    assert!(result.held_documents.is_empty());
+    assert!(actor.markdown_recovery_epoch() > epoch);
+    let candidates = actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].obligation.kind, Kind::CollectionAdoption);
+    assert_eq!(candidates[0].obligation.held_checkpoint_sha256, None);
+    let key = f.key.clone();
+    let sequence = actor.run(move |store, _| {
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert_eq!(doc.frontmatter_json()["id"], expected_id);
+        Ok(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq)
+    }).await.unwrap();
+    let recovered = actor.reconcile_collections_guarded("w".into(), "main".into(), root.clone(),
+        LeaseRegistry::new(), Arc::new(()), 22, Arc::new(NoFaults), CancellationToken::new(),
+        Arc::new(CaptureRoot(root.clone()))).await.unwrap();
+    assert_eq!(recovered.held_documents.len(), 1);
+    let key = f.key.clone();
+    actor.run(move |store, _| {
+        assert_eq!(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq, sequence);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.join(PATH)).unwrap(), f.source);
+    supervisor.close(&db).unwrap();
 }
