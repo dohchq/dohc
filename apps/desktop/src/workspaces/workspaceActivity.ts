@@ -809,6 +809,11 @@ export function createWorkspaceActivity(
     if (snapshot.authExpired || snapshot.updateRequired || snapshot.syncFailure) throw new Error(unsynced);
   }
 
+  // Pushes everything the workspace recorded so far. Rejects when a pass fails.
+  async function pushRecorded(state: WorkspaceActivityState): Promise<void> {
+    await state.entry?.engine?.pushRecorded();
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -993,6 +998,7 @@ export function createWorkspaceActivity(
     queueCloudSync,
     retryCloudSync,
     syncNow,
+    pushRecorded,
     queueCloudPull,
     pullStarting,
     retryFileObservation,

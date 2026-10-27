@@ -2683,6 +2683,8 @@ const activity = {
     withWorkspaceActivityState(workspaceId, lease => workspaceActivity.retryFileObservation(lease.state.activity)),
   syncNow: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.syncNow(lease.state.activity)),
+  pushRecorded: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.pushRecorded(lease.state.activity)),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       // Started inside the promise, so a workspace closing under the loop
@@ -6609,6 +6611,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
+    pushRecorded: async workspace => activity.pushRecorded(workspace.workspaceId),
     ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {
