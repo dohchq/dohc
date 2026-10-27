@@ -6501,7 +6501,10 @@ export const AutomationControlsTargetShape = z.object({
   path: codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS),
   run: NOTICE_TARGET_FIELD,
 }).refine(isNoticeTarget);
-export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export const RefusalCoordinate = z.union([
+  z.object({ originId: z.string(), originSeq: z.number().int() }),
+  z.object({ obligationOrder: z.number().int().positive(), checkpointSha256: z.string(), headSha256: z.string().nullable() }),
+]);
 export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,

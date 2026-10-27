@@ -224,6 +224,20 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
+  it("offers Open note for a held local save", () => {
+    const retry = vi.fn();
+    const open = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "A change needs your review",
+      body: "This note needs your review.", target: { path: "note.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open));
+    expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open note" } });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(open).toHaveBeenCalledWith("note.md");
+    expect(retry).not.toHaveBeenCalled();
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });

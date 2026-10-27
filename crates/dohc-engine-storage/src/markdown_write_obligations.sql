@@ -25,3 +25,8 @@ CREATE TABLE markdown_write_obligations (
 ) STRICT;
 CREATE INDEX markdown_write_obligations_pending
 ON markdown_write_obligations(workspace_id, completed, obligation_order);
+CREATE TABLE markdown_write_obligation_notice_dismissals (
+    obligation_order INTEGER PRIMARY KEY REFERENCES markdown_write_obligations(obligation_order) ON DELETE CASCADE,
+    checkpoint_sha256 TEXT NOT NULL,
+    head_sha256 TEXT
+) STRICT;

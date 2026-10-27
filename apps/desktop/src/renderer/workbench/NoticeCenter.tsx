@@ -118,7 +118,7 @@ const retriesRun = (notice: NoticeRow): boolean =>
 // A failed automation run, or an agent run that says why it didn't start. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
-  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
 
 // What Copy puts on the clipboard for a failed run's notice. The notice store
 // already bounds the body, so Copy keeps all of the text the person sees.
@@ -2195,7 +2195,7 @@ export function NoticeCenter(props: {
                                         onClick={openNotice}
                                         className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50"
                                       >
-                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                        {busy ? "Opening…" : notice.kind === "markdown-write-held" ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
                                       </button>
                                     ) : null}
                                     {copies ? (

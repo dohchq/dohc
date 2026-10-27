@@ -1269,6 +1269,33 @@ it("rebuilds refusal Notices from the engine and keeps read marks across restart
   expect((await again.store.list()).notices).toEqual([]);
 });
 
+it("keeps local hold identity through restart and dismisses only the shown checkpoint", async () => {
+  const firstCoordinate = { obligationOrder: 7, checkpointSha256: "first", headSha256: null };
+  const nextCoordinate = { ...firstCoordinate, checkpointSha256: "next" };
+  let coordinates = [firstCoordinate];
+  const dismissRefusal = vi.fn(async () => {});
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "local-hold", originId: null, originSeq: null,
+    refusalCoordinates: coordinates, reason: "markdown-write-held",
+    document: { versionId: "main", path: "note.md", objectId: "note", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [shown] = (await first.store.list()).notices;
+  expect(shown).toMatchObject({ kind: "markdown-write-held", target: { path: "note.md" }, refusalCoordinates: [firstCoordinate] });
+  expect(shown!.body).toContain("note.md");
+  expect(shown!.detail).not.toContain("Origin:");
+  await first.store.mark([shown!], "dismissed", null);
+  expect(dismissRefusal).toHaveBeenCalledWith(WORKSPACE, "local-hold", [firstCoordinate]);
+  expect((await first.store.list()).notices).toHaveLength(0);
+  const restarted = await computer(null, { directory: first.directory, refusalNotices, dismissRefusal });
+  expect((await restarted.store.list()).notices).toHaveLength(0);
+  coordinates = [nextCoordinate];
+  expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({
+    kind: "markdown-write-held", readAtMs: null, refusalCoordinates: [nextCoordinate],
+  })]);
+  coordinates = [];
+});
+
 it("names the current file for a terminal binding refusal without suggesting sync again", async () => {
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
     noticeId: "sync-refusal-renamed", originId: "host", originSeq: 1,

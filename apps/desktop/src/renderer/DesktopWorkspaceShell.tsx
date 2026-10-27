@@ -5462,11 +5462,11 @@ export function DesktopWorkspaceShell(props: {
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile);
+      ["sync-refusal", "markdown-write-held"].includes(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile);
   }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile]);
   const hideWorkspaceError = useCallback((id: string) => {
     hideShellError(id);
-    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && ["sync-refusal", "markdown-write-held"].includes(notice.kind));
     if (!refusal) return;
     const askedFor = workspaceId;
     void props.sentNotices!.read([refusal]).catch(error => {

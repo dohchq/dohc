@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   isNoticeBody,
   isAutomationWake,
@@ -175,14 +176,16 @@ type LocalRow = z.infer<typeof LocalRow>;
 
 export const RefusalNotices = z.object({ notices: z.array(z.object({
   refusalCoordinates: z.array(RefusalCoordinate),
-  noticeId: z.string(), originId: z.string(), originSeq: z.number(), reason: z.string(),
+  noticeId: z.string(), originId: z.string().nullable(), originSeq: z.number().nullable(), reason: z.string(),
   document: z.object({ versionId: z.string().nullable(), path: z.string().nullable(), objectId: z.string(),
     lineageClaimId: z.string(), conflictId: z.string().nullable() }).nullable(),
 })) });
 type RefusalNotice = z.infer<typeof RefusalNotices>["notices"][number];
 
 function coordinateKey(coordinate: RefusalCoordinate): string {
-  return JSON.stringify([coordinate.originId, coordinate.originSeq]);
+  return "obligationOrder" in coordinate
+    ? JSON.stringify(["local", coordinate.obligationOrder, coordinate.checkpointSha256, coordinate.headSha256])
+    : JSON.stringify([coordinate.originId, coordinate.originSeq]);
 }
 
 function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinate[]): RefusalCoordinate[] {
@@ -368,8 +371,8 @@ export function createNoticeStore(deps: {
 
   function pruneLocal(file: LocalFile): boolean {
     // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
-    const pending = file.rows.filter(row => row.kind === "sync-refusal");
-    const rest = file.rows.filter(row => row.kind !== "sync-refusal");
+    const pending = file.rows.filter(row => ["sync-refusal", "markdown-write-held"].includes(row.kind));
+    const rest = file.rows.filter(row => !["sync-refusal", "markdown-write-held"].includes(row.kind));
     const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, nowMs())];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
@@ -703,7 +706,7 @@ export function createNoticeStore(deps: {
       const prior = await loadLocal();
       const previousRows = new Map(prior.rows.map(row => [row.noticeId, row]));
       const failedWorkspaces = new Set(workspaces.filter(row => row.notices === null).map(row => row.workspaceId));
-      const rows = prior.rows.filter(row => row.kind !== "sync-refusal" || (row.workspaceId !== null && failedWorkspaces.has(row.workspaceId)));
+      const rows = prior.rows.filter(row => !["sync-refusal", "markdown-write-held"].includes(row.kind) || (row.workspaceId !== null && failedWorkspaces.has(row.workspaceId)));
       for (const { workspaceId, notices } of workspaces) {
         if (notices === null) continue;
         for (const refusal of notices) {
@@ -729,17 +732,19 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          const markdownHeld = refusal.reason === "markdown-write-held";
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = bindingChanged
+          const body = markdownHeld ? lossyNoteRefusal(document?.path ?? "") : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
-          rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
+          rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
             title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
-              `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
+              `Lineage: ${document?.lineageClaimId ?? "unknown"}`,
+              ...(refusal.originId === null ? [] : [`Origin: ${refusal.originId}:${refusal.originSeq}`])].join("\n"),
             target,
             createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
             readAtMs: withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? []).length === 0
@@ -946,14 +951,14 @@ export function createNoticeStore(deps: {
         const file = await loadLocal();
         // Once refusal work stops, a batch with a refusal dismissal fails before it changes any row.
         if (refusalsStopped && mark === "dismissed" && file.rows.some(row => localRefs.has(row.noticeId) &&
-          row.dismissedAtMs === null && row.kind === "sync-refusal" && row.workspaceId)) {
+          row.dismissedAtMs === null && ["sync-refusal", "markdown-write-held"].includes(row.kind) && row.workspaceId)) {
           throw new DOMException("dohc is closing. Dismiss this Notice after dohc opens again.", "AbortError");
         }
         for (const row of file.rows) {
           const ref = localRefs.get(row.noticeId);
           if (!ref) continue;
           if (row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) continue;
-          if (mark === "dismissed" && row.kind === "sync-refusal" && row.workspaceId) {
+          if (mark === "dismissed" && ["sync-refusal", "markdown-write-held"].includes(row.kind) && row.workspaceId) {
             const shown = ref.refusalCoordinates;
             if (!shown?.length || !deps.dismissRefusal) throw new Error("The engine could not dismiss this Notice. Try again.");
             await deps.dismissRefusal(row.workspaceId, row.noticeId, shown);

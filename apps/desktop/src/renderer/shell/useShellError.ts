@@ -444,12 +444,13 @@ export function useShellError(workspaceId: string) {
       ...notices.map(notice => {
         const prior = current.find(error => error.id === notice.noticeId);
         const bindingChanged = notice.detail?.split("\n")[0] === SETTLEMENT_BINDING_CHANGED;
+        const markdownHeld = notice.kind === "markdown-write-held";
         const path = notice.target?.path;
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
           title: bindingChanged ? notice.title : undefined,
           details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
-          retry: bindingChanged ? null : retry,
-          ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}) };
+          retry: bindingChanged || markdownHeld ? null : retry,
+          ...((bindingChanged || markdownHeld) && path && openFile ? { action: { label: markdownHeld ? "Open note" : "Open", run: () => openFile(path) } } : {}) };
       }),
     ]);
   }, []);
