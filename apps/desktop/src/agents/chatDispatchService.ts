@@ -741,9 +741,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   // Whether a run's own request is pending again. A later run in its
   // thread does not cover it: the engine coalesces only pending requests.
+  // Another agent's request for the same message is not this run's.
   async function backInLine(dispatch: AwaitableAgentDispatchStore, run: AgentRunRecord): Promise<boolean> {
     return (await dispatch.listPending(run.workspaceId))
-      .some((each) => each.triggerMessageId === run.triggerMessageId);
+      .some((each) => each.triggerMessageId === run.triggerMessageId && each.agentId === run.agentId);
   }
 
   // Posts every notice this workspace still owes, after a crash or a failed

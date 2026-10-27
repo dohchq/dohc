@@ -4008,6 +4008,39 @@ describe("chatDispatchService", () => {
       }
     });
 
+    it("tells the person about a trust-blocked start when another agent the message names still waits", async () => {
+      let lookups = 0;
+      const fixture = await createFixture({
+        agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+        afterTrustLookup: (trust) => { if ((lookups += 1) === 1) trust.revoke(WORKSPACE_ID); },
+      });
+      const service = createChatDispatchService({ ...fixture.serviceOptions, requeueFailedTrigger: async () => false });
+      try {
+        const general = await fixture.chat.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+        const asked = await fixture.chat.startChannelThread({
+          authorActorKey: null,
+          workspaceId: WORKSPACE_ID,
+          channelId: general.id,
+          author: { kind: "human", displayName: "Sam" },
+          authorUserId: "user_local",
+          namedAgentIds: ["default", "codex"],
+          body: "@Nova @Codex plan day 9.",
+        });
+        service.start();
+        await service.scanWorkspace(WORKSPACE_ID);
+        expect(fixture.spawnCalls).toEqual([]);
+        // One agent's start failed; the other agent's request waits for trust.
+        expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([
+          expect.objectContaining({ triggerMessageId: asked.message.id }),
+        ]);
+        await vi.waitFor(() => expect(fixture.notices).toEqual([expect.objectContaining({
+          title: expect.stringContaining("did not start in Restricted Mode"),
+        })]));
+      } finally {
+        await service.stop();
+      }
+    });
+
     it("looks for held requests when a self-test's runner exits after the kill grace", async () => {
       vi.useFakeTimers();
       const fixture = await createFixture();
