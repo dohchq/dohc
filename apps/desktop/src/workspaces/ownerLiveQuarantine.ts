@@ -2,6 +2,7 @@ import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type L
 import {EngineRequestError, type EngineClient, type OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
 import {recoverySnapshot, sameBinding, type UnwrittenRelease} from "./ownerLiveReleases";
+import {RESTORE_FENCED_RECOVERY_LIMIT} from "./ownerLiveRecoveryLimits";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
@@ -220,8 +221,10 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       after = page.next;
     } while (after !== null);
     let retainedAfter: string | undefined;
+    let retainedCount = 0;
     do {
-      const page = await outbox.listRestoreFenced({after: retainedAfter, limit: 64});
+      const page = await outbox.listRestoreFenced({after: retainedAfter, limit: Math.min(64, RESTORE_FENCED_RECOVERY_LIMIT - retainedCount)});
+      retainedCount += page.queues.length;
       for (const queue of page.queues) {
         const head = await readFacts(queue);
         if (typeof head === "string") {
@@ -229,12 +232,12 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
             outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: null, recovery: "unreadable", saveOnly: true});
           continue;
         }
-        if (head.state !== "quarantined" || head.reason !== "restore-fenced" || head.headDeliveryId === null || !sameBinding(head.binding, queue.binding)) continue;
-        found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: head.reason,
+        if (head.headDeliveryId === null || !sameBinding(head.binding, queue.binding)) continue;
+        found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: "restore-fenced",
           outboxId: queue.outboxId, binding: head.binding, headDeliveryId: head.headDeliveryId, recovery: "paused", saveOnly: true});
       }
       retainedAfter = page.next ?? undefined;
-    } while (retainedAfter !== undefined);
+    } while (retainedAfter !== undefined && retainedCount < RESTORE_FENCED_RECOVERY_LIMIT);
     for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
     // A queue is read whole only when a record may have come from it, and once per draft revision and size.
     const snapshotOf = async (outboxId: string) => {

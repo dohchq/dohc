@@ -1,4 +1,5 @@
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
@@ -491,7 +492,7 @@ export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
 }).strict();
 export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
 export const OwnerLiveDocumentsResult = z.object({
-  documents: z.array(OwnerLiveDocument),
+  documents: z.array(OwnerLiveDocument).max(128 + RESTORE_FENCED_RECOVERY_LIMIT),
   nextCursor: SAFE_RELATIVE_PATH.nullable(),
 }).strict();
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
@@ -1427,7 +1428,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
-  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the

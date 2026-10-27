@@ -41,7 +41,7 @@ const record = (objectId: string, recovery: string, extra: object = {}) => ({obj
 
 it("lists each old restore queue after the binding advances and reads the selected queue for recovery", async () => {
   const old = binding("restored", 1), current = binding("restored", 3);
-  const first = {outboxId: "old-1", binding: old, pendingBytes: 10, oldestEntryAtMs: 1};
+  const first = {outboxId: "old-1", binding: old, pendingBytes: 10};
   const second = {...first, outboxId: "old-2", binding: binding("restored", 2)};
   outboxes.list.mockResolvedValueOnce({queues: [first], next: first.outboxId}).mockResolvedValueOnce({queues: [second], next: null});
   for (const queue of [first, second]) outboxes.heads.set(queue.outboxId, {state: "quarantined", quarantineReason: "restore-fenced",
@@ -56,6 +56,21 @@ it("lists each old restore queue after the binding advances and reads the select
   const selected = rows[0]!;
   if (selected.outboxId === null) throw new Error("Expected the retained queue.");
   expect(await readOwnerLiveQueue(client, "handle", selected)).toMatchObject({binding: old});
+});
+
+it("stops restore discovery at 128 queues even when more remain", async () => {
+  const queues = Array.from({length: 128}, (_, index) => ({outboxId: `retained-${index}`, binding: binding("restored", 1), pendingBytes: 10}));
+  for (const queue of queues) outboxes.heads.set(queue.outboxId, {state: "quarantined", quarantineReason: "restore-fenced",
+    binding: queue.binding, entry: {deliveryId: `${queue.outboxId}-delivery`}, retryDeliveryId: null});
+  outboxes.list.mockClear();
+  outboxes.list.mockResolvedValueOnce({queues: queues.slice(0, 64), next: queues[63]!.outboxId})
+    .mockResolvedValueOnce({queues: queues.slice(64), next: queues[127]!.outboxId});
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [], next: null}))} as unknown as EngineClient;
+  const rows = await readOwnerLiveQuarantines(client, "handle");
+  expect(rows).toHaveLength(128);
+  expect(rows.every(row => row.saveOnly)).toBe(true);
+  expect(outboxes.list).toHaveBeenCalledTimes(2);
 });
 
 it("reads every refused queue from durable state, and leaves binding changes to enrollment", async () => {

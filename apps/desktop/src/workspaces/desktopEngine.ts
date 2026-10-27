@@ -297,10 +297,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // A refusal starts or renews a quarantine; one already read as waiting stays
   // as read. An acceptance can end only a quarantine already read.
   const quarantinesMayChange = (workspaceId: string, objectId: string, outcome: string) => {
-    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId)?.recovery;
+    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId && !row.saveOnly)?.recovery;
     return outcome === "frozen" ? recovery === undefined || recovery === "retrying" : outcome === "acknowledged" && recovery !== undefined;
   };
-  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).map(row => row.path));
+  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).filter(row => !row.saveOnly).map(row => row.path));
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
@@ -414,7 +414,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 assertCurrent();
                 const outcome = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent,
+                  onEnrolled: async () => {await readQuarantinesAfterPass(workspaceId, client, binding.workspace);}});
                 if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
                 return outcome;
               });
@@ -463,7 +464,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                 document, config, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
+                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent,
+                onEnrolled: async () => {await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);}});
               assertCurrent();
               if (quarantinesMayChange(document.binding.workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
@@ -839,7 +841,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         // Read again, so a Try again never names a queue that already changed.
         const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle))
           .find(candidate => candidate.objectId === objectId && quarantineIncident(candidate) === incident);
-        if (!row || row.saveOnly || row.outboxId === null || row.recovery !== "paused") {
+        if (row?.saveOnly) throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
+        if (!row || row.outboxId === null || row.recovery !== "paused") {
           throw new Error("This document changed. Open Live documents to check it.");
         }
         const outboxId = row.outboxId;

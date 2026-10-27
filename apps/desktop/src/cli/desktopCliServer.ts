@@ -502,7 +502,7 @@ export function createDesktopCliServer<State>(
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
-                  if (kept.saveOnly) throw new Error("This document changed. Open Live documents to check it.");
+                  if (kept.saveOnly && kept.recovery !== "unreadable") throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
                   await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
                 }),
                 // Only a Stop that kept the edits runs again; any other Stop belongs to Live documents.
