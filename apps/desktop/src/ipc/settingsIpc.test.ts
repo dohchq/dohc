@@ -245,7 +245,7 @@ describe("registered settings IPC", () => {
       // the file rather than saving into it.
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
       // Every change puts the whole file into effect, the zoom step included.
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
+      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });

@@ -72,7 +72,8 @@ export function createWorkspaceEngineIpc<
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
   historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
-  localAgentDisplayName(): string;
+  /** The name Settings gives one of this computer's agents, while Settings lists it. */
+  agentName(agentId: string): string | undefined;
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
@@ -121,7 +122,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, agentName, localPersonId, localPersonName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, assertWritableWorkspace, syncStatusWithOwnedProjection,
@@ -130,6 +131,8 @@ export function createWorkspaceEngineIpc<
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   } = dependencies;
   const timeline = createHistoryTimeline();
+  // This computer's agent by its name now, or by its id once Settings no longer lists it.
+  const localAgentName = (agentId: string) => agentId === "dohc-mcp" ? "Agent" : agentName(agentId) ?? agentId;
   const runLocator = createRunLocator({
     onThisComputer: automationRunOnThisComputer,
     onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
@@ -260,7 +263,7 @@ export function createWorkspaceEngineIpc<
           const authors: RecordHistoryAuthors = {
             prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
             person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
-            agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
+            agent: (agentId, onBehalfOf) => onBehalfOf === localPersonId() ? localAgentName(agentId) : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
           };
@@ -289,10 +292,10 @@ export function createWorkspaceEngineIpc<
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
-    // Runs dohc started use the Settings name. Other agents use their handshake label.
+    // Runs dohc started use the Settings name of the agent they ran. Other agents use their handshake label.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         presentations,

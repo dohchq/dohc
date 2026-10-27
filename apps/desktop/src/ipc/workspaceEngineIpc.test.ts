@@ -194,7 +194,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
-  const displayName = vi.fn(() => "You");
+  const displayName = vi.fn((_agentId: string): string | undefined => "You");
   const syncProjection = vi.fn(async (_workspace: RegistryEntry, status: SyncStatusResult) => status);
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   let missingAdapter = false;
@@ -246,7 +246,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
     },
-    requireEngineCapture, localAgentDisplayName: displayName,
+    requireEngineCapture, agentName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
@@ -890,6 +890,39 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
       moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
     });
+  });
+
+  it("names each agent's changes by that agent, with the name Settings gives it now", async () => {
+    const h = await harness();
+    const settingsNames = new Map([["nova", "Nova"], ["codex", "Codex"]]);
+    h.displayName.mockImplementation((agentId) => settingsNames.get(agentId));
+    h.capture.listMoments.mockResolvedValue({
+      moments: [{ agentId: "nova", agentRunId: "run-1" }, { agentId: "codex", agentRunId: "run-2" }].map((run, index) => ({
+        id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
+        authors: [{ kind: "agent", onBehalfOf: "person-local", ...run }],
+      })),
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    const recordChange = (historyId: number, authorOriginId: string): CollectionGetRecordResult["history"][number] => ({
+      historyId, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId, actorKind: "agent", onBehalfOf: "person-local", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null,
+    });
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [recordChange(1, "nova"), recordChange(2, "codex")],
+    });
+    const names = async () => {
+      const moments = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> };
+      const record = GetCollectionRecordHistoryResult.parse(await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" }));
+      return [...moments.moments.map((moment) => moment.agentAuthorName), ...record.entries.map(({ author }) => author?.kind === "agent" ? author.name : null)];
+    };
+    await expect(names()).resolves.toEqual(["Nova", "Codex", "Nova", "Codex"]);
+    // A rename shows at once, and an agent removed from Settings keeps its id.
+    settingsNames.set("codex", "Kit");
+    settingsNames.delete("nova");
+    await expect(names()).resolves.toEqual(["nova", "Kit", "nova", "Kit"]);
   });
 
   it("restores as the person signed in here, never one the renderer names, and History names them", async () => {

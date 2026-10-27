@@ -6,8 +6,9 @@ import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
-  AgentColors, StoredUserSettingsResult, firstAgent, rendererUserSettingsResult, runnableAgents,
+  AgentColors, StoredUserSettingsResult, listAgents, rendererUserSettingsResult, runnableAgents,
   settingsDeepEqual,
+  type Agent,
   type DesktopUserSettings,
   type ThemeMode,
   type ZoomStep,
@@ -44,7 +45,7 @@ export function createSettingsIpc<
   },
 >(dependencies: {
   stateDir(): string;
-  setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
+  setCachedPreferredName(preferredName: string | undefined, agents: readonly Agent[]): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
   // The theme the OS draws dohc's menus, dialogs, and window background in.
   applyThemeMode(themeMode: ThemeMode): void;
@@ -86,7 +87,7 @@ export function createSettingsIpc<
   // The windows must match whatever zoom level, theme and spellcheck are in
   // the file, however they got there.
   function takeEffect(settings: DesktopUserSettings): void {
-    setCachedPreferredName(settings.profile.preferredName, firstAgent(settings)?.name);
+    setCachedPreferredName(settings.profile.preferredName, listAgents(settings));
     applyZoomLevelToWindows(settings.appearance.zoomLevel);
     applyThemeMode(settings.appearance.themeMode);
     setSpellCheckerEnabled(settings.editor.spellcheck);
