@@ -928,7 +928,7 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
-    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith(`[desktop] quit: shutdown ran past its ${WILL_QUIT_BUDGET_MS} ms budget`);
+    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith(`[desktop] quit: shutdown ran past its ${WILL_QUIT_BUDGET_MS} ms budget, still running: settleYDocs`);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     held.resolve();
     await vi.advanceTimersByTimeAsync(0);
