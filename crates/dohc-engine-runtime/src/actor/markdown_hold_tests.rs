@@ -683,3 +683,51 @@ async fn markdown_hold_witness_verdict_reuses_source_identity_across_edits_but_r
     assert_eq!(reader.dispatch_count(), 2);
     f.supervisor.close(&f.db).unwrap();
 }
+
+#[tokio::test]
+async fn markdown_hold_third_preparation_stays_pending_without_consuming_consent_or_refresh_debt() {
+    let f = Fixture::new().await;
+    let grant = f.consent();
+    let proof = f.pending.clone();
+    let key = f.key.clone();
+    f.actor.run(move |_, _| {
+        MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |_| {
+            MARKDOWN_BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(move |store| {
+                let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+                let wire = yrs::Doc::new();
+                wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+                let before = wire.transact().state_vector();
+                wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(),
+                    "dohcMarkdownSourceProjectionSha256", "f".repeat(64));
+                let update = wire.transact().encode_state_as_update_v1(&before);
+                store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                    tx, &key, &update, None, None, 11))?;
+                Ok(())
+            })));
+            Err(CollabError::MarkdownReaderPending(proof).into())
+        })));
+        Ok(())
+    }).await.unwrap();
+    let pending = match f.settle(false, Some(grant.clone())).await {
+        Err(RuntimeError::Collab(CollabError::MarkdownWitnessCheckPending { pending, .. })) => pending,
+        _ => panic!("a third preparation must leave the foreground save pending"),
+    };
+    assert!(!grant.is_consumed());
+    f.unchanged().await;
+    f.actor.run(|store, _| {
+        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+        Ok(())
+    }).await.unwrap();
+    pending.resolve().await;
+    f.settle(false, Some(grant.clone())).await.unwrap().settled().unwrap();
+    assert!(grant.is_consumed());
+    f.actor.run(|store, _| {
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, WriteObligationKind::WitnessRefresh);
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
