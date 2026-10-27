@@ -16,8 +16,8 @@ use dohc_engine_sync::list_replication_ops;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_IMPORT_PROGRESS_EVENT, CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CAPTURE_WRITE_DEFERRED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice,
-    EngineEventReceiver, EngineService, root_binding::write_root_binding,
+    CAPTURE_WRITE_DEFERRED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
+    EngineEventNotice, EngineEventReceiver, EngineService, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -2636,7 +2636,9 @@ async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write
     );
     assert!(deferred_events(&mut events).is_empty());
     assert_eq!(
-        read_text(&transport, &handle, 2, "unheld.md").await.as_deref(),
+        read_text(&transport, &handle, 2, "unheld.md")
+            .await
+            .as_deref(),
         Some("No open session.\n")
     );
 
@@ -2681,7 +2683,9 @@ async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write
         );
         assert!(deferred_events(&mut events).is_empty());
         assert_eq!(
-            read_text(&transport, &handle, 5, "note.md").await.as_deref(),
+            read_text(&transport, &handle, 5, "note.md")
+                .await
+                .as_deref(),
             Some("Still held.\n")
         );
     }

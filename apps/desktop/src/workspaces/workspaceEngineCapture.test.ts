@@ -2034,7 +2034,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(discardUnsentState).not.toHaveBeenCalled();
   });
 
-  it.each(["event", "health poll"])("reports an outside write to an open note through the %s", async source => {
+  it.each(["event", "health poll", "open"])("reports an outside write to an open note through the %s", async source => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "notes/a.md", "seed");
@@ -2070,16 +2070,21 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       engine.start();
       await engine.flush();
+      // Held before the session existed: its wake reached no session.
+      if (source === "open") paths = ["notes/a.md"];
       const session = await engine.openYDocSession({ path: "notes/a.md", onRemoteUpdate: () => undefined, onChangedOutside: changedOutside });
-      deferredEvent({ workspaceId: "other", path: "notes/a.md" });
-      deferredEvent({ workspaceId: WORKSPACE_ID, path: "closed.md" });
-      deferredEvent({ workspaceId: WORKSPACE_ID, path: 1 });
-      deferredEvent(null);
-      expect(changedOutside).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(0);
+      if (source !== "open") {
+        deferredEvent({ workspaceId: "other", path: "notes/a.md" });
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: "closed.md" });
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: 1 });
+        deferredEvent(null);
+        expect(changedOutside).not.toHaveBeenCalled();
+      }
       if (source === "event") {
         deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
         await vi.advanceTimersByTimeAsync(0);
-      } else {
+      } else if (source === "health poll") {
         paths = ["notes/a.md"];
         await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS - 1);
         expect(changedOutside).not.toHaveBeenCalled();

@@ -5803,6 +5803,14 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
+        // An outside write capture held before this entry existed woke no
+        // session, so read the held paths once instead of waiting for the poll.
+        // Before start(), the first poll reads them.
+        if (daemonCaptureHealthTimer !== null) void engine.watcherStatus?.().then((status) => {
+          if (!stopped && !shuttingDown && status?.deferredWrites.includes(input.path) && liveYDocSessions.get(input.path) === liveEntry) {
+            liveEntry.changedOutside();
+          }
+        }).catch(() => undefined);
         // The editor's first save state, decided before it can show Saved.
         //
         // A document can open over an outside edit: write nothing and report
