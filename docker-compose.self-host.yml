@@ -115,7 +115,7 @@ services:
       timeout: 5s
       retries: 20
       # The first start after an upgrade can build an index over the whole relay log before the relay listens.
-      start_period: 600s
+      start_period: 300s
 
   relay-snapshot:
     <<: *service

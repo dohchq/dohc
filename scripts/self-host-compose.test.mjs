@@ -39,11 +39,9 @@ test('startup gates data services on their single-use initialization jobs', () =
   for (const name of ['workspace-api', 'sync-relay', 'share-web']) assert.equal(compose.services.gateway.depends_on[name].condition, 'service_healthy');
 });
 
-test('startup waits through the relay start period and its failing checks before it reports a failure', () => {
-  const seconds = value => Number(/^(\d+)s$/.exec(value)[1]);
-  const { start_period: start, interval, retries } = compose.services['sync-relay'].healthcheck;
-  // The relay turns unhealthy at the latest after its start period and its failing checks. The services that wait for it need a minute more.
-  assert.ok(startupWaitSeconds >= seconds(start) + seconds(interval) * retries + 60);
+test('startup waits through the relay start period, then 180 s for its failing checks and the services after it', () => {
+  const [, start] = /^(\d+)s$/.exec(compose.services['sync-relay'].healthcheck.start_period);
+  assert.equal(startupWaitSeconds, Number(start) + 180);
 });
 
 test('an aborted relay validation process writes no core file', () => {

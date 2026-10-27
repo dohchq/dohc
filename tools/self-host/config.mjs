@@ -11,7 +11,7 @@ export function supportedComposeVersion(value) {
 
 // How long `up --wait` waits: the relay's start_period in docker-compose.self-host.yml, then 180 s for its failing
 // checks and the services that wait for it.
-export const startupWaitSeconds = 780;
+export const startupWaitSeconds = 480;
 
 export function readSettings(path = '.env.self-host') {
   return parseEnv(readFileSync(path, 'utf8'));

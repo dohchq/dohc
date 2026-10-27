@@ -558,4 +558,4 @@ node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 
 The upgrade preserves volumes and secrets and saves the previous configuration privately.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
-On a large relay log, the first start after an upgrade can take several minutes. The upgrade waits up to 13 minutes for the server to become ready.
+On a large relay log, the first start after an upgrade can take several minutes.
