@@ -7,14 +7,12 @@
 // every chunk (definitions render nothing), so links keep resolving across
 // chunk boundaries.
 
+import { TABLE_ROW_HEIGHTS_COMMENT } from "@dohc/ydoc-projection/table-row-heights";
+
 const CHUNK_TARGET_BYTES = 4 * 1024;
 
 const FENCE_RE = /^\s{0,3}(```|~~~)/;
 const LINK_DEF_RE = /^\s{0,3}\[[^\]]+\]:\s+\S/;
-// A table's row-height comment names the table under it, even across blank
-// lines (@dohc/ydoc-projection/table-row-heights). A line that may hold one
-// keeps the blank lines and the block after it in its segment.
-const ROW_HEIGHTS_COMMENT = "<!-- dohc:table row-heights=";
 
 export function splitMarkdownBlocks(source: string): string[] {
   const lines = source.split("\n");
@@ -42,7 +40,11 @@ export function splitMarkdownBlocks(source: string): string[] {
       else flush();
       continue;
     }
-    afterRowHeights = line.includes(ROW_HEIGHTS_COMMENT);
+    // A table's row-height comment names the table under it, even across
+    // blank lines. A line that may hold one keeps the blank lines as written,
+    // which decide whether the editor reads it, and the block after them in
+    // its segment.
+    afterRowHeights = line.includes(TABLE_ROW_HEIGHTS_COMMENT);
     if (fence === null && LINK_DEF_RE.test(line)) definitions.push(line);
     current.push(line);
   }

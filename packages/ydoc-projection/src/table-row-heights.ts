@@ -9,6 +9,10 @@
 export const TABLE_ROW_HEIGHTS_RE =
   /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
 
+// Every annotation starts with this text, so a reader can skip text that
+// holds none.
+export const TABLE_ROW_HEIGHTS_COMMENT = '<!-- dohc:table row-heights='
+
 // The Rust projector reads the attribute through `attr_i64`, which accepts
 // an integer or a trimmed integer string. Keep the same rule here so both
 // projectors write the same annotation for the same Y.Doc.

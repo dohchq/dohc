@@ -14,6 +14,7 @@ import type { Nodes, Parents, Root } from "mdast";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  TABLE_ROW_HEIGHTS_COMMENT,
   TABLE_ROW_HEIGHTS_RE,
   tableRowHeights,
 } from "@dohc/ydoc-projection/table-row-heights";
@@ -52,30 +53,75 @@ const scheduleIdle: IdleScheduler = (cb) => {
 };
 
 // The editor reads a resized row's height from the comment above its table
-// and sets it on the row. Read that one comment with the projection's own
-// rule and set the same height, so a row does not grow when the editor
-// replaces the read body. Any other comment stays text, as in the editor.
+// and sets it on the row. Read that one comment where the editor reads it,
+// with the projection's own rule, and set the same height, so a row does not
+// grow when the editor replaces the read body. Any other comment stays text,
+// as in the editor.
 function remarkTableRowHeights() {
-  return (tree: Root) => applyTableRowHeights(tree);
+  return (tree: Root, file: { value: unknown }) => {
+    const source = String(file.value);
+    if (!source.includes(TABLE_ROW_HEIGHTS_COMMENT)) return;
+    const lines = source.split(/\r\n|\r|\n/u);
+    applyTableRowHeights(tree, (line) => lines[line]);
+  };
 }
 
-function applyTableRowHeights(parent: Parents): void {
+// The editor's parser, marked, reads a quote or a list item from its lines
+// without its prefix: a quote's `>` and one space or tab after it, a list
+// item's indent with each tab four spaces. `editorLine` gives a source line
+// as the editor reads it inside `parent`.
+const QUOTE_PREFIX_RE = /^ {0,3}>[ \t]?/u;
+
+function applyTableRowHeights(parent: Parents, editorLine: (line: number) => string): void {
   const children: Nodes[] = parent.children;
   for (let index = 0; index < children.length; index += 1) {
     const node = children[index];
     const next = children[index + 1];
-    if (node.type === "html" && next?.type === "table") {
-      const annotation = TABLE_ROW_HEIGHTS_RE.exec(node.value);
-      if (!annotation) continue;
+    if (node.type === "html" && next?.type === "table" && node.position && next.position) {
+      // The editor reads the comment only at the start of its line, and only
+      // across blank lines that hold nothing, not even a space.
+      const annotation = TABLE_ROW_HEIGHTS_RE.exec(editorLine(node.position.start.line - 1));
+      const tableLine = next.position.start.line - 1;
+      let line = node.position.end.line;
+      while (line < tableLine && editorLine(line) === "") line += 1;
+      if (!annotation || line < tableLine) continue;
       for (const [row, height] of tableRowHeights(annotation[1])) {
         const tableRow = next.children[row];
         if (tableRow) tableRow.data = { hProperties: { style: `height: ${height}px` } };
       }
       children.splice(index, 1);
-    } else if ("children" in node) {
-      applyTableRowHeights(node);
+    } else if (node.type === "blockquote") {
+      applyTableRowHeights(node, (line) => editorLine(line).replace(QUOTE_PREFIX_RE, ""));
+    } else if (node.type === "list") {
+      applyTableRowHeights(node, editorLine);
+    } else if (node.type === "listItem" && node.position) {
+      // marked expands the tabs on an item's first line to the next tab stop.
+      const first = node.position.start.line - 1;
+      const indent = listItemIndent(expandTabs(editorLine(first)));
+      applyTableRowHeights(node, (line) =>
+        (line === first
+          ? expandTabs(editorLine(line))
+          : editorLine(line).replaceAll("\t", "    ")
+        ).slice(indent),
+      );
     }
   }
+}
+
+// marked's indent for a list item: its marker and the spaces after it, or the
+// marker and one space when nothing follows it or more than four spaces do.
+function listItemIndent(firstLine: string): number {
+  const [, marker = "", spaces = "", text = ""] =
+    /^( *(?:[*+-]|\d+[.)]))( *)(.*)$/u.exec(firstLine) ?? [];
+  return marker.length + (text === "" || spaces.length > 4 ? 1 : spaces.length);
+}
+
+function expandTabs(line: string): string {
+  let expanded = "";
+  for (const char of line) {
+    expanded += char === "\t" ? " ".repeat(4 - (expanded.length % 4)) : char;
+  }
+  return expanded;
 }
 
 // GFM is what people actually write in a README: tables, strikethrough, bare
