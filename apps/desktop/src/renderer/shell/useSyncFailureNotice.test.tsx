@@ -77,8 +77,8 @@ function renderNotice(
 describe("useSyncFailureNotice", () => {
   it.each([false, true])("shows copy recovery and keeps the same row on retry, blocked=%s", async blocked => {
     const message = blocked
-      ? ".dohc/local/outside-write-copies is in the way, so dohc left n.md as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again."
-      : "dohc left n.md as it was. Check that dohc can write to the workspace folder, then choose Try again.";
+      ? ".dohc/local/outside-write-copies is in the way, so dohc left n.md as it was.\nMove .dohc/local/outside-write-copies somewhere else, then choose Try again."
+      : "dohc left n.md as it was.\nCheck that dohc can write to the workspace folder, then choose Try again.";
     const detail = `OutsideWriteCopyError: dohc could not keep a copy of n.md\n${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
     const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
     await waitFor(() => expect(view.toasts()).toHaveLength(1));
