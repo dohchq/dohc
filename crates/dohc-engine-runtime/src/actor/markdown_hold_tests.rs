@@ -215,6 +215,7 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
 
 #[tokio::test]
 async fn markdown_hold_consent_rollback_retries_after_witness_and_journal_preparation() {
+    for queued in [false, true] {
     let f = Fixture::new().await;
     let grant = f.consent();
     let pending = f.pending.clone();
@@ -243,7 +244,7 @@ async fn markdown_hold_consent_rollback_retries_after_witness_and_journal_prepar
         })));
         Ok(())
     }).await.unwrap();
-    assert!(f.settle(false, Some(grant.clone())).await.unwrap().settled().unwrap().materialized);
+    assert!(f.settle(queued, Some(grant.clone())).await.unwrap().settled().unwrap().materialized);
     assert!(reran.load(std::sync::atomic::Ordering::Acquire));
     assert!(grant.is_consumed());
     f.actor.run(|store, _| {
@@ -253,6 +254,7 @@ async fn markdown_hold_consent_rollback_retries_after_witness_and_journal_prepar
         Ok(())
     }).await.unwrap();
     f.supervisor.close(&f.db).unwrap();
+    }
 }
 
 #[tokio::test]
@@ -744,4 +746,59 @@ async fn markdown_hold_third_preparation_stays_pending_without_consuming_consent
         Ok(())
     }).await.unwrap();
     f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_third_proof_returns_pending_and_wakes_recovery_without_using_consent() {
+    for queued in [false, true] {
+        let f = Fixture::new().await;
+        let grant = f.consent();
+        let proof = f.pending.clone();
+        let again = proof.clone();
+        f.actor.run(move |_, _| {
+            MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |_| {
+                MARKDOWN_BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(move |store| {
+                    let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+                    assert_eq!(owed.len(), 1);
+                    assert_eq!(owed[0].kind, WriteObligationKind::Session);
+                    assert!(owed[0].held_checkpoint_sha256.is_none());
+                    MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |_| {
+                        Err(CollabError::MarkdownReaderPending(again).into())
+                    })));
+                    Ok(())
+                })));
+                Err(CollabError::MarkdownReaderPending(proof).into())
+            })));
+            Ok(())
+        }).await.unwrap();
+        let epoch = f.actor.markdown_recovery_epoch();
+        let modified = std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap();
+        assert!(matches!(f.settle(queued, Some(grant.clone())).await,
+            Err(RuntimeError::Collab(CollabError::MarkdownReaderPending(_)))));
+        assert!(!grant.is_consumed());
+        f.unchanged().await;
+        assert_eq!(std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
+        f.actor.run(|store, _| {
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, WriteObligationKind::Session);
+            assert!(owed[0].held_checkpoint_sha256.is_none());
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(())
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while f.actor.markdown_recovery_epoch() == epoch { tokio::task::yield_now().await; }
+        }).await.expect("background proof completion wakes the recovery owner");
+        assert!(f.settle(queued, Some(grant.clone())).await.unwrap().settled().unwrap().materialized);
+        assert!(grant.is_consumed());
+        f.actor.run(|store, _| {
+            assert_eq!(store.table_row_count("moments")?, 2);
+            assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+            let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, WriteObligationKind::WitnessRefresh);
+            Ok(())
+        }).await.unwrap();
+        f.supervisor.close(&f.db).unwrap();
+    }
 }
