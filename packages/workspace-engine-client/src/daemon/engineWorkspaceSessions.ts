@@ -35,6 +35,7 @@ import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 export interface EngineWorkspace {
   workspaceId: string;
@@ -516,21 +517,21 @@ export class EngineWorkspaceSessions {
    * the session is closing or rebuilding. An open is under way from a run's
    * first attempt to its last, including a wait for a busy store and the
    * pause before a retry. A close that keeps the workspace, such as the sync
-   * client's rebind, counts as an open under way once no run is active, until
-   * the next open starts. Settles when the open does, with its binding
-   * published, when its last attempt fails, or when the workspace starts
-   * closing for good or rebuilding. It also settles if an attempt's
-   * preparation outlasts the open deadline, if its daemon request outlasts
-   * that deadline from when it started, or after two deadlines in all. Null
-   * once the workspace is open. Never opens, and never counts as a run, so a
-   * caller inside a run can wait on it. A close waits for runs, so while one
-   * does there is nothing to wait on.
+   * client's rebind, counts as an open under way until the next open starts.
+   * Settles when the open does, with its binding published, when its last
+   * attempt fails, or when the workspace starts closing for good or
+   * rebuilding. It also settles if an attempt's preparation outlasts the open
+   * deadline, if its daemon request outlasts that deadline from when it
+   * started, or after two deadlines in all. Null once the workspace is open.
+   * Never opens, and never counts as a run. A close waits for runs, so while
+   * one does, a caller inside a run (engineRunScope) is given nothing to wait
+   * on.
    */
   openInProgress(workspace: EngineWorkspace, until = this.now() + 2 * this.workspaceOpenDeadlineMs): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
     if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry ||
       (!entry.opening && entry.openingRuns === 0 && !entry.reopening) ||
-      (entry.closing && entry.activeRuns > 0) ||
+      (entry.closing && entry.activeRuns > 0 && insideEngineRun()) ||
       entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
       (this.hasAvailableClient() && this.currentBinding(workspace)) || this.now() >= until) return null;
     const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
@@ -558,7 +559,7 @@ export class EngineWorkspaceSessions {
     if (!binding || !entry) return null;
     entry.activeRuns += 1;
     try {
-      return await operation(binding);
+      return await inEngineRun(() => operation(binding));
     } finally {
       this.release(entry);
     }
@@ -623,7 +624,7 @@ export class EngineWorkspaceSessions {
           });
         }
         try {
-          const running = operation(binding);
+          const running = inEngineRun(() => operation(binding));
           return await (options.abandonAtQuit ? this.untilQuit(running) : running);
         } catch (error) {
           const retryAfterReconnect = requiresReconnect(error);

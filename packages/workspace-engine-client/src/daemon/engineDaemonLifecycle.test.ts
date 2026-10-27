@@ -11,6 +11,7 @@ import {
   runEngineDaemonStartupSmoke,
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 // Every cross-machine wait in this file carries this bound. Each
 // relaunch runs the startup smoke against a real temporary directory, so a
@@ -267,6 +268,31 @@ describe("Rust engine daemon lifecycle", () => {
         payload: null,
       });
       expect(seen).toEqual([1, 2]);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("runs a handler registered inside an engine run inside that run", async () => {
+    let emit: ((event: Event) => void) | undefined;
+    class EventfulClient extends FakeClient {
+      onEvent(handler: (event: Event) => void): () => void {
+        emit = handler;
+        return () => {};
+      }
+    }
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      initialBackoffMs: 0,
+      launch: async () => new EventfulClient(),
+    });
+    const inside: boolean[] = [];
+    inEngineRun(() => lifecycle.onEvent(() => inside.push(insideEngineRun())));
+    lifecycle.onEvent(() => inside.push(insideEngineRun()));
+    try {
+      await lifecycle.start();
+      emit?.({ seq: 1, sessionGeneration: 1, name: "capture.momentRecorded", payload: null });
+      expect(inside).toEqual([true, false]);
     } finally {
       await lifecycle.stop();
     }

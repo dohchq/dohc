@@ -12,6 +12,7 @@ import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type
 import {validateUserWritePath} from "@dohc/workspace-core";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
+import { keepEngineRunScope } from "./engineRunScope";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -1741,8 +1742,9 @@ export class EngineClient implements EngineTransport {
   }
 
   onEvent(handler: (event: Event) => void): () => void {
-    this.eventHandlers.add(handler);
-    return () => this.eventHandlers.delete(handler);
+    const scoped = keepEngineRunScope(handler);
+    this.eventHandlers.add(scoped);
+    return () => this.eventHandlers.delete(scoped);
   }
 
   onBlob(handler: (blob: CompletedBlob) => void): () => void {

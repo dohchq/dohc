@@ -20,6 +20,7 @@ import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
+import { keepEngineRunScope } from "./engineRunScope";
 import {
   EngineWorkspaceRebindError,
   EngineWorkspaceRebuildingError,
@@ -100,7 +101,7 @@ it("drains an existing-binding operation before close and refuses new work while
   await sessions.closeAll();
 });
 
-it("gives the open under way to wait on, without a run, and nothing while closing", async () => {
+it("gives the open under way to wait on, without a run", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("ready", { localStateReady: true });
   const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
@@ -115,14 +116,47 @@ it("gives the open under way to wait on, without a run, and nothing while closin
   expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
   await opening;
   expect(sessions.openInProgress(workspace)).toBeNull();
-  // A close waits for runs, so a caller inside one is given nothing to wait on.
-  const inRun = deferred<void>(), finish = deferred<void>();
-  const running = sessions.run(workspace, async () => { inRun.resolve(); await finish.promise; });
+  await sessions.closeAll();
+});
+
+it("waits through a close that waits for a run, except inside that run", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("held", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  const waits = () => sessions.openInProgress(workspace) !== null;
+  const inRun = deferred<void>(), resume = deferred<void>();
+  const inHandler = deferred<boolean>(), inTimer = deferred<{ closing: boolean; waits: boolean }>();
+  let outsideHandler: boolean | undefined;
+  client.onEvent(() => { outsideHandler = waits(); });
+  const running = sessions.run(workspace, async (binding) => {
+    binding.client.onEvent?.(() => inHandler.resolve(waits()));
+    // Fires after the close below starts, which the test starts before
+    // any timer can run.
+    setTimeout(() => inTimer.resolve({ closing: sessions.currentBinding(workspace) === null, waits: waits() }), 0);
+    inRun.resolve();
+    await resume.promise;
+    return waits();
+  });
   await inRun.promise;
   const closing = sessions.closeWorkspaceBinding(workspace);
-  expect(sessions.openInProgress(workspace)).toBeNull();
-  finish.resolve();
-  await running; await closing;
+  const outside = sessions.openInProgress(workspace);
+  expect(outside).not.toBeNull();
+  let over = false;
+  void outside!.then(() => { over = true; });
+  client.emit({ seq: 1, sessionGeneration: 1, name: "workspace.filesChanged", payload: null });
+  expect(await inHandler.promise).toBe(false);
+  expect(outsideHandler).toBe(true);
+  expect(await inTimer.promise).toEqual({ closing: true, waits: false });
+  resume.resolve();
+  expect(await running).toBe(false);
+  await closing;
+  expect(over).toBe(false);
+  await sessions.run(workspace, async () => undefined);
+  await outside;
+  expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
   await sessions.closeAll();
 });
 
@@ -520,9 +554,11 @@ class MockClient implements EngineDaemonClient {
 
   close(): void {}
 
+  // As the daemon clients do.
   onEvent(handler: (event: Event) => void): () => void {
-    this.eventHandlers.add(handler);
-    return () => this.eventHandlers.delete(handler);
+    const scoped = keepEngineRunScope(handler);
+    this.eventHandlers.add(scoped);
+    return () => this.eventHandlers.delete(scoped);
   }
 
   emit(event: Event): void {
