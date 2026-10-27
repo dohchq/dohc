@@ -725,7 +725,10 @@ export function LiveDocumentsDialog({
                 ) : null}
                 {row.reason === "conflict-parent-withheld" ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.
+                    A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version.{" "}
+                    {row.status === "retired"
+                      ? "You can keep editing it in dohc, but your edits won't reach them."
+                      : "You can keep editing it in dohc, but your edits may not reach them."}
                   </p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

@@ -59,17 +59,21 @@ function actions(path: string): string[] {
     .map((button) => button.textContent);
 }
 
-it("keeps a retired held note's explanation and offers no Resume or Stop, like a retired diverged note", async () => {
+it("distinguishes retired and hosted held notes and offers no Resume or Stop on retired notes", async () => {
   const h = harness();
   h.load.mockResolvedValue(page([
     row("docs/held.md", {status: "retired", reason: "conflict-parent-withheld"}),
+    row("docs/hosted.md", {status: "unavailable", reason: "conflict-parent-withheld"}),
     row("docs/diverged.md", {status: "retired", reason: "session-host-diverged"}),
   ]));
   render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
   const held = await screen.findByTestId("live-document-row-docs/held.md");
   expect(held.children[1]?.textContent).toBe("Can't resume");
-  expect(held.textContent).toContain("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.");
+  expect(within(held).getByText("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits won't reach them.")).toBeDefined();
+  const hosted = screen.getByTestId("live-document-row-docs/hosted.md");
+  expect(within(hosted).getByText("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.")).toBeDefined();
   expect(actions("docs/held.md")).toEqual([]);
+  expect(actions("docs/hosted.md")).toEqual(["Stop live editing"]);
   expect(actions("docs/diverged.md")).toEqual([]);
 });
 
