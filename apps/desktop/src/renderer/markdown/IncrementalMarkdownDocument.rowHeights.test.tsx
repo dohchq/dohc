@@ -79,6 +79,7 @@ const CASES: [string, boolean, string][] = [
   ["a quote's blank line holding a tab", true, lines(`> ${COMMENT}`, ">\t", prefixed("> ", TABLE))],
   ["a quote's blank line holding a space and a tab", false, lines(`> ${COMMENT}`, "> \t", prefixed("> ", TABLE))],
   ["several quote blank lines", true, lines(`> ${COMMENT}`, ">", "> ", prefixed("> ", TABLE))],
+  ["a tab after a quote's comment", true, lines(`> ${COMMENT}\t`, prefixed("> ", TABLE))],
   ["a quote's comment after two spaces", false, lines(`>  ${COMMENT}`, prefixed("> ", TABLE))],
   ["a quote's comment after a tab", true, lines(`>\t${COMMENT}`, prefixed("> ", TABLE))],
 
@@ -92,10 +93,19 @@ const CASES: [string, boolean, string][] = [
   ["a comment later in a list item", true, lines("- Text.", "", `  ${COMMENT}`, "  ", prefixed("  ", TABLE))],
   ["a comment indented past its list item's indent", false, lines("- Text.", "", `   ${COMMENT}`, prefixed("  ", TABLE))],
 
+  ["a tab after a list item's comment", false, lines(`- ${COMMENT}\t`, prefixed("  ", TABLE))],
+  ["a tab after a nested list item's comment", false, lines("- Text.", `  - ${COMMENT}\t`, prefixed("    ", TABLE))],
+  ["a tab after a later comment in a list item", false, lines("- Text.", "", `  ${COMMENT}\t`, prefixed("  ", TABLE))],
+  ["an ordered item's comment after a tab", true, lines(`1.\t${COMMENT}`, prefixed("    ", TABLE))],
+
   ["a list in a quote", true, lines(`> - ${COMMENT}`, ">", prefixed(">   ", TABLE))],
   ["a list in a quote, its blank line holding spaces", false, lines(`> - ${COMMENT}`, ">    ", prefixed(">   ", TABLE))],
   ["a quote in a list", true, lines(`- > ${COMMENT}`, "  >", prefixed("  > ", TABLE))],
   ["a quote in a list, its blank line holding spaces", false, lines(`- > ${COMMENT}`, "  >  ", prefixed("  > ", TABLE))],
+
+  ["a tab after a comment in a list in a quote", false, lines(`> - ${COMMENT}\t`, ">", prefixed(">   ", TABLE))],
+  ["a quote in a list, its comment after a tab", true, lines(`- >\t${COMMENT}`, prefixed("  > ", TABLE))],
+  ["a tab after a comment in a quote in a list", false, lines(`- > ${COMMENT}\t`, prefixed("  > ", TABLE))],
 
   ["a task item", true, lines("- [ ] Task", "", `  ${COMMENT}`, prefixed("  ", TABLE))],
 ];

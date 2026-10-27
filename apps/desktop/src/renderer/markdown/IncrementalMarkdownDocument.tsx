@@ -72,6 +72,17 @@ function remarkTableRowHeights() {
 // as the editor reads it inside `parent`.
 const QUOTE_PREFIX_RE = /^ {0,3}>[ \t]?/u;
 
+// In a list, the editor's import hides each tab after a line's indent, quote
+// marks and list markers from marked and keeps it as text. A comment with a
+// tab after it is then text too.
+const LIST_LINE_PREFIX_RE =
+  /^[ \t]*(?:>[ \t]*)*(?:(?:[-+*][ \t]+(?:\[[ xX]\][ \t]+)?|[0-9]{1,9}[.)][ \t]+)(?:>[ \t]*)*)*/u;
+
+function hideTextTabs(line: string): string {
+  const prefix = LIST_LINE_PREFIX_RE.exec(line)?.[0] ?? "";
+  return prefix + line.slice(prefix.length).replaceAll("\t", "\u{FFFD}");
+}
+
 function applyTableRowHeights(parent: Parents, editorLine: (line: number) => string): void {
   const children: Nodes[] = parent.children;
   for (let index = 0; index < children.length; index += 1) {
@@ -97,11 +108,12 @@ function applyTableRowHeights(parent: Parents, editorLine: (line: number) => str
     } else if (node.type === "listItem" && node.position) {
       // marked expands the tabs on an item's first line to the next tab stop.
       const first = node.position.start.line - 1;
-      const indent = listItemIndent(expandTabs(editorLine(first)));
+      const itemLine = (line: number) => hideTextTabs(editorLine(line));
+      const indent = listItemIndent(expandTabs(itemLine(first)));
       applyTableRowHeights(node, (line) =>
         (line === first
-          ? expandTabs(editorLine(line))
-          : editorLine(line).replaceAll("\t", "    ")
+          ? expandTabs(itemLine(line))
+          : itemLine(line).replaceAll("\t", "    ")
         ).slice(indent),
       );
     }
