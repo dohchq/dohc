@@ -4081,6 +4081,145 @@ async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_record_events_for_a_drain_but_not_an_owner_draft() {
+    use dohc_engine_collab::owner_outbox::draft::{
+        ObservedOwnerBinding, install_observed_binding_in_tx,
+    };
+
+    let config = serde_json::from_value(json!({
+        "ingress": {
+            "aggregateBytes": 1_000_000_000, "applicationWorkingReserveBytes": 1_000_000,
+            "maxUploads": 2, "uploadDeadlineMs": 30_000
+        },
+        "maxRegistrations": 2, "maxAdoptionBytes": 1_000_000, "maxAdoptionEvents": 100,
+        "maxApplicationsPerSettlement": 100,
+        "ownerOutbox": { "maxPendingBytes": 1_000_000, "maxPendingAgeMs": 100_000 }
+    }))
+    .expect("ordinary host config");
+    let (service, _connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+    let parked = park_remote_status_update(Some(service), 10).await;
+    let mut events = parked.service.events().subscribe();
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    let object_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("record object");
+    let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap();
+    let checkpoint = persisted.doc.encode_full_state();
+    let claim = persisted.marker.lineage_claim_id.unwrap();
+    let update = persisted
+        .doc
+        .frontmatter_set("status", "still-parked")
+        .unwrap();
+    let sha = store.put_binary_blob(&update).expect("next update blob");
+    let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: PARKED_REMOTE_ORIGIN.to_owned(),
+        origin_seq: 1,
+        relay_seq: Some(11),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main", "objectId": object_id, "path": "tasks/alpha.md",
+            "contentKind": "richdoc", "updateBlobSha256": sha,
+            "lineageClaimId": claim, "isBaseState": false,
+            "actorOriginId": PARKED_REMOTE_ORIGIN
+        }),
+        recorded_at_ms: 300,
+    };
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park another record update");
+    assert!(matches!(
+        applied.primary,
+        ApplyDisposition::Applied(result) if result.deferred
+    ));
+    let observed = ObservedOwnerBinding {
+        binding: dohc_engine_collab::LiveObjectBinding {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            main_version_id: "main".to_owned(),
+            object_id,
+            lineage_claim_id: claim,
+            current_path: "tasks/alpha.md".to_owned(),
+            selector_paths: vec!["tasks/alpha.md".to_owned()],
+            restore_fence_generation: 0,
+        },
+        relay_database_namespace: "resync-owner-relay".to_owned(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: persisted.marker.head_update_seq,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        },
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(tx, WORKSPACE_ID, &observed, &checkpoint)
+        })
+        .expect("observe owner binding");
+    drop(store);
+    let (state, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        301,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert!(state["ownerDraft"].is_object());
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).unwrap();
+    assert!(
+        !doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("still-parked")
+    );
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
 /// and settle must leave a parked synced update queued. The next `ydoc.open`
