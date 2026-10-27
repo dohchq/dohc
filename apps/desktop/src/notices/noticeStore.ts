@@ -190,6 +190,18 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
   return rows.filter(row => !keys.has(coordinateKey(row)));
 }
 
+// Names the file, cut to fit a title, and says "a file" for a name a title
+// can't hold.
+function unattributedTitle(path: string | null | undefined): string {
+  const lead = "dohc could not confirm who changed ";
+  if (!path) return `${lead}a file`;
+  // Room for the name between its two quotes.
+  const room = NOTICE_TITLE_MAX_CHARS - lead.length - 2;
+  const name = [...path.slice(path.lastIndexOf("/") + 1)];
+  const title = `${lead}“${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
+  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a file`;
+}
+
 const RelayRow = z.object({
   wake: z.custom<AutomationWake>(isAutomationWake).optional(),
   noticeId: NoticeRow.shape.noticeId,
@@ -741,7 +753,7 @@ export function createNoticeStore(deps: {
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
-            title: attributionRefused ? `dohc could not confirm who changed ${name}`
+            title: attributionRefused ? unattributedTitle(document?.path)
               : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),

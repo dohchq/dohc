@@ -1304,6 +1304,26 @@ it("says a change synced without its author, without suggesting sync again", asy
   });
 });
 
+it("cuts a long file name to fit the title and keeps listing other refusals", async () => {
+  const long = `${"a".repeat(120)}.md`;
+  const refusal = (noticeId: string, originSeq: number, path: string) => ({
+    noticeId, originId: "host", originSeq, refusalCoordinates: [{ originId: "host", originSeq }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path, objectId: `object-${originSeq}`, lineageClaimId: "lineage", conflictId: null },
+  });
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [
+    refusal("sync-refusal-long", 1, `notes/${long}`), refusal("sync-refusal-tab", 2, "notes/a\tb.md"), refusal("sync-refusal-short", 3, "notes/n.md"),
+  ] }];
+  const first = await computer(null, { refusalNotices });
+  const titles = (await first.store.list()).notices.map(row => row.title);
+  expect(titles).toHaveLength(3);
+  expect(titles).toContain("dohc could not confirm who changed a file");
+  expect(titles).toContain("dohc could not confirm who changed “n.md”");
+  const cut = titles.find(title => title.includes("…"))!;
+  expect([...cut]).toHaveLength(120);
+  expect(cut).toMatch(/^dohc could not confirm who changed “a+…”$/u);
+});
+
 it("keeps the refusals it words for itself equal to the engine's", () => {
   const engine = (path: string) => readFileSync(new URL(`../../../../crates/dohc-engine-sync/src/${path}`, import.meta.url), "utf8")
     .replace(/=\s+"/g, '= "');
