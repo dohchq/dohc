@@ -3170,7 +3170,7 @@ pub(super) fn ydoc_settle_on_store(
             retry_inputs: serde_json::json!({"expectedHeadSha256": expected_head_sha,
                 "restoreGeneration": restore_generation, "useReader": use_reader}),
             held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: current_sha.clone(),
-            settled_cut: None, settled_head_sha256: None,
+            source_sha256: None, settled_head_sha256: None,
         };
         if holds && !uses_consent {
             write_obligations::record_in(tx, &obligation, now_ms)?;
@@ -3263,12 +3263,14 @@ pub(super) fn ydoc_settle_on_store(
         if uses_consent {
             write_obligations::record_in(tx, &WriteObligation {
                 kind: WriteObligationKind::WitnessRefresh,
-                settled_cut: Some(current_marker.head_update_seq),
+                source_sha256: current_witness_sha.map(ToOwned::to_owned),
                 settled_head_sha256: Some(result.snapshot.blob_sha256.clone()),
                 held_checkpoint_sha256: None, held_head_sha256: None,
                 ..obligation.clone()
             }, now_ms)?;
         }
+        write_obligations::advance_refresh_head_in(tx, key, current_marker.lineage_claim_id.as_deref(),
+            current_sha.as_deref(), &result.snapshot.blob_sha256, now_ms)?;
         write_obligations::complete_in(tx, &obligation, now_ms)?;
         if let Some(audit) = live_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
@@ -3432,6 +3434,9 @@ pub(super) fn ydoc_settle_on_store(
     };
     let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
         .then(|| projection.content.clone());
+    if materialized && let Err(error) = refresh_markdown_witnesses_on_store(store, doc_cache, key, now_ms) {
+        eprintln!("engine: Markdown witness refresh retained: {error}");
+    }
     Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
@@ -3441,6 +3446,100 @@ pub(super) fn ydoc_settle_on_store(
         collection_reconcile_required,
         projection,
     })))
+}
+
+pub(super) fn refresh_markdown_witnesses_on_store(
+    store: &mut EngineStore, cache: &mut WriterDocCache, key: &DocKey, now_ms: i64,
+) -> Result<(), RuntimeError> {
+    let pending = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
+    for owed in pending.into_iter().filter(|owed| owed.key == *key && owed.kind == WriteObligationKind::WitnessRefresh) {
+        let marker = dohc_engine_collab::read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+        if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
+            || marker.path.as_deref() != Some(owed.path.as_str()) {
+            continue;
+        }
+        let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))?;
+        let restore_generation = store.read_with(|conn|
+            dohc_engine_collab::live_update_application::restore_generation(conn, key))?;
+        let source = doc.markdown_source_reference().and_then(|reference|
+            doc.markdown_source(&reference).map(|_| reference.source_sha256));
+        if source.as_deref() != owed.source_sha256.as_deref() {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(tx, key, restore_generation)?;
+                let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                if current_marker.lineage_claim_id != marker.lineage_claim_id || current_marker.path != marker.path {
+                    return Err(CollabError::MarkdownReaderUnavailable);
+                }
+                let current = dohc_engine_collab::load_doc_in(tx, key)?;
+                let source = current.markdown_source_reference().and_then(|reference|
+                    current.markdown_source(&reference).map(|_| reference.source_sha256));
+                if source.as_deref() != owed.source_sha256.as_deref() {
+                    write_obligations::complete_in(tx, &owed, now_ms)?;
+                }
+                Ok::<_, CollabError>(())
+            })? {
+                TxnOutcome::Committed(()) => continue,
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+        let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &owed.path)?;
+        let Some(head) = head.filter(|head| head.object_id == key.object_id
+            && Some(head.blob_sha256.as_str()) == owed.settled_head_sha256.as_deref()
+            && Some(head.blob_sha256.as_str()) != owed.source_sha256.as_deref()) else { continue; };
+        if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref() != Some(head.blob_sha256.as_str())
+            || store.read_with(|conn| dohc_engine_sync::open_sync_conflict_for_object(
+                conn, &key.workspace_id, &key.version_id, &key.object_id))?.is_some() {
+            continue;
+        }
+        if !store.read_with(|conn| refresh_head_materialized_in(conn, key, &owed.path, &head.blob_sha256))? {
+            continue;
+        }
+        let update = doc.clear_markdown_source_witness();
+        let resolver = cache.reader_resolver.clone();
+        let outcome = dohc_engine_collab::record_local_update(store, cache, key, &update,
+            dohc_engine_collab::LocalAppend {
+                marker: None, actor_origin_id: None, attribution: None,
+                lineage_guard: dohc_engine_collab::LineageGuard::Expect(marker.lineage_claim_id.as_deref()),
+                restore_generation, ensure_parent_row: false, require_empty_lineage: false,
+                is_seed: false, seed_source_sha256: None, request_id: None,
+            }, &dohc_engine_storage::NoFaults, now_ms, |tx, outcome, _| {
+                let current = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                let fresh = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                    .find(|row| row.order == owed.order);
+                let snapshot: Option<(String, String)> = tx.query_row(
+                    "SELECT object_id,blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    params![key.workspace_id,key.version_id,owed.path], |row| Ok((row.get(0)?,row.get(1)?)))
+                    .optional().map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))?;
+                if outcome.seq != marker.head_update_seq + 1 || current.path != marker.path
+                    || current.lineage_claim_id != marker.lineage_claim_id
+                    || snapshot.as_ref() != Some(&(key.object_id.clone(), head.blob_sha256.clone()))
+                    || !refresh_head_materialized_in(tx, key, &owed.path, &head.blob_sha256)?
+                    || !fresh.is_some_and(|row| row.source_sha256 == owed.source_sha256
+                        && row.settled_head_sha256 == owed.settled_head_sha256) {
+                    return Err(CollabError::MarkdownReaderUnavailable);
+                }
+                journal_local_append_in_tx(tx, key, &owed.path, marker.content_kind, &update,
+                    None, None, None, resolver.as_deref(), &mut None, outcome, now_ms)?;
+                write_obligations::complete_in(tx, &owed, now_ms)
+            })?;
+        if matches!(outcome, TxnOutcome::Crashed { .. }) { return Err(RuntimeError::OperationCrashed); }
+    }
+    Ok(())
+}
+
+fn refresh_head_materialized_in(
+    conn: &rusqlite::Connection, key: &DocKey, path: &str, sha256: &str,
+) -> Result<bool, CollabError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshots s JOIN ydoc_docs d \
+         ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id \
+         JOIN materialization_jobs j ON j.job_id IN ('ydoc-mat_'||s.latest_moment_id,'sync-mat_'||s.latest_moment_id) \
+         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 \
+         AND s.blob_sha256=?5 AND d.last_settled_sha=?5 AND j.content_sha256=?5 \
+         AND j.workspace_id=?1 AND j.target_path=?4 AND j.status='complete')",
+        params![key.workspace_id,key.version_id,key.object_id,path,sha256], |row| row.get(0),
+    ).map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
 fn lineage_originated_here_on_store(

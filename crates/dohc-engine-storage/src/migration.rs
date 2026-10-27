@@ -4576,7 +4576,7 @@ mod tests {
             ),
             (
                 "v2-markdown-write-obligations",
-                "ba2d128e41440f920162dc065479cdfda771b6a14ed1f91dd4c0be49c798f232",
+                "38ba4345ef6671b2d95f8f24831bebccf78c9b0cdce7fb97066b016c2ba8a245",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

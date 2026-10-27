@@ -4138,7 +4138,7 @@ fn record_markdown_hold_in_tx(
             kind: dohc_engine_collab::markdown_write_obligations::Kind::SyncProjection,
             path: path.clone(), retry_inputs: serde_json::to_value(inputs).map_err(SyncError::corrupt)?,
             held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: head_sha256.clone(),
-            settled_cut: None, settled_head_sha256: None,
+            source_sha256: None, settled_head_sha256: None,
         }, now_ms).map_err(map_collab_hard_error)
 }
 
@@ -4355,7 +4355,7 @@ pub fn project_and_write_in_tx(
             tx, &key.workspace_id, &key.version_id, &key.object_id, &doc.frontmatter_json(),
         ).map_err(map_domain_hard_error)?;
     }
-    if let Some(lineage) = lineage {
+    if let Some(lineage) = lineage.as_deref() {
         crate::refusal_notices::clear_lineage_in_tx(
             tx, &key.workspace_id, &key.version_id, &key.object_id, &lineage,
         )?;
@@ -4403,6 +4403,9 @@ pub fn project_and_write_in_tx(
         )?;
     }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
+    dohc_engine_collab::markdown_write_obligations::advance_refresh_head_in(
+        tx, key, lineage.as_deref(), head_sha256, &result.snapshot.blob_sha256, now_ms,
+    ).map_err(map_collab_hard_error)?;
     // Later envelopes may supersede this disk projection; the history moment already covers its interval.
     if !(replayed && result.deduped) {
         dohc_engine_collab::author_coverage::advance_in(tx, key, false)

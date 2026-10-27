@@ -165,6 +165,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "secret_moments",
     // R11a durable Y.Doc tables.
     "ydoc_docs",
+    "markdown_write_obligations",
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",

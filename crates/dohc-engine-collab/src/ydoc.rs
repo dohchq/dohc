@@ -1691,6 +1691,17 @@ impl Ydoc {
         self.stage_source_preserving_edit(markdown, |_| Ok(()))
     }
 
+    /// Clear a converted source without changing document content or its private tail.
+    pub fn clear_markdown_source_witness(&self) -> Vec<u8> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        self.with_delta(|txn| {
+            for key in [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY, MARKDOWN_SOURCE_READER_META_KEY] {
+                meta.remove(txn, key);
+            }
+        })
+    }
+
     pub(crate) fn rewrite_richdoc_preserving_source_bounded(
         &self,
         markdown: &str,
@@ -11454,6 +11465,33 @@ mod projection_tests {
             crate::hex_sha256(canonical.as_bytes()),
         );
         canonical
+    }
+
+    #[test]
+    fn clear_markdown_witness_is_meta_only_with_a_large_source_and_private_tail() {
+        let doc = Ydoc::wire();
+        let source = "source paragraph\n\n".repeat(8_000);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source).unwrap();
+        witness_source(&doc, &source);
+        doc.doc.get_or_insert_map(ROOT_META).insert(
+            &mut doc.doc.transact_mut(), MARKDOWN_SOURCE_READER_META_KEY, "reader-identity",
+        );
+        let peer = Ydoc::wire();
+        peer.apply(&doc.encode_full_state()).unwrap();
+        let tail = doc.richdoc_append_paragraph("Owner's unsettled tail");
+        let before = doc.canonical_content();
+        let update = doc.clear_markdown_source_witness();
+        assert!(!doc.has_markdown_witness());
+        assert!(!doc.has_reader_source());
+        assert_eq!(doc.canonical_content(), before);
+        assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("Owner's unsettled tail"));
+        // Delivery in either order keeps a tail the clearing peer has not seen.
+        peer.apply(&update).unwrap();
+        peer.apply(&tail).unwrap();
+        assert_eq!(peer.canonical_content(), before);
+        assert!(!peer.has_markdown_witness());
+        peer.apply(&update).unwrap();
+        assert_eq!(peer.canonical_content(), before);
     }
 
     #[test]
