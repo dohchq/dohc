@@ -23,6 +23,25 @@ use std::time::Instant;
 pub(crate) mod restore;
 pub(crate) mod sync;
 
+fn forwarded_owner_consent(
+    sessions: &Mutex<HashMap<String, super::ydoc::YdocSession>>,
+    workspace: Option<&WorkspaceHandle>, binding: &LiveObjectBinding, session_id: Option<&str>,
+) -> Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>> {
+    lock(sessions).get(session_id?).filter(|session| {
+        workspace == Some(&session.workspace)
+            && session.key.workspace_id == binding.workspace_id
+            && session.key.version_id == binding.main_version_id
+            && session.key.object_id == binding.object_id
+            && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
+            && session.restore_generation.unwrap_or(0) == binding.restore_fence_generation
+    }).and_then(|session| session.conversion_consent.clone())
+        .filter(|consent| !consent.is_consumed())
+}
+
+#[cfg(test)]
+#[path = "markdown_owner_consent_tests.rs"]
+mod markdown_owner_consent_tests;
+
 /// Explicit host provisioning for the private admitted-update path.
 #[doc(hidden)]
 pub struct LiveApplicationHostConfig {
@@ -543,18 +562,8 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
-        let conversion_consent = if let Some(session_id) = params.owner_session_id.as_ref() {
-            lock(&self.sessions).get(session_id)
-                .filter(|session| {
-                    let b = &registration.binding;
-                    request.workspace.as_ref() == Some(&session.workspace)
-                        && session.key.workspace_id == b.workspace_id && session.key.version_id == b.main_version_id
-                        && session.key.object_id == b.object_id && session.lineage_claim_id.as_deref() == Some(b.lineage_claim_id.as_str())
-                        && session.restore_generation.unwrap_or(0) == b.restore_fence_generation
-                })
-                .and_then(|session| session.conversion_consent.clone())
-                .filter(|consent| !consent.is_consumed())
-        } else { None };
+        let conversion_consent = forwarded_owner_consent(&self.sessions, request.workspace.as_ref(),
+            &registration.binding, params.owner_session_id.as_deref());
         let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();

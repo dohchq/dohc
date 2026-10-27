@@ -111,7 +111,12 @@ impl Fixture {
         };
         self.actor.run(move |store, _| {
             let marker = dohc_engine_collab::read_marker(store, &key)?.unwrap();
-            store.write_with(&NoFaults, |tx| tx.execute(
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO ydoc_owner_base_sources(workspace_id,version_id,object_id,lineage_claim_id,\
+                    path,source_moment_id,source_blob_sha256,source_byte_length) VALUES ('w','main','note',?1,\
+                    'note.md','source',?2,?3)", params![binding.lineage_claim_id,source_sha,source_length])
+                    .map_err(StorageError::persist_public)?;
+                tx.execute(
                 "INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,\
                  object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,\
                  baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
@@ -119,7 +124,8 @@ impl Fixture {
                  max_pending_bytes,max_pending_age_ms) VALUES ('relay','adoption','w','main','note',?1,?2,'source',?3,?4,\
                  0,0,?3,?3,0,?5,0,'null','{}',1000000,1000000)",
                 params![binding.lineage_claim_id, serde_json::to_string(&binding).unwrap(), source_sha,
-                    source_length, marker.head_update_seq]).map_err(StorageError::persist_public))?;
+                    source_length, marker.head_update_seq]).map_err(StorageError::persist_public)
+            })?;
             Ok(())
         }).await.unwrap();
     }
@@ -140,12 +146,39 @@ impl Fixture {
     async fn audited_settle(&self, handle: &crate::actor::ActorLiveApplicationHandle,
         consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<dohc_engine_collab::live_update_application::LiveSettlementResult, RuntimeError> {
-        handle.settle_with_consent(None, 100, self.scratch.path().to_owned(), 10, Arc::new(NoFaults),
+        self.audit_at(handle, None, 100, consent).await
+    }
+
+    async fn audit_at(&self, handle: &crate::actor::ActorLiveApplicationHandle,
+        terminal: Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>, max: usize,
+        consent: Option<Arc<MarkdownConversionConsent>>,
+    ) -> Result<dohc_engine_collab::live_update_application::LiveSettlementResult, RuntimeError> {
+        handle.settle_with_consent(terminal, max, self.scratch.path().to_owned(), 10, Arc::new(NoFaults),
             CancellationToken::new(), dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
                 policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
                     working_reserve_bytes: 8 * 1024 * 1024,
                 }, reservation: Arc::new(()),
             }, consent).await
+    }
+
+    fn event(&self, cursor: i64, bytes: Vec<u8>)
+        -> dohc_engine_collab::live_update_application::AdmittedLiveUpdate {
+        use dohc_engine_collab::live_update_application::*;
+        AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt { delivery_id: format!("delivery-{cursor}"),
+                        update_digest: hex_sha256(&bytes), journal_cursor: cursor, accepting_host_epoch: 1 },
+                    binding: dohc_engine_collab::live_object_binding::LiveObjectBinding {
+                        workspace_id: "w".into(), main_version_id: "main".into(), object_id: "note".into(),
+                        lineage_claim_id: self.claim.clone(), current_path: "note.md".into(),
+                        selector_paths: vec!["note.md".into()], restore_fence_generation: 0,
+                    }, authority: ServerDerivedLiveUpdateAuthority::Owner { principal_id: "owner".into() },
+                    received_at_ms: 10,
+                }, first_seen: vec![], canonical_version: None, author_snapshot: None,
+                first_seen_deletes: None, checkpoint_coverage: None,
+            }, update_bytes: bytes,
+        }
     }
 }
 
@@ -354,5 +387,106 @@ async fn markdown_hold_audited_noop_pending_never_uses_fresh_consent_or_adds_deb
         assert_eq!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.len(), 1);
         Ok(())
     }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_audited_latest_terminal_covers_older_debt_and_bounds_admission() {
+    use dohc_engine_collab::live_update_application::{ApplicationPending, ApplicationResult};
+    let f = Fixture::new().await;
+    f.adopt().await;
+    let (_owner, host) = f.audited_host().await;
+    let key = f.key.clone();
+    let checkpoint = f.actor.run(move |store, _| Ok(dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc.encode_full_state()))
+        .await.unwrap();
+    let producer = Ydoc::wire();
+    producer.apply(&checkpoint).unwrap();
+    let first = f.event(1, producer.richdoc_append_paragraph("First accepted visitor edit"));
+    let first_receipt = first.metadata.accepted.receipt.clone();
+    assert!(matches!(host.apply_with_reservation(first, Arc::new(NoFaults), None,
+        8 * 1024 * 1024, Some(2)).await.unwrap(), ApplicationResult::Applied(_, _)));
+    assert!(matches!(f.audit_at(&host, Some(first_receipt), 2, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })));
+    f.unchanged().await;
+    let second = f.event(2, producer.richdoc_append_paragraph("Second accepted visitor edit"));
+    let terminal = second.metadata.accepted.receipt.clone();
+    assert!(matches!(host.apply_with_reservation(second, Arc::new(NoFaults), None,
+        8 * 1024 * 1024, Some(2)).await.unwrap(), ApplicationResult::Applied(_, _)));
+    let refused = f.event(3, producer.richdoc_append_paragraph("Unaccepted edit waits for capacity"));
+    assert!(matches!(host.apply_with_reservation(refused.clone(), Arc::new(NoFaults), None,
+        8 * 1024 * 1024, Some(2)).await.unwrap(),
+        ApplicationResult::Pending(ApplicationPending::SettlementRequired)));
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(store.table_row_count("live_device_update_applications")?, 2);
+        assert_eq!(store.table_row_count("live_device_settlements")?, 0);
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, WriteObligationKind::AuditedSettle);
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert!(!doc.project(ContentKind::Richdoc)?.content.contains("Unaccepted edit"));
+        Ok(())
+    }).await.unwrap();
+    let grant = f.consent();
+    let saved = f.audit_at(&host, Some(terminal), 2, Some(grant.clone())).await.unwrap();
+    assert!(grant.is_consumed());
+    assert_eq!(saved.terminal_cursor, 2);
+    assert!(saved.materialized);
+    let file = std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap();
+    assert!(file.contains("First accepted visitor edit") && file.contains("Second accepted visitor edit"));
+    f.actor.run(|store, _| {
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert!(owed.iter().all(|row| row.kind == WriteObligationKind::WitnessRefresh));
+        assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+        Ok(())
+    }).await.unwrap();
+    assert!(matches!(host.apply_with_reservation(refused, Arc::new(NoFaults), None,
+        8 * 1024 * 1024, Some(2)).await.unwrap(), ApplicationResult::Applied(_, _)));
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_author_capacity_keeps_coverage_and_retries_only_after_consent_settles() {
+    use dohc_engine_collab::author_coverage;
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let f = Fixture::new().await;
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        let mut authors = vec![serde_json::json!({"kind":"unattributed"})];
+        authors.extend((1..author_coverage::MAX_INTERVAL_AUTHORS).map(|i|
+            serde_json::json!({"kind":"human","humanId":format!("human-{i}")})));
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE ydoc_docs SET pending_authors_json=?1 WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4",
+            params![serde_json::to_string(&authors).unwrap(),key.workspace_id,key.version_id,key.object_id])
+            .map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+    for _ in 0..2 { assert!(matches!(f.settle(true, None).await, Err(RuntimeError::MarkdownWriteHeld { .. }))); }
+    let append = |actor: &str| {
+        let key = f.key.clone();
+        let actor = actor.to_owned();
+        move |store: &mut EngineStore, cache: &mut WriterDocCache| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            let update = doc.richdoc_append_paragraph("Capacity-tested edit");
+            let attribution = ChangeAttribution { actor_kind: ChangeActorKind::Human,
+                on_behalf_of: None, depth: 0, run: None };
+            dohc_engine_collab::record_local_update(store, cache, &key, &update,
+                dohc_engine_collab::LocalAppend { actor_origin_id: Some(&actor), attribution: Some(&attribution),
+                    ..Default::default() }, &NoFaults, 10, |_, _, _| Ok(()))?;
+            Ok(())
+        }
+    };
+    assert!(matches!(f.actor.run(append("new-human")).await,
+        Err(RuntimeError::Collab(CollabError::AuthorCapacity))));
+    f.actor.run(append("human-1")).await.unwrap();
+    f.unchanged().await;
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(store.read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))?.len(),
+            author_coverage::MAX_INTERVAL_AUTHORS);
+        Ok(())
+    }).await.unwrap();
+    f.settle(true, Some(f.consent())).await.unwrap().settled().unwrap();
+    f.actor.run(append("new-human")).await.unwrap();
     f.supervisor.close(&f.db).unwrap();
 }
