@@ -4,6 +4,17 @@ import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { OwnerLiveDocumentsResult } from "./bridgeContract";
+
+it("keeps every restore queue beyond the current document list limits", () => {
+  const rows = Array.from({length: 257}, (_, index) => ({objectId: "object", path: "note.md", reason: "restore-fenced",
+    storedOn: "this-computer", incident: `queue-${index}:delivery:0`, recovery: "paused", saveOnly: true}));
+  const status = {state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+    historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveQuarantines: rows};
+  expect(SyncStatusResult.parse(status).ownerLiveQuarantines).toEqual(rows);
+  const documents = rows.map(({reason: _reason, recovery, ...row}) => ({...row, status: "ready", canResume: false, quarantine: recovery}));
+  expect(OwnerLiveDocumentsResult.parse({documents, nextCursor: null}).documents).toEqual(documents);
+});
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};

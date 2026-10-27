@@ -23,7 +23,7 @@ import { localStateDir } from "./workspaceLocalState";
 import { createUnwrittenReleases, recoverySnapshot, type UnwrittenRelease, type UnwrittenReleases } from "./ownerLiveReleases";
 import { directDocumentProjection } from "./documentProjection";
 import { createHash } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { readServerKeptEditsQueue, ServerKeptEditsConflict, ServerRecoveryCopyRefusedError, type OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
 import { liveRecoveryUpdates, parseLiveRecoveryPackage } from "./ownerLiveRecoveryCopy";
@@ -216,13 +216,14 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[],
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** A refused queue read with its checkpoint: the server accepted the first edit, then refused the one that builds on it. */
 // `accepted` is a recipient's accepted edit the checkpoint holds.
-function recoveryQueue(binding: LiveObjectBinding, accepted?: string) {
+function recoveryQueue(binding: LiveObjectBinding, accepted?: string, pending?: string) {
   const doc = new Y.Doc(); doc.getMap("frontmatter").set("title", "Plan");
   const baseUpdate = Y.encodeStateAsUpdate(doc);
   doc.getMap("frontmatter").set("status", "accepted");
   if (accepted !== undefined) doc.getMap("frontmatter").set("note", accepted);
   const checkpoint = Y.encodeStateAsUpdate(doc), before = Y.encodeStateVector(doc);
   doc.getMap("frontmatter").set("status", "kept");
+  if (pending !== undefined) doc.getMap("frontmatter").set("note", pending);
   const update = Y.encodeStateAsUpdate(doc, before); doc.destroy();
   return {update, queue: {outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: digest(baseUpdate), checkpoint, checkpointDigest: digest(checkpoint), state: "quarantined" as const,
     pendingBytes: update.byteLength, oldestEntryAtMs: 1, quarantineReason: "capacity-refused", observedBinding: null, retryDeliveryId: null,
@@ -1613,13 +1614,16 @@ describe("server owner peer lifecycle", () => {
     const row = {objectId: "object", path: "notes/plan.md", reason: "restore-fenced", outboxId: "old-queue", binding: old,
       headDeliveryId: "old-delivery", recovery: "paused", saveOnly: true};
     quarantineMock.read.mockResolvedValue([row]);
-    const {queue} = recoveryQueue(old, "Owner typed during the hold.");
+    const {queue} = recoveryQueue(old, undefined, "Owner typed during the hold.");
     quarantineMock.queue.mockResolvedValue({...queue, outboxId: row.outboxId, quarantineReason: row.reason,
       observedBinding: binding, entries: queue.entries.map(entry => ({...entry, deliveryId: row.headDeliveryId}))});
     ownerDeliveryMock.pass.mockResolvedValue("empty");
     try {
       expect(await f.engine.start()).toBe(true);
       const owner = await workspace();
+      const root = f.rows.get("owner")!.rootPath;
+      await mkdir(join(root, "notes"), {recursive: true});
+      await writeFile(join(root, row.path), "Restored text.");
       await f.engine.refreshOwnerLiveQuarantines(owner);
       const incident = "old-queue:old-delivery:0";
       expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: row.path, reason: row.reason,
@@ -1627,14 +1631,33 @@ describe("server owner peer lifecycle", () => {
       await expect(f.engine.retryOwnerLiveQuarantine(owner, "object", incident)).rejects.toThrow("This document changed.");
       expect(quarantineMock.retry).not.toHaveBeenCalled();
       const saved = await f.engine.saveOwnerLiveRecoveryCopy(owner, row.path, incident);
-      const root = f.rows.get("owner")!.rootPath;
       expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("Owner typed during the hold.");
+      expect(await readFile(join(root, row.path), "utf8")).toBe("Restored text.");
       expect(parseLiveRecoveryPackage(await readFile(join(root, saved.packagePath), "utf8")))
         .toMatchObject({outboxId: row.outboxId, binding: old, reason: "restore-fenced"});
       expect(saved.keptEdits).toBe("kept");
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{incident, saveOnly: true}]);
       await expect(f.engine.saveOwnerLiveRecoveryCopy(owner, row.path, "old-queue:new-delivery:0")).rejects.toThrow("This document changed.");
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  it("releases the current document without claiming an unreadable restore queue", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([]);
+    const old = {...binding, restoreFenceGeneration: 0};
+    quarantineMock.read.mockImplementation(async (_client, _handle, options: {strict?: (binding: LiveObjectBinding) => boolean}) => {
+      if (options.strict?.(old)) throw new Error("owner-outbox-accepted-state-incomplete");
+      return [{objectId: old.objectId, path: old.currentPath, reason: "owner-outbox-accepted-state-incomplete", outboxId: "old-queue",
+        binding: old, headDeliveryId: null, recovery: "unreadable", saveOnly: true}];
+    });
+    f.client.respond = async request => request.method === "ydoc.ownerStop.release" ? releaseAnswer(true)(request)
+      : {id: request.id, result: request.method === "workspace.open" ? {workspace: "workspace-handle"}
+        : request.method === "ydoc.ownerStop.list" ? {stops: []} : request.method === "engine.ping" ? {ok: true} : null};
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await expect(f.engine.releaseOwnerLiveStop(await workspace(), binding, 1)).resolves.toMatchObject({materialized: true});
+      expect(quarantineMock.queue).not.toHaveBeenCalled();
+      expect(f.unwritten).toEqual([]);
+    } finally {credentials.abort(); await f.close();}
   });
 
   it("saves a recovery copy without touching the queue, which stays quarantined", async () => {

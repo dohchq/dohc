@@ -53,7 +53,9 @@ it("lists each old restore queue after the binding advances and reads the select
     outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: `${queue.outboxId}-delivery`, recovery: "paused", saveOnly: true})));
   expect(outboxes.list).toHaveBeenLastCalledWith({after: first.outboxId, limit: 64});
   outboxes.pending.set(first.outboxId, {outboxId: first.outboxId, binding: old, state: "quarantined", quarantineReason: "restore-fenced"});
-  expect(await readOwnerLiveQueue(client, "handle", {...rows[0]!, outboxId: first.outboxId})).toMatchObject({binding: old});
+  const selected = rows[0]!;
+  if (selected.outboxId === null) throw new Error("Expected the retained queue.");
+  expect(await readOwnerLiveQueue(client, "handle", selected)).toMatchObject({binding: old});
 });
 
 it("reads every refused queue from durable state, and leaves binding changes to enrollment", async () => {

@@ -16,6 +16,7 @@ export type LiveDocumentRow = {
   quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreadable";
   /** The server keeps them in an earlier copy of the workspace, copied or not. */
   earlier?: true;
+  saveOnly?: true;
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
@@ -132,24 +133,26 @@ function isMutation(work: Work): work is Extract<Work, { kind: "stop" | "resume"
   return work.kind === "stop" || work.kind === "resume";
 }
 
-// A page lists the newest row for a path first, and every page carries a fresh
-// read of the active documents. So the first row of the newest response wins,
-// and it replaces the older row in place rather than moving it down the list.
-// Keep current documents above stopped history, including resumed paths.
+const rowIdentity = (row: LiveDocumentRow) => row.saveOnly ? `${row.path}\n${row.incident}` : row.path;
+const rowTestId = (row: LiveDocumentRow) => `live-document-row-${row.path}${row.saveOnly ? `-${row.incident}` : ""}`;
+
+// Each response refreshes current documents and retained queues. The newest
+// row replaces the same path or retained incident; stopped history stays.
 function mergeRows(
   existing: LiveDocumentRow[],
   incoming: LiveDocumentRow[],
 ): LiveDocumentRow[] {
-  const currentPaths = new Set(incoming.map((row) => row.path));
-  const merged = existing.filter((row) => row.status === "retired" || currentPaths.has(row.path));
-  const positions = new Map(merged.map((row, index) => [row.path, index]));
+  const currentPaths = new Set(incoming.map(rowIdentity));
+  const merged = existing.filter((row) => (!row.saveOnly && row.status === "retired") || currentPaths.has(rowIdentity(row)));
+  const positions = new Map(merged.map((row, index) => [rowIdentity(row), index]));
   const taken = new Set<string>();
   for (const row of incoming) {
-    if (taken.has(row.path)) continue;
-    taken.add(row.path);
-    const at = positions.get(row.path);
+    const identity = rowIdentity(row);
+    if (taken.has(identity)) continue;
+    taken.add(identity);
+    const at = positions.get(identity);
     if (at === undefined) {
-      positions.set(row.path, merged.length);
+      positions.set(identity, merged.length);
       merged.push(row);
     } else merged[at] = row;
   }
@@ -196,11 +199,11 @@ function statusTone(row: LiveDocumentRow): string {
 
 // The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
+  return !row.saveOnly && row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
 }
 
 function canResume(row: LiveDocumentRow): boolean {
-  return row.canResume;
+  return !row.saveOnly && row.canResume;
 }
 
 // A Resume finishes a deferred Stop, but not one on a server copy that diverged or misses an edit.
@@ -214,6 +217,7 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
 
 // Edits the server refused: where they are, and the one way back that always works.
 function quarantineNote(row: LiveDocumentRow): string | null {
+  if (row.saveOnly && row.quarantine !== "unreadable") return "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
   switch (row.quarantine) {
     case "paused":
       if (row.earlier) return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
@@ -524,8 +528,9 @@ export function LiveDocumentsDialog({
   // page, so the list reads on, through the same guarded reads, until it shows.
   useEffect(() => {
     if (state.kind !== "ready" || reveal === undefined || revealed.current === `${workspaceId}\n${reveal}`) return;
-    const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]
-      .find((element) => element.dataset.liveDocumentPath === reveal);
+    const matching = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]
+      .filter((element) => element.dataset.liveDocumentPath === reveal);
+    const row = matching.find(element => element.dataset.liveDocumentSaveOnly !== undefined) ?? matching[0];
     if (!row) {
       // Each page once: a failed read reports itself and waits for its Try again.
       const page = `${workspaceId}\n${reveal}\n${state.nextCursor}`;
@@ -622,9 +627,10 @@ export function LiveDocumentsDialog({
           >
             {state.rows.map((row) => (
               <li
-                key={row.path}
-                data-testid={`live-document-row-${row.path}`}
+                key={rowIdentity(row)}
+                data-testid={rowTestId(row)}
                 data-live-document-path={row.path}
+                data-live-document-save-only={row.saveOnly ? "" : undefined}
                 aria-current={row.path === reveal ? "true" : undefined}
                 tabIndex={-1}
                 className={`flex flex-wrap items-center gap-3 rounded-md py-2 focus-visible:-outline-offset-2 ${
@@ -694,11 +700,11 @@ export function LiveDocumentsDialog({
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
-                    disabled={row.quarantine === "unreadable" || savingCopies.has(`${workspaceId}\n${row.path}`)}
-                    aria-busy={savingCopies.has(`${workspaceId}\n${row.path}`) || undefined}
+                    disabled={row.quarantine === "unreadable" || savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`)}
+                    aria-busy={savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`) || undefined}
                     aria-label={`Save recovery copy of ${row.path}`}
                     onClick={() => {
-                      const key = `${workspaceId}\n${row.path}`;
+                      const key = `${workspaceId}\n${rowIdentity(row)}`;
                       setSavingCopies(saving => new Set(saving).add(key));
                       void saveRecoveryCopy(workspaceId, row.path, row.incident).finally(() => setSavingCopies(saving => {
                         const next = new Set(saving);
@@ -708,7 +714,7 @@ export function LiveDocumentsDialog({
                     }}
                   >
                     {/* The server first prepares the earlier copy of the workspace that holds these edits. */}
-                    {row.earlier && savingCopies.has(`${workspaceId}\n${row.path}`) ? "Preparing recovery copy…" : "Save recovery copy"}
+                    {row.earlier && savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`) ? "Preparing recovery copy…" : "Save recovery copy"}
                   </SecondaryButton>
                 ) : null}
                 {/* A Resume alone fails again until dohc has opened the document once. */}

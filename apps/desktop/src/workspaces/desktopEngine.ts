@@ -249,8 +249,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
     // Only the queue of the generation this release takes. If the engine refuses
     // to read this document's queue head, the release fails: nothing would keep its edits.
-    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle, queue => queue.objectId === binding.objectId))
-      .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
+    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle,
+      queue => queue.objectId === binding.objectId && sameGeneration(queue, binding)))
+      .find(row => row.objectId === binding.objectId && !row.saveOnly && row.outboxId !== null && sameGeneration(row.binding, binding));
     if (kept?.recovery === "unreadable") throw new Error(`dohc could not read the edits it kept for ${kept.path}.`);
     let keptSnapshot: string | undefined;
     if (kept?.outboxId) {
@@ -808,8 +809,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // keeps. A record that can only be saved leaves the server's row its own.
     ownerLiveQuarantines(workspaceId: string): OwnerLiveQuarantine[] {
       const local: OwnerLiveQuarantine[] = (ownerQuarantines.get(workspaceId) ?? []).map(row => ({objectId: row.objectId, path: row.path, reason: row.reason,
-        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery}));
-      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write"))
+        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery, ...(row.saveOnly ? {saveOnly: true} : {})}));
+      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write" && !kept.saveOnly))
         .map((row): OwnerLiveQuarantine => ({objectId: row.objectId, path: row.path, reason: row.reason, storedOn: "server",
           incident: serverIncident(row), recovery: row.recovery, ...(row.earlier ? {earlier: true} : {})}))];
     },
@@ -836,8 +837,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       }
       await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
-        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
-        if (!row || row.outboxId === null || row.recovery !== "paused" || quarantineIncident(row) !== incident) {
+        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle))
+          .find(candidate => candidate.objectId === objectId && quarantineIncident(candidate) === incident);
+        if (!row || row.saveOnly || row.outboxId === null || row.recovery !== "paused") {
           throw new Error("This document changed. Open Live documents to check it.");
         }
         const outboxId = row.outboxId;

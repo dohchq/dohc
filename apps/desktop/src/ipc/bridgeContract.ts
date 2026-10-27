@@ -436,6 +436,8 @@ export const OwnerLiveQuarantine = z.object({
   recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
   // The server keeps them in an earlier copy of the workspace, copied or not, so Try again cannot reach them.
   earlier: z.literal(true).optional(),
+  // A restore set these edits aside; only a recovery copy can return them.
+  saveOnly: z.literal(true).optional(),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
@@ -470,6 +472,7 @@ export const OwnerLiveDocument = z.object({
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,
+  saveOnly: OwnerLiveQuarantine.shape.saveOnly,
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),
@@ -488,7 +491,7 @@ export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
 }).strict();
 export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
 export const OwnerLiveDocumentsResult = z.object({
-  documents: z.array(OwnerLiveDocument).max(128),
+  documents: z.array(OwnerLiveDocument),
   nextCursor: SAFE_RELATIVE_PATH.nullable(),
 }).strict();
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
@@ -1424,7 +1427,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
-  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the

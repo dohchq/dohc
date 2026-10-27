@@ -203,7 +203,7 @@ export function createOwnerLiveDocumentActions<
       if (local?.document.objectId!==document.objectId) throw changed();
       // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
       // and edits an earlier release could not write are not this Stop's to claim.
-      const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write");
+      const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write" && !row.saveOnly);
       const quarantined=kept?.storedOn==="this-computer", onServer=kept?.storedOn==="server";
       if (!local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
       let result: unknown;
@@ -346,12 +346,15 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
-        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId);
+        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
         if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
           ...(quarantine.earlier ? {earlier: true} : {})});
       }
-      return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
+      const retained = quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId,
+        status: documents.get(row.path)?.objectId === row.objectId ? documents.get(row.path)!.status : "unavailable",
+        canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true}));
+      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...retained], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
   };
 

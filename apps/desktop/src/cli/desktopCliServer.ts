@@ -497,11 +497,12 @@ export function createDesktopCliServer<State>(
             ...(ownerLiveRecovery ? {
               keptEdits: {
                 list: () => withOwnerLiveRecovery(async operation =>
-                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier }) =>
-                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}) }))),
+                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier, saveOnly }) =>
+                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}), ...(saveOnly ? { saveOnly } : {}) }))),
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  if (kept.saveOnly) throw new Error("This document changed. Open Live documents to check it.");
                   await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
                 }),
                 // Only a Stop that kept the edits runs again; any other Stop belongs to Live documents.
