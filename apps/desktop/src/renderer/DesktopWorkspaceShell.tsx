@@ -69,6 +69,7 @@ import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
+import { leaveEditorField } from "./shell/leaveEditorField";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
@@ -459,15 +460,6 @@ function editorFocus(state: WorkbenchState): EditorFocus {
 function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
   const current = editorFocus(state);
   return current.groupId === focus.groupId && current.tab === focus.tab;
-}
-
-// A click on a tab moves focus first, so a field that saves when left, such
-// as a list property, saves before its tab goes. A shortcut leaves focus in
-// the field, and removing a focused field fires no blur, so it leaves first.
-function leaveEditorField(): void {
-  const field = document.activeElement;
-  if ((field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)
-    && field.closest('[data-testid="file-inspector"]')) field.blur();
 }
 
 function InvalidSitePathFallback({
