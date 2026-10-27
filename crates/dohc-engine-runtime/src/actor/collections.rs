@@ -229,6 +229,19 @@ impl ActorHandle {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_collections_guarded(
+        &self, workspace_id: String, version_id: String, root_dir: PathBuf,
+        leases: LeaseRegistry, self_writes: Arc<dyn SelfWriteRecorder>, now_ms: i64,
+        faults: Arc<dyn FaultInjector>, token: CancellationToken, root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CollectionReconciliation, RuntimeError> {
+        self.run_with_reader_retry(move |store, cache| {
+            reconcile_collections_on_store(store, cache, &workspace_id, &version_id, &root_dir,
+                Some(root_guard.as_ref()), &leases, self_writes.as_ref(), now_ms,
+                faults.as_ref(), &token, None)
+        }).await
+    }
+
     pub async fn collections_list(
         &self,
         workspace_id: String,

@@ -916,6 +916,7 @@ async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disp
         Arc::new(NoFaults),
         Some(reservation),
         100_000_000,
+        None,
     ));
     assert!(
         std::future::poll_fn(|context| std::task::Poll::Ready(

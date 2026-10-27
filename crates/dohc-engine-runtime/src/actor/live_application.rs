@@ -10,7 +10,7 @@ use dohc_engine_collab::live_update_application::{
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
     NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, UnloadPending,
-    adopt_owner_committed, apply_committed, bootstrap_committed, read_application_ack,
+    adopt_owner_committed, apply_committed_with_settlement_limit, bootstrap_committed, read_application_ack,
     unload_pending, validate_application_binding, with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
@@ -163,7 +163,7 @@ impl ActorLiveApplicationOwner {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -241,7 +241,7 @@ impl ActorLiveApplicationOwner {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -312,7 +312,7 @@ impl ActorLiveApplicationOwner {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -355,7 +355,7 @@ impl ActorLiveApplicationOwner {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -636,7 +636,7 @@ impl ActorLiveApplicationHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -689,7 +689,7 @@ impl ActorLiveApplicationHandle {
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         let result = receive_reserved(receive).await;
-        if !super::wait_for_reader(&result, attempt).await {
+        if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
         current(&self.actor, &self.token)?;
         return result;
         }
@@ -733,7 +733,7 @@ impl ActorLiveApplicationHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             let result = receive_reserved(receive).await;
-            if !super::wait_for_reader(&result, attempt).await {
+            if !super::wait_for_reader(&result, attempt, self.actor.markdown_recovery.clone()).await {
                 let result = result?;
                 current(&self.actor, &self.token)?;
                 return Ok(result);
@@ -751,7 +751,7 @@ impl ActorLiveApplicationHandle {
         faults: Arc<dyn FaultInjector>,
         working_reserve_bytes: usize,
     ) -> Result<ApplicationResult, RuntimeError> {
-        self.apply_with_reservation(event, faults, None, working_reserve_bytes)
+        self.apply_with_reservation(event, faults, None, working_reserve_bytes, None)
             .await
     }
 
@@ -763,6 +763,7 @@ impl ActorLiveApplicationHandle {
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
         working_reserve_bytes: usize,
+        max_applications: Option<usize>,
     ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
@@ -783,6 +784,7 @@ impl ActorLiveApplicationHandle {
                 faults,
                 reservation,
                 working_reserve_bytes,
+                max_applications,
                 reply,
             })))
             .await
@@ -977,6 +979,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
         working_reserve_bytes: usize,
+        max_applications: Option<usize>,
         reply: ReservedReply<ApplicationResult>,
     },
     Unload {
@@ -1412,17 +1415,19 @@ impl Request {
                 faults,
                 reservation,
                 working_reserve_bytes,
+                max_applications,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     let now_ms=event.metadata.accepted.received_at_ms;
-                    apply_committed(
+                    apply_committed_with_settlement_limit(
                         store,
                         cache,
                         &application,
                         event,
                         faults.as_ref(),
                         working_reserve_bytes,
+                        max_applications,
                         |tx,namespace,binding,count| {
                             dohc_engine_sync::journal_live_event_or_defer_in_tx(tx,namespace,binding,count,now_ms)
                                 .map(|_|())

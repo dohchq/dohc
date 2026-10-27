@@ -1294,6 +1294,7 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let claim_events = self.events.clone();
         let claim_workspace = host.open.workspace_id.clone();
+        let max_applications = self.configured_settlement_limit();
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
@@ -1309,6 +1310,7 @@ impl EngineService {
                         Arc::new(NoFaults),
                         Some(input.reservation),
                         input.working_reserve_bytes,
+                        max_applications,
                     )
                     .await
                     .map(|result| match result {

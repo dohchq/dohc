@@ -42,6 +42,7 @@ pub use link_documents::{DocumentIsOpen, DocumentResync};
 mod journal;
 mod live_application;
 mod materialization;
+mod markdown_recovery;
 mod relay;
 #[cfg(unix)]
 mod retained;
@@ -64,6 +65,8 @@ pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
+pub use markdown_recovery::MarkdownRecoveryCandidate;
+use markdown_recovery::MarkdownRecoverySignal;
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
@@ -192,6 +195,7 @@ enum Command {
 /// Owns the worker thread and the command sender. Held by the supervisor;
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
     identity: EngineDbIdentity,
     store: Arc<StoreLocation>,
@@ -418,6 +422,8 @@ impl WorkspaceActor {
         let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let store = StoreLocation::new(db_path.clone());
         let worker_state = Arc::clone(&state);
+        let markdown_recovery = Arc::new(MarkdownRecoverySignal::default());
+        let worker_markdown_recovery = markdown_recovery.clone();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -433,6 +439,7 @@ impl WorkspaceActor {
                     startup_tx,
                     writer_lock,
                     work,
+                    worker_markdown_recovery,
                 )
             })
             .map_err(RuntimeError::ThreadSpawn)?;
@@ -441,6 +448,7 @@ impl WorkspaceActor {
             Ok(Ok(store_freshly_created)) => {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
+                    markdown_recovery,
                     reader_configured: Arc::default(),
                     identity,
                     store,
@@ -485,6 +493,7 @@ impl WorkspaceActor {
     /// A clonable handle for issuing commands.
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
+            markdown_recovery: self.markdown_recovery.clone(),
             reader_configured: Arc::clone(&self.reader_configured),
             identity: self.identity.clone(),
             store: Arc::clone(&self.store),
@@ -582,6 +591,7 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
     #[cfg(unix)]
     retained_root: retained::Root,
@@ -616,6 +626,7 @@ impl Drop for LinkDrainHold {
 fn wait_for_reader<R>(
     result: &Result<R, RuntimeError>,
     attempt: usize,
+    recovery: Arc<MarkdownRecoverySignal>,
 ) -> impl std::future::Future<Output = bool> + Send + 'static {
     let pending = match result {
         Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(pending)))
@@ -646,7 +657,10 @@ fn wait_for_reader<R>(
             pending.resolve().await;
             true
         } else {
-            tokio::spawn(async move { pending.resolve().await });
+            tokio::spawn(async move {
+                pending.resolve().await;
+                recovery.request();
+            });
             false
         }
     }
@@ -663,7 +677,9 @@ impl ActorHandle {
             configured.store(true, Ordering::Release);
             Ok(())
         })
-        .await
+        .await?;
+        self.request_markdown_recovery();
+        Ok(())
     }
 
     async fn run_with_reader_retry<R: Send + 'static>(
@@ -677,7 +693,7 @@ impl ActorHandle {
         for attempt in 0..=2 {
             let work = work.clone();
             let result = self.run(move |store, cache| work(store, cache)).await;
-            if !wait_for_reader(&result, attempt).await {
+            if !wait_for_reader(&result, attempt, self.markdown_recovery.clone()).await {
                 return result;
             }
         }
@@ -960,6 +976,7 @@ fn worker_main(
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -1153,6 +1170,7 @@ fn worker_main(
                 }
             }
         }
+        let changes_before = store.read_with(|conn| Ok::<_, StorageError>(conn.total_changes())).unwrap_or(0);
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
@@ -1170,6 +1188,8 @@ fn worker_main(
                 break;
             }
         }
+        let changes_after = store.read_with(|conn| Ok::<_, StorageError>(conn.total_changes())).unwrap_or(0);
+        if changes_after != changes_before { markdown_recovery.wake.notify_one(); }
         store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;
@@ -1413,6 +1433,7 @@ mod saturation_tests {
         let metrics = SharedMetrics::default();
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
+            markdown_recovery: Arc::default(),
             reader_configured: Arc::default(),
             identity,
             store: StoreLocation::new(db.to_path_buf()),
@@ -1440,6 +1461,7 @@ mod saturation_tests {
         let state = Arc::clone(&actor.state);
         let metrics = Arc::clone(&actor.link_metrics);
         let holds = Arc::clone(&actor.link_drain_holds);
+        let markdown_recovery = actor.markdown_recovery.clone();
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
                 db,
@@ -1453,6 +1475,7 @@ mod saturation_tests {
                 startup_tx,
                 Some(writer_lock),
                 None,
+                markdown_recovery,
             );
         }));
         actor.store_freshly_created = startup_rx

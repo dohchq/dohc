@@ -2097,7 +2097,7 @@ impl ActorHandle {
                 }
                 Err(error) => {
                     let result: Result<(), RuntimeError> = Err(error);
-                    if super::wait_for_reader(&result, preparation_attempt).await {
+                    if super::wait_for_reader(&result, preparation_attempt, self.markdown_recovery.clone()).await {
                         preparation_attempt += 1;
                         continue;
                     }
