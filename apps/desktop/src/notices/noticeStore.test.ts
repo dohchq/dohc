@@ -1313,13 +1313,17 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   });
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [
     refusal("sync-refusal-long", 1, `notes/${long}`), refusal("sync-refusal-tab", 2, "notes/a\tb.md"), refusal("sync-refusal-short", 3, "notes/n.md"),
-    refusal("sync-refusal-folder", 4, "notes/"),
+    refusal("sync-refusal-folder", 4, "notes/"), refusal("sync-refusal-same-name", 5, "archive/n.md"),
   ] }];
   const first = await computer(null, { refusalNotices });
-  const titles = (await first.store.list()).notices.map(row => row.title);
-  expect(titles).toHaveLength(4);
+  const rows = (await first.store.list()).notices;
+  const titles = rows.map(row => row.title);
+  expect(titles).toHaveLength(5);
   expect(titles.filter(title => title === "Some author names did not sync")).toHaveLength(2);
-  expect(titles).toContain("Some author names did not sync for “n.md”");
+  // Two files with one name share a title; Copy details tells them apart.
+  const sameName = rows.filter(row => row.title === "Some author names did not sync for “n.md”");
+  expect(sameName.map(row => row.detail?.split("\n").find(line => line.startsWith("Path: "))).sort())
+    .toEqual(["Path: archive/n.md", "Path: notes/n.md"]);
   const cut = titles.find(title => title.includes("…"))!;
   expect([...cut]).toHaveLength(120);
   expect(cut).toMatch(/^Some author names did not sync for “a+…”$/u);
