@@ -21,6 +21,7 @@ const R1 = "Recipient continued.";
 const HELD = "Owner typed during the hold.";
 const COPY = "notes/plan (recovered).md";
 const PACKAGE = "notes/plan (recovered).dohc-recovery.json";
+const COPY_AFTER_STOP = "notes/plan (recovered 2).md";
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
 const normalized = (text: string) => text.replaceAll("\r\n", "\n").trim();
@@ -34,12 +35,13 @@ async function openNote(page: Page, path = PATH): Promise<void> {
   await expect(editor(page)).toBeVisible();
 }
 
-async function typeAfter(page: Page, text: string): Promise<void> {
+async function typeAfter(page: Page, text: string, expectedState: "saved" | "pending-share" = "saved"): Promise<void> {
   await editor(page).getByText(ANCHOR).click();
   await page.keyboard.press("End");
   await page.keyboard.type(` ${text}`);
   await expect(editor(page)).toContainText(text);
-  await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, {timeout: 60_000});
+  await expect(saveState(page)).toHaveAttribute("data-state", expectedState === "pending-share" ? expectedState : /^(saved|saved-to-host)$/, {timeout: 60_000});
+  if (expectedState === "pending-share") await expect(saveState(page)).toHaveText("Saved locally · Pending share");
 }
 
 async function screenshots(page: Page, info: TestInfo, stage: string): Promise<void> {
@@ -185,7 +187,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
 
     await test.step("the owner types HELD, closes the note, and makes a new Edit share nobody opens", async () => {
       await openNote(page);
-      await typeAfter(page, HELD);
+      await typeAfter(page, HELD, "pending-share");
       const tab = page.getByTestId(editorTabTestId(PATH));
       await tab.hover();
       await tab.getByRole("button", {name: /^Close /}).click();
@@ -274,6 +276,13 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect(current.getByRole("button", {name: `Resume live editing for ${PATH}`, exact: true})).toBeEnabled({timeout: 60_000});
       await expect(kept.getByRole("button")).toHaveText(["Save recovery copy"]);
       await expect(kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true})).toBeEnabled();
+      await kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true}).click();
+      await expect.poll(async () => readFile(join(ownerTemp.rootPath, COPY_AFTER_STOP), "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      }), {timeout: 60_000}).toContain(HELD);
+      expect(normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8"))).toBe(restored);
+      await info.attach("recovered-plan-after-stop.md", {path: join(ownerTemp.rootPath, COPY_AFTER_STOP), contentType: "text/markdown"});
       await expectCliKeptEdits();
       await live.getByRole("button", {name: "Close", exact: true}).click();
       await expect(live).toHaveCount(0);
