@@ -1735,13 +1735,6 @@ impl EngineService {
                         };
                         let settle_now = match now_ms() {
                             Ok(now) => now,
-                            Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
-                                eprintln!("engine: queued author coverage settlement held: {error}");
-                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
-                                    session.author_settlement.hold();
-                                }
-                                return;
-                            }
                             Err(error) => {
                                 eprintln!(
                                     "engine: queued author coverage settlement clock failed: {error}"
@@ -1792,6 +1785,13 @@ impl EngineService {
                                     );
                                 }
                                 true
+                            }
+                            Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
+                                eprintln!("engine: queued author coverage settlement held: {error}");
+                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                                    session.author_settlement.hold();
+                                }
+                                return;
                             }
                             Err(error) => {
                                 eprintln!(
