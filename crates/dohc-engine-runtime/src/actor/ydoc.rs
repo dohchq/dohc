@@ -87,6 +87,7 @@ pub struct YdocSeedMaterialization {
 /// Actor-owned state returned when a live session refreshes its Y.Doc.
 #[derive(Debug)]
 pub struct YdocResyncState {
+    pub head_blob_sha256: Option<String>,
     pub initial_update: Vec<u8>,
     pub lineage_claim_id: Option<String>,
     /// See [`dohc_engine_sync::lineage_originated_here`].
@@ -3515,6 +3516,10 @@ pub(super) fn refresh_markdown_witnesses_on_store(
                     || current.lineage_claim_id != marker.lineage_claim_id
                     || snapshot.as_ref() != Some(&(key.object_id.clone(), head.blob_sha256.clone()))
                     || !refresh_head_materialized_in(tx, key, &owed.path, &head.blob_sha256)?
+                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 \
+                        AND target_version_id=?2 AND incoming_object_id=?3 AND status='open' AND metadata_origin='sync')",
+                        params![key.workspace_id,key.version_id,key.object_id], |row| row.get::<_,bool>(0))
+                        .map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))?
                     || !fresh.is_some_and(|row| row.source_sha256 == owed.source_sha256
                         && row.settled_head_sha256 == owed.settled_head_sha256) {
                     return Err(CollabError::MarkdownReaderUnavailable);
@@ -3638,6 +3643,10 @@ fn ydoc_resync_on_store(
         .flat_map(|replacement| replacement.recovered_paths)
         .collect();
     Ok(YdocResyncState {
+        head_blob_sha256: store.read_with(|conn| conn.query_row(
+            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0)).optional()
+            .map_err(|error| StorageError::corrupt_public(error)))?,
         initial_update,
         lineage_claim_id,
         lineage_originated_here,

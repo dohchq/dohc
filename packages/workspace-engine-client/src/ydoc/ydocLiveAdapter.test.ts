@@ -1791,6 +1791,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -2074,6 +2075,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -2167,6 +2169,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: [],
               artifactAssets: [],
@@ -2234,7 +2237,7 @@ describe("YdocLiveAdapter", () => {
           emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
-            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+            result: { headSha256: null, lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
           };
         }
         return engine.sendRequest(request);
@@ -2362,7 +2365,7 @@ describe("YdocLiveAdapter", () => {
           emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
-            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+            result: { headSha256: null, lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
           };
         }
         return engine.sendRequest(request);

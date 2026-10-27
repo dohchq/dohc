@@ -257,6 +257,7 @@ export class RemoteYdocApplyError extends YdocAdapterError {
 }
 
 export interface OpenYdocAdapterSessionInput {
+  allowLossySourceSha256?: string;
   workspace: WorkspaceHandle;
   versionId: string;
   path: string;
@@ -643,6 +644,7 @@ export class YdocAdapterSession {
   // Set by openSession; read by the open consumer, which owns the
   // create-or-refuse decision.
   head: "present" | "absent" = "present";
+  headSha256: string | null = null;
   // Whether the daemon resumed durable CRDT state for this object. Read with
   // `head`, never instead of it: a crash-orphaned draft the daemon resurrects
   // is lineage-existing and head-absent, and its CRDT rows are the only copy
@@ -1131,7 +1133,7 @@ export class YdocAdapterSession {
     return result.status;
   }
 
-  async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
+  async settle(options?: { summary?: string; allowLossySourceSha256?: string }): Promise<YdocSettleResult> {
     this.assertRecordable();
     await this.recordChain;
     // A resync request that landed while the journal drained is waited out,
@@ -1146,6 +1148,7 @@ export class YdocAdapterSession {
     const params: YdocSettleParams = {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
+      ...(options?.allowLossySourceSha256 ? { allowLossySourceSha256: options.allowLossySourceSha256 } : {}),
     };
     let raw: Response["result"];
     try {
@@ -1170,6 +1173,7 @@ export class YdocAdapterSession {
     }
     const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
+    this.headSha256 = result.sha256;
     return result;
   }
 
@@ -1392,6 +1396,7 @@ export class YdocAdapterSession {
     const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
     if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     this.ownerDraft = result.ownerDraft;
+    this.headSha256 = result.headSha256;
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
@@ -1592,6 +1597,7 @@ export class YdocLiveAdapter {
     input: OpenYdocAdapterSessionInput,
   ): Promise<YdocAdapterSession> {
     const params: YdocOpenParams = {
+      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
       versionId: input.versionId,
       path: input.path,
       ...(input.expectedObjectId
@@ -1633,6 +1639,7 @@ export class YdocLiveAdapter {
     });
     this.sessions.set(result.sessionId, session);
     session.head = result.head;
+    session.headSha256 = result.headSha256;
     session.lineage = result.lineage;
     session.unsettled = result.unsettled;
     // `lineage` (durable CRDT state) is not `head` (a snapshot in this

@@ -4,6 +4,7 @@ import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
@@ -364,6 +365,8 @@ export const FileInspector = memo(function FileInspector(
     props.path,
     props.engineVersionKey,
   );
+  const currentDocument = useRef(key);
+  currentDocument.current = key;
   const localBuffer = useRetainedLocalDocument(key);
   const fileKind = fileKindForPath(props.path);
   const kind = fileKind.displayKind;
@@ -534,6 +537,7 @@ export const FileInspector = memo(function FileInspector(
       (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
+    allowLossySourceSha256: consented && editAnyway?.source ? editAnyway.source : undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
@@ -554,6 +558,7 @@ export const FileInspector = memo(function FileInspector(
     // Edit anyway already accepted what saving does.
     doc: checksLossyNote && !editingAnyway ? engine.doc : null,
     checkedHash: checked.checkedHash,
+    headSha256: engine.headSha256,
   });
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
@@ -869,7 +874,16 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            onEditAnyway={() => {
+              const source = typeof boundSource === "string" ? boundSource : contentHash;
+              setEditAnyway({ open: lossyOpen, source });
+              if (engine.available && source) {
+                void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
+                  allowLossySourceSha256: source }).catch((error: unknown) => {
+                  if (currentDocument.current === key) props.onButtonError?.(lossyNoteRefusal(props.path), error, retryEngineOpen);
+                });
+              }
+            }}
             onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}

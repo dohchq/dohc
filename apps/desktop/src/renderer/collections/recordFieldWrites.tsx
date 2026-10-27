@@ -104,6 +104,7 @@ export function CollectionRecordFieldWrite({
     open: change.recordPath,
     doc: docState.doc,
     checkedHash: source.state === "clear" ? source.contentHash : null,
+    headSha256: docState.headSha256,
   });
   const checkedClear = source.state === "clear" && session === "clear";
   useEffect(() => {

@@ -23,6 +23,7 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::Lease;
 use dohc_engine_collab::Regime;
+use dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent;
 use dohc_engine_collab::owner_outbox::draft::{OwnerDraftDescriptor, OwnerDraftSnapshot};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -70,7 +71,16 @@ impl AuthorSettlementQueue {
 
 type EditorDraftRead = (Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>);
 
+fn validate_conversion_source(source: Option<&str>) -> Result<(), WireError> {
+    if source.is_some_and(|source| source.len() != 64 || !source.bytes().all(|byte|
+        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))) {
+        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-source-digest"));
+    }
+    Ok(())
+}
+
 pub(crate) struct YdocSession {
+    pub(super) conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) workspace: WorkspaceHandle,
     pub(super) key: DocKey,
@@ -109,6 +119,7 @@ impl YdocSession {
     ) -> Result<Self, CollabError> {
         lease.bind_claim(Some(&captured.source.lineage_claim_id))?;
         Ok(Self {
+            conversion_consent: None,
             owner_draft: None,
             workspace,
             key,
@@ -130,6 +141,7 @@ impl YdocSession {
 
 #[derive(Clone)]
 pub(super) struct YdocSessionView {
+    pub(super) conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) key: DocKey,
     pub(super) path: String,
@@ -259,6 +271,8 @@ struct OwnerYDocOutboxRetryParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
+    #[serde(default)]
+    allow_lossy_source_sha256: Option<String>,
     version_id: String,
     path: String,
     /// The document this open continues. The open refuses when the path
@@ -280,6 +294,7 @@ struct YdocOpenParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocOpenResult {
+    head_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_draft: Option<OwnerDraftDescriptor>,
     session_id: String,
@@ -386,6 +401,8 @@ struct YdocRecordUpdateResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocSettleParams {
+    #[serde(default)]
+    allow_lossy_source_sha256: Option<String>,
     session_id: String,
     #[serde(default)]
     summary: Option<String>,
@@ -453,6 +470,7 @@ struct YdocResyncParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
+    head_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_draft: Option<OwnerDraftDescriptor>,
     lineage_claim_id: Option<String>,
@@ -1151,6 +1169,7 @@ impl EngineService {
         request_id: u64,
     ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocOpenParams = parse(params)?;
+        validate_conversion_source(params.allow_lossy_source_sha256.as_deref())?;
         validate_ydoc_path(&params.path)?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
@@ -1414,6 +1433,7 @@ impl EngineService {
             seed => (seed, None),
         };
         let result = YdocOpenResult {
+            head_sha256: state.head_blob_sha256.clone(),
             owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),
@@ -1455,8 +1475,13 @@ impl EngineService {
             .bind_claim(state.lineage_claim_id.as_deref())
             .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
         lock(&self.sessions).insert(
-            session_id,
+            session_id.clone(),
             YdocSession {
+                conversion_consent: params.allow_lossy_source_sha256.map(|source| Arc::new(
+                    MarkdownConversionConsent::new(state.key.clone(), session_id,
+                        state.lineage_claim_id.clone(), state.restore_generation, source,
+                        state.head_blob_sha256.clone()),
+                )),
                 owner_draft,
                 workspace: handle,
                 key: state.key,
@@ -1653,6 +1678,12 @@ impl EngineService {
                 if let Ok(append) = &outcome
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
+                    if session.first_update_pending && require_empty && append.lineage_originated_here
+                        && let Some(claim) = append.lineage_claim_id.clone()
+                        && let Some(consent) = session.conversion_consent.as_ref()
+                            .and_then(|consent| consent.for_originated_claim(claim)) {
+                        session.conversion_consent = Some(Arc::new(consent));
+                    }
                     session.first_update_pending = false;
                     session
                         .set_lineage_claim(append.lineage_claim_id.clone())
@@ -1678,9 +1709,10 @@ impl EngineService {
                                 session.lineage_claim_id.clone(),
                                 session.open_head_sha.clone(),
                                 session.restore_generation,
+                                session.conversion_consent.clone(),
                             )
                         });
-                        let Some((key, path, kind, lineage, head, restore)) = pending else {
+                        let Some((key, path, kind, lineage, head, restore, consent)) = pending else {
                             return;
                         };
                         let settle_now = match now_ms() {
@@ -1711,7 +1743,7 @@ impl EngineService {
                                 CancellationToken::new(),
                                 restore,
 
-                                None,
+                                consent,
                             )
                             .await
                         {
@@ -1869,6 +1901,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: YdocSettleParams = parse(params)?;
+        validate_conversion_source(params.allow_lossy_source_sha256.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
@@ -1878,6 +1911,16 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
+        if let Some(source) = params.allow_lossy_source_sha256 {
+            let (_, view) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            let mut sessions = lock(&self.sessions);
+            let session = sessions.get_mut(&params.session_id)
+                .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+            session.conversion_consent.get_or_insert_with(|| Arc::new(MarkdownConversionConsent::new(
+                view.key, params.session_id.clone(), view.lineage_claim_id, view.restore_generation,
+                source, view.last_settled_sha.or(view.open_head_sha),
+            )));
+        }
         let settled = self
             .ydoc_settle_inner(
                 &cancellation,
@@ -1913,8 +1956,7 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
                 session.restore_generation,
-
-                None,
+                session.conversion_consent,
             )
             .await
             .map_err(map_runtime)?;
@@ -2170,6 +2212,9 @@ impl EngineService {
         let (state, owner_draft) = match draft {
             Some(draft) => (
                 dohc_engine_runtime::actor::YdocResyncState {
+                    head_blob_sha256: open.actor.ydoc_open_state(open.workspace_id.clone(), now_ms()?, false,
+                        Some(session.key.clone()), session.key.version_id.clone(), session.path.clone(),
+                        Some(session.content_kind), cancellation.token()).await.map_err(map_runtime)?.head_blob_sha256,
                     initial_update: draft.initial_update,
                     lineage_claim_id: Some(draft.descriptor.binding.lineage_claim_id.clone()),
                     lineage_originated_here: false,
@@ -2217,6 +2262,7 @@ impl EngineService {
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = serde_json::to_value(YdocResyncResult {
+            head_sha256: state.head_blob_sha256,
             owner_draft,
             lineage_claim_id: state.lineage_claim_id,
             lineage_originated_here: state.lineage_originated_here,
@@ -2264,6 +2310,7 @@ impl EngineService {
         Ok((
             open,
             YdocSessionView {
+                conversion_consent: session.conversion_consent.clone(),
                 owner_draft: session.owner_draft.clone(),
                 key: session.key.clone(),
                 path: session.path.clone(),

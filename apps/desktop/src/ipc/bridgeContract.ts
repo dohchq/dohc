@@ -6852,6 +6852,7 @@ const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
 });
 
 export const OpenEngineYDocSessionPayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   sessionId: ENGINE_YDOC_SESSION_ID,
   path: PATH_STRING,
@@ -6874,6 +6875,7 @@ export const engineYDocAdmissionOperations = {
 } satisfies OperationTable;
 
 export const RetryEngineYDocSavePayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
   // Save it again, on a document whose file was deleted outside dohc: main
@@ -6906,6 +6908,7 @@ export const engineYDocSaveOperations = {
 } satisfies OperationTable;
 
 export const OpenEngineYDocSessionResult = z.object({
+  headSha256: z.string().nullable().optional(),
   available: z.boolean(),
   captureHeld: z.boolean().optional(),
   // A close released the file, but capture has not recorded the version

@@ -224,6 +224,7 @@ export interface CliCollectionsPort {
 export interface CliDocumentsPort {
   read(path: string): Promise<{ path: string; markdown: string }>;
   edit(input: {
+    allowLossySourceSha256?: string;
     path: string;
     edit: DocumentEdit;
     origin: LiveDocumentEditOrigin;
@@ -3076,6 +3077,7 @@ async function dispatchWorkspace(
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
         try {
           const outcome = await documents.edit({
+            ...(request.args.allowLossySourceSha256 ? { allowLossySourceSha256: request.args.allowLossySourceSha256 } : {}),
             path,
             edit: { find, replacement },
             origin: documentEditOrigin(agent, context, options),
@@ -3092,7 +3094,7 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit, completion);
+       return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null, request.args.allowLossySourceSha256 ?? null], edit, completion);
     }
 
     case "documentCreate": {

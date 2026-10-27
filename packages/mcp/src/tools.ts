@@ -2349,12 +2349,13 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string; requestId?: string },
+  args: { path: string; find?: string; replacement: string; requestId?: string; allowLossySourceSha256?: string },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentEdit", {
+    ...(args.allowLossySourceSha256 ? { allowLossySourceSha256: args.allowLossySourceSha256 } : {}),
     path: resolved.normalized,
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,

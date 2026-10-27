@@ -226,6 +226,7 @@ const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
+    allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
     requestId: requestIdSchema.optional(),

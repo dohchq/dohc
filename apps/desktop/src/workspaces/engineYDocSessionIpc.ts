@@ -284,6 +284,7 @@ export interface LiveDocumentEditOrigin {
 }
 
 export interface LiveDocumentEdit {
+  allowLossySourceSha256?: string;
   workspaceId: string;
   /** Validated and normalized; resolved again to the path sessions use. */
   path: string;
@@ -292,7 +293,7 @@ export interface LiveDocumentEdit {
    * current state, or null for no change. `keepBlocks` says someone may be
    * typing in the document.
    */
-  change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  change(state: Uint8Array, options: { keepBlocks: boolean; headSha256?: string | null }): Promise<Uint8Array | null>;
   /**
    * Throws when the document at the resolved `path` is a lossy note
    * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
@@ -707,6 +708,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
+            ...(!shared && input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             path: canonicalPath,
             contentKind: documentKind,
             assertRecordWritable: () => {
@@ -829,6 +831,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
+        headSha256: owned.provider.headSha256,
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
         ...(owned.provider.versionId
@@ -917,7 +920,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
-      settle = held.session.provider.settleNow();
+      settle = held.session.provider.settleNow(
+        !this.#isSharedView(authority.workspace) && input.allowLossySourceSha256
+          ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined,
+      );
     } finally {
       authority.release();
     }
@@ -1130,6 +1136,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
     if (!capture) throw new Error("The workspace engine is not running.");
     const provider = await capture.openYDocSession({
+      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
       path,
       contentKind: "richdoc",
       // Nothing else reads this session's doc before it closes.
@@ -1481,6 +1488,7 @@ async function applyDocumentEdit(
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,
+    headSha256: provider.headSha256,
   });
   if (update === null) return { changed: false };
   session.assertSame();
@@ -1490,7 +1498,8 @@ async function applyDocumentEdit(
   }, input.origin);
   session.show(update);
   try {
-    await settleNow.call(provider);
+    await settleNow.call(provider, input.allowLossySourceSha256
+      ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
   } catch (error) {
     if (!armed) throw error;
     // The session's journal holds the edit and a later settle saves it.

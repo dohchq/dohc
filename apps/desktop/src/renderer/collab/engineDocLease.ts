@@ -145,6 +145,7 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
+      headSha256?: string | null;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -184,12 +185,14 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
   kind: LiveDocumentKind,
+  allowLossySourceSha256?: string,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
     ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
+        ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
         workspaceId,
         path,
         sessionId,
@@ -199,6 +202,7 @@ function makeTransport(
       }
       return {
         available: result.available,
+        headSha256: result.headSha256,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.objectId ? { objectId: result.objectId } : {}),
         ...(result.versionId ? { versionId: result.versionId } : {}),
@@ -291,6 +295,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  allowLossySourceSha256?: string;
   accessEnded?: boolean;
   workspaceId: string;
   path: string;
@@ -433,6 +438,7 @@ function createEngineDocSession(
     localSeq,
     writesRefused,
     documentKind,
+    input.allowLossySourceSha256,
   );
 
   let snapshot = emptyLeaseSnapshot(requestKey);
@@ -536,6 +542,7 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
+    headSha256: bound.headSha256,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),

@@ -426,18 +426,21 @@ export function createDesktopCliServer<State>(
               });
           return { path: live.path, markdown };
         },
-        edit: ({ path, edit, origin }) =>
+        edit: ({ path, edit, origin, allowLossySourceSha256 }) =>
           liveDocuments.editDocument({
+            ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
             workspaceId: workspace.workspaceId,
             path,
             origin,
             assertEditable: async (resolved) => {
-              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+              const source = await lossyNoteText(workspace.rootPath, resolved);
+              if (source !== null && createHash("sha256").update(source).digest("hex") !== allowLossySourceSha256) {
                 throw new Error(lossyNoteRefusal(resolved));
               }
             },
-            change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
+            change: (state, { keepBlocks, headSha256 }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, headSha256,
+                ...(allowLossySourceSha256 ? {} : { refuseLossy: path }) }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before

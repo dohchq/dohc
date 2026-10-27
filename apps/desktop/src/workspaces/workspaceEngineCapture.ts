@@ -582,6 +582,7 @@ export interface WorkspaceEngineCapture {
   // with the version binding, so a switch cannot land between them.
   openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
+    allowLossySourceSha256?: string;
     path: string;
     assertRecordWritable?: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
@@ -2330,6 +2331,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function openRestartSafeRustYDocSession(input: {
+    allowLossySourceSha256?: string;
     versionId: string;
     path: string;
     contentKind?: YdocContentKind;
@@ -2726,6 +2728,8 @@ export function createWorkspaceEngineCapture(
             });
           };
           const providerOpened = await openProvider({
+            ...(generation === 1 && input.allowLossySourceSha256
+              ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -3512,6 +3516,7 @@ export function createWorkspaceEngineCapture(
         // operation's next line records it here.
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
+      get headSha256() { return current?.headSha256; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -4741,6 +4746,7 @@ export function createWorkspaceEngineCapture(
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
+          ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -5883,6 +5889,7 @@ export function createWorkspaceEngineCapture(
             return session.artifactAssets ?? [];
           },
           path: session.path,
+          get headSha256() { return session.headSha256; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,

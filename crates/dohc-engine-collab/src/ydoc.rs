@@ -11479,7 +11479,11 @@ mod projection_tests {
         let peer = Ydoc::wire();
         peer.apply(&doc.encode_full_state()).unwrap();
         let tail = doc.richdoc_append_paragraph("Owner's unsettled tail");
-        let before = doc.canonical_content();
+        let mut before = doc.canonical_content();
+        for key in [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY, MARKDOWN_SOURCE_READER_META_KEY] {
+            before[ROOT_META].as_object_mut().unwrap().remove(key);
+        }
         let update = doc.clear_markdown_source_witness();
         assert!(!doc.has_markdown_witness());
         assert!(!doc.has_reader_source());

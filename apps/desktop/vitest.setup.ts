@@ -108,9 +108,9 @@ if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
         throw new ReferenceError("Worker is not defined");
       }
     }
-    postMessage(data: { id: number; markdown?: string; state?: Uint8Array }): void {
+    postMessage(data: { id: number; markdown?: string; state?: Uint8Array; headSha256?: string | null }): void {
       void Promise.resolve().then(() => {
-        const answer = data.state ? sessionVerdict(data.state) : { lossy: isLossyMarkdown(data.markdown ?? "") };
+        const answer = data.state ? sessionVerdict(data.state, data.headSha256 ?? null) : { lossy: isLossyMarkdown(data.markdown ?? "") };
         if (!this.#closed) this.onmessage?.({ data: { id: data.id, ...answer } });
       });
     }

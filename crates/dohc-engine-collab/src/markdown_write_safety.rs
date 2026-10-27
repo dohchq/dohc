@@ -33,6 +33,13 @@ impl MarkdownConversionConsent {
         self.consumed.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// The first local append can originate the previously absent lineage.
+    pub fn for_originated_claim(&self, lineage_claim_id: String) -> Option<Self> {
+        if self.lineage_claim_id.is_some() || self.is_consumed() { return None; }
+        Some(Self::new(self.key.clone(), self.session_id.clone(), Some(lineage_claim_id),
+            self.restore_generation, self.source_sha256.clone(), self.head_sha256.clone()))
+    }
+
     pub fn committed(&self) {
         self.consumed.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -162,6 +169,24 @@ pub fn holds(safety: &MarkdownWriteSafety, witness_source_sha256: Option<&str>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_consent_is_scoped_and_consumed_only_after_commit() {
+        let key = DocKey::new("w", "main", "object").unwrap();
+        let consent = MarkdownConversionConsent::new(key.clone(), "session".into(), None,
+            Some(4), "source".into(), None);
+        assert!(consent.permits(&key, "session", None, Some(4), Some("source"), None));
+        assert!(!consent.permits(&key, "other", None, Some(4), Some("source"), None));
+        assert!(!consent.permits(&key, "session", None, Some(5), Some("source"), None));
+        assert!(!consent.permits(&key, "session", None, Some(4), Some("other"), None));
+        assert!(!consent.permits(&key, "session", None, Some(4), Some("source"), Some("head")));
+        let claimed = consent.for_originated_claim("claim".into()).unwrap();
+        assert!(claimed.permits(&key, "session", Some("claim"), Some(4), Some("source"), None));
+        assert!(claimed.for_originated_claim("replacement".into()).is_none());
+        claimed.committed();
+        assert!(!claimed.permits(&key, "session", Some("claim"), Some(4), Some("source"), None));
+        assert!(claimed.for_originated_claim("claim".into()).is_none());
+    }
 
     #[test]
     fn unsafe_witness_holds_only_an_absent_or_matching_head() {

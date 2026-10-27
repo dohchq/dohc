@@ -34,6 +34,7 @@ export type JsonObject = { [key: string]: JsonValue | undefined };
 export type ArtifactAssetDescriptor = typeof ArtifactAssetDescriptorSchema.Type;
 
 export type YdocOpenParams = JsonObject & {
+  allowLossySourceSha256?: string;
   versionId: string;
   path: string;
   // The document this open continues. The engine refuses the open when the
@@ -82,6 +83,7 @@ export type YdocRecordUpdateParams = JsonObject & {
 export type YdocRecordUpdateResult = typeof RecordUpdateResultSchema.Type;
 
 export type YdocSettleParams = JsonObject & {
+  allowLossySourceSha256?: string;
   sessionId: string;
   summary?: string;
 };
@@ -197,6 +199,7 @@ const ArtifactAssetDescriptorSchema = mutableStruct({
   version: Schema.optionalKey(Schema.Int),
 });
 const OpenResultSchema = mutableStruct({
+  headSha256: Schema.NullOr(Schema.String),
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   sessionId: Schema.String,
   objectId: Schema.String,
@@ -232,6 +235,7 @@ const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   ownerDraft: mutableStruct(OwnerAppendFields),
 })]);
 const ResyncResultSchema = mutableStruct({
+  headSha256: Schema.NullOr(Schema.String),
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   lineageClaimId: Schema.NullOr(Schema.String),
   lineageOriginatedHere: Schema.Boolean,

@@ -45,6 +45,7 @@ export interface EngineYDocTransport {
   // no-downgrade outcomes: the caller must not expose a writable plain editor.
   open(): Promise<{
     available: boolean;
+    headSha256?: string | null;
     initialUpdate?: Uint8Array;
     objectId?: string;
     versionId?: string;
@@ -213,6 +214,7 @@ const timeoutBatchScheduler: EngineYDocBatchScheduler = {
 };
 
 export interface EngineYDocBinding {
+  readonly headSha256?: string | null;
   // The mirror Y.Doc the editor binds to, or null when the doc is not
   // engine-backed (available:false) — the caller stays on the local autosave
   // editor.
@@ -673,6 +675,7 @@ export async function bindEngineYDoc(
       return doc;
     },
     available: true,
+    headSha256: opened.headSha256,
     objectId: opened.objectId ?? null,
     versionId: opened.versionId ?? null,
     notInVersion: false,

@@ -49,6 +49,7 @@ const NO_DRAFT_IDS: readonly number[] = [];
 // — the stale response is dropped and its session closed.
 
 export type UseEngineDoc = {
+  headSha256?: string | null;
   // True once the engine session is open and the mirror doc is bound. false
   // permits the local autosave editor only after opening settles without a
   // named refusal outcome.
@@ -334,6 +335,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
 
   return {
     available,
+    headSha256: outcome?.kind === "bound" ? outcome.headSha256 : undefined,
     opening,
     doc,
     objectId,
