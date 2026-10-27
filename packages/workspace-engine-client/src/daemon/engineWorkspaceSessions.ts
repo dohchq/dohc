@@ -1072,12 +1072,18 @@ export class EngineWorkspaceSessions {
         return;
       }
       if (entry.closing) {
+        // A close for good ends a wait on a close that keeps the workspace
+        // now, not once that close settles.
+        if (retire && entry.reopening) {
+          entry.reopening = false;
+          this.wakeOpenWaiters(entry);
+        }
         await entry.closing;
         continue;
       }
 
       entry.retiring = retire;
-      entry.reopening = !retire;
+      entry.reopening = !retire && !this.rebuildingWorkspaces.has(key);
       const closing = this.closeEntry(entry);
       entry.closing = closing;
       this.wakeOpenWaiters(entry);

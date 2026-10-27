@@ -412,6 +412,42 @@ it("gives nothing to wait on after a rebuild ends a close that kept the workspac
   await sessions.closeAll();
 });
 
+it("gives nothing to wait on after a rebuild during which a close kept the workspace", async () => {
+  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebind") };
+  const client = new MockClient("rebind", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  sessions.beginRebuild(workspace);
+  await sessions.closeWorkspaceBinding(workspace);
+  sessions.endRebuild(workspace);
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
+it("ends a wait on a close that keeps the workspace once a close for good starts", async () => {
+  const workspace = await tempWorkspace();
+  const client = new MockClient("rebind", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
+  });
+  await sessions.run(workspace, async () => undefined);
+  const held = deferred<void>();
+  client.holdClose = held.promise;
+  const closing = sessions.closeWorkspaceBinding(workspace);
+  const waited = sessions.openInProgress(workspace);
+  expect(waited).not.toBeNull();
+  const retiring = sessions.closeWorkspace(workspace);
+  // Before the first close settles.
+  await waited;
+  held.resolve();
+  await closing;
+  await retiring;
+  expect(sessions.openInProgress(workspace)).toBeNull();
+  await sessions.closeAll();
+});
+
 it("reports the current binding's .dohc/local readiness only while that open stands", async () => {
   const workspace = await tempWorkspace();
   const ready = new MockClient("ready", { localStateReady: true });
@@ -460,6 +496,7 @@ class MockClient implements EngineDaemonClient {
   private readonly eventHandlers = new Set<(event: Event) => void>();
 
   holdOpen: Promise<void> | null = null;
+  holdClose: Promise<void> | null = null;
   failOpen = false;
 
   constructor(
@@ -475,6 +512,7 @@ class MockClient implements EngineDaemonClient {
       return { id: request.id, result: { workspace: this.handle, ...this.opened } };
     }
     if (request.method === "workspace.close") {
+      await this.holdClose;
       return { id: request.id, result: { closed: true } };
     }
     throw new Error(`Unexpected method: ${request.method}`);
