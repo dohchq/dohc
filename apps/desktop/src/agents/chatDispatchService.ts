@@ -1063,7 +1063,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ),
     );
     // The engine claims the oldest request in a thread that is not paused,
-    // so its agent's command is the one the claim records.
+    // and the claim records the listed request's agent's command. A request
+    // written since the list was read can win the claim. Its own agent still
+    // runs, but the run records the listed agent's command.
     const next = pending.find(({ threadId }) => pauseStates.get(threadId)?.paused !== true);
     const nextAgent = (next && runnable.get(next.agentId)) ?? [...runnable.values()][0]!;
     if (dispatch.resolveUncertainClaim) {

@@ -4031,7 +4031,7 @@ describe("chatDispatchService", () => {
         expect(fixture.spawnCalls).toEqual([]);
         // One agent's start failed; the other agent's request waits for trust.
         expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([
-          expect.objectContaining({ triggerMessageId: asked.message.id }),
+          expect.objectContaining({ triggerMessageId: asked.message.id, agentId: "default" }),
         ]);
         await vi.waitFor(() => expect(fixture.notices).toEqual([expect.objectContaining({
           title: expect.stringContaining("did not start in Restricted Mode"),
