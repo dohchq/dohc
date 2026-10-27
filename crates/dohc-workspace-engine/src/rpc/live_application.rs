@@ -489,6 +489,8 @@ impl EngineService {
             registration_id: u64,
             terminal_receipt:
                 Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+            #[serde(default)]
+            owner_session_id: Option<String>,
         }
         if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
             return Err(WireError::new(
@@ -541,6 +543,18 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
+        let conversion_consent = if let Some(session_id) = params.owner_session_id.as_ref() {
+            let (_, view) = self.ydoc_session(request.workspace.as_ref(), session_id)?;
+            let b = &registration.binding;
+            if view.key.workspace_id != b.workspace_id || view.key.version_id != b.main_version_id
+                || view.key.object_id != b.object_id || view.lineage_claim_id.as_deref() != Some(&b.lineage_claim_id)
+                || view.restore_generation.unwrap_or(0) != b.restore_fence_generation {
+                return Err(WireError::new(ErrorCode::InvalidParams, "owner-session-binding-mismatch"));
+            }
+            lock(&self.sessions).get(session_id)
+                .and_then(|session| session.conversion_consent.clone())
+                .filter(|consent| !consent.is_consumed())
+        } else { None };
         let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
@@ -555,7 +569,7 @@ impl EngineService {
             let _serial = serial;
             registration
                 .handle
-                .settle(
+                .settle_with_consent(
                     params.terminal_receipt,
                     max_applications,
                     registration.host.open.root.clone(),
@@ -563,6 +577,7 @@ impl EngineService {
                     Arc::new(NoFaults),
                     token,
                     reconstruction,
+                    conversion_consent,
                 )
                 .await
         });

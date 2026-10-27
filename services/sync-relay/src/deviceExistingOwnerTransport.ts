@@ -347,7 +347,8 @@ export function startExistingOwnerDeviceTransport(options: {
         } else if (operation.method === "liveApplication.settle") {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const params = configRecord(operation.params,["registrationId","terminalReceipt"]);
-          result = (await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,terminalReceipt: params.terminalReceipt as never } },signal)).result;
+          result = (await config.client.sendRequest({ ...request,method: operation.method,params: { registrationId: registration.nativeId,terminalReceipt: params.terminalReceipt as never,
+            ownerSessionId: registration.owner.nativeSessionId } },signal)).result;
           owner.assertCurrent();
         } else throw new Error("Owner device method is unavailable.");
       }

@@ -33,6 +33,15 @@ impl MarkdownConversionConsent {
         self.consumed.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub fn permits_audited(&self, key: &DocKey, lineage_claim_id: Option<&str>,
+        restore_generation: i64, source_sha256: Option<&str>, head_sha256: Option<&str>) -> bool {
+        !self.is_consumed() && self.key == *key
+            && self.lineage_claim_id.as_deref() == lineage_claim_id
+            && self.restore_generation.unwrap_or(0) == restore_generation
+            && Some(self.source_sha256.as_str()) == source_sha256
+            && self.head_sha256.as_deref() == head_sha256
+    }
+
     /// The first local append can originate the previously absent lineage.
     pub fn for_originated_claim(&self, lineage_claim_id: String) -> Option<Self> {
         if self.lineage_claim_id.is_some() || self.is_consumed() { return None; }

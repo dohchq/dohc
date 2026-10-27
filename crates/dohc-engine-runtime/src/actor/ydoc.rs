@@ -3108,7 +3108,7 @@ pub(super) fn ydoc_settle_on_store(
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| -> Result<_, RuntimeError> {
         if live_audit.is_none() {
-            dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
+            dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key).map_err(
                 |_| DomainError::InvalidInput {
                     reason: "owner-outbox-frozen",
                 },
@@ -3169,10 +3169,18 @@ pub(super) fn ydoc_settle_on_store(
         }
         let holds = markdown_write_safety::holds(&markdown_write_safety, current_witness_sha, current_sha.as_deref())
             && !markdown_write_safety::check_witness(write_doc, key, path, witness_resolver.as_deref())?;
-        let uses_consent = holds && live_audit.is_none() && conversion_consent.is_some_and(|consent|
-            consent.permits(key, session_id, current_marker.lineage_claim_id.as_deref(), restore_generation,
-                current_witness_sha, current_sha.as_deref()));
-        let obligation = WriteObligation {
+        let adopted_owner = dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)?;
+        let uses_consent = holds && conversion_consent.is_some_and(|consent| {
+            if let Some(audit) = live_audit {
+                consent.permits_audited(key, current_marker.lineage_claim_id.as_deref(),
+                    audit.binding().restore_fence_generation, current_witness_sha, current_sha.as_deref())
+            } else {
+                !adopted_owner && consent.permits(key, session_id,
+                    current_marker.lineage_claim_id.as_deref(), restore_generation,
+                    current_witness_sha, current_sha.as_deref())
+            }
+        });
+        let mut obligation = WriteObligation {
             order: 0, key: key.clone(), lineage_claim_id: current_marker.lineage_claim_id.clone().unwrap_or_default(),
             operation_id: session_id.to_owned(),
             kind: if live_audit.is_some() { WriteObligationKind::AuditedSettle }
@@ -3189,8 +3197,23 @@ pub(super) fn ydoc_settle_on_store(
             source_sha256: None, settled_head_sha256: None,
         };
         if holds && !uses_consent {
-            write_obligations::record_in(tx, &obligation, now_ms)?;
+            if live_audit.is_none() && adopted_owner {
+                let retry = write_obligations::AuditedRetry::adopted_owner_in(tx, key, current_marker.head_update_seq)?
+                    .ok_or(CollabError::NoMarker)?;
+                obligation.kind = WriteObligationKind::AuditedSettle;
+                obligation.operation_id = retry.operation_id();
+                obligation.retry_inputs = serde_json::to_value(retry)
+                    .map_err(StorageError::persist_public)?;
+            }
+            if obligation.kind == WriteObligationKind::AuditedSettle {
+                write_obligations::record_audited_in(tx, &obligation, now_ms)?;
+            } else {
+                write_obligations::record_in(tx, &obligation, now_ms)?;
+            }
             return Ok((None, false));
+        }
+        if live_audit.is_none() && adopted_owner {
+            return Err(DomainError::InvalidInput { reason: "owner-outbox-frozen" }.into());
         }
         let preimage = if bootstrap_absent {
             Preimage::Absent
@@ -3287,7 +3310,9 @@ pub(super) fn ydoc_settle_on_store(
         }
         write_obligations::advance_refresh_head_in(tx, key, current_marker.lineage_claim_id.as_deref(),
             current_sha.as_deref(), &result.snapshot.blob_sha256, now_ms)?;
-        write_obligations::complete_in(tx, &obligation, now_ms)?;
+        if live_audit.is_none() {
+            write_obligations::complete_in(tx, &obligation, now_ms)?;
+        }
         if let Some(audit) = live_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {

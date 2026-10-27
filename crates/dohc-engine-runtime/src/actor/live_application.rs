@@ -656,7 +656,19 @@ impl ActorLiveApplicationHandle {
         token: tokio_util::sync::CancellationToken,
         reconstruction: AdmittedNativeHistoryReconstruction,
     ) -> Result<LiveSettlementResult, RuntimeError> {
+        self.settle_with_consent(terminal, max_applications, root, now_ms, faults, token,
+            reconstruction, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn settle_with_consent(
+        &self, terminal: Option<LiveUpdateReceipt>, max_applications: usize,
+        root: std::path::PathBuf, now_ms: i64, faults: Arc<dyn FaultInjector>,
+        token: tokio_util::sync::CancellationToken, reconstruction: AdmittedNativeHistoryReconstruction,
+        conversion_consent: Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>>,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
         current(&self.actor, &self.token)?;
+        for attempt in 0..=2 {
         let (reply, receive) = oneshot::channel();
         self.actor
             .tx
@@ -664,20 +676,25 @@ impl ActorLiveApplicationHandle {
                 workspace_id: self.workspace_id.clone(),
                 token: self.token.clone(),
                 application: self.application.clone(),
-                terminal,
+                terminal: terminal.clone(),
                 max_applications,
-                root,
+                root: root.clone(),
                 now_ms,
-                faults,
-                cancel: token,
-                reconstruction,
+                faults: faults.clone(),
+                cancel: token.clone(),
+                reconstruction: reconstruction.clone(),
+                conversion_consent: conversion_consent.clone(),
                 reply,
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive_reserved(receive).await?;
+        let result = receive_reserved(receive).await;
+        if !super::wait_for_reader(&result, attempt).await {
         current(&self.actor, &self.token)?;
-        Ok(result)
+        return result;
+        }
+        }
+        unreachable!()
     }
     /// Install an original baseline through the same captured actor and owner.
     pub async fn bootstrap(
@@ -925,6 +942,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reconstruction: AdmittedNativeHistoryReconstruction,
+        conversion_consent: Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>>,
         reply: ReservedReply<LiveSettlementResult>,
     },
     Bootstrap {
@@ -1107,7 +1125,7 @@ impl Request {
                     let resolver = cache.reader_resolver.clone();
                     if cancel.is_cancelled() {return Err(RuntimeError::Cancelled);}
                     owner.with_restore_settlement(store, resolver.as_ref(),*input,coordinate,max_bytes,max_events,|store,audit| {
-                        let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel)?;
+                        let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel,None)?;
                         result.materialized &= matches!(
                             dohc_engine_files::probe_projection_target(&root,&audit.binding().current_path,dohc_engine_files::ProjectionTargetKind::Plaintext),
                             dohc_engine_files::ProjectionTargetState::Text {sha256} if sha256 == result.markdown_digest
@@ -1282,6 +1300,7 @@ impl Request {
                 faults,
                 cancel,
                 reconstruction,
+                conversion_consent,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1303,6 +1322,7 @@ impl Request {
                                 now_ms,
                                 faults.as_ref(),
                                 &cancel,
+                                conversion_consent.as_deref(),
                             )
                         },
                     )
@@ -1474,6 +1494,7 @@ fn settle_audited(
     now_ms: i64,
     faults: &dyn FaultInjector,
     cancel: &tokio_util::sync::CancellationToken,
+    conversion_consent: Option<&dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>,
 ) -> Result<LiveSettlementResult, RuntimeError> {
     let binding = audit.binding();
     let key = dohc_engine_collab::DocKey::new(
@@ -1502,10 +1523,16 @@ fn settle_audited(
         None,
         super::ydoc::SettlementKind::Document,
         false,
-        None,
+        conversion_consent,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
     let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
+    match store.write_with(faults, |tx| {
+        dohc_engine_collab::markdown_write_obligations::complete_covered_audited_in(tx, &key, now_ms)
+    })? {
+        dohc_engine_storage::TxnOutcome::Committed(()) => {},
+        dohc_engine_storage::TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    }
     let mut result = audit.result(id, settled.moment_id, settled.sha256, settled.materialized);
     result.collection_reconcile_required = settled.collection_reconcile_required;
     Ok(result)
