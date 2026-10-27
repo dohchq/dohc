@@ -565,9 +565,12 @@ impl EngineService {
             reservation: Mutex::new(Some(reconstruction.reservation.clone())),
         });
         let mut retirement = RetireOnCancellation(Some(host));
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let workspace = request.workspace.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            registration
+            let result = registration
                 .handle
                 .settle_with_consent(
                     params.terminal_receipt,
@@ -579,7 +582,21 @@ impl EngineService {
                     reconstruction,
                     conversion_consent,
                 )
-                .await
+                .await;
+            if result.is_ok() {
+                let binding = &registration.binding;
+                for (id, session) in lock(&sessions).iter() {
+                    if workspace.as_ref() == Some(&session.workspace)
+                        && session.key.workspace_id == binding.workspace_id
+                        && session.key.version_id == binding.main_version_id
+                        && session.key.object_id == binding.object_id
+                        && session.path == binding.current_path
+                        && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str()) {
+                        events.emit("ydoc.remoteUpdate", json!({"sessionId":id,"resyncRequired":true}));
+                    }
+                }
+            }
+            result
         });
         let outcome = operation.await;
         retirement.0 = None;
