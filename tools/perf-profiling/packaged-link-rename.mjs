@@ -12,7 +12,7 @@ export function linkFixtureFile(n, links) {
 export function linkingPaths(links) {
   return links ? ['large.md', ...Array.from({length: links - 1}, (_, n) => linkFixtureFile(n + 3, links).name)] : [];
 }
-const recordPath = (root, id) => join(root, '.dohc', 'trash', `move-${createHash('sha256').update(id).digest('hex')}.json`);
+const recordPath = (root, id) => join(root, '.dohc', 'local', 'trash', `move-${createHash('sha256').update(id).digest('hex')}.json`);
 export const readLinkRecord = async (root, id) => JSON.parse(await readFile(recordPath(root, id), 'utf8'));
 // Reproduce a quit after the engine receipt but before main saved done. The app is stopped.
 export async function rearmLinkReceipt(root, id) {
@@ -60,7 +60,7 @@ export async function measureLinkRename({instance, links, typing, waitUntil, sig
         if (!move.operationId || !move.undo?.available) throw Error('The link rename did not return an Undo operation');
         const name = `move-${createHash('sha256').update(move.operationId).digest('hex')}.json`;
         const pass = waitUntil(async () => {
-          const record = JSON.parse(await readFile(join(root, '.dohc', 'trash', name), 'utf8').catch(error => {
+          const record = JSON.parse(await readFile(join(root, '.dohc', 'local', 'trash', name), 'utf8').catch(error => {
             if (error.code === 'ENOENT') return '{}'; throw error;
           }));
           if (record.links?.state !== 'done') return false;
