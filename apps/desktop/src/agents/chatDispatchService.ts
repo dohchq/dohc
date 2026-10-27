@@ -1,6 +1,7 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import { cutText } from "@dohc/automation-executor/automation-chat";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";
@@ -69,20 +70,24 @@ const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
   restricted: "did not start in Restricted Mode",
 };
 
-// "Your agent finished in "Plan day 2"" or "Your agent's run in "Plan day
-// 2" failed", shortening the thread's name to fit. Without a name, the
-// sentence names no thread.
-function runNoticeTitle(outcome: RunOutcome, thread: string): string {
+const NOTICE_AGENT_NAME_MAX_CHARS = 32;
+
+// "Atlas finished in "Plan day 2"" or "Atlas's run in "Plan day 2" failed",
+// by the agent's Settings name, shortening it to 32 characters and the
+// thread's name to fit. An agent no longer in Settings is "Your agent".
+// Without a thread name, the sentence names no thread.
+function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
+  const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
   const sentence = (name: string | null) => {
     const where = name === null ? "" : ` in "${name}"`;
-    if (outcome === "stopped") return `Stopped the run${where}`;
+    if (outcome === "stopped") return `Stopped ${agent === undefined ? "the run" : `${agent}'s run`}${where}`;
+    const who = agent ?? "Your agent";
     return outcome === "finished"
-      ? `Your agent finished${where}`
-      : `Your agent's run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
+      ? `${who} finished${where}`
+      : `${who}'s run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
   };
   if (!thread) return sentence(null);
-  const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
-  return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
+  return sentence(cutText(thread, NOTICE_TITLE_MAX_CHARS - [...sentence("")].length));
 }
 
 // A run that failed to start says why and what to do next.
@@ -788,7 +793,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
+      title: runNoticeTitle(
+        outcome,
+        await threadTitle(workspace, run.threadId),
+        (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
+      ),
       body: runNoticeBody(run, outcome, nodeAvailable),
       target: { thread: run.threadId, run: run.runId },
     });
