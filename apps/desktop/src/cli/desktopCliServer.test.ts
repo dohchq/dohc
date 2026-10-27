@@ -1409,6 +1409,17 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
+  it("lists each restore queue as save-only and saves the exact incident", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = ["old-1:delivery:0", "old-2:delivery:0"].map(incident =>
+      ({...f.row("object-plan", "notes/plan.md", incident), reason: "restore-fenced", saveOnly: true}));
+    const expected = f.kept.workspace.map(({objectId: _objectId, ...row}) => row);
+    expect(await f.doors[door].list()).toEqual({ok: true, keptEdits: expected});
+    expect(await f.doors[door].save("notes/plan.md", "old-2:delivery:0")).toMatchObject({ok: true, keptEdits: "kept"});
+    expect(f.save).toHaveBeenLastCalledWith(expect.objectContaining({workspaceId: "workspace"}), "notes/plan.md", "old-2:delivery:0");
+    expect(await f.doors[door].retry("notes/plan.md", "old-1:delivery:0")).toMatchObject({ok: false});
+    expect(f.retry).not.toHaveBeenCalled();
+  });
   it("lists only this workspace's kept edits, without the engine's object ids", async () => {
     const f = await keptEditsFixture();
     expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [

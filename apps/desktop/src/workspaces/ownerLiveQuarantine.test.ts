@@ -7,10 +7,11 @@ import {createTestScratch} from "./testTemp";
 
 // The engine's queue heads, by outbox, as the outbox read answers them.
 const outboxes = vi.hoisted(() => ({heads: new Map<string, unknown>(), pending: new Map<string, unknown>(), retried: [] as unknown[],
-  reads: [] as string[]}));
+  reads: [] as string[], list: vi.fn().mockResolvedValue({queues: [], next: null})}));
 vi.mock("@dohc/workspace-engine-client", async original => ({
   ...await original<typeof import("@dohc/workspace-engine-client")>(),
   OwnerYDocOutbox: class {
+    listRestoreFenced = outboxes.list;
     // A delivery head never transfers the base. A head set to an error is the engine's refusal of it.
     readDeliveryHead(outboxId: string) {
       outboxes.reads.push(`delivery:${outboxId}`);
@@ -37,6 +38,23 @@ const stop = (objectId: string, state: "requested" | "released", options: {retir
     state, retirementOwed: options.retirementOwed ?? state === "requested", ...(options.deferred ? {deferred: {unsentEdits: 40, editable: false}} : {})});
 const record = (objectId: string, recovery: string, extra: object = {}) => ({objectId, path: `${objectId}.md`, reason: "invalid-update",
   outboxId: `outbox-${objectId}`, binding: binding(objectId), headDeliveryId: `delivery-${objectId}`, recovery, ...extra});
+
+it("lists each old restore queue after the binding advances and reads the selected queue for recovery", async () => {
+  const old = binding("restored", 1), current = binding("restored", 3);
+  const first = {outboxId: "old-1", binding: old, pendingBytes: 10, oldestEntryAtMs: 1};
+  const second = {...first, outboxId: "old-2", binding: binding("restored", 2)};
+  outboxes.list.mockResolvedValueOnce({queues: [first], next: first.outboxId}).mockResolvedValueOnce({queues: [second], next: null});
+  for (const queue of [first, second]) outboxes.heads.set(queue.outboxId, {state: "quarantined", quarantineReason: "restore-fenced",
+    binding: queue.binding, entry: {deliveryId: `${queue.outboxId}-delivery`}, retryDeliveryId: null});
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => [stop("restored", "requested", {generation: 3})]),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [{...draft("restored", "active"), binding: current}], next: null}))} as unknown as EngineClient;
+  const rows = await readOwnerLiveQuarantines(client, "handle");
+  expect(rows).toEqual([first, second].map(queue => ({objectId: "restored", path: "restored.md", reason: "restore-fenced",
+    outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: `${queue.outboxId}-delivery`, recovery: "paused", saveOnly: true})));
+  expect(outboxes.list).toHaveBeenLastCalledWith({after: first.outboxId, limit: 64});
+  outboxes.pending.set(first.outboxId, {outboxId: first.outboxId, binding: old, state: "quarantined", quarantineReason: "restore-fenced"});
+  expect(await readOwnerLiveQueue(client, "handle", {...rows[0]!, outboxId: first.outboxId})).toMatchObject({binding: old});
+});
 
 it("reads every refused queue from durable state, and leaves binding changes to enrollment", async () => {
   head("a", "invalid-update"); head("b", "binding-changed"); head("c", "capacity-refused", "delivery-c");

@@ -1607,6 +1607,36 @@ describe("server owner peer lifecycle", () => {
 
   // Save recovery copy reads the whole queue and writes next to the file. It
   // asks the engine for nothing that changes the queue.
+  it("lists and saves restore-fenced typing with its old incident after the binding advances", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}]);
+    const old = {...binding, restoreFenceGeneration: 0};
+    const row = {objectId: "object", path: "notes/plan.md", reason: "restore-fenced", outboxId: "old-queue", binding: old,
+      headDeliveryId: "old-delivery", recovery: "paused", saveOnly: true};
+    quarantineMock.read.mockResolvedValue([row]);
+    const {queue} = recoveryQueue(old, "Owner typed during the hold.");
+    quarantineMock.queue.mockResolvedValue({...queue, outboxId: row.outboxId, quarantineReason: row.reason,
+      observedBinding: binding, entries: queue.entries.map(entry => ({...entry, deliveryId: row.headDeliveryId}))});
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const owner = await workspace();
+      await f.engine.refreshOwnerLiveQuarantines(owner);
+      const incident = "old-queue:old-delivery:0";
+      expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: row.path, reason: row.reason,
+        storedOn: "this-computer", incident, recovery: "paused", saveOnly: true}]);
+      await expect(f.engine.retryOwnerLiveQuarantine(owner, "object", incident)).rejects.toThrow("This document changed.");
+      expect(quarantineMock.retry).not.toHaveBeenCalled();
+      const saved = await f.engine.saveOwnerLiveRecoveryCopy(owner, row.path, incident);
+      const root = f.rows.get("owner")!.rootPath;
+      expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("Owner typed during the hold.");
+      expect(parseLiveRecoveryPackage(await readFile(join(root, saved.packagePath), "utf8")))
+        .toMatchObject({outboxId: row.outboxId, binding: old, reason: "restore-fenced"});
+      expect(saved.keptEdits).toBe("kept");
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{incident, saveOnly: true}]);
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(owner, row.path, "old-queue:new-delivery:0")).rejects.toThrow("This document changed.");
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
   it("saves a recovery copy without touching the queue, which stays quarantined", async () => {
     const {f, credentials, binding, workspace} = await quarantinedOwner([]);
     const row = {objectId: "object", path: "notes/plan.md", reason: "capacity-refused", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "stopped-kept"};

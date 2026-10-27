@@ -364,6 +364,22 @@ describe("owner live document enrollment", () => {
     ]);
   });
 
+  it("lists each restore queue as save-only beside the current document, including an unhosted note", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [], nextCursor: null}
+      : {ok: true, documents: [{path: "note.md", objectId: "object", status: "ready"}]});
+    h.ownerLiveQuarantines.mockReturnValue(["old-1", "old-2"].map(incident => ({objectId: "object", path: "note.md",
+      reason: "restore-fenced", storedOn: "this-computer" as const, recovery: "paused" as const, saveOnly: true as const, incident})));
+    const listed = await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
+    expect(listed).toEqual({documents: [{path: "note.md", objectId: "object", status: "ready", canResume: false},
+      ...["old-1", "old-2"].map(incident => ({path: "note.md", objectId: "object", status: "ready", canResume: false,
+        quarantine: "paused", storedOn: "this-computer", incident, saveOnly: true}))], nextCursor: null});
+    h.request.mockResolvedValue({ok: true, documents: [], nextCursor: null});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toMatchObject({documents: [
+      {path: "note.md", incident: "old-1", saveOnly: true}, {path: "note.md", incident: "old-2", saveOnly: true}]});
+  });
+
   it("uses the server owner credential session for retire and resume", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path, init) => {

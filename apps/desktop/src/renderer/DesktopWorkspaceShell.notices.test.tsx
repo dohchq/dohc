@@ -44,6 +44,26 @@ describe("edits the server refused", () => {
     ({...SYNC_STATUS, ownerLiveQuarantines: rows});
   const TITLE = "Live editing paused for notes/plan.md";
   const BODY = "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
+  it("keeps each restore queue in its own save-only notice", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined(...["old-1:delivery:0", "old-2:delivery:0"].map(incident =>
+      ({...quarantine, reason: "restore-fenced", saveOnly: true as const, incident}))));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const rows = within(notices).getAllByText("Edits not written to notes/plan.md").map(title => title.closest("li")!);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(within(row).queryByRole("button", {name: "Try again"})).toBeNull();
+      expect(within(row).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+      expect(row.textContent).toContain("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
+    }
+    await user.click(within(rows[0]!).getByRole("button", {name: "Save recovery copy"}));
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId,
+      path: "notes/plan.md", incident: "old-1:delivery:0"});
+  });
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", objectId: "object-other", status: "ready", canResume: false},
