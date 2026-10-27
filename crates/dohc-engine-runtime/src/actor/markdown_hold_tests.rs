@@ -897,3 +897,90 @@ async fn markdown_hold_reopened_or_other_device_session_cannot_reuse_the_old_gra
         f.supervisor.close(&f.db).unwrap();
     }
 }
+
+#[test]
+fn markdown_hold_validated_source_override_saves_without_consent_but_rejects_other_bytes() {
+    for absent in [false, true] {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+        VersionedTextStore::new(&mut store).ensure_main_version("w", "main", 1, &NoFaults).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('w','note',1)", [])
+            .map_err(StorageError::persist_public)).unwrap();
+        let source = "- parent\n  - child\n";
+        let successor = format!("---\ntitle: Saved\n---\n\n{source}");
+        let key = DocKey::new("w", "main", "note").unwrap();
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source).unwrap();
+        doc.frontmatter_set_preserving_markdown_source("title", "Saved", &successor).unwrap();
+        assert_eq!(doc.preserved_markdown_source(&doc.project(ContentKind::Richdoc).unwrap().content),
+            Some(successor.clone()));
+        if !absent {
+            VersionedTextStore::new(&mut store).write_text(&WriteText {
+                workspace_id: "w".into(), version_id: "main".into(), object_id: "note".into(),
+                path: "note.md".into(), text: source.into(), moment_id: "source".into(),
+                metadata_origin: "test".into(), metadata_summary: None, metadata_correlation_id: None,
+                author_json: None, now_ms: 2, request_id: None,
+            }, &NoFaults).unwrap();
+            std::fs::write(scratch.path().join("note.md"), source).unwrap();
+        }
+        dohc_engine_collab::claim_base(&mut store, &key, ContentKind::Richdoc,
+            &doc.encode_full_state(), &NoFaults, 3).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET path='note.md'", [])
+            .map_err(StorageError::persist_public)).unwrap();
+        let claim = dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap().lineage_claim_id;
+        let mut cache = WriterDocCache::new();
+        let head = (!absent).then(|| hex_sha256(source.as_bytes()));
+        let moments = store.table_row_count("moments").unwrap();
+        let result = ydoc_settle_on_store(&mut store, &mut cache, scratch.path(), &key, "note.md",
+            ContentKind::Richdoc, false, claim.as_deref(), head.clone(), Some("Unvalidated override".into()),
+            "owner", &(), 4, &NoFaults, &CancellationToken::new(), None, None, None,
+            SettlementKind::Document, false, None);
+        assert!(matches!(result, Err(RuntimeError::Collab(CollabError::FrontmatterEditRefused))));
+        assert_eq!(store.table_row_count("moments").unwrap(), moments);
+        assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
+        let saved = VersionedTextStore::new(&mut store).read_text("w", "main", "note.md").unwrap();
+        assert_eq!(saved.as_ref().map(|saved| saved.blob_sha256.clone()), head);
+        if absent { assert!(!scratch.path().join("note.md").exists()); }
+        else { assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source); }
+        assert!(ydoc_settle_on_store(&mut store, &mut cache, scratch.path(), &key, "note.md",
+            ContentKind::Richdoc, false, claim.as_deref(), head, Some(successor.clone()), "owner",
+            &(), 5, &NoFaults, &CancellationToken::new(), None, None, None,
+            SettlementKind::Document, false, None).unwrap().settled().unwrap().materialized);
+        assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), successor);
+        assert_eq!(store.table_row_count("moments").unwrap(), moments + 1);
+        assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w")).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn markdown_hold_plaintext_with_partial_witness_metadata_needs_no_markdown_checker() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+    VersionedTextStore::new(&mut store).ensure_main_version("w", "main", 1, &NoFaults).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute(
+        "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('w','plain',1)", [])
+        .map_err(StorageError::persist_public)).unwrap();
+    let key = DocKey::new("w", "main", "plain").unwrap();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "Plain text remains writable");
+    let wire = yrs::Doc::new();
+    wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(), "dohcMarkdownSource", "Partial witness");
+    doc.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
+    assert!(doc.has_markdown_witness());
+    assert_eq!(doc.project(ContentKind::Plaintext).unwrap().markdown_write_safety, MarkdownWriteSafety::NotMarkdown);
+    dohc_engine_collab::claim_base(&mut store, &key, ContentKind::Plaintext,
+        &doc.encode_full_state(), &NoFaults, 2).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET path='plain.txt'", [])
+        .map_err(StorageError::persist_public)).unwrap();
+    let claim = dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap().lineage_claim_id;
+    let saved = ydoc_settle_on_store(&mut store, &mut WriterDocCache::new(), scratch.path(), &key,
+        "plain.txt", ContentKind::Plaintext, false, claim.as_deref(), None, None, "owner", &(), 3,
+        &NoFaults, &CancellationToken::new(), None, None, None, SettlementKind::Document, false, None)
+        .unwrap().settled().unwrap();
+    assert!(saved.materialized);
+    assert_eq!(std::fs::read_to_string(scratch.path().join("plain.txt")).unwrap(), "Plain text remains writable");
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+    assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w")).unwrap().is_empty());
+}
