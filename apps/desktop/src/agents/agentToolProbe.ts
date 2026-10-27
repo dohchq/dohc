@@ -11,6 +11,7 @@ export interface AgentProbeDependencies {
   isExecutable(path: string): boolean;
   signal: AbortSignal;
   run(executable: string, args: readonly string[], signal: AbortSignal): Promise<ProbeOutput>;
+  codexMayRunWithoutLogin(): boolean;
 }
 
 // Only absolute PATH entries and known user install locations participate.
@@ -56,7 +57,8 @@ export function parseAgentAuth(tool: AgentToolId, output: ProbeOutput): AgentToo
   }
   const text = `${output.stdout}\n${output.stderr}`.replace(/\x1b\[[0-9;]*m/gu, "");
   if (tool === "codex") {
-    if (output.exitCode === 0 && /Logged in using /u.test(text)) return "signed-in";
+    // Codex 0.164 and later say "API key configured" for a saved API key.
+    if (output.exitCode === 0 && /Logged in using |API key configured/u.test(text)) return "signed-in";
     if (/Not logged in/iu.test(text)) return "signed-out";
   }
   if (tool === "cursor") {
@@ -102,6 +104,8 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
       if (!result.version) return result;
       result.probe = "detected";
       if (tool.authArgs && !deps.signal.aborted) result.auth = parseAgentAuth(tool.id, await deps.run(executable, tool.authArgs, deps.signal));
+      // Codex reports only a saved login. A key or another provider can still reach a model.
+      if (tool.id === "codex" && result.auth === "signed-out" && deps.codexMayRunWithoutLogin()) result.auth = "unknown";
     } catch { /* Keep detection separate from probe success and authentication; cancellation is reported after the join. */ }
     return result;
   }));

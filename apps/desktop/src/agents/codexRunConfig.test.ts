@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
-import { type CodexConfigFiles, codexConfigFiles, codexRunConfig, codexTrustKeys } from "./codexRunConfig";
+import { type CodexConfigFiles, codexConfigFiles, codexMayRunWithoutLogin, codexRunConfig, codexTrustKeys } from "./codexRunConfig";
 import { createTestScratch } from "../workspaces/testTemp";
 
 const SYSTEM = "C:\\ProgramData\\OpenAI\\Codex\\config.toml";
@@ -160,5 +160,32 @@ describe("a dohc Codex run", () => {
       requirements: ["/etc/codex/requirements.toml"],
       config: ["/etc/codex/config.toml", "/Users/sam/.codex/config.toml"],
     });
+  });
+});
+
+describe("Codex without a saved login", () => {
+  const paths: CodexConfigFiles = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] };
+  const mayRun = (files: Record<string, string>, env: NodeJS.ProcessEnv = {}, given: CodexConfigFiles | null = paths) =>
+    codexMayRunWithoutLogin(env, given, (path) => files[path] ?? missing(path));
+
+  it("may reach a model through CODEX_API_KEY, but not OPENAI_API_KEY", () => {
+    expect(mayRun({}, { CODEX_API_KEY: "key" })).toBe(true);
+    expect(mayRun({}, { OPENAI_API_KEY: "key" })).toBe(false);
+    expect(mayRun({})).toBe(false);
+  });
+
+  it("may reach a model through the provider Codex picks from the person's config", () => {
+    expect(mayRun({ [USER]: "model_provider = 'azure'\n" })).toBe(true);
+    expect(mayRun({ [USER]: "model_provider = 'openai'\n" })).toBe(false);
+    // The user config wins over the system config, and the system requirements win over both.
+    expect(mayRun({ [SYSTEM]: "model_provider = 'azure'\n", [USER]: "model_provider = 'openai'\n" })).toBe(false);
+    expect(mayRun({ [USER]: "model_provider = 'openai'\n", [REQUIREMENTS]: "model_provider = 'azure'\n" })).toBe(true);
+    // dohc runs Codex without --profile.
+    expect(mayRun({ [USER]: "[profiles.work]\nmodel_provider = 'azure'\n" })).toBe(false);
+  });
+
+  it("may reach a model when dohc can't read the person's config", () => {
+    expect(mayRun({ [USER]: "model_provider = \n" })).toBe(true);
+    expect(mayRun({}, {}, null)).toBe(true);
   });
 });

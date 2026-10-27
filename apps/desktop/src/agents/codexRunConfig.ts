@@ -78,6 +78,23 @@ function workspaceWrite(tables: readonly Table[], key: "network_access" | "exclu
   return value;
 }
 
+// Whether Codex may reach a model without the saved login that
+// `codex login status` reports: through CODEX_API_KEY, or through a model
+// provider other than OpenAI's. The system requirements' provider wins over
+// the config's. A file dohc can't read counts as maybe.
+export function codexMayRunWithoutLogin(
+  env: NodeJS.ProcessEnv,
+  files: CodexConfigFiles | null,
+  read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): boolean {
+  if (env.CODEX_API_KEY) return true;
+  const tables = files && readConfigTables([...files.config, ...files.requirements], read);
+  if (tables === null) return true;
+  let provider = "openai";
+  for (const table of tables) if (typeof table.model_provider === "string") provider = table.model_provider;
+  return provider !== "openai";
+}
+
 const lowerAscii = (key: string) => key.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 
 // Every spelling Codex looks a folder's trust up under: its canonical path,
