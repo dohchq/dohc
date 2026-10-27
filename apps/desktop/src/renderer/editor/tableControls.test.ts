@@ -1827,6 +1827,11 @@ describe("table controls grips", () => {
 
       typeOnPeer();
       click(control(editor, ".dohc-table-append--col"));
+      expect(tableTextGrid(editor)).toEqual([
+        ["A1", "A2", "A3", ""],
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+      ]);
       typeOnPeer();
       click(control(editor, ".dohc-table-append--row"));
       expect(tableTextGrid(editor)).toEqual([
@@ -1845,6 +1850,13 @@ describe("table controls grips", () => {
       typeOnPeer();
       const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
       drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+        ["A1", "A2", "A3", ""],
+        ["", "", "", ""],
+      ]);
+      expect(rowHeights(editor)).toEqual([null, 38, null, null]);
       typeOnPeer();
       const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
       drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
