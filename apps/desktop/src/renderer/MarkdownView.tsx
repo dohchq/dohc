@@ -963,8 +963,12 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  // The record this file is, as the record row hears from main. The engine
+  // gave it its `id`, so the properties count that line as shown.
+  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
+  const recordId = record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} />
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
@@ -2222,7 +2226,7 @@ export function MarkdownView(props: {
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
             </Suspense>
           </div>
           <EditorErrorBoundary
@@ -2399,7 +2403,7 @@ export function MarkdownView(props: {
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
             </Suspense>
           </div>
           <EditorErrorBoundary
@@ -2478,6 +2482,7 @@ export function MarkdownView(props: {
                 fieldMarks={fieldMarks}
                 opening={opening}
                 readOnly={readOnly}
+                recordId={recordId}
                 onShowSource={toggleSourceView}
               />
             </Suspense>

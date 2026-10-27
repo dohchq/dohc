@@ -1464,6 +1464,11 @@ describe("PropertiesPanel's Source button", () => {
     ["an empty value", "---\nowner:\n---\n"],
     ["a list as its items", "---\ntags:\n  - kyoto\n  - 'food'\n---\n"],
     ["a list on one line", "---\ntags: [kyoto, food]\n---\n"],
+    ["a list on one line in quotes", "---\ntags: [\"kyoto\", \"food\"]\n---\n"],
+    ["a list on one line with no spaces", "---\ntags: [kyoto,food]\n---\n"],
+    ["a name in quotes", "---\n\"owner\": Sam\n---\n"],
+    ["a name with a colon", "---\nhttp:host: Sam\n---\n"],
+    ["a space after an empty value", "---\nowner: \n---\n"],
   ])("offers no Source button when the pills show every line: %s", (_, body) => {
     render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={vi.fn()} />);
     expect(screen.queryByTestId("properties-source")).toBeNull();
@@ -1477,7 +1482,11 @@ describe("PropertiesPanel's Source button", () => {
     ["a value over several lines", "---\nnote: |\n  one\n  two\n---\n"],
     ["a comment between list items", "---\ntags:\n  - kyoto\n  # later\n  - food\n---\n"],
     ["a list it can't edit", "---\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"],
-    ["a block that doesn't read", "---\n{owner: Sam, status: Draft}\n---\n"],
+    ["a line break in a value", "---\nnote: \"one\\ntwo\"\n---\n"],
+    ["a line break in a list item", "---\ntags: [\"one\\ntwo\"]\n---\n"],
+    ["an anchor", "---\nowner: &who Sam\n---\n"],
+    ["a tag", "---\nowner: !!str Sam\n---\n"],
+    ["a block that doesn't read", "---\nowner: [Sam\n---\n"],
   ])("opens Source from the properties when the block holds %s", async (_, body) => {
     const user = userEvent.setup();
     const onShowSource = vi.fn();
@@ -1488,6 +1497,20 @@ describe("PropertiesPanel's Source button", () => {
     expect(button.getAttribute("title")).toBe("Show all properties in Source (Ctrl+/)");
     await user.click(button);
     expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no Source button for a record whose own ID is its only hidden line", () => {
+    render(<PropertiesPanel body={"---\nid: rec-12\nstatus: Draft\n---\n\nBody\n"} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["an ID the engine didn't give it", "---\nid: rec-13\nstatus: Draft\n---\n"],
+    ["its own ID and a comment", "---\nid: rec-12\n# Paid in cash\nstatus: Draft\n---\n"],
+  ])("opens Source from a record's properties when the block holds %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
   });
 
   it("shows a note you can only view as pills with no +, no × and no edits", async () => {
@@ -1519,7 +1542,7 @@ describe("PropertiesPanel's Source button", () => {
   });
 
   it("offers Source, not an edit, for a block you can only view that doesn't read", () => {
-    render(<PropertiesPanel body={"---\n{owner: Sam}\n---\n\nBody\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    render(<PropertiesPanel body={"---\nowner: [Sam\n---\n\nBody\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
     expect(screen.queryByTestId("properties-locked")).toBeNull();
     expect(screen.getByTestId("properties-source")).toBeTruthy();
   });
@@ -1532,6 +1555,28 @@ describe("PropertiesPanel's Source button", () => {
 
       // The engine read the file again, and the comment is gone.
       act(() => doc.getMap("meta").delete("dohcFrontmatterSource"));
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("reads a live document's kept text that changes before the panel listens", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    // A layout effect runs after the panel renders and before it subscribes.
+    function Reread() {
+      useLayoutEffect(() => {
+        doc.getMap("meta").delete("dohcFrontmatterSource");
+      }, []);
+      return null;
+    }
+    try {
+      render(
+        <>
+          <PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />
+          <Reread />
+        </>,
+      );
       expect(screen.queryByTestId("properties-source")).toBeNull();
     } finally {
       doc.destroy();

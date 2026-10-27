@@ -9,6 +9,7 @@ import {
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterAsWritten, frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { EVENT_ALIAS, EVENT_DOCUMENT, EVENT_POP, EVENT_SCALAR, parseEvents } from "js-yaml";
 import { Code, Lock, Plus, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -16,7 +17,6 @@ import { shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
   applyFrontmatter,
-  displayFrontmatterValue,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromPairs,
@@ -63,6 +63,9 @@ export type PropertiesPanelProps = (
   // Opens Source at the top. The panel offers it while the block has lines
   // no pill shows.
   onShowSource?: () => void;
+  // The engine's ID for the record this note is. An `id` line with exactly
+  // that value hides nothing, so it counts as shown.
+  recordId?: string;
 };
 
 function isReserved(key: string): boolean {
@@ -246,49 +249,40 @@ function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
     .map(({ entry }) => entry);
 }
 
-// A value written as its pill shows it: bare, or in YAML's quotes.
-function writtenAs(text: string | undefined, shown: string): boolean {
-  return text === shown || text === JSON.stringify(shown) || text === `'${shown.replaceAll("'", "''")}'`;
-}
-
 /**
- * Whether the pills and the page's title and icon show every line of a block:
- * each property as `name: value`, bare or quoted, and a list as its items. A
- * comment, an `id`, a value over several lines, or a block that doesn't read
+ * Whether the pills and the page's title and icon show all of a block: each
+ * property's name and value as the pills read them. A comment, an anchor, a
+ * tag, a value with named fields, a list the pills can't edit, a line break in
+ * a value, an `id` other than the record's own, or a block that doesn't read
  * shows only in Source.
  */
-function everyLineShown(block: string): boolean {
-  const meta = loadMarkdownFrontmatter(`${block}\n`)?.meta;
-  if (!meta) return false;
-  const lines = block.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    if (line === "" || line === "---") continue;
-    const match = /^([^\s:#][^:]*?):(?: (.*))?$/.exec(line);
-    const key = match?.[1];
-    if (!match || key === undefined || !Object.hasOwn(meta, key)) return false;
-    // PageIdentity shows `title` and `icon`, named just so.
-    if (isReserved(key) && key !== "title" && key !== "icon") return false;
-    const value = meta[key];
-    const text = match[2];
-    if (value === null) {
-      if (text !== undefined) return false;
-    } else if (Array.isArray(value)) {
-      if (!frontmatterEntriesFromPairs([[key, value]])[0]?.list) return false;
-      const items = value as string[];
-      if (text !== undefined) {
-        if (text !== `[${items.join(", ")}]`) return false;
-        continue;
-      }
-      for (const item of items) {
-        index += 1;
-        if (!writtenAs(/^ *- (.*)$/.exec(lines[index] ?? "")?.[1], item)) return false;
-      }
-    } else if (typeof value === "object" || !writtenAs(text, displayFrontmatterValue(value))) {
-      return false;
+function everyLineShown(block: string, recordId: string | undefined): boolean {
+  const read = loadMarkdownFrontmatter(`${block}\n`);
+  if (!read) return false;
+  // The text between the delimiters without its names and values. A `#` left
+  // in it starts a comment.
+  const text = block.slice(block.indexOf("\n") + 1, block.lastIndexOf("\n") + 1);
+  let rest = "";
+  let at = 0;
+  try {
+    for (const event of parseEvents(text, {})) {
+      if (event.type === EVENT_ALIAS) return false;
+      if (event.type === EVENT_DOCUMENT || event.type === EVENT_POP) continue;
+      if (event.anchorStart >= 0 || event.tagStart >= 0) return false;
+      if (event.type !== EVENT_SCALAR || event.valueStart < at) continue;
+      rest += text.slice(at, event.valueStart);
+      at = event.valueEnd;
     }
+  } catch {
+    return false;
   }
-  return true;
+  if (`${rest}${text.slice(at)}`.includes("#")) return false;
+  return frontmatterEntriesFromPairs(read.keys.map((key) => [key, read.meta[key]])).every((entry) => {
+    // PageIdentity shows `title` and `icon`, named just so.
+    const own = entry.key === "title" || entry.key === "icon" || (entry.key === "id" && entry.rawValue === recordId);
+    // A field shows one line, so a line break hides what follows it.
+    return (own || !isReserved(entry.key)) && !entry.readOnly && !/[\r\n]/.test(`${entry.key}${entry.value}`);
+  });
 }
 
 // A value the pill shows but can't change, such as a list with a comma in an
@@ -347,14 +341,16 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY)) setKeptRevision((revision) => revision + 1);
     };
     meta.observe(update);
+    // The text can change after render and before this subscribes.
+    setKeptRevision((revision) => revision + 1);
     return () => meta.unobserve(update);
   }, [ydoc]);
   const leading = ydoc ? "" : (LEADING_BLOCK.exec(body)?.[0] ?? "");
   const unshown = useMemo(() => {
     const text = ydoc ? frontmatterAsWritten(ydoc, false) : leading ? (leadingFrontmatter(leading)?.text ?? "") : "";
     const block = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
-    return block !== "" && !everyLineShown(block);
-  }, [leading, ydoc, ydocRevision, keptRevision]);
+    return block !== "" && !everyLineShown(block, props.recordId);
+  }, [leading, ydoc, ydocRevision, keptRevision, props.recordId]);
 
   useEffect(() => {
     // This can apply after the person's next keystroke has changed the
