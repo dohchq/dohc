@@ -85,18 +85,17 @@ class FakeClient implements EngineDaemonClient {
     return [...this.outstanding].filter(match).length;
   }
 
-  async sendRequest(request: Request): Promise<Response> {
+  async sendRequest(request: Request, _signal?: AbortSignal, _progress?: () => void, cancelSignal?: AbortSignal): Promise<Response> {
+    const cancel = () => this.cancelledRequestIds.push(request.id);
+    cancelSignal?.addEventListener("abort", cancel, {once: true});
     this.requests.push(request);
     this.outstanding.add(request);
     try {
       return await this.respond(request);
     } finally {
+      cancelSignal?.removeEventListener("abort", cancel);
       this.outstanding.delete(request);
     }
-  }
-
-  async cancelRequest(requestId: number): Promise<void> {
-    this.cancelledRequestIds.push(requestId);
   }
 
   close(): void {
@@ -1938,7 +1937,8 @@ describe("Rust engine daemon lifecycle", () => {
         client.requests.filter(({ method }) => method === "engine.ping").length,
       ).toBeGreaterThan(1);
       expect(client.closeCause).toBe("transport-error");
-      expect(client.cancelledRequestIds).toContain(client.requests[0]!.id);
+      // Its own client deadline has already ended this request before the drain.
+      expect(client.cancelledRequestIds).not.toContain(client.requests[0]!.id);
     } finally {
       await lifecycle.stop();
     }
@@ -2561,10 +2561,10 @@ class ProgressClient extends SelfExitingClient {
   readonly progressCallbacks = new Map<number, () => void>();
   readonly requestSignals = new Map<number, AbortSignal>();
   reportsProgress(): boolean { return true; }
-  override async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void): Promise<Response> {
+  override async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response> {
     if (onProgress) this.progressCallbacks.set(request.id, onProgress);
     if (signal) this.requestSignals.set(request.id, signal);
-    return await super.sendRequest(request);
+    return await super.sendRequest(request, signal, onProgress, cancelSignal);
   }
 }
 

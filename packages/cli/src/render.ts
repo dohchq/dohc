@@ -379,7 +379,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "historyOperation": {
       const operation = result as CliResultByVerb["historyOperation"];
       if (!operation.ok) return operation.reason;
-      return [...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
+      const links = operation.links;
+      return [...(links ? links.state === "updating" ? ["Updating links…"]
+        : [`Link updates committed in History: ${links.documents} documents. Disk writes follow.`,
+          ...(links.uncheckedCount ? [`${links.uncheckedCount} linking documents not checked.`, ...links.unchecked.map(path => `Not checked: ${lineSafe(path)}`)] : [])] : []),
+        ...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
         ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
         ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
     }
