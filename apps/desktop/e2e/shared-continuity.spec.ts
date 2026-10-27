@@ -1153,7 +1153,7 @@ test("@self-host-activation-typing typing continues through self-host activation
     await typeAfter(recipient.page, continued, ` ${reply}`);
     await expect(editor(owner.page)).toContainText(reply);
     await expect.poll(() => ownerSettled(ownerTemp, [during, continued, reply]), { timeout: 120_000 }).toBe(true);
-    await expect(saveState(owner.page)).toHaveAttribute("data-state", "saved");
+    await expect(saveState(owner.page)).toHaveAttribute("data-state", "saved-to-host");
     await expect.poll(() => {
       const server = stack!.livePublication(workspaceId, PATH);
       const applied = appliedServiceHostSeqs(ownerTemp.rootPath, workspaceId);
