@@ -28,10 +28,7 @@ pub fn list_restore_fenced_in(
          WHERE o.workspace_id=?1 AND o.outbox_id>?2 \
            AND o.state='quarantined' AND o.quarantine_reason='restore-fenced' \
            AND o.pending_bytes>0 \
-           AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
-             WHERE b.workspace_id=o.workspace_id AND b.main_version_id=o.main_version_id \
-               AND b.object_id=o.object_id \
-               AND json_extract(b.binding_json,'$.restoreFenceGeneration')<=o.restore_fence_generation) \
+           AND o.kept_checkpoint_digest IS NOT NULL \
          ORDER BY o.outbox_id LIMIT ?3",
         )
         .map_err(read_sql)?;

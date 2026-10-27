@@ -2311,6 +2311,42 @@ fn restore_fenced_discovery_excludes_zero_pending_bytes() {
 }
 
 #[test]
+fn restore_fenced_discovery_excludes_work_consumed_by_recovery_enrollment() {
+    use super::super::list_restore_fenced_in;
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let parent = store
+        .read_with(|conn| find_parent_for_binding(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    assert!(parent.pending_bytes > 0);
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: parent.outbox_id.clone(),
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let next = next_generation(&observed);
+    let mut input = successor_input(&store, &next, host);
+    input.recovery = true;
+    let draft = enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(draft.binding, next);
+    let old = store
+        .read_with(|conn| read_parent(conn, &parent.outbox_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.pending_bytes, 0);
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn later_restore_generation_installs_the_host_checkpoint_and_quarantines_unsent_work() {
     let (_dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();
     let key = key(&observed.binding).unwrap();
