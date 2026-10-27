@@ -417,8 +417,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
-                  // Leaving the list shows it as the document holds it.
-                  onBlur={entry.list ? () => setListDraft(null) : undefined}
+                  // Leaving the list shows it as the document holds it. Switching
+                  // to another window blurs the field without leaving it.
+                  onBlur={entry.list
+                    ? (event) => {
+                        if (event.currentTarget.ownerDocument.activeElement !== event.currentTarget) setListDraft(null);
+                      }
+                    : undefined}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}

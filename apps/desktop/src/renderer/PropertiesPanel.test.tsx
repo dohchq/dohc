@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLayoutEffect, useState } from "react";
@@ -905,6 +905,21 @@ describe("PropertiesPanel", () => {
     expect(propertyValue("tags")).toBe("kyoto, food, ramen ,");
     await user.tab();
     expect(propertyValue("tags")).toBe("kyoto, food, ramen");
+  });
+
+  it("keeps the typed list text when the window loses focus with the field still focused", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.type(input, ", ");
+    fireEvent.blur(input);
+    expect(document.activeElement).toBe(input);
+    expect(propertyValue("tags")).toBe("kyoto, food, ");
+    await user.type(input, "nara");
+
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - nara\n---\n\nBody\n");
   });
 
   it("writes each list item as text, trimmed and without blank items", async () => {
