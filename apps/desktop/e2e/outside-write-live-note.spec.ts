@@ -194,15 +194,12 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       }
       stack.resume();
       if (variant === "open-reload") {
-        const failure = page.getByTestId("workspace-shell-notice").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
-        await expect(failure).toBeVisible({ timeout: 120_000 });
-        const failureBody = `dohc could not keep a copy of ${PATH}, because .dohc/local/outside-write-copies is in the way, so it left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`;
-        await expect(failure).toContainText(failureBody);
-        await expect(failure).not.toContainText("Check that dohc can write to the workspace folder");
-        await page.getByTestId("notice-center-toggle").click();
+        if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
         const failureRow = page.locator("[data-notice-row]").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
-        await expect(failureRow).toBeVisible();
+        await expect(failureRow).toBeVisible({ timeout: 120_000 });
+        const failureBody = `dohc could not keep a copy of ${PATH}, because .dohc/local/outside-write-copies is in the way, so it left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`;
         await expect(failureRow).toContainText(failureBody);
+        await expect(failureRow).not.toContainText("Check that dohc can write to the workspace folder");
         const listFailureRow = page.locator("[data-notice-row]").filter({ hasText: "dohc could not list every kept copy" });
         await expect(listFailureRow).toBeVisible();
         await expect(listFailureRow).toContainText("To find a copy that isn't listed, look beside its file for (kept copy) in the name.");

@@ -102,6 +102,8 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
   }
   async function list(onReadError: (error: unknown) => void): Promise<[string, string, string][]> {
     const rows: [string, string, string][] = [];
+    // Cached rows can't show that the folder was blocked or replaced since.
+    await directory().catch(error => { loaded = null; throw error; });
     const { rows: savedRecords, errors } = await records();
     errors.forEach(onReadError);
     for (const record of [...savedRecords].sort((a, b) => a.createdAtMs - b.createdAtMs)) {

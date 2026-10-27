@@ -117,6 +117,21 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(await copies.list(errors)).toEqual([["n.md", "n (kept copy).md", expect.any(String)]]);
   });
 
+  it("reports a records folder blocked after the list was cached, then lists again once it is cleared", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await writeFile(join(rootPath, "n.md"), "outside");
+    await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
+    expect(await copies.list()).toEqual([["n.md", "n (kept copy).md", expect.any(String)]]);
+    const folder = join(rootPath, ".dohc/local/outside-write-copies");
+    await rm(folder, { recursive: true });
+    await writeFile(folder, "blocked");
+    await expect(copies.list()).rejects.toThrow("A file is at .dohc/local/outside-write-copies, which must be a real folder.");
+    await rm(folder);
+    // The records went with the folder; the copy itself stays beside n.md.
+    expect(await copies.list()).toEqual([]);
+    expect(await readFile(join(rootPath, "n (kept copy).md"), "utf8")).toBe("outside");
+  });
+
   it("retains a stale cached receipt when pruning fails with EACCES and retries later", async () => {
     const { rootPath, copies, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "outside");
