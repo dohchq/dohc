@@ -1805,7 +1805,9 @@ describe("table controls grips", () => {
 
       peer.view.dispatch(peer.state.tr.insertText("Synced ", 1));
       expect(editor.state.doc.textContent).toContain("Synced Intro");
-      expect(controls(editor).filter((element, index) => element !== before[index])).toEqual([]);
+      const after = controls(editor);
+      expect(after).toHaveLength(before.length);
+      expect(after.filter((element, index) => element !== before[index])).toEqual([]);
 
       click(control(editor, ".dohc-table-grip--col", 2));
       click(menuItemByLabel("Align center"));
@@ -1816,6 +1818,43 @@ describe("table controls grips", () => {
       click(control(editor, ".dohc-table-grip--row", 1));
       click(menuItemByLabel("Delete row"));
       expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["A1", "C1"]);
+      expect(tableTextGrid(peer)).toEqual(tableTextGrid(editor));
+    });
+
+    it("adds, resizes and moves the right row and column after a collaborator's edit arrives through sync", async () => {
+      ({ local: editor, peer } = await createSyncedEditors());
+      const typeOnPeer = () => peer!.view.dispatch(peer!.state.tr.insertText("Synced ", 1));
+
+      typeOnPeer();
+      click(control(editor, ".dohc-table-append--col"));
+      typeOnPeer();
+      click(control(editor, ".dohc-table-append--row"));
+      expect(tableTextGrid(editor)).toEqual([
+        ["A1", "A2", "A3", ""],
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+        ["", "", "", ""],
+      ]);
+
+      typeOnPeer();
+      control(editor, ".dohc-table-row-resize", 2).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+      expect(rowHeights(editor)).toEqual([null, null, 38, null]);
+
+      typeOnPeer();
+      const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+      drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+      typeOnPeer();
+      const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
+      drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B2", "B3", "B1", ""],
+        ["C2", "C3", "C1", ""],
+        ["A2", "A3", "A1", ""],
+        ["", "", "", ""],
+      ]);
+      expect(rowHeights(editor)).toEqual([null, 38, null, null]);
       expect(tableTextGrid(peer)).toEqual(tableTextGrid(editor));
     });
 
