@@ -3884,6 +3884,79 @@ fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
     }
 }
 
+#[test]
+fn invalid_text_shared_blob_is_fetched_once_for_two_rows() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let bytes = vec![0xff];
+    let sha = dohc_engine_storage::hex_sha256(&bytes);
+    let paths = ["docs/first.txt", "docs/second.txt"];
+    let snapshots: Vec<serde_json::Value> = paths
+        .iter()
+        .map(|path| {
+            json!({
+                "path": path,
+                "blobSha256": sha,
+                "contentKind": "text",
+            })
+        })
+        .collect();
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({ "versionId": "shared-version", "forkSnapshots": snapshots }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha.clone(), bytes)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("invalid text rows do not fail the page");
+    assert_eq!((outcome.applied, outcome.skipped), (0, 2));
+    assert_eq!(outcome.pending_cursor.cursor, 1);
+    assert_eq!(outcome.refusals.len(), 1);
+    let refusal = &outcome.refusals[0];
+    assert_eq!(refusal.code, "invalid-input");
+    let reason =
+        "share op is not replayable: share write claims text content the shared bytes cannot be";
+    assert_eq!(
+        refusal.detail,
+        format!(
+            "2 files in this operation were not applied: {reason} — {}; {reason} — {}",
+            paths[0], paths[1]
+        )
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [sha],
+        "invalid text must be remembered before the next row names the same blob"
+    );
+}
+
 /// Two refused files that differ only past the path budget must still read
 /// apart.
 ///
