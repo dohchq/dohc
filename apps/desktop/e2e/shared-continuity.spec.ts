@@ -1040,6 +1040,153 @@ function departureWindows(reads: LiveEditingRead[], from: number) {
   return windows;
 }
 
+async function observeOwnerLiveEditing(page: Page, workspaceId: string): Promise<() => Promise<LiveEditingRead[]>> {
+  await page.evaluate((workspaceId) => {
+    const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+    const reads: LiveEditingRead[] = [];
+    const pending = new Set<Promise<void>>();
+    // Each read takes its place in the log when it is asked for, and its
+    // state when it answers.
+    const read = () => {
+      const entry: LiveEditingRead = { requestedAt: Date.now(), state: "unread", reason: null };
+      reads.push(entry);
+      const done: Promise<void> = api.getSyncStatus({ workspaceId }).then((status) => {
+        entry.state = status.ownerLiveDelivery ?? null;
+        entry.reason = status.ownerLiveDeliveryReason ?? null;
+      }, () => undefined).finally(() => pending.delete(done));
+      pending.add(done);
+    };
+    api.onWorkspaceActivity((event) => {
+      if (event.workspaceId === undefined || event.workspaceId === workspaceId) read();
+    });
+    read();
+    Reflect.set(window, "ownerLiveEditing", { reads, pending });
+  }, workspaceId);
+  // Every read asked for so far, once each has answered, in the order asked.
+  return () => page.evaluate(async () => {
+    const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as { reads: LiveEditingRead[]; pending: Set<Promise<void>> };
+    while (pending.size) await Promise.all(pending);
+    return reads;
+  });
+}
+
+// The service activates at cursor 0. Runtime owner_publication tests cover
+// changed nonzero cuts with a new owner's durable pending edits.
+test("@self-host-activation-typing typing continues through self-host activation and reaches both people", async ({ browser }, testInfo) => {
+  test.setTimeout(600_000);
+  const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
+  const ownerTemp = await createTempWorkspace();
+  const recipientTemp = await createTempWorkspace();
+  let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
+  let trust: ReturnType<typeof trustFixtureCa> | undefined;
+  let owner: LaunchedDesktopApp | undefined;
+  let liveEditingReads: (() => Promise<LiveEditingRead[]>) | undefined;
+  let activationStartedAt: number | undefined;
+  let updatesHeld = false;
+  let lastSettled: unknown;
+  let bodyFailure: { error: unknown } | undefined;
+  const contexts: BrowserContext[] = [];
+  const desktops: LaunchedDesktopApp[] = [];
+  const ownerAccount = { email: `owner-${randomUUID()}@example.test`, password: `Owner-proof-${randomUUID()}`, name: "Owner proof" };
+  const recipientAccount = { email: `recipient-${randomUUID()}@example.test`, password: `Recipient-proof-${randomUUID()}`, name: "Recipient proof" };
+  const during = "Typing while the server starts.";
+  const continued = "Still typing after activation.";
+  const reply = "The other person continues.";
+  const attachJson = (name: string, value: unknown) =>
+    testInfo.attach(name, { contentType: "application/json", body: JSON.stringify(value, null, 2) });
+  const ownerNotices = async () => (await owner!.page.evaluate(() =>
+    (window as unknown as { dohcDesktop: Api }).dohcDesktop.listNotices({}))).notices;
+  try {
+    stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true, signal });
+    const origin = stack.relayUrl;
+    trust = trustFixtureCa(stack.ca!.ca);
+    const approvalPage = async () => {
+      const context = await browser.newContext();
+      contexts.push(context);
+      await trust!.route(context, origin);
+      return context.newPage();
+    };
+    const recipientPage = await approvalPage();
+    await createVerifiedAccount(recipientPage, stack.account, recipientAccount);
+    await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }]);
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
+    desktops.push(owner);
+    const { workspaceId } = await connectAndSync(owner, ownerTemp, await approvalPage(), origin, stack.account, ownerAccount);
+    await waitForWorkspaceFile(owner.page, workspaceId, PATH);
+    await openDocument(owner.page);
+    liveEditingReads = await observeOwnerLiveEditing(owner.page, workspaceId);
+
+    // Keep an editor update in flight across activation. This is a renderer
+    // draft, not the durable native outbox covered by the runtime tests.
+    await holdEditorUpdates(owner);
+    updatesHeld = true;
+    await typeAfter(owner.page, "The person writes here.", ` ${during}`);
+    await expect.poll(async () => (await heldEditorUpdates(owner!))?.entered ?? 0).toBeGreaterThan(0);
+    activationStartedAt = Date.now();
+    const [share] = await Promise.all([
+      shareForEdit(owner.page, workspaceId, recipientAccount.email),
+      typeAfter(owner.page, during, ` ${continued}`),
+    ]);
+    const binding = stack.ownerLiveBinding(workspaceId, PATH);
+    expect(binding).not.toBeNull();
+    await expect.poll(() => binding && ownerEnrollment(ownerTemp.rootPath, binding.binding)?.acceptedCursor,
+      { timeout: 60_000 }).toBe(0);
+    expect(stack.livePublication(workspaceId, PATH).acceptedHead).toBe(0);
+    const held = await heldEditorUpdates(owner);
+    expect(held).toMatchObject({ settled: 0, released: false });
+    await attachJson("typing held across cursor-zero activation", { checkedAt: new Date().toISOString(), binding, held });
+    await expect(editor(owner.page)).toContainText(during);
+    await expect(editor(owner.page)).toContainText(continued);
+    await attachScreen(testInfo, owner.page, "owner keeps typing through activation");
+    await releaseEditorUpdates(owner);
+    updatesHeld = false;
+    await expect.poll(async () => {
+      const state = await heldEditorUpdates(owner!);
+      return state !== null && state.settled === state.entered;
+    }, { timeout: 60_000 }).toBe(true);
+
+    const recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
+    desktops.push(recipient);
+    await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
+    await expect(editor(recipient.page)).toContainText(during);
+    await expect(editor(recipient.page)).toContainText(continued);
+    await typeAfter(recipient.page, continued, ` ${reply}`);
+    await expect(editor(owner.page)).toContainText(reply);
+    await expect.poll(() => ownerSettled(ownerTemp, [during, continued, reply]), { timeout: 120_000 }).toBe(true);
+    await expect(saveState(owner.page)).toHaveAttribute("data-state", "saved");
+    await expect.poll(() => {
+      const server = stack!.livePublication(workspaceId, PATH);
+      const applied = appliedServiceHostSeqs(ownerTemp.rootPath, workspaceId);
+      lastSettled = { checkedAt: new Date().toISOString(), server, applied };
+      return server.acceptedHead > 0 && Object.keys(server.hostOrigins).length > 0 &&
+        server.hosts.every(host => host.unpushed === 0) &&
+        Math.max(...server.hosts.map(host => host.settledThrough)) >= server.acceptedHead &&
+        isDeepStrictEqual(applied, server.hostOrigins);
+    }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
+    expect((await ownerNotices()).filter(notice => notice.kind === "sync-refusal")).toEqual([]);
+    expect(refusedSettlementChecks(stack.relayOutput())).toEqual([]);
+    await attachScreen(testInfo, recipient.page, "both people's typing reached the shared note");
+  } catch (error) {
+    bodyFailure = { error };
+    throw error;
+  } finally {
+    if (updatesHeld && owner) await releaseEditorUpdates(owner).catch(() => undefined);
+    await attachJson("live settlement state", lastSettled ?? null).catch(() => undefined);
+    const reads = await liveEditingReads?.().catch(() => undefined);
+    await attachJson("owner live editing reads", reads ?? null).catch(() => undefined);
+    await attachJson("owner live editing departures", reads && activationStartedAt !== undefined
+      ? { from: "the owner starts sharing", unit: "ms", windows: departureWindows(reads, activationStartedAt) } : null).catch(() => undefined);
+    if (owner) await ownerNotices().then(notices => attachJson("owner Notices at the end", notices)).catch(() => undefined);
+    if (stack) await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() }).catch(() => undefined);
+    const cleanup = await Promise.allSettled([...contexts.map(context => context.close()), ...desktops.map(desktop => desktop.close())]);
+    trust?.restore();
+    cleanup.push(...await Promise.allSettled([stack?.close()]));
+    cleanup.push(...await Promise.allSettled([recipientTemp.cleanup(), ownerTemp.cleanup()]));
+    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length && !bodyFailure) throw new AggregateError(failures.map(result => result.reason), "Self-host activation cleanup failed.");
+  }
+});
+
 // Two people open a shared note live on a self-hosted server, and nobody edits
 // it. The server publishes its settlement of the note with its authors, so the
 // owner's Notices holds no review row.
@@ -1091,34 +1238,7 @@ test("@self-host-live-review two people open a shared note live and its owner ge
     testInfo.annotations.push({ type: "refused settlement checks before the recipient opens the share",
       description: refusedSettlementChecks(stack.relayOutput()).join(", ") || "none" });
 
-    // Each time the owner's live editing leaves active is recorded, not failed.
-    await owner.page.evaluate((workspaceId) => {
-      const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-      const reads: LiveEditingRead[] = [];
-      const pending = new Set<Promise<void>>();
-      // Each read takes its place in the log when it is asked for, and its
-      // state when it answers.
-      const read = () => {
-        const entry: LiveEditingRead = { requestedAt: Date.now(), state: "unread", reason: null };
-        reads.push(entry);
-        const done: Promise<void> = api.getSyncStatus({ workspaceId }).then((status) => {
-          entry.state = status.ownerLiveDelivery ?? null;
-          entry.reason = status.ownerLiveDeliveryReason ?? null;
-        }, () => undefined).finally(() => pending.delete(done));
-        pending.add(done);
-      };
-      api.onWorkspaceActivity((event) => {
-        if (event.workspaceId === undefined || event.workspaceId === workspaceId) read();
-      });
-      read();
-      Reflect.set(window, "ownerLiveEditing", { reads, pending });
-    }, workspaceId);
-    // Every read asked for so far, once each has answered, in the order asked.
-    liveEditingReads = () => owner!.page.evaluate(async () => {
-      const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as { reads: LiveEditingRead[]; pending: Set<Promise<void>> };
-      while (pending.size) await Promise.all(pending);
-      return reads;
-    });
+    liveEditingReads = await observeOwnerLiveEditing(owner.page, workspaceId);
 
     const recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
     desktops.push(recipient);
@@ -1138,6 +1258,7 @@ test("@self-host-live-review two people open a shared note live and its owner ge
         isDeepStrictEqual(applied, server.hostOrigins);
     }, { message: "The host settled and published the note, and its owner applied it.", timeout: 120_000, intervals: [1_000] }).toBe(true);
     expect((await ownerNotices()).filter(notice => notice.kind === "sync-refusal")).toEqual([]);
+    expect(refusedSettlementChecks(stack.relayOutput())).toEqual([]);
   } catch (error) {
     bodyFailure = { error };
     throw error;
