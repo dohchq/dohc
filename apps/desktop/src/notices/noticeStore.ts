@@ -3,7 +3,7 @@ import { mkdir, readFile, rename } from "node:fs/promises";
 import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
-import { SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
+import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
@@ -729,15 +729,20 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          // The change synced; only its author's name did not.
+          const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = bindingChanged
+          const body = attributionRefused
+            ? "The change still syncs. History shows it without an author."
+            : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
-            title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
+            title: attributionRefused ? `dohc could not confirm who changed ${name}`
+              : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
             target,

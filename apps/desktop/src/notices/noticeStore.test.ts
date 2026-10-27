@@ -1,5 +1,6 @@
 import { historyCursor } from "../testing/historyPageFixture";
 import { open, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -27,6 +28,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
@@ -1284,6 +1286,29 @@ it("names the current file for a terminal binding refusal without suggesting syn
     target: { path: "renamed.md" },
   });
   expect(row!.body).not.toContain("try sync again");
+});
+
+it("says a change synced without its author, without suggesting sync again", async () => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-unattributed", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path: "n.md", objectId: "object-a", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  expect(row).toMatchObject({
+    title: "dohc could not confirm who changed “n.md”",
+    body: "The change still syncs. History shows it without an author.",
+    target: { path: "n.md" },
+  });
+});
+
+it("keeps the refusals it words for itself equal to the engine's", () => {
+  const engine = (path: string) => readFileSync(new URL(`../../../../crates/dohc-engine-sync/src/${path}`, import.meta.url), "utf8")
+    .replace(/=\s+"/g, '= "');
+  expect(engine("moment_apply/pending.rs")).toContain(`BINDING_CHANGED: &str = ${JSON.stringify(SETTLEMENT_BINDING_CHANGED)};`);
+  expect(engine("settlement_publication.rs")).toContain(`REFUSAL_MESSAGE: &str = ${JSON.stringify(SETTLEMENT_ATTRIBUTION_REFUSED)};`);
 });
 
 it("offers no Open step for a binding refusal whose file is gone", async () => {
