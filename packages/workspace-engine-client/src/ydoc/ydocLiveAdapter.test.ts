@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as ydocProjection from "@dohc/ydoc-projection";
+import commonmark from "../../../ydoc-projection/src/fixtures/commonmark-edit-meaning.json";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -388,6 +389,83 @@ it("forwards settlement requests only to their open native session", async () =>
   expect(wanted).toHaveBeenCalledOnce(); expect(changed).not.toHaveBeenCalled();
   expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
   await session.evict(); adapter.dispose();
+});
+
+it("wakes the owner after a held consent settle and keeps its native session usable", async () => {
+  const engine = new YdocLoopbackEngine();
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path: "held.md", content: "# Note", contentKind: "richdoc"});
+  const attempts: Array<{sessionId: string; allowLossySourceSha256?: string}> = [];
+  const held = new DaemonRefusalError({code: "CONFLICT", message: "markdown-write-held", retry: "no"}, undefined);
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          attempts.push(request.params as {sessionId: string; allowLossySourceSha256?: string});
+          if (attempts.length === 1) throw held;
+        }
+        return engine.sendRequest(request);
+      }},
+    workspace: WORKSPACE, versionId: VERSION, path: "held.md", contentKind: "richdoc",
+    onRemoteUpdate() {}, scheduleSettle: () => () => {},
+  });
+  const owner = provider.nativeOwner!;
+  const wanted = vi.fn(), changed = vi.fn();
+  owner.onSettlementWanted(wanted);
+  owner.onDurableLocalChange(changed);
+  await provider.applyLocalUpdate(richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "Accepted edit"), {armSettle: false});
+  await expect(provider.settleNow({allowLossySourceSha256: "a".repeat(64)})).rejects.toBe(held);
+  expect(wanted).toHaveBeenCalledOnce();
+  expect(changed).toHaveBeenCalledOnce();
+  expect(engine.activeSessionIds()).toContain(owner.sessionId);
+  expect(ydocProjection.yDocToMarkdown(provider.doc)).toContain("Accepted edit");
+
+  await provider.settleNow();
+  expect(attempts).toEqual([
+    {sessionId: owner.sessionId, allowLossySourceSha256: "a".repeat(64)},
+    {sessionId: owner.sessionId},
+  ]);
+  expect(wanted).toHaveBeenCalledOnce();
+  expect(changed).toHaveBeenCalledOnce();
+  await provider.evict();
+});
+
+it.each([148, 161, 192, 193, 572, 575, 577])("retains CommonMark %i source and an edited paragraph through client reopen and reconnect", async number => {
+  const example = commonmark.examples.find(row => row.example === number)!;
+  const source = example.markdown + "\n\nEditable paragraph.\n";
+  const sourceSha256 = createHash("sha256").update(source).digest("hex");
+  const engine = new YdocLoopbackEngine();
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path: "commonmark.md", content: source, contentKind: "richdoc"});
+  const open = () => openEngineYdocProviderSession({
+    transport: engine, workspace: WORKSPACE, versionId: VERSION, path: "commonmark.md", contentKind: "richdoc",
+    onRemoteUpdate() {}, scheduleSettle: () => () => {},
+  });
+  const first = await open();
+  const projectionSha256 = first.doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256");
+  const assertSource = (doc: Y.Doc) => {
+    expect(doc.getMap("meta").get("dohcMarkdownSource")).toBe(source);
+    expect(doc.getMap("meta").get("dohcMarkdownSourceSha256")).toBe(sourceSha256);
+    expect(doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256")).toBe(projectionSha256);
+    expect(ydocProjection.yDocToMarkdown(doc)).toContain("Changed paragraph.");
+    expect(ydocProjection.yDocToMarkdown(doc)).not.toContain("Editable paragraph.");
+  };
+  await first.applyLocalUpdate(ydocProjection.documentEditUpdate(Y.encodeStateAsUpdate(first.doc),
+    {find: "Editable paragraph.", replacement: "Changed paragraph."}, {keepBlocks: true})!, {armSettle: false});
+  assertSource(first.doc);
+  const sessionId = first.nativeOwner!.sessionId;
+  engine.markSessionReplicated(sessionId);
+  await first.evict();
+
+  const reopened = await open();
+  expect(reopened.lineage).toBe("existing");
+  expect(reopened.headSha256).toBe(sourceSha256);
+  assertSource(reopened.doc);
+  await reopened.nativeOwner!.resyncIfNeeded();
+  await reopened.evict();
+
+  const reconnected = await open();
+  assertSource(reconnected.doc);
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(0);
+  await reconnected.evict();
 });
 
 it("resyncs a native invalidation into an open provider without losing its durable local edit", async () => {
