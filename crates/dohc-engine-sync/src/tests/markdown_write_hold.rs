@@ -141,3 +141,39 @@ fn markdown_hold_drain_consumes_coordinates_and_recovers_without_reapplying_edit
     assert!(saved.text.contains("A parked edit survives"));
     assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
 }
+
+#[test]
+fn markdown_hold_coalesced_recovery_does_not_credit_a_later_provisional_author() {
+    let mut f = Fixture::new();
+    f.base();
+    let delta = f.doc.richdoc_append_paragraph("Later content has no verified author");
+    let op = f.op(1, &delta, false);
+    apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, &NoLiveLeases).unwrap();
+    let pending = f.pending();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].retry_inputs["provisionalAuthor"], false);
+    assert_eq!(pending[1].retry_inputs["provisionalAuthor"], true);
+    drop(f.store);
+    f.store = EngineStore::open(&f.db, 3000).unwrap();
+    f.cache = WriterDocCache::new();
+    let persisted = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+    let clear = persisted.clear_markdown_source_witness();
+    f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+        tx, &f.key, &clear, None, None, 3001)).unwrap();
+    let sequence = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+    for owed in f.pending() {
+        f.store.write_with(&NoFaults, |tx| crate::retry_markdown_projection_in_tx(
+            tx, &owed, None, None, 3002)).unwrap();
+    }
+    assert!(f.pending().is_empty());
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(f.store.table_row_count("materialization_jobs").unwrap(), 1);
+    assert_eq!(dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq, sequence);
+    let audit_requests: i64 = f.store.read_with(|conn| conn.query_row(
+        "SELECT count(*) FROM engine_requests WHERE kind='sync-ydoc-provisional-author'", [],
+        |row| row.get(0))).unwrap();
+    assert_eq!(audit_requests, 0);
+    let saved = VersionedTextStore::new(&mut f.store).read_text("ws", "main", PATH).unwrap().unwrap();
+    assert_eq!(saved.text.matches("Later content has no verified author").count(), 1);
+    assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
+}
