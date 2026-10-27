@@ -1999,6 +1999,13 @@ export function NoticeCenter(props: {
             event.stopPropagation();
             setOpen(false);
           }}
+          onBlur={(event) => {
+            // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
+            // a press outside does. Focus leaving the window keeps it open.
+            const next = event.relatedTarget;
+            if (!(next instanceof Element) || event.currentTarget.contains(next) || toggleRef.current?.contains(next)) return;
+            setOpen(false);
+          }}
           className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-60 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">

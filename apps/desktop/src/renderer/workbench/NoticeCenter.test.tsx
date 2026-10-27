@@ -418,6 +418,30 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
+  // Focus that leaves Notices for the workbench closes it, as a press outside
+  // does. Focus that moves within it or leaves the window keeps it open.
+  it("closes when focus moves out of it, not when focus leaves the window", async () => {
+    render(<button type="button">Search</button>);
+    const outside = screen.getByRole("button", { name: "Search" });
+    renderNotices({ agentActive: true });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const panel = screen.getByTestId("notice-center");
+    const action = within(panel).getByRole("button", { name: "Open History" });
+    act(() => {
+      panel.focus();
+      action.focus();
+      action.blur();
+    });
+    expect(screen.getByTestId("notice-center")).toBe(panel);
+
+    act(() => {
+      action.focus();
+      outside.focus();
+    });
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+    expect(document.activeElement).toBe(outside);
+  });
+
   // Saved edits still reach others, never live ones. Sync cannot clear the
   // refusal, so the notice offers the document, never Try again.
   it("says saved edits reach others when dohc syncs and offers to open the document", async () => {
@@ -770,6 +794,39 @@ describe("notice center", () => {
       expect(screen.getByTestId("notice-center")).toBeTruthy();
       rerender(view(true));
       await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when F6 takes focus back to the dialog", async () => {
+      const onClose = vi.fn();
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
+      fireEvent.keyDown(panel, { key: "F6" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when Tab finds nothing to reach in it", async () => {
+      const view = (rows: SentNotice[]) => (
+        <>
+          {noticeElement({
+            sentNotices: rows,
+            sentNoticeToast: sentRow("a"),
+            onHideSentNoticeToast: vi.fn(),
+            onOpenSentNotice: async () => "The automation's file is gone.",
+          })}
+          <Overlay onClose={() => undefined}>
+            <button type="button">Close</button>
+          </Overlay>
+        </>
+      );
+      const { rerender } = render(view([sentRow("a")]));
+      const panel = await openFromToast();
+      rerender(view([]));
+      expect(panel.querySelector("button:not([disabled])")).toBeNull();
+      fireEvent.keyDown(panel, { key: "Tab" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
       expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
     });
 
