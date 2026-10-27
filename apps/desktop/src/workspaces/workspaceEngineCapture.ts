@@ -126,6 +126,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
+  EngineCaptureNotSettledError,
   type CaptureTextFileMetadata,
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
@@ -781,8 +782,9 @@ export interface WorkspaceEngineCapture {
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
-  // Relay sync runs on the same capture chain as local batch capture and
-  // version operations. The task owns engine push/pull; returned
+  // A relay pull runs on the same capture chain as local batch capture and
+  // version operations. The task owns the engine pull; pushes run off the
+  // chain because they write no workspace files. Returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
   // Data-safety contract: the task must give every pull page to the supplied
@@ -941,6 +943,12 @@ export function isVolumeSharesNewFilesCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+// An engine still taking in files: it refused the read, or its capture pass
+// outlasted the settle budget.
+function isCaptureBusy(error: unknown): boolean {
+  return isWorkspaceUpdatingRefusal(error) || error instanceof EngineCaptureNotSettledError;
 }
 
 function isUpdateBackoffCause(error: unknown): boolean {
@@ -4205,8 +4213,8 @@ export function createWorkspaceEngineCapture(
   // reaches onCaptureOutcome, whether the failure was a thrown task (store
   // unavailable) or per-path errors the task swallowed to keep the batch
   // going. Rethrows so enqueue's catch still logs via onError. An engine
-  // still taking in files is busy, not broken: that refusal leaves the
-  // previous outcome standing.
+  // still taking in files is busy, not broken (`isCaptureBusy`): that
+  // answer leaves the previous outcome standing.
   async function reportCaptureOutcome(task: () => Promise<boolean>): Promise<void> {
     let ok: boolean;
     try {
@@ -4214,7 +4222,7 @@ export function createWorkspaceEngineCapture(
       storeRefused = null;
       storeRefusedDetail = null;
     } catch (error) {
-      if (isWorkspaceUpdatingRefusal(error)) return;
+      if (isCaptureBusy(error)) return;
       // A thrown pass says whether the engine refused the store or
       // failed some other way; a pass that completed — even degraded —
       // reached the store, so any earlier refusal no longer describes it.
@@ -4410,7 +4418,7 @@ export function createWorkspaceEngineCapture(
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
             // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
-            if (healthy || !isWorkspaceUpdatingRefusal(error)) throw error;
+            if (healthy || !isCaptureBusy(error)) throw error;
           });
         }
         return healthy;

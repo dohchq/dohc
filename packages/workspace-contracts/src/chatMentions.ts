@@ -63,8 +63,14 @@ export function codeRanges(body: string): Array<[number, number]> {
   }
   if (openFence) ranges.push([openFence.start, body.length]);
 
-  const inFence = (position: number) =>
-    ranges.some(([start, end]) => position >= start && position < end);
+  // Fences are in order and runs come in order, so one pointer finds each
+  // run's fence.
+  const fences = ranges.length;
+  let fence = 0;
+  const inFence = (position: number) => {
+    while (fence < fences && ranges[fence]![1] <= position) fence++;
+    return fence < fences && ranges[fence]![0] <= position;
+  };
   const runRe = /`+/g;
   let open: { len: number; start: number } | null = null;
   for (let match = runRe.exec(body); match !== null; match = runRe.exec(body)) {
@@ -80,15 +86,25 @@ export function codeRanges(body: string): Array<[number, number]> {
   return ranges;
 }
 
+// For positions asked in ascending order: whether each is inside code. Each
+// call moves forward through the ranges, so a whole scan reads them once.
+export function codeCover(body: string): (position: number) => boolean {
+  const ranges = codeRanges(body).sort((a, b) => a[0] - b[0]);
+  let next = 0;
+  let end = -1;
+  return (position) => {
+    while (next < ranges.length && ranges[next]![0] <= position) end = Math.max(end, ranges[next++]![1]);
+    return position < end;
+  };
+}
+
 // Candidate-agnostic source scanner used by the engine mention index and by
 // renderer candidate resolution. Tokens are returned in document order.
 export function scanMentionTokens(
   body: string,
   options: MentionScanOptions = {},
 ): MentionToken[] {
-  const ranges = options.ignoreCode ? codeRanges(body) : [];
-  const inCode = (position: number) =>
-    ranges.some(([start, end]) => position >= start && position < end);
+  const inCode = options.ignoreCode ? codeCover(body) : () => false;
   const found: MentionToken[] = [];
   MENTION_RE.lastIndex = 0;
   for (let match = MENTION_RE.exec(body); match !== null; match = MENTION_RE.exec(body)) {

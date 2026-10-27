@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it, vi } from "vitest";
-import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import { createCaptureLiveStores as createAttachedCaptureLiveStores, EngineCaptureNotSettledError } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import { restoreDirectWrites, type StopAndRestoreDependencies } from "./stopAndRestore";
 
@@ -435,7 +435,7 @@ describe("createCaptureLiveStores", () => {
     );
 
     try {
-      await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+      await expect(store.flushCapture?.()).rejects.toThrow(EngineCaptureNotSettledError);
       expect(now).toBe(1_000);
       expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(51);
     } finally {
@@ -524,7 +524,7 @@ describe("createCaptureLiveStores", () => {
     try {
       await started.promise;
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(await flushing).toEqual(new Error(`Engine capture for ${WORKSPACE_ID} did not settle.`));
+      expect(await flushing).toEqual(new EngineCaptureNotSettledError(WORKSPACE_ID));
       const closing = store.close!();
       reply.resolve();
       await closing;

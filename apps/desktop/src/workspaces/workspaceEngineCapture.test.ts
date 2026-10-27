@@ -53,6 +53,7 @@ import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
+  EngineCaptureNotSettledError,
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 import * as Y from "yjs";
@@ -2972,6 +2973,74 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // A first import can keep capture working past the settle budget of the
+  // adoption drain's reconcile. That is busy too: the poll keeps the outcome,
+  // and it still cannot hide a degraded watcher.
+  it("keeps the capture outcome while the adoption drain's reconcile has not settled", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    let watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] as string[] };
+    let pending = false;
+    let settles = false;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: pending ? [{ versionId: "main", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            collectionPath: "tasks", filePath: "tasks/record.md", objectId: "record" }] : [],
+          nextCursor: null,
+        });
+        if (property === "reconcileCapture") return async () => {
+          if (!settles) throw new EngineCaptureNotSettledError(WORKSPACE_ID);
+          pending = false;
+        };
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      openRustYDocProviderSession: async input =>
+        ({ path: input.path, evict: async () => undefined }) as unknown as EngineYdocProviderSession,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    const poll = async () => {
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([null]);
+      pending = true;
+      await poll();
+      expect(outcomes).toEqual([null]);
+
+      watcher = { ...watcher, degraded: true };
+      await poll();
+      expect(outcomes).toEqual([null, "other"]);
+
+      watcher = { ...watcher, degraded: false };
+      settles = true;
+      await poll();
+      expect(outcomes).toEqual([null, "other", null]);
+      expect(pending).toBe(false);
+    } finally {
+      watcher = { running: true, degraded: false, terminal: false, deferredWrites: [] };
+      settles = true;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -4810,7 +4879,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     };
   }
 
-  it("opens a document and publishes an authored file between bounded relay passes", async () => {
+  it("opens a document and publishes an authored file while a relay push waits", async () => {
     const root = await createTestScratch("dohc-drain-interleave-");
     const loopback = new VersionedLoopbackEngine();
     const path = "note.md";
@@ -4851,17 +4920,17 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     try {
       const pass = sync.start();
       await entered.promise;
-      const opened = engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
-      const written = engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
-        { kind: "agent", agentId: "agent", onBehalfOf: "local" }).then(result => {
-        events.push("authored write");
-        return result;
-      });
-      release.resolve();
-      const [, session] = await Promise.all([pass, opened, written]);
-      await continued.promise;
-      expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2"]);
+      // Neither waits for the push on the relay.
+      const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+      await engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
+        { kind: "agent", agentId: "agent", onBehalfOf: "local" });
+      events.push("authored write");
+      expect(events).toEqual(["push 1", "document opened", "authored write"]);
       expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("authored content");
+      release.resolve();
+      await pass;
+      await continued.promise;
+      expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2"]);
       releaseContinuation.resolve();
       await sync.stop();
       expect(events.at(-1)).toBe("pull");
