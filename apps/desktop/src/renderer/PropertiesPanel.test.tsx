@@ -1054,6 +1054,24 @@ describe("PropertiesPanel", () => {
     expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: ready\n---\n\nBody\n");
   });
 
+  it("edits a local list from what Enter saved, before the file catches up", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags: [kyoto, food]\n---\n\nBody\n";
+    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.type(input, ", osaka{Enter}, rome");
+    const saved = onChange.mock.lastCall?.[0] as string;
+    expect(saved).toBe("---\ntags:\n  - kyoto\n  - food\n  - osaka\n---\n\nBody\n");
+    rerender(<PropertiesPanel body={saved} onChange={onChange} />);
+    expect(propertyValue("tags")).toBe("kyoto, food, osaka, rome");
+
+    await user.clear(input);
+    await user.type(input, "kyoto, food{Enter}");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n---\n\nBody\n");
+  });
+
   it("shows a local file's newer list in place of typed items, and writes nothing over it", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

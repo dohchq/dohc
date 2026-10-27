@@ -319,7 +319,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   function draftText(index: number): string | undefined {
     const entry = entries[index];
     return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
-      && sameFrontmatterValue(listDraft.base, entry.rawValue)
+      && sameFrontmatterValue(listDraft.base, entryValue(entry))
       ? listDraft.text
       : undefined;
   }
@@ -329,7 +329,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   function setValue(index: number, value: string) {
     const entry = entries[index];
-    if (entry?.list) setListDraft({ index, key: entry.sourceKey ?? entry.key, base: entry.rawValue, text: value });
+    if (entry?.list) setListDraft({ index, key: entry.sourceKey ?? entry.key, base: entryValue(entry), text: value });
     else commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
@@ -339,7 +339,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     const entry = entries[index];
     const text = draftText(index);
     setListDraft(null);
-    if (!entry || text === undefined || sameFrontmatterValue(listItems(text), entry.rawValue)) return;
+    if (!entry || text === undefined || sameFrontmatterValue(listItems(text), entryValue(entry))) return;
     commit(entries.map((row, i) => (i === index ? { ...row, value: text } : row)));
   }
 
