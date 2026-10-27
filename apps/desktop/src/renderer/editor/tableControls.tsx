@@ -77,6 +77,7 @@ import {
   addRowBefore,
   cellAround,
   CellSelection,
+  columnResizingPluginKey,
   deleteColumn,
   deleteRow,
   deleteTable,
@@ -164,6 +165,23 @@ function createTableControlsRuntime(): TableControlsRuntime {
     menuAnchor: null,
     menuSerial: 0,
   };
+}
+
+function clearColumnResizePreview(view: EditorView): void {
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.spec.tableRole !== "table") return true;
+    const dom = view.nodeDOM(pos) as HTMLElement | null;
+    const columns = dom?.querySelectorAll<HTMLTableColElement>("colgroup > col");
+    let column = 0;
+    node.firstChild?.forEach((cell) => {
+      for (let index = 0; index < cell.attrs.colspan; index++, column++) {
+        const col = columns?.[column];
+        const width = cell.attrs.colwidth?.[index];
+        if (col) col.style.width = width ? `${width}px` : "";
+      }
+    });
+    return false;
+  });
 }
 
 const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
@@ -1937,6 +1955,14 @@ export function makeTableControlsPlugin(
 
   return new Plugin({
     key: tableControlsKey,
+    appendTransaction(transactions, _oldState, state) {
+      if (!transactions.some((tr) => tr.docChanged)) return null;
+      const resize = columnResizingPluginKey.getState(state);
+      if (resize?.dragging && resize.activeHandle === -1) {
+        return state.tr.setMeta(columnResizingPluginKey, { setDragging: null });
+      }
+      return null;
+    },
     state: {
       init(_, instance) {
         return buildTableControlDecorations(
@@ -1985,7 +2011,18 @@ export function makeTableControlsPlugin(
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
           const docChanged = !view.state.doc.eq(prevState.doc);
-          if (docChanged && runtime.activeRowResize) runtime.cancelPointer?.();
+          const resize = columnResizingPluginKey.getState(view.state);
+          if (
+            docChanged && resize?.activeHandle === -1 &&
+            columnResizingPluginKey.getState(prevState)?.dragging
+          ) {
+            // Tiptap's table view restores the table size but leaves preview col widths.
+            clearColumnResizePreview(view);
+          }
+          if (docChanged && runtime.cancelPointer) {
+            if (runtime.activeDrag) announceTableDrag(view, "Table reorder cancelled.");
+            runtime.cancelPointer();
+          }
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;

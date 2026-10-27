@@ -313,7 +313,12 @@ describe("table gestures while the note changes", () => {
       .toBe("Table reorder cancelled.");
   }
 
-  it.each(["row", "column"])("cancels a %s grip drag after a synced edit above the table", async (band) => {
+  it.each([
+    { band: "row", origin: "synced" },
+    { band: "column", origin: "synced" },
+    { band: "row", origin: "local" },
+    { band: "column", origin: "local" },
+  ])("cancels a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
     const { editor, collaborator } = await setup();
     const before = tableTextGrid(editor);
     const selector = `.dohc-table-grip--${band === "column" ? "col" : "row"}`;
@@ -326,8 +331,9 @@ describe("table gestures while the note changes", () => {
     expect(source.getAttribute("aria-grabbed")).toBe("true");
     expect(document.body.querySelector(".dohc-table-drop-indicator.is-visible")).not.toBeNull();
 
-    editAbove(collaborator);
+    editAbove(origin === "synced" ? collaborator : editor);
     expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    expectNoDragChrome(editor);
     elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
     dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
 
@@ -366,6 +372,8 @@ describe("table gestures while the note changes", () => {
   it("cancels a column width resize after a synced edit invalidates its handle", async () => {
     const { editor, collaborator } = await setup();
     const before = tableNode(editor);
+    const table = editor.view.dom.querySelector("table")!;
+    const beforeSize = [table.style.width, table.style.minWidth];
     startColumnResize(editor);
 
     editAbove(collaborator);
@@ -378,6 +386,8 @@ describe("table gestures while the note changes", () => {
     expect(tableNode(editor)).toEqual(before);
     expect(tableNode(collaborator)).toEqual(before);
     expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", "", ""]);
+    const currentTable = editor.view.dom.querySelector("table")!;
+    expect([currentTable.style.width, currentTable.style.minWidth]).toEqual(beforeSize);
     expect(editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle")).toBeNull();
   });
 
