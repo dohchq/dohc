@@ -13,6 +13,18 @@ use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_session() {
     for queued in [false, true] {
+        preparation_exhaustion_without_session(queued, false).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_preparation_exhaustion_survives_workspace_restart_without_a_session() {
+    for queued in [false, true] {
+        preparation_exhaustion_without_session(queued, true).await;
+    }
+}
+
+async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
         let scratch = ScratchDir::new().unwrap();
         let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
@@ -106,7 +118,25 @@ async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_sessi
         }
         assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
         assert_eq!(std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
-        drop(gate);
+        let (open, handle, reader) = if restart {
+            open.shutdown_capture().await;
+            drop(gate);
+            service.workspace_close(Some(handle)).await.unwrap();
+            drop(open);
+            let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+                "rootDir":scratch.path(),"workspaceId":"w","captureMode":"none",
+            })).await.unwrap();
+            let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+            let open = service.open(Some(&handle)).unwrap();
+            let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(&scratch, "witness-safe"))));
+            open.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(reader.clone())))
+                .await.unwrap();
+            assert!(lock(&service.sessions).is_empty());
+            (open, handle, reader)
+        } else {
+            drop(gate);
+            (open, handle, reader)
+        };
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 if open.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty() { break; }
@@ -115,7 +145,7 @@ async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_sessi
         }).await.expect("the workspace worker completes the save without a session or explicit retry");
         let saved = std::fs::read_to_string(scratch.path().join("note.md")).unwrap();
         assert_eq!(saved.matches("Accepted edit awaiting preparation").count(), 1);
-        assert_eq!(reader.dispatch_count(), 2);
+        assert_eq!(reader.dispatch_count(), if restart { 1 } else { 2 });
         {
             let store = EngineStore::open_read_only(&db).unwrap();
             assert_eq!(store.table_row_count("moments").unwrap(), 2);
@@ -125,7 +155,6 @@ async fn markdown_recovery_preparation_exhaustion_finishes_without_an_open_sessi
                 marker.head_update_seq + 1);
         }
         service.workspace_close(Some(handle)).await.unwrap();
-    }
 }
 
 pub(in crate::rpc) fn witness_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
