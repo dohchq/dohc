@@ -224,6 +224,38 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
+  it("opens History when author names did not sync, instead of retrying sync", () => {
+    const retry = vi.fn();
+    const openHistory = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const reason = "dohc could not verify who changed this file. The file will share without author names.";
+    const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
+      body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.", detail: `${reason}\nWorkspace: ws-a`,
+      target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
+    expect(result.current.shellErrors[0]).toMatchObject({
+      title: notice.title, message: notice.body, tone: "warning", retry: null, action: { label: "Open History" },
+    });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(openHistory).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("copies a refused save's whole path, so two files with one name can be told apart", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const deep = "folder/".repeat(80);
+    const notice = (noticeId: string, path: string) => ({ noticeId, kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
+      body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
+      detail: "dohc could not verify who changed this file. The file will share without author names.\nWorkspace: ws-a",
+      target: { path }, createdAtMs: 1, readAtMs: null, postedHere: true });
+    act(() => result.current.showSyncRefusals([notice("a", `${deep}notes/n.md`), notice("b", `${deep}archive/n.md`)], vi.fn()));
+    const copied = result.current.shellErrors.map(error => errorDetails(error.details ?? []));
+    expect(copied[0]).toContain(`File: ${deep}notes/n.md\n`);
+    expect(copied[1]).toContain(`File: ${deep}archive/n.md\n`);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });
