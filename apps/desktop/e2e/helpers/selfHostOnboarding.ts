@@ -30,9 +30,12 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * `live` serves the stack over HTTPS from a fixture CA and runs the self-host
  * live service with the native engine. `trustEnv` is the environment a desktop
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
- * for an HTTPS loopback relay.
+ * for an HTTPS loopback relay. `refuse` answers matching requests with 503
+ * before they reach a service.
  */
-export async function startSelfHostOnboardingStack(directory: string, options: { live?: boolean; signal: AbortSignal }) {
+export async function startSelfHostOnboardingStack(directory: string, options: {
+  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean;
+}) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
   const ca = options.live ? await mintLocalhostCa(directory) : undefined;
@@ -43,13 +46,15 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     ? { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
       DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" }
     : {};
-  const proxy = await startServerProxy(ca);
+  const proxy = await startServerProxy(ca, options.refuse ? { refuse: options.refuse } : {});
+  let account: Awaited<ReturnType<typeof startAccountServer>> | undefined;
   let relay: Awaited<ReturnType<typeof startAuthenticatedRelay>> | undefined;
   try {
+    // The account server applies the migrations whose tables the relay reads as it starts.
+    account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
+    proxy.routeAuthTo(account.listenOrigin);
     relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
     proxy.routeRelayTo(relay.url);
-    const account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
-    proxy.routeAuthTo(account.listenOrigin);
     return {
       account,
       ca,
@@ -74,13 +79,13 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
         hostedAgentEvidence(directory, workspaceId, path, agentId),
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
       async close() {
-        const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
+        const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Self-host services did not close.");
       },
     };
   } catch (error) {
-    await Promise.allSettled([proxy.close(), relay?.close()]);
+    await Promise.allSettled([proxy.close(), relay?.close(), account?.close()]);
     throw error;
   }
 }
@@ -122,6 +127,7 @@ interface PendingHostedLogResponse extends HostedLogResponseBarrier {
 
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
+  refuse?(method: string, path: string): boolean;
 } = {}) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
@@ -136,6 +142,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   const forward: RequestListener = (incoming, outgoing) => {
     if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
+    if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
     const hostedWorkspace = incoming.method === "GET"
       ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
     const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace

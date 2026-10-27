@@ -132,6 +132,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     stopAutomationWakes(): Promise<void>;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
+    // This run's copies of other people's files that dohc opened in other apps.
+    removeMarkedCopies(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
     // Sends the reports that wait, within its own deadline inside the budget.
@@ -187,8 +189,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     );
     const engineYDocStop = step("settleYDocs", shutdown.settleYDocs());
     const agentIntegrationStop = step("stopAgentIntegration", shutdown.stopAgentIntegration()).catch(() => undefined);
-    // Reports go alongside teardown, and exit waits for both within the budget.
+    // Reports and copies go alongside teardown, and exit waits for all within the budget.
     const reportsFlush = step("flushReports", shutdown.flushReports()).catch(() => undefined);
+    const markedCopiesRemoval = step("removeMarkedCopies", shutdown.removeMarkedCopies()).catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       noticeRefusalStop,
@@ -210,7 +213,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     let budgetExpired = false;
     let shutdownTimer: ReturnType<typeof setTimeout>;
     void Promise.race([
-      Promise.all([workspaceShutdown, reportsFlush]),
+      Promise.all([workspaceShutdown, reportsFlush, markedCopiesRemoval]),
       new Promise<void>((resolve) => {
         shutdownTimer = setTimeout(() => {
           budgetExpired = true;

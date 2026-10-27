@@ -221,6 +221,7 @@
     "desktop:workspace-trust-changed",
     "desktop:read-diagnostics",
     "desktop:read-engine-moment",
+    "desktop:read-external-open",
     "desktop:read-reports-notice",
     "desktop:read-schedule-host",
     "desktop:read-share-proposal-changes",
