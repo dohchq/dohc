@@ -440,6 +440,26 @@ describe("table gestures while the note changes", () => {
     expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", ""]);
   });
 
+  it("cancels a column width resize when a local edit replaces its cell", async () => {
+    const { editor, collaborator } = await setup();
+    const handle = startColumnResize(editor);
+    const cell = editor.state.doc.nodeAt(handle)!;
+
+    editor.view.dispatch(editor.state.tr.replaceWith(
+      handle,
+      handle + cell.nodeSize,
+      cell.type.create(cell.attrs, editor.schema.nodes.paragraph!.create(null, editor.schema.text("X2"))),
+    ));
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "X2", "A3"]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+  });
+
   it("finishes a column width resize on the same column after a local edit deletes the column before it", async () => {
     const { editor, collaborator } = await setup();
     startColumnResize(editor);
