@@ -2,13 +2,14 @@ import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocAuthorCapacityRefusal,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
 } from "@dohc/workspace-engine-client";
@@ -1502,16 +1503,27 @@ async function applyDocumentEdit(
   });
   if (update === null) return { changed: false };
   session.assertSame();
-  let armed = false;
-  provider.applyLocalUpdate(update, () => {
-    armed = true;
-  }, input.origin);
+  const options = { ...input.origin, idempotencyKey: randomUUID() };
+  const append = () => provider.applyDecidedLocalUpdate(() => {
+    session.assertSame();
+    return update;
+  }, undefined, options);
+  let accepted: boolean;
+  try {
+    accepted = await append();
+  } catch (error) {
+    if (!input.allowLossySourceSha256 || !isYdocAuthorCapacityRefusal(error)) throw error;
+    session.assertSame();
+    await settleNow.call(provider, { allowLossySourceSha256: input.allowLossySourceSha256 });
+    session.assertSame();
+    accepted = await append();
+  }
+  if (!accepted) throw new Error(`The engine did not accept the edit to ${path}.`);
   session.show(update);
   try {
     await settleNow.call(provider, input.allowLossySourceSha256
       ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
   } catch (error) {
-    if (!armed) throw error;
     // The session's journal holds the edit and a later settle saves it.
     // Sending the edit again could apply it twice.
     const cause = error instanceof Error ? error.message : String(error);
@@ -1524,7 +1536,6 @@ async function applyDocumentEdit(
       { cause: error },
     );
   }
-  if (!armed) throw new Error(`The engine did not accept the edit to ${path}.`);
   // Someone who removed or reshaped a block while the edit went into it takes
   // the edit's text with the block. That merge is correct for the document,
   // but the agent must not hear that its text is there.

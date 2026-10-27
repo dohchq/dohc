@@ -248,6 +248,25 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     await h.ipc.shutdown();
   });
+
+  it("delivers changed and absent heads only to the current renderer session", async () => {
+    const sender = new FakeSender(7);
+    const session = providerSession();
+    const h = harness(session);
+    await h.ipc.open(sender, openPayload);
+    const opened = h.capturedOpen()!;
+    opened.onHeadChanged?.("a".repeat(64));
+    expect(sender.sent.at(-1)?.payload).toMatchObject({
+      ...openPayload, headSha256: "a".repeat(64),
+    });
+    opened.onHeadChanged?.(null);
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...openPayload, headSha256: null });
+    const sent = sender.sent.length;
+    h.setGeneration(2);
+    opened.onHeadChanged?.("b".repeat(64));
+    expect(sender.sent).toHaveLength(sent);
+    await h.ipc.shutdown();
+  });
   it("names main's person when each request first arrives and keeps that person for its retries", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -1956,7 +1975,7 @@ describe("engine Y.Doc IPC adapter", () => {
     // way the capture's canonical doc takes a journaled update.
     function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
       const doc = markdownToYDoc(markdown);
-      return providerSession({
+      const session = providerSession({
         doc,
         applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
           trace.push("apply");
@@ -1971,6 +1990,13 @@ describe("engine Y.Doc IPC adapter", () => {
           trace.push("close");
         }),
       });
+      session.applyDecidedLocalUpdate = vi.fn(async (decide, onArmed, options) => {
+        const update = decide(session.doc);
+        if (update === null) return false;
+        session.applyLocalUpdate(update, onArmed, options);
+        return true;
+      });
+      return session;
     }
 
     const keepBlocksSeen: boolean[] = [];
@@ -2017,8 +2043,8 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
       expect(session.applyLocalUpdate).toHaveBeenCalledWith(
         expect.any(Uint8Array),
-        expect.any(Function),
-        agentOrigin,
+        undefined,
+        expect.objectContaining({ ...agentOrigin, idempotencyKey: expect.any(String) }),
       );
       expect(session.settleNow).toHaveBeenCalledOnce();
       expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
@@ -2243,6 +2269,63 @@ describe("engine Y.Doc IPC adapter", () => {
       );
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("settles consent without an append before retrying one capacity-refused edit", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const h = harness(session);
+      const source = "a".repeat(64);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: source }))
+        .resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(trace).toEqual(["settle", "apply", "settle", "close"]);
+      const calls = vi.mocked(session.applyDecidedLocalUpdate).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[1]![2]).toEqual(calls[0]![2]);
+      expect(session.settleNow).toHaveBeenNthCalledWith(1, { allowLossySourceSha256: source });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+    });
+
+    it("keeps a capacity-refused edit unapplied when the consent-only settlement holds", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const held = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-write-held", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(held);
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(held);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("does not retry capacity without consent or retry a second capacity refusal", async () => {
+      for (const allowLossySourceSha256 of [undefined, "a".repeat(64)]) {
+        const session = editableSession();
+        const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+        vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValue(capacity);
+        const h = harness(session);
+        await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256 })).rejects.toBe(capacity);
+        expect(session.applyDecidedLocalUpdate).toHaveBeenCalledTimes(allowLossySourceSha256 ? 2 : 1);
+        expect(session.settleNow).toHaveBeenCalledTimes(allowLossySourceSha256 ? 1 : 0);
+        expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      }
+    });
+
+    it("does not append an accepted edit again when consent settlement holds", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(new DaemonRefusalError({
+        code: "CONFLICT", message: "markdown-write-held", retry: "no",
+      }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) }))
+        .rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.settleNow).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
     });
 
     it("reports no change without applying or settling", async () => {
