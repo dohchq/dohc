@@ -59,35 +59,29 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
   }
 }
 
-const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
-  "no-reply": "produced no reply",
-  "timed-out": "timed out",
-  failed: "failed",
-  "not-started": "failed to start",
-  restarted: "stopped when dohc restarted",
-  quit: "stopped when dohc quit",
-  stopped: "stopped",
-  restricted: "did not start in Restricted Mode",
-};
-
 const NOTICE_AGENT_NAME_MAX_CHARS = 32;
 
-// "Atlas finished in "Plan day 2"" or "Atlas's run in "Plan day 2" failed",
-// by the agent's Settings name, shortening it to 32 characters and the
-// thread's name to fit. An agent no longer in Settings is "Your agent".
-// Without a thread name, the sentence names no thread.
+// "Atlas's run failed in "Plan day 2"" or "Restricted Mode blocked Atlas's
+// run in "Plan day 2"". What happened comes first and names last, so a clamp
+// cuts only a name: the agent's Settings name at 32 characters, then the
+// thread's to fit. An agent no longer in Settings is "Your agent".
 function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
   const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
-  const sentence = (name: string | null) => {
-    const where = name === null ? "" : ` in "${name}"`;
-    if (outcome === "stopped") return `Stopped ${agent === undefined ? "the run" : `${agent}'s run`}${where}`;
-    const who = agent ?? "Your agent";
-    return outcome === "finished"
-      ? `${who} finished${where}`
-      : `${who}'s run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
-  };
-  if (!thread) return sentence(null);
-  return sentence(cutText(thread, NOTICE_TITLE_MAX_CHARS - [...sentence("")].length));
+  const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
+  const sentence = {
+    finished: `${agent ?? "Your agent"} finished`,
+    stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
+    "no-reply": `${whose(true)} produced no reply`,
+    "timed-out": `${whose(true)} timed out`,
+    failed: `${whose(true)} failed`,
+    "not-started": `${whose(true)} failed to start`,
+    restarted: `dohc restarted and stopped ${whose(false)}`,
+    quit: `dohc quit and stopped ${whose(false)}`,
+    restricted: `Restricted Mode blocked ${whose(false)}`,
+  } satisfies Record<RunOutcome, string>;
+  const what = sentence[outcome];
+  if (!thread) return what;
+  return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
 }
 
 // A run that failed to start says why and what to do next.
