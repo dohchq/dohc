@@ -235,4 +235,64 @@ mod tests {
         assert!(matches!(check_witness(&doc, &key, "note.md", Some(&resolver)),
             Err(CollabError::MarkdownReaderUnavailable)));
     }
+
+    #[tokio::test]
+    async fn witness_cache_rechecks_a_new_checker_build_and_refuses_a_changed_runtime() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(crate::ContentKind::Richdoc, "source\n").unwrap();
+        let key = DocKey::new("w", "main", "object").unwrap();
+        let checks = WitnessChecks::default();
+        let first_dir = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let second_dir = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let invalid_dir = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let first = Arc::new(Reader::new(Some(witness_checker(&first_dir, "ok", "first"))));
+        let pending = match checks.check(&first, &doc, &key, "note.md") {
+            Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) => pending,
+            _ => panic!("a new source requires a witness check"),
+        };
+        pending.resolve().await;
+        assert!(checks.check(&first, &doc, &key, "note.md").unwrap());
+        doc.richdoc_append_paragraph("A different checkpoint and candidate");
+        assert!(checks.check(&first, &doc, &key, "note.md").unwrap());
+        assert_eq!(first.dispatch_count(), 1);
+        let second = Arc::new(Reader::new(Some(witness_checker(&second_dir, "witness-unsafe", "second"))));
+        let pending = match checks.check(&second, &doc, &key, "note.md") {
+            Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) => pending,
+            _ => panic!("a new checker cannot reuse the prior build's safe verdict"),
+        };
+        pending.resolve().await;
+        assert!(!checks.check(&second, &doc, &key, "note.md").unwrap());
+        assert_ne!(first.checker_identity(), second.checker_identity());
+        assert_eq!(second.dispatch_count(), 1);
+        let invalid = Arc::new(Reader::new(Some(witness_checker(&invalid_dir, "runtime-icu", "second"))));
+        let pending = match checks.check(&invalid, &doc, &key, "note.md") {
+            Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) => pending,
+            _ => panic!("a changed runtime requires fresh evidence"),
+        };
+        pending.resolve().await;
+        assert!(matches!(checks.check(&invalid, &doc, &key, "note.md"),
+            Err(CollabError::MarkdownReaderUnavailable)));
+    }
+
+    fn witness_checker(root: &dohc_engine_testkit::ScratchDir, mode: &str, build: &str)
+        -> dohc_engine_reader::Config {
+        use dohc_engine_storage::hex_sha256;
+        let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+        let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+        assert!(output.status.success());
+        let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let node = std::path::PathBuf::from(runtime.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
+        runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
+        let mut manifest = serde_json::json!({"version":1,"runtime":runtime,"buildSha256":build,
+            "parentCwd":std::env::current_dir().unwrap()});
+        let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
+            .replace("MANIFEST", &manifest.to_string()).replace("MODE", &serde_json::to_string(mode).unwrap());
+        let bundle = root.path().join("reader.cjs");
+        std::fs::write(&bundle, &script).unwrap();
+        manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
+        manifest["sources"] = serde_json::json!([]);
+        let path = root.path().join("reader-manifest.json");
+        std::fs::write(&path, manifest.to_string()).unwrap();
+        dohc_engine_reader::Config { node, bundle, manifest: path }
+    }
 }
