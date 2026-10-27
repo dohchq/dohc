@@ -244,7 +244,7 @@ describe("useShellError", () => {
 
   it("copies a refused save's whole path, so two files with one name can be told apart", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
-    const deep = "folder/".repeat(65);
+    const deep = "folder/".repeat(80);
     const notice = (noticeId: string, path: string) => ({ noticeId, kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
       body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
