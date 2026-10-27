@@ -2468,7 +2468,7 @@ fn record_file_holds_head(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
@@ -2696,7 +2696,7 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     MARKDOWN_BEFORE_SETTLE.with(|slot| slot.borrow_mut().take())
         .map(|check| check(store)).transpose()?;
     if token.is_cancelled() {
@@ -3369,7 +3369,7 @@ pub(super) fn ydoc_settle_on_store(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
@@ -3395,7 +3395,7 @@ pub(super) fn ydoc_settle_on_store(
             path,
             content_kind == ContentKind::Richdoc,
         )?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fault-injection"))]
         if live_audit.is_none() { markdown_settlement_test_fault(tx)?; }
         Ok((Some((result, reconcile_required)), uses_consent))
     })?;
@@ -3615,17 +3615,38 @@ pub(super) fn refresh_markdown_witnesses_on_store(
 #[path = "markdown_refresh_tests.rs"]
 mod markdown_refresh_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fault-injection"))]
 type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError>>;
-#[cfg(test)]
+#[cfg(any(test, feature = "fault-injection"))]
 thread_local! {
     static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
     static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "fault-injection"))]
 fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
     MARKDOWN_SETTLEMENT_FAULT.with(|slot| slot.borrow_mut().take())
         .map(|fault| fault(conn)).transpose().map(|_| ())
+}
+
+#[cfg(feature = "fault-injection")]
+impl ActorHandle {
+    #[doc(hidden)]
+    pub async fn markdown_settlement_fault_for_harness(
+        &self,
+        fault: impl FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError> + Send + 'static,
+        after_rollback: impl FnOnce(&EngineStore) -> Result<(), RuntimeError> + Send + 'static,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |_, _| {
+            MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |conn| {
+                let result = fault(conn);
+                if result.is_err() {
+                    MARKDOWN_BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(after_rollback)));
+                }
+                result
+            })));
+            Ok(())
+        }).await
+    }
 }
 
 #[cfg(test)]

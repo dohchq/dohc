@@ -608,6 +608,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "yrs",
 ]
 
 [[package]]
