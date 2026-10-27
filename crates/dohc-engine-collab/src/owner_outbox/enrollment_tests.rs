@@ -2018,27 +2018,53 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
         .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
         .unwrap();
     let typed = draft.doc.richdoc_append_paragraph("TYPED");
-    committed(store.write_with(&NoFaults, |tx| {
-        super::super::draft::append_draft_in_tx(
-            tx, "workspace", &observed.binding, 1, "typed".into(), typed.clone(), 6,
-        )
-    }).unwrap()).unwrap();
-    assert!(store.read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64)).unwrap().is_empty());
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::draft::append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "typed".into(),
+                    typed.clone(),
+                    6,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
     let next = next_generation(&observed);
     let input = successor_input(&store, &next, host.clone());
     enroll(&mut store, &input, &observed.limits).unwrap();
     drop(store);
     let mut store = EngineStore::open(&dir.join("engine.db"), 30).unwrap();
-    let rows = store.read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 1)).unwrap();
+    let rows = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 1))
+        .unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.binding, observed.binding);
     assert!(row.pending_bytes > 0);
     assert_eq!(row.oldest_entry_at_ms, Some(5));
-    assert!(store.read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&row.outbox_id), 1)).unwrap().is_empty());
-    assert!(store.read_with(|conn| list_restore_fenced_in(conn, "another-workspace", None, 64)).unwrap().is_empty());
-    assert!(store.read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 0)).is_err());
-    assert!(store.read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 65)).is_err());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&row.outbox_id), 1))
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "another-workspace", None, 64))
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 0))
+        .is_err());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 65))
+        .is_err());
     let pending = read_pending(&store, "workspace", &row.outbox_id).unwrap();
     assert_eq!(pending.quarantine_reason.as_deref(), Some("restore-fenced"));
     let header = match read_pending_page(&store, "workspace", &row.outbox_id, None, 4096).unwrap() {
@@ -2046,7 +2072,10 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
         _ => panic!("unchanged snapshot"),
     };
     let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
-    assert_eq!(raw["checkpointDigest"], serde_json::json!(hex_sha256(&checkpoint)));
+    assert_eq!(
+        raw["checkpointDigest"],
+        serde_json::json!(hex_sha256(&checkpoint))
+    );
     let mut cursor = Some(OwnerOutboxReadCursor {
         snapshot: header.cursor.snapshot,
         part: OwnerOutboxReadPart::Checkpoint,
@@ -2055,7 +2084,8 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
     });
     let mut accepted = Vec::new();
     while let Some(next) = cursor {
-        let page = match read_pending_page(&store, "workspace", &row.outbox_id, Some(next), 7).unwrap() {
+        let page = match read_pending_page(&store, "workspace", &row.outbox_id, Some(next), 7).unwrap()
+        {
             OwnerOutboxPageResult::Page(page) => page,
             _ => panic!("unchanged snapshot"),
         };
@@ -2069,15 +2099,104 @@ fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
         recovered.apply(&entry.update).unwrap();
     }
     assert!(recovered.canonical_content().to_string().contains("TYPED"));
-    let current = store.read_with(|conn| open_draft_in(conn, &next, 2)).unwrap();
+    let current = store
+        .read_with(|conn| open_draft_in(conn, &next, 2))
+        .unwrap();
     assert_eq!(bounded(&current.doc).unwrap(), host);
     assert!(!current.doc.canonical_content().to_string().contains("TYPED"));
-    assert!(super::super::retry(&mut store, "workspace", OwnerOutboxRetryInput {
-        outbox_id: row.outbox_id.clone(), binding: observed.binding.clone(),
-    }).is_err());
-    assert!(super::super::retry(&mut store, "workspace", OwnerOutboxRetryInput {
-        outbox_id: row.outbox_id.clone(), binding: next,
-    }).is_err());
+    assert!(super::super::retry(
+        &mut store,
+        "workspace",
+        OwnerOutboxRetryInput {
+            outbox_id: row.outbox_id.clone(),
+            binding: observed.binding.clone(),
+        }
+    )
+    .is_err());
+    assert!(super::super::retry(
+        &mut store,
+        "workspace",
+        OwnerOutboxRetryInput {
+            outbox_id: row.outbox_id.clone(),
+            binding: next.clone(),
+        }
+    )
+    .is_err());
+    let fresh = current.doc.richdoc_append_paragraph("TYPED AGAIN");
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::draft::append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &next,
+                    2,
+                    "typed-again".into(),
+                    fresh.clone(),
+                    31,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    let later = LiveObjectBinding {
+        restore_fence_generation: next.restore_fence_generation + 1,
+        ..next
+    };
+    let input = successor_input(&store, &later, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    let first = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 1))
+        .unwrap();
+    let second = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&first[0].outbox_id), 1))
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(first[0].outbox_id < second[0].outbox_id);
+    assert_ne!(
+        first[0].binding.restore_fence_generation,
+        second[0].binding.restore_fence_generation
+    );
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&second[0].outbox_id), 1))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_other_quarantines() {
+    for reason in ["stale-binding", "binding-changed", "invalid-update"] {
+        let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+        let outbox_id: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        super::super::quarantine(
+            &mut store,
+            "workspace",
+            OwnerOutboxQuarantineInput {
+                outbox_id,
+                reason: reason.into(),
+                observed_binding: None,
+            },
+            10,
+        )
+        .unwrap();
+        let input = successor_input(&store, &next_generation(&observed), host);
+        enroll(&mut store, &input, &observed.limits).unwrap();
+        assert!(
+            store
+                .read_with(|conn| super::super::list_restore_fenced_in(conn, "workspace", None, 64))
+                .unwrap()
+                .is_empty(),
+            "{reason}"
+        );
+    }
 }
 
 #[test]

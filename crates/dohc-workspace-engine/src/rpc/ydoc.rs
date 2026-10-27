@@ -498,6 +498,55 @@ fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
     Ok(bytes)
 }
 
+fn restore_fenced_page(
+    rows: Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>,
+    limit: usize,
+    request_id: u64,
+    max_frame_bytes: usize,
+) -> Result<Value, WireError> {
+    let corrupt = |_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
+    let too_large = || WireError::new(ErrorCode::LimitExceeded, "owner-outbox-page-exceeds-wire-limit");
+    let envelope = dohc_engine_protocol::wire::Envelope::Response(Response {
+        id: request_id,
+        result: json!({"queues": [], "next": null}),
+    });
+    let mut bytes = serde_json::to_vec(&envelope).map_err(corrupt)?.len();
+    if bytes > max_frame_bytes {
+        return Err(too_large());
+    }
+    let fetched = rows.len();
+    let mut queues = Vec::new();
+    let mut next = None;
+    for (index, row) in rows.into_iter().enumerate() {
+        let row_bytes = serde_json::to_vec(&row).map_err(corrupt)?.len();
+        let continuing = index + 1 < fetched || fetched == limit;
+        let cursor_bytes = if continuing {
+            serde_json::to_vec(&row.outbox_id)
+                .map_err(corrupt)?
+                .len()
+                .saturating_sub(4)
+        } else {
+            0
+        };
+        let comma = usize::from(!queues.is_empty());
+        if bytes
+            .saturating_add(comma)
+            .saturating_add(row_bytes)
+            .saturating_add(cursor_bytes)
+            > max_frame_bytes
+        {
+            if queues.is_empty() {
+                return Err(too_large());
+            }
+            break;
+        }
+        bytes += comma + row_bytes;
+        next = continuing.then(|| row.outbox_id.clone());
+        queues.push(row);
+    }
+    Ok(json!({"queues": queues, "next": next}))
+}
+
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
@@ -821,6 +870,36 @@ impl EngineService {
             "oldestEntryAtMs": result.oldest_entry_at_ms,
             "state": result.state.as_str(),
         }))
+    }
+
+    pub(super) async fn owner_ydoc_outbox_list_restore_fenced(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            after: Option<String>,
+            limit: usize,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = open
+            .actor
+            .owner_ydoc_list_restore_fenced(
+                open.workspace_id.clone(),
+                params.after,
+                params.limit,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        restore_fenced_page(rows, params.limit, request_id, ctx.max_frame_bytes as usize)
     }
 
     pub(super) async fn owner_ydoc_outbox_read_pending(
@@ -4260,6 +4339,40 @@ mod tests {
         assert!(total_wire_bytes > 1_048_576);
         assert!(base_pages >= 2, "one base must span pages");
         assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[test]
+    fn restore_fenced_discovery_pages_fit_the_actual_wire_envelope() {
+        use dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced;
+        let params = owner_outbox_append_params("workspace", "append");
+        let binding: dohc_engine_collab::LiveObjectBinding =
+            serde_json::from_value(params["binding"].clone()).unwrap();
+        let rows: Vec<_> = (0..3)
+            .map(|index| OwnerOutboxRestoreFenced {
+                outbox_id: format!("queue-{index}-\"\\"),
+                binding: binding.clone(),
+                pending_bytes: 12,
+                oldest_entry_at_ms: Some(5),
+            })
+            .collect();
+        let id = dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
+        let wire_bytes = |result| {
+            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response { id, result }))
+                .unwrap()
+                .len()
+        };
+        let single = restore_fenced_page(vec![rows[0].clone()], 1, id, usize::MAX).unwrap();
+        let budget = wire_bytes(single);
+        let first = restore_fenced_page(rows.clone(), 3, id, budget).unwrap();
+        assert_eq!(first["queues"].as_array().unwrap().len(), 1);
+        assert_eq!(first["next"], rows[0].outbox_id);
+        assert_eq!(wire_bytes(first), budget);
+        assert!(restore_fenced_page(rows.clone(), 3, id, budget - 1).is_err());
+        let all = restore_fenced_page(rows, 64, id, usize::MAX).unwrap();
+        assert_eq!(all["queues"].as_array().unwrap().len(), 3);
+        assert!(all["next"].is_null());
+        let empty = restore_fenced_page(Vec::new(), 64, id, budget).unwrap();
+        assert_eq!(empty, json!({"queues": [], "next": null}));
     }
 
     #[tokio::test]

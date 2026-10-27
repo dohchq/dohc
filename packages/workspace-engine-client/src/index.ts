@@ -85,4 +85,5 @@ export {
   type LiveObjectBinding,
   type OwnerYDocOutboxEntry,
   type OwnerYDocOutboxRecovery,
+  type OwnerYDocOutboxRestoreFenced,
 } from "./ydoc/ownerYDocOutbox";
