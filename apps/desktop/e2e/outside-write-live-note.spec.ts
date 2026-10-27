@@ -184,7 +184,6 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         await record("4-restart", { appPid, oldPids, freshPid, capturePath: "Not observed: public watcher status does not expose Added versus Changed.", ...await snapshot() });
       }
       const before = outsideWriteRecoveryState(temp.rootPath, workspaceId);
-      const beforeSettlement = ownerSettlementState(temp.rootPath);
       const recordsPath = join(temp.rootPath, ".dohc/local/outside-write-copies");
       if (variant === "open-reload") {
         await mkdir(recordsPath, { recursive: true });
@@ -211,6 +210,9 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         await unlink(recordsPath);
         if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
         await failureRow.getByRole("button", { name: "Try again", exact: true }).click();
+        // Try again closes Notices, which would hide a row that stays.
+        await expect(page.getByTestId("notice-center")).toHaveCount(0);
+        await page.getByTestId("notice-center-toggle").click();
         await expect(failureRow).toHaveCount(0, { timeout: 120_000 });
         await expect(listFailureRow).toHaveCount(0, { timeout: 120_000 });
         if (await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
@@ -222,7 +224,8 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       await expect.poll(() => {
         const state = ownerSettlementState(temp.rootPath);
         const recovery = outsideWriteRecoveryState(temp.rootPath, workspaceId);
-        return state !== null && state.settlementRecords.length > (beforeSettlement?.settlementRecords.length ?? 0)
+        // A settlement must cover the accepted OWNER-1 edit; an earlier one doesn't.
+        return state !== null && state.acceptedCursor > 0 && state.settlementRecords.some(row => row.terminalCursor >= state.acceptedCursor)
           && state.settlementRecords.every(row => row.momentHere) && state.parked === 0 && state.deferred === 0
           && recovery !== null && JSON.stringify(recovery.pull) !== JSON.stringify(before?.pull);
       }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
@@ -249,9 +252,8 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 120_000 });
       await expect.poll(() => outsideCopyPushed(temp.rootPath, workspaceId, copyPath), { timeout: 120_000 }).toBe(true);
       expect(await readFile(join(temp.rootPath, copyPath), "utf8")).toBe("AGENT-1\n");
-      const disk = await readFile(join(temp.rootPath, PATH), "utf8");
-      expect(disk).toContain("OWNER-1");
-      expect(disk).not.toContain("AGENT-1");
+      await expect.poll(() => readFile(join(temp.rootPath, PATH), "utf8"), { timeout: 60_000 }).toContain("OWNER-1");
+      expect(await readFile(join(temp.rootPath, PATH), "utf8")).not.toContain("AGENT-1");
       const toast = page.getByTestId("workspace-shell-notice").filter({ hasText: `Kept a copy of ${PATH}` }).filter({ hasText: copyPath });
       await expect(toast).toBeVisible();
       await expect(toast.getByRole("button", { name: "Open copy", exact: true })).toBeVisible();
@@ -287,7 +289,9 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       expect(await readFile(join(temp.rootPath, copyPath), "utf8")).toBe("AGENT-1\n");
       await record("6", { ...final, copyPath, copyReplicationKinds: replicationOpKindsMentioning(temp.rootPath, copyPath), copyPushed: outsideCopyPushed(temp.rootPath, workspaceId, copyPath), outsideTextKept: true, ownerOnDisk: true });
     } catch (error) {
-      await record("failure", { error: error instanceof Error ? error.stack : String(error) });
+      await record("failure", { error: error instanceof Error ? error.stack : String(error),
+        settlementEvidence: await read(Promise.resolve().then(() => stack?.settlementEvidence())),
+        relayOutput: await read(Promise.resolve().then(() => stack?.relayOutput())) });
       if (desktop && workspaceId) await read(snapshot().then(value => record("failure-state", value)));
       throw error;
     } finally {
