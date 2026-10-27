@@ -78,3 +78,60 @@ it("retains a settle request beside changes before and during an outbox pass", a
   expect(calls).toEqual(["change", "change", "settle"]);
   queue.close();
 });
+
+it("runs settlement without another edit and retains both wakes received during that settlement", async () => {
+  const r = registration(), entered = deferred<void>(), release = deferred<boolean>(), finished = deferred<void>();
+  const calls: string[] = [], onError = vi.fn();
+  const disposed = vi.spyOn(r.lifetime.signal, "removeEventListener");
+  let allowed = false;
+  const queue = new OwnerOutboxWake({canRun: () => allowed, onError,
+    async run(_registration, kind) {
+      calls.push(kind);
+      if (calls.length === 1) { entered.resolve(); return release.promise; }
+      if (calls.length === 3) finished.resolve();
+      return false;
+    }});
+  try {
+    queue.wake(r.value, "settle");
+    await Promise.resolve();
+    expect(calls).toEqual([]);
+    allowed = true;
+    queue.pump();
+    await entered.promise;
+    for (let i = 0; i < 20; i++) {
+      queue.wake(r.value, "settle");
+      queue.wake(r.value, "change");
+    }
+    release.resolve(false);
+    await finished.promise;
+    expect(calls).toEqual(["settle", "change", "settle"]);
+    expect(onError).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce());
+    queue.pump();
+    await Promise.resolve();
+    expect(calls).toHaveLength(3);
+  } finally { release.resolve(false); queue.close(); }
+});
+
+it("does not pass an invalidated registration's settlement wake to its replacement", async () => {
+  const old = registration(), replacement = registration(), entered = deferred<void>(), release = deferred<boolean>();
+  const next = deferred<void>(), calls: {signal: AbortSignal; kind: string}[] = [];
+  const queue = new OwnerOutboxWake({canRun: () => true, onError: vi.fn(),
+    async run(value, kind) {
+      calls.push({signal: value.invalidated, kind});
+      if (value.invalidated === old.value.invalidated) { entered.resolve(); return release.promise; }
+      next.resolve(); return false;
+    }});
+  try {
+    queue.wake(old.value);
+    await entered.promise;
+    queue.wake(old.value, "settle");
+    old.lifetime.abort();
+    queue.wake(replacement.value);
+    await next.promise;
+    release.resolve(false);
+    await Promise.resolve(); await Promise.resolve();
+    expect(calls).toEqual([{signal: old.value.invalidated, kind: "change"},
+      {signal: replacement.value.invalidated, kind: "change"}]);
+  } finally { release.resolve(false); queue.close(); }
+});
