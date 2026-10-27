@@ -5,7 +5,7 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 import { useShellError } from "./useShellError";
 import {
   forgetSyncFailureNoticesForTests,
-  syncFailureMessage,
+  syncFailureNotice,
   useSyncFailureNotice,
 } from "./useSyncFailureNotice";
 
@@ -77,12 +77,12 @@ function renderNotice(
 describe("useSyncFailureNotice", () => {
   it.each([false, true])("shows copy recovery and keeps the same row on retry, blocked=%s", async blocked => {
     const message = blocked
-      ? "dohc could not keep a copy of n.md, because .dohc/local/outside-write-copies is in the way, so it left n.md as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again."
-      : "dohc could not keep a copy of n.md, so it left n.md as it was. Check that dohc can write to the workspace folder, then choose Try again.";
-    const detail = `OutsideWriteCopyError: ${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
+      ? ".dohc/local/outside-write-copies is in the way, so dohc left n.md as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again."
+      : "dohc left n.md as it was. Check that dohc can write to the workspace folder, then choose Try again.";
+    const detail = `OutsideWriteCopyError: dohc could not keep a copy of n.md\n${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
     const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
     await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(view.rows()[0]).toMatchObject({ message: `${message} Sync waits until then.`, seen: false });
+    expect(view.rows()[0]).toMatchObject({ title: "dohc could not keep a copy of n.md", message: `${message} Sync waits until then.`, seen: false });
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
     expect(view.rows()[0]!.details).toEqual([["Detail", detail]]);
     const id = view.rows()[0]!.id;
@@ -325,9 +325,9 @@ describe("useSyncFailureNotice", () => {
   // A failed sync pass proves nothing about this machine's copy, so no
   // message claims the changes are saved here.
   it("never claims the changes are saved", () => {
-    expect(syncFailureMessage(unreachable(1, 1))).toBe("dohc could not reach the server.");
+    expect(syncFailureNotice(unreachable(1, 1))).toEqual({ message: "dohc could not reach the server." });
     expect(
-      syncFailureMessage({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
-    ).toBe("dohc could not sync this workspace.");
+      syncFailureNotice({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
+    ).toEqual({ message: "dohc could not sync this workspace." });
   });
 });

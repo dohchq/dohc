@@ -26,16 +26,18 @@ async function readRecord(path: string) {
   catch (cause) { throw new CopyRecordError(path, cause); }
 }
 
+// The first line is the notice's title and the second its body, so the row's
+// clamp never hides the next step.
 export class OutsideWriteCopyError extends Error {
   override name = "OutsideWriteCopyError";
   constructor(path: string, cause: unknown, rootPath: string, blockingPath?: string) {
-    const lead = blockingPath
-      ? `dohc could not keep a copy of ${path}, because ${blockingPath} is in the way, so it left ${path} as it was.`
-      : `dohc could not keep a copy of ${path}, so it left ${path} as it was.`;
+    const why = blockingPath
+      ? `${blockingPath} is in the way, so dohc left ${path} as it was.`
+      : `dohc left ${path} as it was.`;
     const next = blockingPath ? `Move ${blockingPath} somewhere else, then choose Try again.`
       : "Check that dohc can write to the workspace folder, then choose Try again.";
     const location = blockingPath ? `Blocking file: ${join(rootPath, blockingPath)}` : `Workspace folder: ${rootPath}`;
-    super(`${lead} ${next}\n${location}\nCause: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    super(`dohc could not keep a copy of ${path}\n${why} ${next}\n${location}\nCause: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
   }
 
   static async from(path: string, cause: unknown, rootPath: string): Promise<OutsideWriteCopyError> {

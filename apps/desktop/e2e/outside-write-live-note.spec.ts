@@ -196,8 +196,9 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
         const failureRow = page.locator("[data-notice-row]").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
         await expect(failureRow).toBeVisible({ timeout: 120_000 });
-        const failureBody = `dohc could not keep a copy of ${PATH}, because .dohc/local/outside-write-copies is in the way, so it left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`;
-        await expect(failureRow).toContainText(failureBody);
+        const failureBody = `.dohc/local/outside-write-copies is in the way, so dohc left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`;
+        // The title stands alone, so the row's clamp never hides the next step.
+        await expect(failureRow.getByText(failureBody, { exact: true })).toBeVisible();
         await expect(failureRow).not.toContainText("Check that dohc can write to the workspace folder");
         const listFailureRow = page.locator("[data-notice-row]").filter({ hasText: "dohc could not list every kept copy" });
         await expect(listFailureRow).toBeVisible();
@@ -288,6 +289,13 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       expect(final.disk).not.toContain("AGENT-1");
       expect(await readFile(join(temp.rootPath, copyPath), "utf8")).toBe("AGENT-1\n");
       await record("6", { ...final, copyPath, copyReplicationKinds: replicationOpKindsMentioning(temp.rootPath, copyPath), copyPushed: outsideCopyPushed(temp.rootPath, workspaceId, copyPath), outsideTextKept: true, ownerOnDisk: true });
+      // "History paused" follows capture. Once capture works again, the row clears by itself.
+      const captureFailed = async () => (await page.evaluate(workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.getSyncStatus({ workspaceId }), workspaceId)).historyCaptureFailed === true;
+      const captureRecovered = await expect.poll(captureFailed, { timeout: 120_000, intervals: [1_000] }).toBe(false).then(() => true, () => false);
+      await page.getByTestId("notice-center-toggle").click();
+      await expect(page.getByTestId("notice-history-capture-failed")).toHaveCount(captureRecovered ? 0 : 1, { timeout: 10_000 });
+      await page.getByTestId("notice-center-toggle").click();
+      await record("7-history", { captureRecovered, ...await snapshot() });
     } catch (error) {
       await record("failure", { error: error instanceof Error ? error.stack : String(error),
         settlementEvidence: await read(Promise.resolve().then(() => stack?.settlementEvidence())),

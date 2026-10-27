@@ -3,16 +3,24 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 type SyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
 
-type SyncFailureNotice = { message: string; detail: string; toast: boolean };
+type SyncFailureNotice = { title?: string; message: string; detail: string; toast: boolean };
+
+const COPY_FAILURE = "OutsideWriteCopyError: ";
 
 // Neither message vouches for this machine's copy: a failed sync pass does
 // not prove local writes are healthy, and each document shows its own save.
-export function syncFailureMessage(failure: SyncFailure): string {
-  if (failure.cause === "claim-refused") return failure.detail;
-  if (failure.detail.startsWith("OutsideWriteCopyError: ")) return `${failure.detail.slice("OutsideWriteCopyError: ".length).split("\n")[0]} Sync waits until then.`;
-  return failure.cause === "server-unreachable"
-    ? "dohc could not reach the server."
-    : "dohc could not sync this workspace.";
+// A copy dohc could not keep has a title line and a body line.
+export function syncFailureNotice(failure: SyncFailure): { title?: string; message: string } {
+  if (failure.cause === "claim-refused") return { message: failure.detail };
+  if (failure.detail.startsWith(COPY_FAILURE)) {
+    const [title = "", body = ""] = failure.detail.slice(COPY_FAILURE.length).split("\n");
+    return { title, message: `${body} Sync waits until then.` };
+  }
+  return {
+    message: failure.cause === "server-unreachable"
+      ? "dohc could not reach the server."
+      : "dohc could not sync this workspace.",
+  };
 }
 
 // One failed pass, named the same way whether the retry's answer or the
@@ -101,10 +109,7 @@ export function useSyncFailureNotice(input: {
         } else {
           shownFailures.set(askedFor, { sinceMs: next.sinceMs, toasted: true, dismissed: false });
         }
-        file(
-          { message: syncFailureMessage(next), detail: next.detail, toast: true },
-          key,
-        );
+        file({ ...syncFailureNotice(next), detail: next.detail, toast: true }, key);
       },
       (error: unknown) => {
         if (!mountedRef.current || workspaceRef.current !== askedFor) return;
@@ -149,10 +154,7 @@ export function useSyncFailureNotice(input: {
     if (shown.dismissed) return;
     const toast = !shown.toasted;
     if (toast) shown.toasted = true;
-    file(
-      { message: syncFailureMessage(current), detail: current.detail, toast },
-      key,
-    );
+    file({ ...syncFailureNotice(current), detail: current.detail, toast }, key);
   }, [attempts, cause, clear, detail, file, known, sinceMs, workspaceId]);
 
   // Back online after an outage: try now instead of waiting out the backoff.

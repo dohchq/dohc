@@ -414,11 +414,11 @@ export function useShellError(workspaceId: string) {
   // interrupts; otherwise the row keeps whatever toast its predecessor had.
   const reportSyncFailure = useCallback(
     (
-      notice: { message: string; detail: string; toast: boolean },
+      notice: { title?: string; message: string; detail: string; toast: boolean },
       retry: () => void,
     ) =>
       push(
-        { message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
+        { ...(notice.title ? { title: notice.title } : {}), message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
         notice.toast ? false : "quiet",
       ),
     [push],
