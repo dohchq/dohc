@@ -1,4 +1,5 @@
 import { relayShareOperations } from "./shareOperations";
+import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
@@ -264,6 +265,22 @@ describe("owner live document enrollment", () => {
       {path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged",canResume:false},
     ],nextCursor:null});
   });
+  it("offers no Resume after the real relay retires a held document and forgets its running hold", async () => {
+    const f = await heldDocumentFixture(workspaceId);
+    try {
+      expect((await f.stop()).status).toBe(200);
+      expect(f.host.holdReason()).toBeUndefined();
+      const h = harness();
+      h.request.mockImplementation(async (_credentials, path) => {
+        const response = await f.handle(new Request(`https://relay.test${path}`, {headers: {authorization: "Bearer owner-token"}}));
+        return response.json();
+      });
+      await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [{
+        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", canResume: false,
+      }], nextCursor: null});
+    } finally {await f.close();}
+  });
+
   // Proves: a deferred Stop does not offer Resume on a document whose server
   // copy misses an edit made while live editing was off.
   it.each(["live-edit-unadmitted", "conflict-parent-withheld"])("offers no Resume for a deferred Stop with %s",async reason => {

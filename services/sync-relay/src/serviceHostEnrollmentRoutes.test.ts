@@ -14,6 +14,7 @@ import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {JsonValue} from "@dohc/workspace-engine-client";
+import {heldDocumentFixture} from "./heldDocument.test-helper";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -372,6 +373,42 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {
+  const f = await heldDocumentFixture(undefined, effectIndex); cleanup.push(f.close);
+  expect((await (await f.handle(f.request())).json()).documents[0]).toMatchObject({reason: "conflict-parent-withheld"});
+  expect((await f.stop()).status).toBe(200);
+  expect(f.host.holdReason()).toBeUndefined();
+  f.storage.releaseServiceHostEnrollment({workspaceId: f.binding.workspaceId, objectId: f.binding.objectId, nowMs: 20});
+  expect(await (await f.handle(f.request("GET", "?retired=1"))).json()).toEqual({ok: true, documents: [{
+    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld",
+  }], nextCursor: null});
+  const resume = await f.handle(f.request("POST", "", {path: f.binding.currentPath}));
+  expect(resume.status).toBe(202);
+  expect(f.storage.readServiceHostEnrollment(f.binding.workspaceId, f.binding.currentPath)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+});
+
+it.each(["unmatched-parent", "other-document", "other-version", "earlier-epoch"])("does not infer a retired conflict hold from %s history", async change => {
+  const f = await heldDocumentFixture(); cleanup.push(f.close);
+  expect((await f.stop()).status).toBe(200);
+  if (change === "unmatched-parent") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.effects[0].momentId','another-moment') WHERE op_kind='conflict.resolve'");
+  if (change === "other-document") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.objectId','another-object') WHERE op_kind='moment.append'");
+  if (change === "other-version") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.versionId','branch') WHERE op_kind='moment.append'");
+  if (change === "earlier-epoch") f.raw.exec("UPDATE sync_relay_workspaces SET epoch_log_floor=2");
+  expect((await (await f.handle(f.request("GET", "?retired=1"))).json()).documents).toEqual([{
+    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired",
+  }]);
+});
+
+it("keeps divergence ahead of retired conflict history, and ignores an obsolete workspace identity", async () => {
+  const f = await heldDocumentFixture(); cleanup.push(f.close);
+  expect((await f.stop()).status).toBe(200);
+  vi.spyOn(f.host, "diverged").mockReturnValue(true);
+  const documents = async () => (await (await f.handle(f.request("GET", "?retired=1"))).json()).documents;
+  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "session-host-diverged"}]);
+  f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'");
+  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired"}]);
 });
 
 it("reports only a conflict-parent hold, after document state and existing blocks", async () => {

@@ -245,7 +245,8 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
         return response({ok: true, documents: page.documents.map(row => ({path: row.path, objectId: row.objectId, status: "retired",
-          ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
+          ...(diverged(row) ? {reason: "session-host-diverged"} : !changed(row) && storage.hasServiceHostConflictEffect(row)
+            ? {reason: "conflict-parent-withheld"} : {})})), nextCursor: page.nextCursor});
       }
       // Later pages of the edits the server kept, after the first page's `keptEditsCursor`.
       if (keptPage) {

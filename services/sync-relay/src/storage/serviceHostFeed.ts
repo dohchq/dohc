@@ -90,3 +90,19 @@ export function latestServiceHostDocumentUpdate(storage: StorageContext, input: 
     .get(input.workspaceId, input.objectId);
   return row ? Number(row.relay_seq) : 0;
 }
+
+/** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */
+export function hasServiceHostConflictEffect(storage: StorageContext, input: {workspaceId: string; objectId: string}): boolean {
+  return !!storage.db.prepare(`SELECT 1 FROM sync_relay_log AS effect INDEXED BY ${INDEX}
+    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='moment.append' AND relay_seq>?
+      AND json_extract(payload_json, '$.versionId')='main'
+      AND json_type(payload_json, '$.conflictId')='text' AND length(json_extract(payload_json, '$.conflictId'))>0
+      AND json_type(payload_json, '$.conflictEffectIndex')='integer' AND json_extract(payload_json, '$.conflictEffectIndex')>=0
+      AND EXISTS(SELECT 1 FROM sync_relay_log AS parent WHERE parent.workspace_id=effect.workspace_id AND parent.origin_id=effect.origin_id
+        AND parent.origin_seq=effect.origin_seq-json_extract(effect.payload_json, '$.conflictEffectIndex')-1
+        AND parent.op_kind='conflict.resolve' AND json_extract(parent.payload_json, '$.targetVersionId')='main'
+        AND json_extract(parent.payload_json, '$.conflictId')=json_extract(effect.payload_json, '$.conflictId')
+        AND json_extract(parent.payload_json, '$.effects[' || json_extract(effect.payload_json, '$.conflictEffectIndex') || '].momentId')=
+          json_extract(effect.payload_json, '$.momentId')) LIMIT 1`)
+    .get(input.workspaceId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+}

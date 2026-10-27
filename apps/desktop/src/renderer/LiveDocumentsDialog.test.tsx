@@ -59,6 +59,20 @@ function actions(path: string): string[] {
     .map((button) => button.textContent);
 }
 
+it("keeps a retired held note's explanation and offers no Resume or Stop, like a retired diverged note", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(page([
+    row("docs/held.md", {status: "retired", reason: "conflict-parent-withheld"}),
+    row("docs/diverged.md", {status: "retired", reason: "session-host-diverged"}),
+  ]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const held = await screen.findByTestId("live-document-row-docs/held.md");
+  expect(held.children[1]?.textContent).toBe("Can't resume");
+  expect(held.textContent).toContain("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.");
+  expect(actions("docs/held.md")).toEqual([]);
+  expect(actions("docs/diverged.md")).toEqual([]);
+});
+
 function paths(): string[] {
   return screen
     .getAllByTestId(/^live-document-row-/)
