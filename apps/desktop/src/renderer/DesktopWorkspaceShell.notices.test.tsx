@@ -1565,6 +1565,19 @@ describe("crash report notice", () => {
     expect(bridge.sendCrashReport).not.toHaveBeenCalled();
   });
 
+  it("offers Send report on the row as on the toast", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: false });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-crash-report");
+    await user.click(within(row).getByRole("button", { name: "Send report" }));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
+  });
+
   it("hands Send report to main, which asks, and says Report sent only when it went", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));

@@ -1744,24 +1744,36 @@ function buildTableControlDecorations(
   return DecorationSet.create(doc, decorations);
 }
 
-// Stretch the append strips of `table` to span its full right/bottom edge.
+type AppendStripLayout = {
+  rect: DOMRect;
+  colStrip: HTMLElement | null;
+  colTop: number | undefined;
+  rowStrip: HTMLElement | null;
+  rowLeft: number | undefined;
+  handles: { handle: HTMLElement; left: number | undefined }[];
+};
+
+function measureAppendStrips(table: HTMLElement): AppendStripLayout {
+  const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col");
+  const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row");
+  return {
+    rect: table.getBoundingClientRect(),
+    colStrip,
+    colTop: colStrip?.parentElement?.getBoundingClientRect().top,
+    rowStrip,
+    rowLeft: rowStrip?.parentElement?.getBoundingClientRect().left,
+    handles: Array.from(
+      table.querySelectorAll<HTMLElement>(".dohc-table-row-resize"),
+      (handle) => ({ handle, left: handle.parentElement?.getBoundingClientRect().left }),
+    ),
+  };
+}
+
+// Stretch the append strips to span the table's full right/bottom edge.
 // Inline styles override the CSS fallback (which only spans the anchor cell)
 // because the strip's absolute-positioning containing block is its anchor
 // cell, not the table.
-function sizeAppendStrips(table: HTMLElement): void {
-  const rect = table.getBoundingClientRect();
-  const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col");
-  const colCell = colStrip?.parentElement;
-  const colTop = colCell?.getBoundingClientRect().top;
-  const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row");
-  const rowCell = rowStrip?.parentElement;
-  const rowLeft = rowCell?.getBoundingClientRect().left;
-  const handles = Array.from(
-    table.querySelectorAll<HTMLElement>(".dohc-table-row-resize"),
-    (handle) => ({ handle, left: handle.parentElement?.getBoundingClientRect().left }),
-  );
-
-  // Read every anchor before changing styles to avoid a layout per row.
+function applyAppendStrips({ rect, colStrip, colTop, rowStrip, rowLeft, handles }: AppendStripLayout): void {
   if (colStrip && colTop !== undefined) {
     colStrip.style.top = `${rect.top - colTop}px`;
     colStrip.style.height = `${rect.height}px`;
@@ -1777,13 +1789,22 @@ function sizeAppendStrips(table: HTMLElement): void {
   }
 }
 
+// Measure every table before writing any style. A read after a write forces
+// a layout, so interleaving them costs one full layout per table.
+function sizeAppendStrips(tables: Iterable<HTMLElement>): void {
+  const layouts = Array.from(tables, measureAppendStrips);
+  layouts.forEach(applyAppendStrips);
+}
+
 // The CSS fallback only spans the anchor corner cell, so size every append
 // strip before edge hover. Otherwise a tall/wide table approached straight
 // from the right/bottom margin has no full-edge "+" target yet.
 function sizeAllAppendStrips(view: EditorView): void {
-  view.dom.querySelectorAll<HTMLElement>("table").forEach((table) => {
-    if (table.querySelector(".dohc-table-append")) sizeAppendStrips(table);
-  });
+  sizeAppendStrips(
+    Array.from(view.dom.querySelectorAll<HTMLElement>("table")).filter((table) =>
+      table.querySelector(".dohc-table-append"),
+    ),
+  );
 }
 
 type HoveredTable = { table: HTMLElement; col: number; row: number };
@@ -1859,7 +1880,7 @@ export function makeTableControlsPlugin(
       return false;
     }
     // Pane resizing and loaded images can change geometry without a document edit.
-    sizeAppendStrips(table);
+    sizeAppendStrips([table]);
     // Grips carry TableMap indices, so hover must use the same map: DOM
     // sibling counting drifts when a rowspan from above covers earlier
     // slots. A spanning cell activates its anchor row/column handle.

@@ -1106,6 +1106,19 @@ const LONG_NOTICE = {
   onDismiss: noop,
 };
 
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1728,6 +1741,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
