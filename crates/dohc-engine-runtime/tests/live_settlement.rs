@@ -4188,6 +4188,20 @@ async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
         .await
         .unwrap();
     let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    let resynced = f
+        .supervisor
+        .open(&f.db, 32)
+        .unwrap()
+        .actor
+        .ydoc_resync(
+            key.clone(),
+            Some(f.binding.lineage_claim_id.clone()),
+            tokio_util::sync::CancellationToken::new(),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert!(resynced.record_facts.is_empty());
     let doc = f.read(|db| dohc_engine_collab::load_doc_in(db, &key).unwrap());
     let update = doc
         .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# After restore\n")
