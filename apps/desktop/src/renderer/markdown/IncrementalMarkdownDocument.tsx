@@ -18,6 +18,7 @@ import {
   TABLE_ROW_HEIGHTS_RE,
   tableRowHeights,
 } from "@dohc/ydoc-projection/table-row-heights";
+import { assertSupportedListMarkdown } from "@dohc/ydoc-projection/list-markdown";
 import {
   activateReadOnlyLinkHref,
   type WorkspaceLinkTarget,
@@ -61,9 +62,24 @@ function remarkTableRowHeights() {
   return (tree: Root, file: { value: unknown }) => {
     const source = String(file.value);
     if (!source.includes(TABLE_ROW_HEIGHTS_COMMENT)) return;
-    const lines = source.split(/\r\n|\r|\n/u);
+    const lines = editorSource(source).split(/\r\n|\r|\n/u);
     applyTableRowHeights(tree, (line) => lines[line]);
   };
+}
+
+// In a list, the editor's import keeps the tabs in a line's text as text and
+// hides them from marked, so a comment with a tab after it is text there.
+// Its own list scan decides which tabs, so read the lines through it.
+function editorSource(source: string): string {
+  if (!source.includes("\t")) return source;
+  try {
+    return assertSupportedListMarkdown(source.replaceAll("\r\n", "\n"), (text) =>
+      text.replaceAll("\t", "\u{FFFD}"),
+    );
+  } catch {
+    // The editor can't open this list Markdown, so it has no height to match.
+    return source;
+  }
 }
 
 // The editor's parser, marked, reads a quote or a list item from its lines
@@ -71,17 +87,6 @@ function remarkTableRowHeights() {
 // item's indent with each tab four spaces. `editorLine` gives a source line
 // as the editor reads it inside `parent`.
 const QUOTE_PREFIX_RE = /^ {0,3}>[ \t]?/u;
-
-// In a list, the editor's import hides each tab after a line's indent, quote
-// marks and list markers from marked and keeps it as text. A comment with a
-// tab after it is then text too.
-const LIST_LINE_PREFIX_RE =
-  /^[ \t]*(?:>[ \t]*)*(?:(?:[-+*][ \t]+(?:\[[ xX]\][ \t]+)?|[0-9]{1,9}[.)][ \t]+)(?:>[ \t]*)*)*/u;
-
-function hideTextTabs(line: string): string {
-  const prefix = LIST_LINE_PREFIX_RE.exec(line)?.[0] ?? "";
-  return prefix + line.slice(prefix.length).replaceAll("\t", "\u{FFFD}");
-}
 
 function applyTableRowHeights(parent: Parents, editorLine: (line: number) => string): void {
   const children: Nodes[] = parent.children;
@@ -108,12 +113,11 @@ function applyTableRowHeights(parent: Parents, editorLine: (line: number) => str
     } else if (node.type === "listItem" && node.position) {
       // marked expands the tabs on an item's first line to the next tab stop.
       const first = node.position.start.line - 1;
-      const itemLine = (line: number) => hideTextTabs(editorLine(line));
-      const indent = listItemIndent(expandTabs(itemLine(first)));
+      const indent = listItemIndent(expandTabs(editorLine(first)));
       applyTableRowHeights(node, (line) =>
         (line === first
-          ? expandTabs(itemLine(line))
-          : itemLine(line).replaceAll("\t", "    ")
+          ? expandTabs(editorLine(line))
+          : editorLine(line).replaceAll("\t", "    ")
         ).slice(indent),
       );
     }
