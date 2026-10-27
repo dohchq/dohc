@@ -267,6 +267,25 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent).toHaveLength(sent);
     await h.ipc.shutdown();
   });
+
+  it("does not deliver an old head callback into a reopened editor for the same path", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession());
+    await h.ipc.open(sender, openPayload);
+    const old = h.capturedOpen()!;
+    await h.ipc.close(sender, {sessionId: openPayload.sessionId});
+    const reopened = {...openPayload, sessionId: "reopened-session"};
+    await h.ipc.open(sender, reopened);
+    const current = h.capturedOpen()!;
+    sender.sent.length = 0;
+
+    old.onHeadChanged?.("a".repeat(64));
+    old.onHeadChanged?.(null);
+    expect(sender.sent).toEqual([]);
+    current.onHeadChanged?.("b".repeat(64));
+    expect(sender.sent.at(-1)?.payload).toMatchObject({...reopened, headSha256: "b".repeat(64)});
+    await h.ipc.shutdown();
+  });
   it("names main's person when each request first arrives and keeps that person for its retries", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -777,6 +796,32 @@ describe("engine Y.Doc IPC adapter", () => {
     await noSettle.ipc.open(sender, openPayload);
     await expect(noSettle.ipc.retrySave(sender, retry)).rejects.toThrow("could not start a save");
     await noSettle.ipc.shutdown();
+  });
+
+  it("forwards Edit anyway only from the current local editor and does not carry it into a reopened editor", async () => {
+    const settleNow = vi.fn(async () => ({
+      momentId: "moment-1", path: "notes/a.md", content: null, sha256: "a".repeat(64), materialized: true,
+      projection: {contentKind: "richdoc" as const, sourceStateVectorSha256: "b".repeat(64), destructive: false},
+    }));
+    const h = harness(providerSession({settleNow}));
+    const sender = new FakeSender(7);
+    const consent = {...DOCUMENT, allowLossySourceSha256: "c".repeat(64)};
+    await h.ipc.open(sender, openPayload);
+    await expect(h.ipc.retrySave(new FakeSender(8), consent)).resolves.toBe("closed");
+    await expect(h.ipc.retrySave(sender, {...consent, workspaceId: "workspace-2"})).rejects.toThrow("another workspace");
+    expect(settleNow).not.toHaveBeenCalled();
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith({allowLossySourceSha256: consent.allowLossySourceSha256});
+    h.setGeneration(2);
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("closed");
+    expect(settleNow).toHaveBeenCalledOnce();
+
+    await h.ipc.retireSender(sender, 1);
+    await h.ipc.open(sender, {...openPayload, sessionId: "reopened-session"});
+    await expect(h.ipc.retrySave(sender, DOCUMENT)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith(undefined);
+    expect(h.capturedOpen()?.allowLossySourceSha256).toBeUndefined();
+    await h.ipc.shutdown();
   });
 
   it("marks only a settle that failed to write as a save failure, and names a read-only file", async () => {
