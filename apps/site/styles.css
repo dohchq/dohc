@@ -234,14 +234,11 @@ body {
 .nav-github:hover { color: var(--ink); border-color: var(--ink); }
 .nav-github:focus-visible { border-radius: 10px; }
 .nav-github svg { width: 15px; height: 15px; flex: none; fill: currentColor; }
-.nav-github-stars { padding-left: 8px; border-left: 1px solid var(--line); color: var(--ink); font-variant-numeric: tabular-nums; }
-.nav-github-stars:empty { display: none; }
 
-/* A narrower header has room for only the mark and the count. */
-@media (max-width: 800px) {
-  .nav-github, .nav-github:hover { gap: 6px; padding: 0 2px; border-color: transparent; }
+/* A narrower header has room for only the mark. */
+@media (max-width: 840px) {
+  .nav-github { padding: 0 10px; }
   .nav-github-label { display: none; }
-  .nav-github-stars { padding-left: 0; border-left: 0; }
 }
 
 @media (max-width: 640px) {
