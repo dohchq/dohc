@@ -9,7 +9,7 @@ import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents"
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
-import {settlementResult,type CommittedSettlement} from "./liveSettlement";
+import {settlementResponse,settlementPending,type CommittedSettlement} from "./liveSettlement";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
@@ -296,10 +296,11 @@ export class ServiceActivationDriver {
       if(!ack)break;
       delivery=this.#delivery.recordDepartedApplication({...input,binding:delivery.binding},ack);
     }
-    const response=await o.client.sendRequest({...request(),method:"liveApplication.settle",
-      params:{registrationId,terminalReceipt:delivery.tip?{...delivery.tip}:null}},signal);
+    const settled=await settlementResponse(o.client.sendRequest({...request(),method:"liveApplication.settle",
+      params:{registrationId,terminalReceipt:delivery.tip?{...delivery.tip}:null}},signal),delivery.tip);
     check();
-    return {kind:"settled",settlement:settlementResult(response.result,delivery.tip)};
+    if(settlementPending(settled))return settled;
+    return {kind:"settled",settlement:settled};
   }
   /**
    * Activates the target and drains it. A target with no owner here first pulls

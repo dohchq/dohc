@@ -1,5 +1,5 @@
 import {expect, it, vi} from "vitest";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -18,6 +18,8 @@ function fixture(events: number, refusals: (call: number) => boolean,
   let applied: LiveUpdateReceipt | null = null, requestId = 0, calls = 0;
   const store = {
     open: vi.fn(() => ({baseline: {binding}})),
+    openSettlement: vi.fn(() => ({})),
+    settlement: vi.fn(() => ({binding,terminalReceipt: applied})),
     close: vi.fn(),
     next: vi.fn(() => {
       const cursor = (applied?.journalCursor ?? 0) + 1;
@@ -96,6 +98,26 @@ it("propagates a failed settlement", async () => {
   await expect(f.consumer.drain(document)).rejects.toBe(failure);
   expect(f.offered()).toEqual([declared(1),declared(2)]);
   expect(f.store.close).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the accepted prefix when author-capacity settlement holds the file save", async () => {
+  const failure = new EngineRequestError(1, {code: "CONFLICT",message: "markdown-write-held",retry: "no"});
+  const f = fixture(2, call => call === 2, {failure});
+  expect(await f.consumer.drain(document)).toEqual({kind: "pending",reason: "markdown-write-held"});
+  expect(f.store.acknowledge).toHaveBeenCalledTimes(1);
+  expect(f.offered()).toEqual([declared(1),declared(2)]);
+  expect(f.settled).toEqual([receipt(1)]);
+  expect(f.store.close).toHaveBeenCalledTimes(1);
+});
+
+it("returns explicit settlement pending without a covering receipt or another accepted edit", async () => {
+  const f = fixture(1, () => false);
+  await f.consumer.drain(document);
+  f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(2,
+    {code: "CONFLICT",message: "markdown-write-held",retry: "no"}));
+  expect(await f.consumer.settle(document)).toEqual({kind: "pending",reason: "markdown-write-held"});
+  expect(f.store.acknowledge).toHaveBeenCalledTimes(1);
+  expect(f.offered()).toEqual([declared(1)]);
 });
 
 it("leaves an earlier unresolved file write to backoff without settling", async () => {

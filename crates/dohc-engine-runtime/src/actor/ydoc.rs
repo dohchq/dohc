@@ -2185,6 +2185,18 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, _update_sha| {
+            // Maintenance appends are accepted live state. Their file index waits for settlement.
+            if !claim_triggers && actor_origin_id.as_deref() == Some("engine") && attribution.is_none() {
+                let head = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
+                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+                let fields = head.snapshot.as_ref().map(|snapshot| {
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&snapshot.text)
+                        .map_or_else(|| serde_json::json!({}), |(fields, _)| fields)
+                }).unwrap_or_else(|| serde_json::json!({}));
+                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(tx,
+                    &key.workspace_id, &key.version_id, &key.object_id, &fields)
+                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+            }
             if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
@@ -3165,11 +3177,14 @@ pub(super) fn ydoc_settle_on_store(
             operation_id: session_id.to_owned(),
             kind: if live_audit.is_some() { WriteObligationKind::AuditedSettle }
                 else if kind == SettlementKind::CollectionAdoption { WriteObligationKind::CollectionAdoption }
+                else if session_id.starts_with("collection-relation-cleanup:") { WriteObligationKind::RelationCleanup }
+                else if session_id == "owner-live-stop" { WriteObligationKind::OwnerStop }
                 else if session_id == "link-rewrite-baseline" { WriteObligationKind::LinkBaseline }
                 else { WriteObligationKind::Session },
             path: path.to_owned(),
-            retry_inputs: serde_json::json!({"expectedHeadSha256": expected_head_sha,
-                "restoreGeneration": restore_generation, "useReader": use_reader}),
+            retry_inputs: if let Some(audit) = live_audit { audit.markdown_retry_inputs() } else {
+                serde_json::json!({"expectedHeadSha256": expected_head_sha,
+                    "restoreGeneration": restore_generation, "useReader": use_reader}) },
             held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: current_sha.clone(),
             source_sha256: None, settled_head_sha256: None,
         };
@@ -3532,6 +3547,10 @@ pub(super) fn refresh_markdown_witnesses_on_store(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "markdown_refresh_tests.rs"]
+mod markdown_refresh_tests;
 
 fn refresh_head_materialized_in(
     conn: &rusqlite::Connection, key: &DocKey, path: &str, sha256: &str,

@@ -187,6 +187,13 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
         return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
     }
+    if matches!(error, RuntimeError::MarkdownWriteHeld { .. } | RuntimeError::Sync(SyncError::MarkdownWriteHeld { .. })) {
+        return WireError::new(ErrorCode::Conflict, "markdown-write-held");
+    }
+    if matches!(error, RuntimeError::Collab(CollabError::MarkdownWitnessCheckPending { .. })
+        | RuntimeError::Sync(SyncError::MarkdownWitnessCheckPending { .. })) {
+        return WireError::new(ErrorCode::Overloaded, "markdown-witness-check-pending");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }

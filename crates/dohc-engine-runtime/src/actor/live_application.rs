@@ -1492,7 +1492,7 @@ fn settle_audited(
         Some(&binding.lineage_claim_id),
         Some(audit.expected_head().to_owned()),
         audit.restored_source().map(ToOwned::to_owned),
-        "configured-live-application",
+        &audit.markdown_operation_id(),
         &(),
         now_ms,
         faults,

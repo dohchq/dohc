@@ -47,12 +47,13 @@ const AUTHOR_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(5);
 #[derive(Default)]
 struct AuthorSettlementQueue {
     queued: bool,
+    held: bool,
     retry_after: Option<Instant>,
 }
 
 impl AuthorSettlementQueue {
     fn try_queue(&mut self, now: Instant) -> bool {
-        if self.queued
+        if self.queued || self.held
             || self
                 .retry_after
                 .is_some_and(|retry_after| now < retry_after)
@@ -66,6 +67,14 @@ impl AuthorSettlementQueue {
     fn finish(&mut self, failed: bool, now: Instant) {
         self.queued = false;
         self.retry_after = failed.then(|| now + AUTHOR_SETTLEMENT_RETRY_DELAY);
+    }
+
+    fn changed_inputs(&mut self) { self.held = false; }
+
+    fn hold(&mut self) {
+        self.queued = false;
+        self.held = true;
+        self.retry_after = None;
     }
 }
 
@@ -702,6 +711,7 @@ impl EngineService {
         // A released row says whether its settlement wrote the file, so the
         // desktop claims recovered edits only when they reached it.
         let mut materialized = vec![false; rows.len()];
+        let mut settlement_reasons = vec![None; rows.len()];
         if action == "release" {
             for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
@@ -760,9 +770,15 @@ impl EngineService {
 
                         None,
                     )
-                    .await
-                    .map_err(map_runtime)?
-                    .settled();
+                    .await;
+                let settled = match settled {
+                    Ok(outcome) => outcome.settled(),
+                    Err(RuntimeError::MarkdownWriteHeld { .. }) => {
+                        settlement_reasons[index] = Some("markdown-write-held");
+                        continue;
+                    }
+                    Err(error) => return Err(map_runtime(error)),
+                };
                 if settled
                     .as_ref()
                     .is_some_and(|s| s.collection_reconcile_required)
@@ -776,8 +792,9 @@ impl EngineService {
         if action == "release"
             && let Some(values) = stops.as_array_mut()
         {
-            for (value, materialized) in values.iter_mut().zip(materialized) {
+            for ((value, materialized), reason) in values.iter_mut().zip(materialized).zip(settlement_reasons) {
                 value["materialized"] = json!(materialized);
+                if let Some(reason) = reason { value["settlementReason"] = json!(reason); }
             }
         }
         Ok(json!({"stops":stops}))
@@ -1678,6 +1695,7 @@ impl EngineService {
                 if let Ok(append) = &outcome
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
+                    if !append.outcome.deduped { session.author_settlement.changed_inputs(); }
                     if session.first_update_pending && require_empty && append.lineage_originated_here
                         && let Some(claim) = append.lineage_claim_id.clone()
                         && let Some(consent) = session.conversion_consent.as_ref()
@@ -1717,6 +1735,13 @@ impl EngineService {
                         };
                         let settle_now = match now_ms() {
                             Ok(now) => now,
+                            Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
+                                eprintln!("engine: queued author coverage settlement held: {error}");
+                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                                    session.author_settlement.hold();
+                                }
+                                return;
+                            }
                             Err(error) => {
                                 eprintln!(
                                     "engine: queued author coverage settlement clock failed: {error}"
@@ -1920,6 +1945,9 @@ impl EngineService {
                 view.key, params.session_id.clone(), view.lineage_claim_id, view.restore_generation,
                 source, view.last_settled_sha.or(view.open_head_sha),
             )));
+        }
+        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
+            session.author_settlement.changed_inputs();
         }
         let settled = self
             .ydoc_settle_inner(
@@ -2485,6 +2513,18 @@ mod tests {
             queue.try_queue(now + AUTHOR_SETTLEMENT_RETRY_DELAY),
             "success clears backoff"
         );
+    }
+
+    #[test]
+    fn held_author_settlement_waits_for_changed_inputs_or_explicit_retry() {
+        let mut queue = AuthorSettlementQueue::default();
+        let now = Instant::now();
+        assert!(queue.try_queue(now));
+        queue.hold();
+        assert!(!queue.try_queue(now + Duration::from_secs(600)));
+        assert!(queue.retry_after.is_none());
+        queue.changed_inputs();
+        assert!(queue.try_queue(now));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

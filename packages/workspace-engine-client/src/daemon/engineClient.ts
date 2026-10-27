@@ -854,10 +854,11 @@ export class EngineClient implements EngineTransport {
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
       // Only a release says whether settlement wrote the file.
-      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized"] : ["deferred", "keptSnapshot"];
+      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized", "settlementReason"] : ["deferred", "keptSnapshot"];
       if (!row || typeof row !== "object" || Object.keys(row).filter(key => !optional.includes(key)).sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown};
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown;settlementReason?: unknown};
       if (r.materialized !== undefined && typeof r.materialized !== "boolean") throw new TypeError("Invalid Stop materialization.");
+      if (r.settlementReason !== undefined && (r.settlementReason !== "markdown-write-held" || r.materialized !== false || r.state !== "released")) throw new TypeError("Invalid Stop settlement reason.");
       if (r.keptSnapshot !== undefined && (typeof r.keptSnapshot !== "string" || !KEPT_SNAPSHOT.test(r.keptSnapshot) || r.binding === null)) throw new TypeError("Invalid Stop kept edits.");
       if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
       const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
@@ -873,6 +874,7 @@ export class EngineClient implements EngineTransport {
       }
       return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {}),
         ...(typeof r.keptSnapshot === "string" ? {keptSnapshot:r.keptSnapshot} : {}),
+        ...(r.settlementReason === "markdown-write-held" ? {settlementReason: r.settlementReason} : {}),
         ...(typeof r.materialized === "boolean" ? {materialized:r.materialized} : {})};
     });
   }

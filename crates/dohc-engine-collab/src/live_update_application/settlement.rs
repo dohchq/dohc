@@ -63,6 +63,16 @@ fn audit_error(error: ApplicationError) -> ApplicationError {
 }
 
 impl LiveSettlementAudit {
+    pub fn markdown_retry_inputs(&self) -> serde_json::Value {
+        serde_json::json!({"namespace": self.namespace, "binding": self.binding,
+            "coordinate": self.coordinate, "terminalCursor": self.terminal_cursor,
+            "receipts": self.receipts, "intervalDigest": self.interval_digest})
+    }
+
+    pub fn markdown_operation_id(&self) -> String {
+        format!("live-settle:{}", crate::hex_sha256(self.markdown_retry_inputs().to_string().as_bytes()))
+    }
+
     /// A compensated filesystem marker can be restored only for this retained projection.
     pub fn covers_projection_in(
         &self,

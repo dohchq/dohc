@@ -6,7 +6,7 @@ import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
 import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
-import {settlementResult,type CommittedSettlement} from "./liveSettlement.js";
+import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
@@ -57,8 +57,8 @@ export class OwnerCommittedDelivery {
   }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
-  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<CommittedSettlement>;
-  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal): Promise<OwnerDeliveryOutcome | CommittedSettlement> {
+  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<SettlementOutcome>;
+  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
     const document = parseLiveDocumentKey(value), key = JSON.stringify(document), c = this.connection;
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
@@ -150,9 +150,9 @@ export class OwnerCommittedDelivery {
           if (result.status === "pending" && result.reason === "settlement-required") {
             // The host's author coverage is full. Settle what it applied once, then offer the identical event again.
             if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-            const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
+            const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
             check(); latest.assertCurrent();
-            const settled = settlementResult(response.result,progress.terminal);
+            if (settlementPending(settled)) {pendingReason = settled.reason; break;}
             if (!settled.materialized) { pendingReason = SETTLEMENT_UNMATERIALIZED; break; }
             adopted.settled = settled;
             settledSinceApply = true;
@@ -183,15 +183,16 @@ export class OwnerCommittedDelivery {
       await applyPending();
       if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
         ? {kind: "pending",reason: pendingReason ?? "Owner delivery pass reached its work budget.",
-          continueDrain: pendingReason !== SETTLEMENT_UNMATERIALIZED && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
+          continueDrain: pendingReason === null && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
         : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
+      if (pendingReason === "markdown-write-held" || pendingReason === "markdown-witness-check-pending") return {kind: "pending", reason: pendingReason};
       if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
       if (adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
-      const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
+      const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
-      const settled = settlementResult(response.result,progress.terminal);
+      if (settlementPending(settled)) return settled;
       if (settled.materialized) adopted.settled = settled;
       return settled;
     } finally { this.#active.delete(key); }
