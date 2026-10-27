@@ -77,8 +77,10 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
   );
 }
 
-function hasDuplicateKeys(entries: FrontmatterEntry[]): boolean {
-  return duplicateKeySet(entries).size > 0;
+// Whether another row has this name, whatever its case.
+function nameTaken(index: number, key: string, entries: FrontmatterEntry[]): boolean {
+  const name = key.trim().toLowerCase();
+  return name !== "" && entries.some((entry, i) => i !== index && editableKey(entry)?.toLowerCase() === name);
 }
 
 function shouldDeferKeyCommit(
@@ -277,7 +279,6 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (refused) return;
     const previous = editableEntries(sourceEntries);
     setEntries(next);
-    if (hasDuplicateKeys(next)) return;
     try {
       if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
@@ -301,8 +302,32 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     }
   }
 
+  // A name another property has can't be saved. It stays on its pill, apart
+  // from the rows that save, so every other property keeps saving as you type.
+  // It goes once its row holds another property or no other has the name.
+  const [heldName, setHeldName] = useState<{ index: number; key: string | undefined; text: string } | null>(null);
+  function heldText(index: number): string | undefined {
+    const entry = entries[index];
+    return entry && heldName?.index === index && heldName.key === entry.sourceKey
+      && nameTaken(index, heldName.text, entries)
+      ? heldName.text
+      : undefined;
+  }
+  useLayoutEffect(() => {
+    if (heldName && heldText(heldName.index) === undefined) setHeldName(null);
+  });
+
   function setKey(index: number, key: string) {
-    const next = entries.map((entry, i) => (i === index ? { ...entry, key } : entry));
+    const entry = entries[index];
+    if (entry && nameTaken(index, key, entries)) {
+      setHeldName({ index, key: entry.sourceKey, text: key });
+      // The row keeps the name it was read with until the new name is free.
+      const read = entry.sourceKey ?? "";
+      if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
+      return;
+    }
+    if (heldName?.index === index) setHeldName(null);
+    const next = entries.map((row, i) => (i === index ? { ...row, key } : row));
     if (shouldDeferKeyCommit(index, key, next)) {
       setEntries(next);
       return;
@@ -375,14 +400,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
-          const duplicate = duplicates.has(entry.key.trim().toLowerCase());
+          const held = heldText(index);
+          const duplicate = held !== undefined || duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (
             <div key={index} data-testid="property-row" className={PILL}>
               <input
                 data-testid="property-key"
                 aria-label={`Property ${index + 1} name`}
-                value={entry.key}
+                value={held ?? entry.key}
                 placeholder="Property"
                 spellCheck={false}
                 readOnly={refused}
@@ -400,7 +426,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   reserved name
                 </span>
               ) : duplicate ? (
-                <span data-testid="property-duplicate" className={TOPMATTER_FLAG} title="Use a unique property name.">
+                <span
+                  data-testid="property-duplicate"
+                  className={TOPMATTER_FLAG}
+                  title={held === undefined ? "Use a unique property name." : "This name isn't saved. Another property has it."}
+                >
                   duplicate name
                 </span>
               ) : entry.readOnly !== undefined ? (

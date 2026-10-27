@@ -362,9 +362,11 @@ describe("PropertiesPanel", () => {
 
       await user.clear(screen.getByLabelText("Property 2 name"));
       await user.type(screen.getByLabelText("Property 2 name"), "owner");
-      const rows = screen.getAllByTestId("property-row");
-      expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.closest('[data-testid="property-row"]'))).toEqual(rows);
-      expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+      const flag = screen.getByTestId("property-duplicate");
+      expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+      expect(flag.title).toBe("This name isn't saved. Another property has it.");
+      expect(screen.getByLabelText("Property 2 name")).toHaveProperty("value", "owner");
+      expect(propertyValue("owner")).toBe("Sam");
       expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: Draft\n---\n");
 
       await user.clear(screen.getByLabelText("Property 2 name"));
@@ -456,7 +458,7 @@ describe("PropertiesPanel", () => {
     await user.clear(screen.getByDisplayValue("status"));
     await user.type(screen.getByLabelText("Property 1 name"), "owner");
 
-    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
     expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
 
     await user.clear(screen.getAllByTestId("property-key")[0]);
@@ -466,6 +468,58 @@ describe("PropertiesPanel", () => {
     expect(screen.getByTestId("current-body").textContent).toBe(
       "---\nid: note-1\ntitle: Plan\nphase: draft\nowner: ice\n---\n\n# Plan\n",
     );
+  });
+
+  it("keeps saving other properties while a name another property has is held", async () => {
+    const user = userEvent.setup();
+    const initialBody = "---\nstatus: draft\nowner: Sam\ntags: [kyoto]\n---\n\nBody\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.type(screen.getByLabelText("Property owner value"), "a");
+    await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+    expect(screen.getByTestId("current-body").textContent).toBe(
+      "---\nstatus: draft\nowner: Sama\ntags:\n  - kyoto\n  - osaka\n---\n\nBody\n",
+    );
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "owner");
+    expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+
+    await user.type(screen.getByLabelText("Property 1 name"), "2");
+
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.getByTestId("current-body").textContent).toBe(
+      "---\nowner2: draft\nowner: Sama\ntags:\n  - kyoto\n  - osaka\n---\n\nBody\n",
+    );
+  });
+
+  it("shows a held name's property as saved once no other property has the name", async () => {
+    const user = userEvent.setup();
+    const initialBody = "---\nstatus: draft\nowner: Sam\n---\n\nBody\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.clear(screen.getByLabelText("Property 2 name"));
+    await user.type(screen.getByLabelText("Property 2 name"), "lead");
+
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "status");
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nlead: Sam\n---\n\nBody\n");
+  });
+
+  it("flags both names and keeps saving other properties when the file holds a name in two cases", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nOwner: Ada\nstatus: draft\n---\n\nBody\n"} />);
+
+    expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.title)).toEqual([
+      "Use a unique property name.",
+      "Use a unique property name.",
+    ]);
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nOwner: Ada\nstatus: draft!\n---\n\nBody\n");
   });
 
   it.each([
@@ -592,7 +646,7 @@ describe("PropertiesPanel", () => {
       try {
         render(<PropertiesPanel ydoc={doc} />);
         await rename(user, "budget", "wifi");
-        expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+        expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
         await user.clear(screen.getByLabelText("Property 1 name"));
         await user.type(screen.getByLabelText("Property 1 name"), "title");
         expect(screen.getByTestId("property-reserved")).toBeTruthy();
@@ -1143,8 +1197,54 @@ describe("PropertiesPanel", () => {
     await user.clear(screen.getByDisplayValue("status"));
     await user.type(screen.getByLabelText("Property 1 name"), "owner");
 
-    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
     expect(frontmatter.get("status")).toBe("draft");
     expect(frontmatter.get("owner")).toBe("ice");
+  });
+
+  it("keeps saving a live document's other properties while a name another property has is held", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "Owner");
+      await user.type(screen.getByLabelText("Property owner value"), "a");
+
+      expect(frontmatterMapValues(frontmatter)).toEqual({ status: "draft", owner: "Sama" });
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "Owner");
+      expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "lead");
+
+      expect(frontmatterMapValues(frontmatter)).toEqual({ lead: "draft", owner: "Sama" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("drops a held name when another device renames its property", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "owner");
+
+      replica.getMap("frontmatter").delete("status");
+      setFrontmatterValue(replica, "phase", "draft");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+
+      expect(screen.queryByTestId("property-duplicate")).toBeNull();
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "phase");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", phase: "draft" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
   });
 });
