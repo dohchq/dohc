@@ -2032,6 +2032,57 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(discardUnsentState).not.toHaveBeenCalled();
   });
 
+  it("reports an outside write to an open note before the next health poll", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes/a.md", "seed");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed" });
+    const sessions = mockLiveSessions(loopback);
+    const live = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let paths: string[] = [];
+    const deferredWrites = vi.fn(async () => paths);
+    const store = new Proxy(live, {
+      get(target, property) {
+        if (property === "deferredWrites") return deferredWrites;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const changedOutside = vi.fn();
+    const engine = capture(root, {
+      store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "seed");
+        return { doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => undefined, close: async () => undefined,
+        } as unknown as EngineYdocProviderSession;
+      },
+    });
+    try {
+      engine.start();
+      await engine.flush();
+      expect(deferredWrites).not.toHaveBeenCalled();
+      const session = await engine.openYDocSession({ path: "notes/a.md", onRemoteUpdate: () => undefined, onChangedOutside: changedOutside });
+      await vi.advanceTimersByTimeAsync(0);
+      paths = ["notes/a.md"];
+      await vi.advanceTimersByTimeAsync(500);
+      expect(changedOutside).toHaveBeenCalledWith(false);
+      paths = [];
+      await session.close();
+      const readsAfterClose = deferredWrites.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(deferredWrites).toHaveBeenCalledTimes(readsAfterClose);
+    } finally {
+      await engine.stop();
+      await live.close();
+      vi.useRealTimers();
+    }
+  });
+
   // #2463 in a synced workspace. A replicated release succeeds over a save
   // refused because the file changed outside dohc. The close then waits for
   // capture to record the outside version, as a local-only eviction does, and
@@ -2047,6 +2098,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const statusReads: string[][] = [];
     const store = new Proxy(live, {
       get(target, property) {
+        if (property === "deferredWrites") return async () => released ? [] : ["notes/a.md"];
         if (property === "watcherStatus") {
           return async () => {
             const deferredWrites = released ? [] : ["notes/a.md"];

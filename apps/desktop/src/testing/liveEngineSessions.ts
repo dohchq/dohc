@@ -60,6 +60,8 @@ export function daemonCaptureLifecycleAnswer(
       return { id: request.id, result: { moved: false, reason: "no-replace-unsupported" } };
     case "watcher.status":
       return { id: request.id, result: READY_WATCHER_STATUS };
+    case "watcher.deferredWrites":
+      return { id: request.id, result: { deferredWrites: [] } };
     case "collections.listPendingAdoptions":
       return { id: request.id, result: { adoptions: [], nextCursor: null } };
     default:

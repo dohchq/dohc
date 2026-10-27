@@ -186,6 +186,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
+  deferredWrites: VersionedLiveAdapter["deferredWrites"];
   // Files dohc moved aside while saving because another program changed
   // them meanwhile, and the step that moves one to a visible copy.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
@@ -1532,6 +1533,13 @@ export function createCaptureLiveStores(
 
     async watcherStatus() {
       return await runRead(async (adapter) => await adapter.watcherStatus());
+    },
+
+    async deferredWrites(signal?: AbortSignal) {
+      return await runRead(async (adapter) => {
+        signal?.throwIfAborted();
+        return await adapter.deferredWrites(signal);
+      });
     },
 
     async listKeptCopies() {

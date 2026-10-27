@@ -261,7 +261,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async workspaceRequest<M extends Exclude<WorkspaceMethod, "workspace.open">>(
     method: M,
     params: WorkspaceMethodParamsMap[M],
-    options?: { idempotencyKey?: string; deadlineMs?: number },
+    options?: { idempotencyKey?: string; deadlineMs?: number; cancelSignal?: AbortSignal },
   ): Promise<WorkspaceMethodResultMap[M]> {
     if (method === WORKSPACE_METHOD.collectionsQuery) {
       return this.collectionRequest(
@@ -1676,6 +1676,13 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async deferredWrites(signal?: AbortSignal): Promise<string[]> {
+    const result = await this.workspaceRequest(WORKSPACE_METHOD.watcherDeferredWrites, {}, {
+      cancelSignal: signal,
+    });
+    return result.deferredWrites;
   }
 
   async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {

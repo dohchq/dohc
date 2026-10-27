@@ -2589,6 +2589,75 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
         .expect("close");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_write_snapshots_follow_outside_edits_and_session_release() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "note.md", b"Before.\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "note.md", "contentKind": "plaintext" }),
+    )
+    .await;
+    for id in [3, 4] {
+        assert_eq!(
+            call(&transport, &handle, id, "watcher.deferredWrites", json!({})).await,
+            json!({ "deferredWrites": [] })
+        );
+    }
+
+    write_file(scratch.path(), "note.md", b"Written by an agent.\n");
+    call(&transport, &handle, 5, "capture.reconcile", json!({})).await;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let snapshot = call(&transport, &handle, 6, "watcher.deferredWrites", json!({})).await;
+            if snapshot == json!({ "deferredWrites": ["note.md"] }) {
+                break;
+            }
+            call(&transport, &handle, 7, "capture.flush", json!({})).await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("capture reports the outside write while the session holds it");
+    assert_eq!(
+        call(&transport, &handle, 8, "watcher.deferredWrites", json!({})).await,
+        json!({ "deferredWrites": ["note.md"] })
+    );
+
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            call(&transport, &handle, 10, "capture.flush", json!({})).await;
+            let snapshot = call(&transport, &handle, 11, "watcher.deferredWrites", json!({})).await;
+            if snapshot == json!({ "deferredWrites": [] }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("capture clears the snapshot after session release");
+    assert_eq!(
+        read_text(&transport, &handle, 12, "note.md").await.as_deref(),
+        Some("Written by an agent.\n")
+    );
+    call(&transport, &handle, 13, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -2602,7 +2671,11 @@ async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
         )
         .await
         .expect("close");
-    for (id, method) in [(4, "watcher.status"), (5, "capture.flush")] {
+    for (id, method) in [
+        (4, "watcher.status"),
+        (5, "capture.flush"),
+        (6, "watcher.deferredWrites"),
+    ] {
         let stale = transport
             .call(
                 RequestContext::unbounded(),

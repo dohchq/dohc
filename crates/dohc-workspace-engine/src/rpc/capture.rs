@@ -422,6 +422,18 @@ impl EngineService {
             .map_err(map_runtime)?;
         Ok(json!({"cleared":true}))
     }
+    pub(super) fn watcher_deferred_writes(
+        &self,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let paths = lock(&open.capture)
+            .as_ref()
+            .map(|driver| driver.status().deferred_writes())
+            .unwrap_or_default();
+        Ok(json!({ "deferredWrites": paths }))
+    }
+
     pub(super) async fn watcher_status(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -1367,6 +1379,42 @@ mod tests {
             .expect("open");
         let handle = serde_json::from_value(opened["workspace"].clone()).expect("handle");
         (scratch, service, handle)
+    }
+
+    #[tokio::test]
+    async fn deferred_write_snapshot_without_a_driver_returns_immediately() {
+        let (_scratch, service, handle) = lease_fixture().await;
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let hold = open.capture_apply_gate.lock().await;
+        for _ in 0..2 {
+            assert_eq!(
+                service.watcher_deferred_writes(Some(handle.clone())).unwrap(),
+                json!({ "deferredWrites": [] })
+            );
+        }
+        drop(hold);
+        service.workspace_close(Some(handle.clone())).await.unwrap();
+        assert!(service.watcher_deferred_writes(Some(handle)).is_err());
+    }
+
+    #[tokio::test]
+    async fn deferred_write_snapshot_returns_during_capture_shutdown() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "deferred-shutdown" }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        service.shutdown_all_capture().await;
+        assert_eq!(
+            service.watcher_deferred_writes(Some(handle.clone())).unwrap(),
+            json!({ "deferredWrites": [] })
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
