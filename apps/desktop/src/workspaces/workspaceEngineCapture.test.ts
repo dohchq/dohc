@@ -3668,7 +3668,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
         versionId: "main", path: "n.md", operation: "write", contentKind: "text",
       }] }, commit));
       if (copyFails) {
-        await expect(run).rejects.toThrow("dohc could not keep a copy of n.md\n.dohc/local/outside-write-copies is in the way, so dohc left n.md as it was.\nMove .dohc/local/outside-write-copies somewhere else, then choose Try again.");
+        await expect(run).rejects.toThrow("dohc could not keep a copy of n.md\nMove .dohc/local/outside-write-copies out of the way, then choose Try again.\nUntil then, dohc leaves n.md as it was.");
         await expect(run).rejects.toThrow(`Blocking file: ${join(root, ".dohc/local/outside-write-copies")}`);
         await expect(run).rejects.toThrow("Cause:");
         expect(commit).not.toHaveBeenCalled();

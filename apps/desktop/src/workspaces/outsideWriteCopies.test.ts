@@ -30,9 +30,9 @@ describe("materialization keeps outside bytes before replacement", () => {
   it.each([undefined, ".dohc", ".dohc/local", ".dohc/local/outside-write-copies"])("reports the cause and exact recovery path, blocker=%s", blockingPath => {
     const rootPath = "C:\\workspace";
     const error = new OutsideWriteCopyError("n.md", new Error("write refused"), rootPath, blockingPath);
-    expect(error.message.split("\n").slice(0, 3)).toEqual(["dohc could not keep a copy of n.md", ...(blockingPath
-      ? [`${blockingPath} is in the way, so dohc left n.md as it was.`, `Move ${blockingPath} somewhere else, then choose Try again.`]
-      : ["dohc left n.md as it was.", "Check that dohc can write to the workspace folder, then choose Try again."])]);
+    expect(error.message.split("\n").slice(0, 3)).toEqual(["dohc could not keep a copy of n.md",
+      blockingPath ? `Move ${blockingPath} out of the way, then choose Try again.` : "Check that dohc can write to the workspace folder, then choose Try again.",
+      "Until then, dohc leaves n.md as it was."]);
     expect(error.message).toContain("Cause: write refused");
     expect(error.message).toContain(blockingPath ? `Blocking file: ${join(rootPath, blockingPath)}` : `Workspace folder: ${rootPath}`);
     expect(error.message).not.toContain("Move it somewhere else.");
@@ -46,8 +46,7 @@ describe("materialization keeps outside bytes before replacement", () => {
     const cause = await copies.beforeWrite("n.md", Buffer.from("incoming"), () => undefined, isRecorded).catch(error => error as unknown);
     expect(cause).toBeInstanceOf(Error);
     const error = await OutsideWriteCopyError.from("n.md", cause, rootPath);
-    expect(error.message).toContain(`${blockingPath} is in the way, so dohc left n.md as it was.`);
-    expect(error.message).toContain(`Move ${blockingPath} somewhere else, then choose Try again.`);
+    expect(error.message).toContain(`Move ${blockingPath} out of the way, then choose Try again.\nUntil then, dohc leaves n.md as it was.`);
     expect(error.message).toContain(`Blocking file: ${join(rootPath, blockingPath)}`);
     expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("outside");
   });
@@ -61,7 +60,7 @@ describe("materialization keeps outside bytes before replacement", () => {
     const fresh = outsideWriteCopies({ rootPath, workspaceId: "outside-copy" });
     const cause = await fresh.beforeWrite("n.md", null, () => undefined, isRecorded).catch(error => error as unknown);
     const error = await OutsideWriteCopyError.from("n.md", cause, rootPath);
-    expect(error.message).toContain(`Move ${blockingPath} somewhere else, then choose Try again.`);
+    expect(error.message).toContain(`Move ${blockingPath} out of the way, then choose Try again.`);
     expect(error.message).toContain(`Blocking file: ${join(rootPath, blockingPath)}`);
   });
 
@@ -246,7 +245,7 @@ describe("materialization keeps outside bytes before replacement", () => {
     const cause = await copies.beforeWrite("n.md", Buffer.from("OWNER-1"), () => undefined, isRecorded).catch(error => error as unknown);
     expect(cause).toBeInstanceOf(Error);
     const error = await OutsideWriteCopyError.from("n.md", cause, rootPath);
-    expect(error.message.split("\n").slice(0, 3)).toEqual(["dohc could not keep a copy of n.md", "dohc left n.md as it was.", "Check that dohc can write to the workspace folder, then choose Try again."]);
+    expect(error.message.split("\n").slice(0, 3)).toEqual(["dohc could not keep a copy of n.md", "Check that dohc can write to the workspace folder, then choose Try again.", "Until then, dohc leaves n.md as it was."]);
     expect(error.message).toContain(`Workspace folder: ${rootPath}\nCause: receipt flush failed`);
     expect(await readFile(join(rootPath, "n.md"), "utf8")).toBe("AGENT-1");
     expect((await readdir(rootPath)).filter(name => name.includes("kept copy"))).toEqual([]);

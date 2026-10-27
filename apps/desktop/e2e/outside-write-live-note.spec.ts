@@ -196,8 +196,8 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
         const failureRow = page.locator("[data-notice-row]").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
         await expect(failureRow).toBeVisible({ timeout: 120_000 });
-        // The reason and the next step are a line each, so the row shows both whole.
-        const failureBody = failureRow.getByText(`.dohc/local/outside-write-copies is in the way, so dohc left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`, { exact: true });
+        // The next step and what dohc did are a line each, so the row shows both whole.
+        const failureBody = failureRow.getByText(`Move .dohc/local/outside-write-copies out of the way, then choose Try again. Until then, dohc leaves ${PATH} as it was and sync waits.`, { exact: true });
         await expect(failureBody).toBeVisible();
         expect(await failureBody.evaluate(element => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
         await expect(failureRow).not.toContainText("Check that dohc can write to the workspace folder");

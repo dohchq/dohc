@@ -9,12 +9,13 @@ const COPY_FAILURE = "OutsideWriteCopyError: ";
 
 // Neither message vouches for this machine's copy: a failed sync pass does
 // not prove local writes are healthy, and each document shows its own save.
-// A copy dohc could not keep has a title, then its reason and next step a line each.
+// A copy dohc could not keep has a title, then its next step and what dohc
+// did with the file. Only a sync pass waits on the copy, so only it says so.
 export function syncFailureNotice(failure: SyncFailure): { title?: string; message: string } {
   if (failure.cause === "claim-refused") return { message: failure.detail };
   if (failure.detail.startsWith(COPY_FAILURE)) {
-    const [title = "", why = "", next = ""] = failure.detail.slice(COPY_FAILURE.length).split("\n");
-    return { title, message: `${why}\n${next} Sync waits until then.` };
+    const [title = "", next = "", left = ""] = failure.detail.slice(COPY_FAILURE.length).split("\n");
+    return { title, message: `${next}\n${left.replace(/\.$/, "")} and sync waits.` };
   }
   return {
     message: failure.cause === "server-unreachable"

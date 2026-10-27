@@ -26,18 +26,15 @@ async function readRecord(path: string) {
   catch (cause) { throw new CopyRecordError(path, cause); }
 }
 
-// The first line is the notice's title. The reason and the next step follow
-// on a line each, so the notice shows both whole.
+// The first line is the notice's title. The next step and what dohc did with
+// the file follow on a line each, so the notice shows both whole.
 export class OutsideWriteCopyError extends Error {
   override name = "OutsideWriteCopyError";
   constructor(path: string, cause: unknown, rootPath: string, blockingPath?: string) {
-    const why = blockingPath
-      ? `${blockingPath} is in the way, so dohc left ${path} as it was.`
-      : `dohc left ${path} as it was.`;
-    const next = blockingPath ? `Move ${blockingPath} somewhere else, then choose Try again.`
+    const next = blockingPath ? `Move ${blockingPath} out of the way, then choose Try again.`
       : "Check that dohc can write to the workspace folder, then choose Try again.";
     const location = blockingPath ? `Blocking file: ${join(rootPath, blockingPath)}` : `Workspace folder: ${rootPath}`;
-    super(`dohc could not keep a copy of ${path}\n${why}\n${next}\n${location}\nCause: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    super(`dohc could not keep a copy of ${path}\n${next}\nUntil then, dohc leaves ${path} as it was.\n${location}\nCause: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
   }
 
   static async from(path: string, cause: unknown, rootPath: string): Promise<OutsideWriteCopyError> {

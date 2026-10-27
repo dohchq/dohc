@@ -76,13 +76,14 @@ function renderNotice(
 
 describe("useSyncFailureNotice", () => {
   it.each([false, true])("shows copy recovery and keeps the same row on retry, blocked=%s", async blocked => {
-    const message = blocked
-      ? ".dohc/local/outside-write-copies is in the way, so dohc left n.md as it was.\nMove .dohc/local/outside-write-copies somewhere else, then choose Try again."
-      : "dohc left n.md as it was.\nCheck that dohc can write to the workspace folder, then choose Try again.";
+    const next = blocked
+      ? "Move .dohc/local/outside-write-copies out of the way, then choose Try again."
+      : "Check that dohc can write to the workspace folder, then choose Try again.";
+    const message = `${next}\nUntil then, dohc leaves n.md as it was.`;
     const detail = `OutsideWriteCopyError: dohc could not keep a copy of n.md\n${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
     const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
     await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(view.rows()[0]).toMatchObject({ title: "dohc could not keep a copy of n.md", message: `${message} Sync waits until then.`, seen: false });
+    expect(view.rows()[0]).toMatchObject({ title: "dohc could not keep a copy of n.md", message: `${next}\nUntil then, dohc leaves n.md as it was and sync waits.`, seen: false });
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
     expect(view.rows()[0]!.details).toEqual([["Detail", detail]]);
     const id = view.rows()[0]!.id;
