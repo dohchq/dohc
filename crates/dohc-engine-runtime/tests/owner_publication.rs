@@ -378,7 +378,7 @@ impl Fixture {
                 faults,
                 CancellationToken::new(),
                 None,
-            
+
                 None,
             )
             .await
@@ -3383,7 +3383,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await

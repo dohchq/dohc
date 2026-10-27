@@ -99,7 +99,7 @@ async fn settle(
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -131,6 +131,97 @@ async fn missing_reader_holds_settlement_and_preserves_file_and_checkpoint() {
     assert!(
         dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&before, &after).unwrap()
     );
+}
+
+#[tokio::test]
+async fn absent_snapshot_reader_refusal_does_not_use_conversion_consent() {
+    let (scratch, db, key, source, claim) = seed();
+    let mut store = EngineStore::open(&db, 4).unwrap();
+    let persisted = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap();
+    let update = persisted.doc.richdoc_append_paragraph("Accepted edit stays canonical");
+    store.write_with(&NoFaults, |tx| {
+        dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 4)?;
+        tx.execute("DELETE FROM snapshots WHERE workspace_id='w'", [])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, dohc_engine_collab::CollabError>(())
+    }).unwrap();
+    let before = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap().doc.encode_full_state();
+    drop(store);
+    std::fs::remove_file(scratch.path().join("note.md")).unwrap();
+    let consent = Arc::new(dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent::new(
+        key.clone(), "reader-test".into(), Some(claim.clone()), None,
+        hex_sha256(source.as_bytes()), None,
+    ));
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 5).unwrap().actor;
+    actor.configure_reader_resolver(Arc::new(ReaderResolver::new(Arc::new(Reader::new(None)))))
+        .await.unwrap();
+    let error = actor.ydoc_settle(scratch.path().to_owned(), key.clone(), "note.md".into(),
+        ContentKind::Richdoc, Some(claim), None, "reader-test".into(), Arc::new(()), 10,
+        Arc::new(NoFaults), CancellationToken::new(), None, Some(consent.clone()))
+        .await.unwrap_err();
+    assert!(matches!(error, dohc_engine_runtime::RuntimeError::Sync(
+        dohc_engine_sync::SyncError::RetryableState { reason: "dohc could not verify this file. Try again." }
+    )));
+    assert!(!consent.is_consumed());
+    supervisor.close(&db).unwrap();
+    assert!(!scratch.path().join("note.md").exists());
+    let store = EngineStore::open(&db, 11).unwrap();
+    let after = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap().doc.encode_full_state();
+    assert_eq!(after, before);
+    store.read_with(|conn| {
+        for table in ["snapshots", "materialization_jobs", "markdown_write_obligations"] {
+            let count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            assert_eq!(count, 0, "{table}");
+        }
+        let moments: i64 = conn.query_row("SELECT count(*) FROM moments", [], |row| row.get(0))
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+        assert_eq!(moments, 1);
+        Ok::<_, dohc_engine_storage::StorageError>(())
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn absent_snapshot_without_reader_metadata_reaches_markdown_hold() {
+    let (scratch, db, key, _, claim) = seed();
+    let mut store = EngineStore::open(&db, 4).unwrap();
+    let persisted = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap();
+    let wire = yrs::Doc::new();
+    wire.transact_mut().apply_update(yrs::Update::decode_v1(&persisted.doc.encode_full_state()).unwrap()).unwrap();
+    let before = wire.transact().state_vector();
+    let meta = wire.get_or_insert_map("meta");
+    meta.remove(&mut wire.transact_mut(), "dohcMarkdownSourceReader");
+    // An incomplete witness is unsafe without asking a checker.
+    meta.remove(&mut wire.transact_mut(), "dohcMarkdownSourceProjectionSha256");
+    let update = wire.transact().encode_state_as_update_v1(&before);
+    store.write_with(&NoFaults, |tx| {
+        dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 4)?;
+        tx.execute("DELETE FROM snapshots WHERE workspace_id='w'", [])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, dohc_engine_collab::CollabError>(())
+    }).unwrap();
+    let doc = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap().doc;
+    let update = doc.richdoc_append_paragraph("Accepted edit stays canonical");
+    store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 4)).unwrap();
+    drop(store);
+    std::fs::remove_file(scratch.path().join("note.md")).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 5).unwrap().actor;
+    let error = actor.ydoc_settle(scratch.path().to_owned(), key.clone(), "note.md".into(),
+        ContentKind::Richdoc, Some(claim), None, "reader-test".into(), Arc::new(()), 10,
+        Arc::new(NoFaults), CancellationToken::new(), None, None).await.unwrap_err();
+    assert!(matches!(error, dohc_engine_runtime::RuntimeError::MarkdownWriteHeld { head_sha256: None, .. }));
+    supervisor.close(&db).unwrap();
+    assert!(!scratch.path().join("note.md").exists());
+    let store = EngineStore::open(&db, 11).unwrap();
+    let doc = dohc_engine_collab::load_persisted(&store, &key).unwrap().unwrap().doc;
+    assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("Accepted edit stays canonical"));
+    let owed = store.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, "w")).unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].kind, dohc_engine_collab::markdown_write_obligations::Kind::Session);
+    assert!(owed[0].held_head_sha256.is_none());
+    assert!(store.list_materialization_jobs().unwrap().is_empty());
 }
 
 #[test]

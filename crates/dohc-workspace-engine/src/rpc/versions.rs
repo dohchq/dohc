@@ -229,7 +229,7 @@ async fn settle_ydoc_session_for_version_fence(
             Arc::new(NoFaults),
             token.clone(),
             session.restore_generation,
-        
+
             None,
         )
         .await

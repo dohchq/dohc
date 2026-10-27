@@ -4326,6 +4326,16 @@ pub fn project_and_write_in_tx(
             ],
         )
         .map_err(SyncError::persist)?;
+        if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+            dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                tx, &key.workspace_id, &key.version_id, &key.object_id, &doc.frontmatter_json(),
+            ).map_err(map_domain_hard_error)?;
+        }
+        if let Some(lineage) = lineage.as_deref() {
+            crate::refusal_notices::clear_lineage_in_tx(
+                tx, &key.workspace_id, &key.version_id, &key.object_id, lineage,
+            )?;
+        }
         return Ok(false);
     }
     use dohc_engine_collab::markdown_write_safety::{self, MarkdownWriteSafety};

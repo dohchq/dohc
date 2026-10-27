@@ -43,14 +43,14 @@ pub use crate::ydoc::MarkdownWriteSafety;
 #[derive(Debug, Clone)]
 pub enum PendingPreparation {
     Reader(Arc<crate::reader_resolver::PendingProof>),
-    Witness(Arc<PendingWitnessCheck>),
+    Witness { key: DocKey, path: String, pending: Arc<PendingWitnessCheck> },
 }
 
 impl PendingPreparation {
     pub async fn resolve(&self) {
         match self {
             Self::Reader(pending) => pending.resolve().await,
-            Self::Witness(pending) => pending.resolve().await,
+            Self::Witness { pending, .. } => pending.resolve().await,
         }
     }
 }

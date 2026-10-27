@@ -300,7 +300,7 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await;

@@ -2008,6 +2008,7 @@ impl ActorHandle {
         // Once the relay may have stored something, the operation runs to its
         // end so the request answers with what landed. Until then each step
         // and each effect-free read stops on cancellation.
+        let mut preparation_attempt = 0;
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -2094,7 +2095,14 @@ impl ActorHandle {
                     transport.apply_progress(&mut outcome);
                     return Ok(outcome);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let result: Result<(), RuntimeError> = Err(error);
+                    if super::wait_for_reader(&result, preparation_attempt).await {
+                        preparation_attempt += 1;
+                        continue;
+                    }
+                    return result.map(|()| unreachable!());
+                }
             }
         }
     }
@@ -2426,6 +2434,15 @@ fn execute_relay_operation(
     let client = RelaySyncClient::new(transport);
     let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
+    if outcome.is_err() && let Some(pending) = client.take_pending_preparation() {
+        use dohc_engine_collab::markdown_write_safety::PendingPreparation;
+        return Err(match pending {
+            PendingPreparation::Reader(pending) => SyncError::MarkdownReaderPending(pending).into(),
+            PendingPreparation::Witness { key, path, pending } => SyncError::MarkdownWitnessCheckPending {
+                key, path, pending,
+            }.into(),
+        });
+    }
     outcome
 }
 

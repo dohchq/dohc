@@ -2414,6 +2414,7 @@ fn settle_head(store: &mut EngineStore, key: &DocKey, path: &str) {
                 99,
                 400,
                 None,
+                None,
             )
         })
         .expect("settle");
@@ -2872,7 +2873,7 @@ async fn closing_an_open_lineage_after_enrolment_claims_it_once_the_file_holds_i
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -2968,7 +2969,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -3075,7 +3076,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -3656,7 +3657,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -3976,7 +3977,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
-            
+
                 None,
             )
             .await

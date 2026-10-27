@@ -138,7 +138,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -403,7 +403,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await

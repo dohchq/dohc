@@ -3083,6 +3083,7 @@ pub(super) fn ydoc_settle_on_store(
         projection.markdown_write_safety = MarkdownWriteSafety::SafeWitness;
     }
     let checkpoint_sha256 = hex_sha256(&doc.encode_full_state());
+    let witness_reference = doc.markdown_source_reference();
     let Projection {
         content: ydoc_projected_text,
         content_kind: projected_content_kind,
@@ -3137,6 +3138,10 @@ pub(super) fn ydoc_settle_on_store(
             Some(dohc_engine_collab::load_doc_in(tx, key)?)
         };
         let write_doc = current_doc.as_ref().unwrap_or(doc);
+        if hex_sha256(&write_doc.encode_full_state()) != checkpoint_sha256
+            || write_doc.markdown_source_reference() != witness_reference {
+            return Err(CollabError::MarkdownReaderUnavailable.into());
+        }
         let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
         if current_marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
             return Err(CollabError::LineageWriteStale {

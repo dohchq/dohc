@@ -66,7 +66,7 @@ pub fn pending_in(conn: &Connection, workspace_id: &str) -> Result<Vec<Obligatio
           retry_inputs_json,held_checkpoint_sha256,held_head_sha256,settled_cut,settled_head_sha256 \
          FROM markdown_write_obligations WHERE workspace_id=?1 AND completed=0 \
          ORDER BY CASE kind WHEN 'collection-adoption' THEN 1 WHEN 'relation-cleanup' THEN 1 \
-          WHEN 'sync-projection' THEN 2 ELSE 0 END,obligation_order"
+          ELSE 0 END,obligation_order"
     ).map_err(crate::durable::map_sql)?;
     let rows = statement.query_map([workspace_id], |row| {
         Ok((row.get::<_,i64>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?,

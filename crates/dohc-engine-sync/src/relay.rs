@@ -768,6 +768,7 @@ pub enum SyncPassOutcome {
 
 pub struct RelaySyncClient<T> {
     transport: T,
+    pending_preparation: std::sync::Mutex<Option<dohc_engine_collab::markdown_write_safety::PendingPreparation>>,
     /// Group automation claims this client's applies committed and nobody
     /// took yet. A pass that fails after an apply committed leaves them here:
     /// its retry finds the message stored and claims nothing again.
@@ -928,8 +929,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
+            pending_preparation: std::sync::Mutex::new(None),
             automation_claims: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn take_pending_preparation(&self) -> Option<dohc_engine_collab::markdown_write_safety::PendingPreparation> {
+        self.pending_preparation.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
+
+    fn local(&self, error: SyncError) -> RelayError {
+        use dohc_engine_collab::markdown_write_safety::PendingPreparation;
+        let pending = match &error {
+            SyncError::MarkdownReaderPending(pending) => Some(PendingPreparation::Reader(pending.clone())),
+            SyncError::MarkdownWitnessCheckPending { key, path, pending } => Some(PendingPreparation::Witness {
+                key: key.clone(), path: path.clone(), pending: pending.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(pending) = pending {
+            *self.pending_preparation.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        }
+        local(error)
     }
 
     /// The Group automation claims this client's applies committed since the
@@ -2524,7 +2545,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
                 if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
                     crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                        .map_err(local)?;
+                        .map_err(|error| self.local(error))?;
                 }
                 let routed = match holding.held_before_routing(store, op)? {
                     Some(reason) => Err(SyncError::RetryableState { reason }),
@@ -2548,7 +2569,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     {
                         still_retryable.push(op);
                     }
-                    Err(error) => return Err(local(error)),
+                    Err(error) => return Err(self.local(error)),
                     Ok(outcome) => {
                         made_progress = true;
                         completed.push(op);
@@ -2622,7 +2643,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             round = still_retryable;
         }
         crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-            .map_err(local)?;
+            .map_err(|error| self.local(error))?;
         let mut settlements = match crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
@@ -3149,7 +3170,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // wedges the pull rather than losing a count.
                 Err(error) => match error.share_disposition() {
                     ShareDisposition::Skip => skipped += 1,
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
         }
@@ -3598,7 +3619,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ));
                         continue;
                     }
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
             // A chat op is fully applied by the boundary above —

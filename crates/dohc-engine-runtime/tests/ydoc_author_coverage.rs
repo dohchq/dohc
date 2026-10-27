@@ -98,7 +98,7 @@ async fn settle(
             faults,
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await

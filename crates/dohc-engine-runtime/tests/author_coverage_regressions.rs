@@ -88,7 +88,7 @@ async fn settle(
             faults,
             CancellationToken::new(),
             None,
-        
+
             None,
         )
         .await
@@ -397,6 +397,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
             1,
             5,
             None,
+            None,
         )
     });
     assert!(matches!(
@@ -439,6 +440,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
                 "remote-origin",
                 1,
                 9,
+                None,
                 None,
             )
         })
@@ -629,6 +631,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
                 1,
                 6,
                 None,
+                None,
             )
         })
         .expect("projection");
@@ -655,6 +658,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
                 "remote",
                 2,
                 8,
+                None,
                 None,
             )
         })
@@ -973,6 +977,7 @@ async fn inactive_version_projection_without_a_job_remains_resolved() {
                 1,
                 3,
                 None,
+                None,
             )
         })
         .expect("inactive projection");
@@ -992,6 +997,7 @@ async fn inactive_version_projection_without_a_job_remains_resolved() {
                 "remote",
                 1,
                 4,
+                None,
                 None,
             )
         })
