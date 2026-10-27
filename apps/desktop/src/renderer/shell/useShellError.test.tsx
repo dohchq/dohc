@@ -242,6 +242,20 @@ describe("useShellError", () => {
     expect(retry).not.toHaveBeenCalled();
   });
 
+  it("copies a refused save's whole path, so two files with one name can be told apart", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const deep = "folder/".repeat(65);
+    const notice = (noticeId: string, path: string) => ({ noticeId, kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
+      body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
+      detail: "dohc could not verify who changed this file. The file will share without author names.\nWorkspace: ws-a",
+      target: { path }, createdAtMs: 1, readAtMs: null, postedHere: true });
+    act(() => result.current.showSyncRefusals([notice("a", `${deep}notes/n.md`), notice("b", `${deep}archive/n.md`)], vi.fn()));
+    const copied = result.current.shellErrors.map(error => errorDetails(error.details ?? []));
+    expect(copied[0]).toContain(`File: ${deep}notes/n.md\n`);
+    expect(copied[1]).toContain(`File: ${deep}archive/n.md\n`);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });

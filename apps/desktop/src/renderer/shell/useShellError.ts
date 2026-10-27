@@ -450,7 +450,9 @@ export function useShellError(workspaceId: string) {
         const path = notice.target?.path;
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
           title: bindingChanged || attributionRefused ? notice.title : undefined,
-          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
+          // The whole path: a title names only the file, and two folders can hold one name.
+          details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
+          atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused ? null : retry,
           ...(attributionRefused ? { tone: "warning" as const } : {}),
           ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}),

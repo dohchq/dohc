@@ -755,8 +755,7 @@ export function createNoticeStore(deps: {
             refusalCoordinates, pendingRefusalDismissals,
             title: attributionRefused ? unattributedTitle(document?.path)
               : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
-            detail: [refusal.reason, `Workspace: ${workspaceId}`, ...(document?.path ? [`Path: ${document.path}`] : []),
-              `Object: ${document?.objectId ?? "unknown"}`,
+            detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
             target,
             createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
