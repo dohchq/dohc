@@ -1458,6 +1458,51 @@ describe("table controls grips", () => {
     expect(rowStrip.style.width).toBe("0px");
   });
 
+  // jsdom has no layout, so model the browser's: the first geometry read after
+  // a style write lays out the whole document again.
+  it("sizes the append strips of many tables with one layout on pointer entry and on edits", () => {
+    let dirty = true;
+    let layouts = 0;
+    const style = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "style")!.get!;
+    const spies = [
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(() => {
+        if (dirty) layouts += 1;
+        dirty = false;
+        return new DOMRect(0, 0, 0, 0);
+      }),
+      vi.spyOn(HTMLElement.prototype, "style", "get").mockImplementation(function (this: HTMLElement) {
+        return new Proxy(style.call(this) as CSSStyleDeclaration, {
+          get: (target, key) => {
+            const value: unknown = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+          set: (target, key, value) => {
+            dirty = true;
+            return Reflect.set(target, key, value, target);
+          },
+        });
+      }),
+    ];
+    try {
+      const table = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>";
+      editor = createEditor(`<p>Start</p>${`${table}<p>Text</p>`.repeat(6)}`);
+      const dom = editor.view.dom;
+      expect(dom.querySelectorAll("table")).toHaveLength(6);
+
+      dirty = true;
+      layouts = 0;
+      dom.dispatchEvent(new MouseEvent("mouseenter"));
+      expect(layouts).toBe(1);
+
+      dirty = true;
+      layouts = 0;
+      editor.view.dispatch(editor.state.tr.insertText("x", 1));
+      expect(layouts).toBe(1);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   it("refreshes edge hit areas after layout changes while the same cell stays hovered", () => {
     editor = createTableEditor(2, 2);
     const dom = editor.view.dom;
