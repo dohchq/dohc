@@ -4576,7 +4576,7 @@ mod tests {
             ),
             (
                 "v2-agent-ids",
-                "21d43c44b4d3ce3c63d3ea12eaf138fe306364aa91247f2d28cffb31127ba9fc",
+                "3886571a320da5555e255b174f102a40f1ee3bffe51c58d7ad31614757b67718",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6602,8 +6602,10 @@ mod tests {
         assert_eq!(kept, 1);
     }
 
-    /// The agent chat, its requests and its runs belong to the default agent
-    /// after the agent-ids migration, and every request keeps its state.
+    /// The agent chat, its requests, its runs and its place in each thread
+    /// belong to the default agent after the agent-ids migration, and every
+    /// request and place keeps its state. The agent chat is the one the
+    /// default agent's wire id names, whatever its slug.
     #[test]
     fn agent_ids_migration_gives_existing_agent_work_to_the_default_agent() {
         let dir = tempdir();
@@ -6613,8 +6615,14 @@ mod tests {
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch(
             "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-                 VALUES ('ws', 'agent', 'My agent', 'my-agent', 'agent', 1, 1), \
+                 VALUES ('ws', 'agent', 'My agent', 'my-agent-2', 'agent', 1, 1), \
+                        ('ws', 'group', 'My agent', 'my-agent', 'channel', 1, 1), \
                         ('ws', 'general', 'general', 'general', 'channel', 1, 1); \
+             INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1', 'agent'); \
+             INSERT INTO chat_agent_read_state \
+                 (workspace_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+                 VALUES ('ws', 't1', 2, 'm1', 3, 4); \
              INSERT INTO chat_dispatch_ledger \
                  (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
                  VALUES ('ws', 'm1', 't1', 'failed', 'run-1', 'app-quit', 1, 2, 3), \
@@ -6641,9 +6649,37 @@ mod tests {
             channels,
             vec![
                 ("agent".to_owned(), Some("default".to_owned())),
-                ("general".to_owned(), None)
+                ("general".to_owned(), None),
+                ("group".to_owned(), None)
             ]
         );
+        let places: Vec<(String, String, i64, String, i64)> = conn
+            .prepare(
+                "SELECT agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision \
+                 FROM chat_agent_read_state ORDER BY agent_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            places,
+            vec![
+                (String::new(), "t1".into(), 2, "m1".into(), 3),
+                ("default".into(), "t1".into(), 2, "m1".into(), 3),
+            ],
+            "the default agent and agents outside a run keep the place they shared."
+        );
+        conn.execute(
+            "INSERT INTO chat_agent_read_state \
+                 (workspace_id, agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+             VALUES ('ws', 'codex', 't1', 0, '', 0, 0)",
+            [],
+        )
+        .expect("a second agent's place in the same thread");
         let ledger: Vec<(String, String, String, Option<String>, i64)> = conn
             .prepare(
                 "SELECT trigger_message_id, agent_id, state, run_id, attempt_count \
@@ -6708,6 +6744,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(removed, 0);
+    }
+
+    /// A fresh store keeps each agent's place in a thread apart.
+    #[test]
+    fn a_fresh_store_keys_each_agents_place_in_a_thread_by_the_agent() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let place = |agent_id: &str| {
+            format!(
+                "INSERT INTO chat_agent_read_state \
+                     (workspace_id, agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+                 VALUES ('ws', '{agent_id}', 't1', 1, 'm1', 1, 1)"
+            )
+        };
+        for agent_id in ["default", "codex", ""] {
+            conn.execute(&place(agent_id), [])
+                .expect("one place per agent");
+        }
+        assert!(
+            conn.execute(&place("codex"), []).is_err(),
+            "an agent has one place in a thread"
+        );
     }
 
     /// Plugin subscriptions and claims written before the automation facts

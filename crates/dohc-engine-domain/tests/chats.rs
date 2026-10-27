@@ -1421,6 +1421,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let agent_read_state = chats
         .mark_thread_read_by_agent(
             WS,
+            None,
             "thread-revision",
             30,
             "message-reply",

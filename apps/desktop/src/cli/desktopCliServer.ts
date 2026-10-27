@@ -105,6 +105,7 @@ interface DesktopCliServerDependencies<State> {
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
     dispatchedAgent(workspaceId: string): string | null;
+    dispatchedRunId(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
@@ -588,6 +589,7 @@ export function createDesktopCliServer<State>(
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       dispatchedAgent: (workspaceId) => activity.dispatchedAgent(workspaceId),
+      dispatchedRunId: (workspaceId) => activity.dispatchedRunId(workspaceId),
       agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

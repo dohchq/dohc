@@ -509,12 +509,14 @@ export class ChatsLiveAdapter {
 
   async markThreadReadByAgent(input: {
     workspaceId: string;
+    runId?: string;
     threadId: string;
     upTo: { createdAtMs: number; messageId: string };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.agentReadMarkThreadRead, {
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
       threadId: input.threadId,
       upTo: input.upTo,
       ...(input.expectedRevision !== undefined
@@ -523,7 +525,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, runId?: string): Promise<ChatThread[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatThread[] = [];
     let cursor: string | undefined;
@@ -531,6 +533,7 @@ export class ChatsLiveAdapter {
       const page = await this.request(
         CHATS_METHOD.agentReadListUnreadThreads,
         {
+          ...(runId !== undefined ? { runId } : {}),
           pageLimit: 500,
           ...(cursor !== undefined ? { cursor } : {}),
         },
@@ -541,14 +544,14 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  // The messages that asked one agent and that it has not read.
-  async listAgentUnreadRequests(workspaceId: string, agentId: string): Promise<ChatAgentRequest[]> {
+  // The messages that asked a running run's agent and that it has not read.
+  async listAgentUnreadRequests(workspaceId: string, runId: string): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
-        agentId,
+        runId,
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });

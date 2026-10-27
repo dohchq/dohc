@@ -924,6 +924,14 @@ export function createWorkspaceActivity(
     return run?.dispatch !== undefined ? run.agentId : null;
   }
 
+  // The engine's id for the run dohc dispatched while it holds the slot, or
+  // null. The engine reads that run's agent from its record to choose whose
+  // place in a thread the CLI reads and moves. A self-test has no record.
+  function dispatchedRunId(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch === "run" ? run.agentRunId : null;
+  }
+
   // The agent run holding the slot, as a local app's invocation is
   // attributed to it, or null with no run.
   function agentRun(state: WorkspaceActivityState): ActiveAgentRun | null {
@@ -1007,6 +1015,7 @@ export function createWorkspaceActivity(
     hasAgentRun,
     agentRunDepth,
     dispatchedAgent,
+    dispatchedRunId,
     agentRun,
     agentRunState,
     engineCaptureFor,

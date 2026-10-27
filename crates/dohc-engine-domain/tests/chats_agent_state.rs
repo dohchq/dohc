@@ -423,10 +423,10 @@ fn agent_read_cursor_rejects_stale_revision() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("advance");
     let error = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(
         error.code(),
@@ -443,10 +443,10 @@ fn agent_read_cursor_clamps_to_latest_and_never_moves_back() {
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "m2", ChatActorKind::Human, 20);
     let clamped = chats
-        .mark_thread_read_by_agent(WS, "thread", 999, "z", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 999, "z", None, 30, &NO_FAULTS)
         .expect("clamp");
     let backward = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 31, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 31, &NO_FAULTS)
         .expect("backward");
     assert_eq!(
         (
@@ -465,10 +465,10 @@ fn agent_read_revision_bumps_only_on_advance() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     let first = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("first");
     let replay = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
         .expect("replay");
     assert_eq!(
         (first.revision, replay.revision),
@@ -486,10 +486,10 @@ fn agent_unread_requires_latest_human_message_beyond_cursor() {
     start(&mut chats, "agent", "a1", ChatActorKind::Human, 11);
     send(&mut chats, "agent", "a2", ChatActorKind::Agent, 12);
     chats
-        .mark_thread_read_by_agent(WS, "human", 10, "h1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "human", 10, "h1", None, 20, &NO_FAULTS)
         .expect("read");
     let rows = chats
-        .list_agent_unread_threads(WS, None, 10)
+        .list_agent_unread_threads(WS, None, None, 10)
         .expect("unread");
     assert!(
         rows.is_empty(),
@@ -505,10 +505,10 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
     start(&mut chats, "thread", "a", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "b", ChatActorKind::Human, 10);
     chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "a", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "a", None, 20, &NO_FAULTS)
         .expect("read a");
     let rows = chats
-        .list_agent_unread_threads(WS, None, 10)
+        .list_agent_unread_threads(WS, None, None, 10)
         .expect("unread");
     assert_eq!(
         rows[0].latest_message_id, "b",
@@ -674,6 +674,9 @@ fn fail_pending_is_workspace_thread_scoped() {
         .enqueue_dispatch(WS, "a", "default", "target", 1, &NO_FAULTS)
         .expect("a");
     chats
+        .enqueue_dispatch(WS, "a", "codex", "target", 1, &NO_FAULTS)
+        .expect("a for codex");
+    chats
         .enqueue_dispatch(WS, "b", "default", "other", 2, &NO_FAULTS)
         .expect("b");
     chats
@@ -686,9 +689,18 @@ fn fail_pending_is_workspace_thread_scoped() {
         .list_pending_dispatches(WS, None, 10)
         .expect("pending");
     assert_eq!(
-        (changed, pending[0].trigger_message_id.as_str()),
-        (1, "b"),
-        "drop workspace/thread/state predicate -> more than one row changes."
+        (
+            changed,
+            pending
+                .iter()
+                .map(|dispatch| (
+                    dispatch.trigger_message_id.as_str(),
+                    dispatch.agent_id.as_str()
+                ))
+                .collect::<Vec<_>>()
+        ),
+        (1, vec![("a", "codex"), ("b", "default")]),
+        "drop workspace/thread/agent/state predicate -> more than one row changes."
     );
 }
 

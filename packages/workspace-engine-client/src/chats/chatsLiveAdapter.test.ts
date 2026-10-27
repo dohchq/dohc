@@ -89,7 +89,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
-  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { agentId: "codex" } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { runId: "run_1" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,

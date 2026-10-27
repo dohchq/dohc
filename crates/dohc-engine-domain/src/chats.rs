@@ -1016,6 +1016,37 @@ pub fn is_agent_id(value: &str) -> bool {
         && !value.ends_with('-')
 }
 
+/// The place in each thread that agents outside a run dohc dispatched share.
+/// No agent id is empty, so their reads never move a dispatched agent's place.
+const OUTSIDE_RUN_READER: &str = "";
+
+/// Whose place in a thread an agent read uses: the agent of the run, which must
+/// still be running in this workspace, or the place agents outside a run share.
+/// A caller names the run, never the agent.
+fn agent_reader(
+    conn: &Connection,
+    workspace_id: &str,
+    run_id: Option<&str>,
+) -> Result<String, DomainError> {
+    let Some(run_id) = run_id else {
+        return Ok(OUTSIDE_RUN_READER.to_owned());
+    };
+    conn.query_row(
+        "SELECT agent_id FROM agent_run_records \
+         WHERE workspace_id = ?1 AND run_id = ?2 AND ended_at_ms IS NULL",
+        params![workspace_id, run_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .ok_or_else(|| {
+        DomainError::chat(
+            "run-not-found",
+            "No agent run with this id is running in this workspace.",
+        )
+    })
+}
+
 /// The wire id every computer gives one agent's chat.
 pub fn agent_channel_wire_id(agent_id: &str) -> String {
     if agent_id == DEFAULT_AGENT_ID {
@@ -3968,7 +3999,7 @@ impl<'a> LinkedChatStore<'a> {
     /// Mention rows for a normalized handle in ascending message-coordinate
     /// order. Inner joins fail closed over missing messages or threads. A
     /// message that already woke a dohc agent is that agent's work, so it is
-    /// left out.
+    /// left out. `unread_only` reads the place agents outside a run share.
     pub fn list_mentions_for_handle(
         &self,
         workspace_id: &str,
@@ -3993,7 +4024,7 @@ impl<'a> LinkedChatStore<'a> {
                      JOIN chat_threads t ON t.workspace_id = x.workspace_id \
                        AND t.thread_id = x.thread_id \
                      LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
-                       AND ars.thread_id = x.thread_id \
+                       AND ars.agent_id = ?8 AND ars.thread_id = x.thread_id \
                      WHERE x.workspace_id = ?1 AND x.handle = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
                          WHERE l.workspace_id = x.workspace_id \
@@ -4016,7 +4047,8 @@ impl<'a> LinkedChatStore<'a> {
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit
+                        limit,
+                        OUTSIDE_RUN_READER
                     ],
                     |row| {
                         let thread_id: String = row.get(0)?;
@@ -4040,23 +4072,19 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// The messages that asked one agent and lie beyond the agent cursor of
-    /// their thread, in ascending message-coordinate order.
+    /// The messages that asked a running run's agent and lie beyond that
+    /// agent's place in their thread, in ascending message-coordinate order.
     pub fn list_agent_unread_requests(
         &self,
         workspace_id: &str,
-        agent_id: &str,
+        run_id: &str,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, DomainError> {
         validate_chat_page_limit(limit)?;
-        if !is_agent_id(agent_id) {
-            return Err(DomainError::InvalidInput {
-                reason: "agent id is invalid",
-            });
-        }
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
+            let agent_id = agent_reader(conn, workspace_id, Some(run_id))?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms \
@@ -4066,7 +4094,7 @@ impl<'a> LinkedChatStore<'a> {
                      JOIN chat_threads t ON t.workspace_id = m.workspace_id \
                        AND t.thread_id = m.thread_id \
                      LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id \
-                       AND ars.thread_id = m.thread_id \
+                       AND ars.agent_id = l.agent_id AND ars.thread_id = m.thread_id \
                      WHERE l.workspace_id = ?1 AND l.agent_id = ?2 \
                        AND (ars.thread_id IS NULL \
                          OR m.created_at_ms > ars.last_read_created_at_ms \
@@ -4107,17 +4135,20 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// Threads whose latest message is human-authored and beyond the agent
-    /// cursor, newest coordinate first.
+    /// Threads whose latest message is human-authored and beyond the reader's
+    /// place, newest coordinate first. The reader is a running run's agent, or
+    /// agents outside a run without one.
     pub fn list_agent_unread_threads(
         &self,
         workspace_id: &str,
+        run_id: Option<&str>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, DomainError> {
         validate_chat_page_limit(limit)?;
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
+            let reader = agent_reader(conn, workspace_id, run_id)?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
@@ -4143,7 +4174,7 @@ impl<'a> LinkedChatStore<'a> {
                               AND newer.message_id > latest.message_id))) \
                      LEFT JOIN chat_agent_read_state ars \
                        ON ars.workspace_id = t.workspace_id \
-                      AND ars.thread_id = t.thread_id \
+                      AND ars.agent_id = ?6 AND ars.thread_id = t.thread_id \
                      WHERE t.workspace_id = ?1 AND latest.author_kind = 'human' \
                        AND (ars.thread_id IS NULL \
                          OR latest.created_at_ms > ars.last_read_created_at_ms \
@@ -4161,7 +4192,8 @@ impl<'a> LinkedChatStore<'a> {
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit
+                        limit,
+                        reader
                     ],
                     |row| {
                         let thread = map_thread_row(row)?;
@@ -4557,11 +4589,13 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Monotonic message-coordinate CAS for the agent's read state.
+    /// Monotonic message-coordinate CAS for one reader's place in a thread:
+    /// a running run's agent, or agents outside a run without one.
     #[allow(clippy::too_many_arguments)]
     pub fn mark_thread_read_by_agent(
         &mut self,
         workspace_id: &str,
+        run_id: Option<&str>,
         thread_id: &str,
         up_to_created_at_ms: i64,
         up_to_message_id: &str,
@@ -4585,8 +4619,9 @@ impl<'a> LinkedChatStore<'a> {
         let thread_id = thread_id.to_owned();
         let up_to_message_id = up_to_message_id.to_owned();
         let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
+            let reader = agent_reader(tx, &workspace_id, run_id)?;
             require_thread(tx, &workspace_id, &thread_id)?;
-            let current = agent_read_state_for_thread(tx, &workspace_id, &thread_id)?;
+            let current = agent_read_state_for_thread(tx, &workspace_id, &reader, &thread_id)?;
             if expected_revision.is_some_and(|revision| revision != current.revision) {
                 return Err(DomainError::chat(
                     "read-state-revision-mismatch",
@@ -4630,14 +4665,16 @@ impl<'a> LinkedChatStore<'a> {
                 .ok_or_else(dispatch_corrupt)?;
             tx.execute(
                 "INSERT INTO chat_agent_read_state \
-                 (workspace_id, thread_id, last_read_created_at_ms, last_read_message_id, \
-                  revision, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT(workspace_id, thread_id) DO UPDATE SET \
+                 (workspace_id, agent_id, thread_id, last_read_created_at_ms, \
+                  last_read_message_id, revision, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(workspace_id, agent_id, thread_id) DO UPDATE SET \
                    last_read_created_at_ms = excluded.last_read_created_at_ms, \
                    last_read_message_id = excluded.last_read_message_id, \
                    revision = excluded.revision, updated_at_ms = excluded.updated_at_ms",
                 params![
                     workspace_id,
+                    reader,
                     thread_id,
                     target.0,
                     target.1,
@@ -7356,13 +7393,15 @@ fn require_decision(
 fn agent_read_state_for_thread(
     conn: &Connection,
     workspace_id: &str,
+    reader: &str,
     thread_id: &str,
 ) -> Result<ChatAgentReadState, DomainError> {
     let row = conn
         .query_row(
             "SELECT last_read_created_at_ms, last_read_message_id, revision, updated_at_ms \
-             FROM chat_agent_read_state WHERE workspace_id = ?1 AND thread_id = ?2",
-            params![workspace_id, thread_id],
+             FROM chat_agent_read_state \
+             WHERE workspace_id = ?1 AND agent_id = ?2 AND thread_id = ?3",
+            params![workspace_id, reader, thread_id],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,

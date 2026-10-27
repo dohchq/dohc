@@ -1192,14 +1192,19 @@ export interface LinkedChatStore {
   ): Promise<ChatAttachment[]>;
   linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
   fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
+  // An agent's place in each thread. A run dohc dispatched names itself and
+  // reads as its agent; without a run, the reads are those of agents outside
+  // a run. The engine refuses a run that is not running.
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
+    runId?: string;
     threadId: ChatThreadId;
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId): Promise<ChatThread[]>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, agentId: string): Promise<ChatAgentRequestRecord[]>;
+  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<ChatThread[]>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, runId: string): Promise<ChatAgentRequestRecord[]>;
+  // unreadByAgentOnly reads the place agents outside a run share.
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,

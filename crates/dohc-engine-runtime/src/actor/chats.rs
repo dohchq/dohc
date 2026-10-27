@@ -492,13 +492,13 @@ impl ActorHandle {
     pub async fn chat_agent_unread_requests(
         &self,
         workspace_id: String,
-        agent_id: String,
+        run_id: String,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_requests(&workspace_id, &agent_id, after, limit)
+                .list_agent_unread_requests(&workspace_id, &run_id, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
@@ -507,12 +507,13 @@ impl ActorHandle {
     pub async fn chat_agent_unread_threads(
         &self,
         workspace_id: String,
+        run_id: Option<String>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_threads(&workspace_id, after, limit)
+                .list_agent_unread_threads(&workspace_id, run_id.as_deref(), after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
@@ -522,6 +523,7 @@ impl ActorHandle {
     pub async fn chat_agent_mark_thread_read(
         &self,
         workspace_id: String,
+        run_id: Option<String>,
         thread_id: String,
         up_to_created_at_ms: i64,
         up_to_message_id: String,
@@ -536,6 +538,7 @@ impl ActorHandle {
                 chats
                     .mark_thread_read_by_agent(
                         &workspace_id,
+                        run_id.as_deref(),
                         &thread_id,
                         up_to_created_at_ms,
                         &up_to_message_id,

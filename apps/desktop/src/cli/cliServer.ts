@@ -392,6 +392,11 @@ export interface CliServerOptions {
   // The agent of a run dohc dispatched while it holds the workspace's run
   // slot, or null.
   dispatchedAgent(workspaceId: string): string | null;
+  // The engine's id for that run when dohc dispatched it as agent work, or
+  // null. The engine reads the run's agent from it, so a read moves only that
+  // agent's place, whatever the command line says. Without a run, reads are
+  // those of agents outside a run.
+  dispatchedRunId(workspaceId: string): string | null;
   agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
@@ -1165,6 +1170,7 @@ async function buildShowResult(
 async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
+  runId: string | null,
   threadId: string,
   messages: readonly ChatMessage[],
 ): Promise<void> {
@@ -1177,6 +1183,7 @@ async function markShownThreadRead(
         : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
+      ...(runId === null ? {} : { runId }),
       threadId,
       upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
     });
@@ -3186,7 +3193,10 @@ async function dispatchWorkspace(
       const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
-            (await context.store.listAgentUnreadThreads(context.workspaceId)).map(
+            (await context.store.listAgentUnreadThreads(
+              context.workspaceId,
+              options.dispatchedRunId(context.workspaceId) ?? undefined,
+            )).map(
               (thread) => thread.id,
             ),
           )
@@ -3254,12 +3264,13 @@ async function dispatchWorkspace(
       const loadedById = new Map(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
-      const unread = await context.store.listAgentUnreadThreads(context.workspaceId);
       // Inside a run dohc dispatched, the inbox is that run's agent's unread
       // work: its chat, and each message elsewhere that asked it. Outside a
       // run, a self-connected agent reads every agent chat and the plain
       // @agent mentions no dohc agent took.
-      const runAgentId = options.dispatchedAgent(context.workspaceId);
+      const runId = options.dispatchedRunId(context.workspaceId);
+      const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
+      const unread = await context.store.listAgentUnreadThreads(context.workspaceId, runId ?? undefined);
       const agentChannelIds = new Set(
         channels
           .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
@@ -3289,8 +3300,8 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = runAgentId !== null
-        ? await context.store.listAgentUnreadRequests(context.workspaceId, runAgentId)
+      const mentionRows = runId !== null
+        ? await context.store.listAgentUnreadRequests(context.workspaceId, runId)
         : await context.store.listMentionsForHandle(
           context.workspaceId,
           "agent",
@@ -3348,6 +3359,7 @@ async function dispatchWorkspace(
         await markShownThreadRead(
           context,
           request.args.actor,
+          options.dispatchedRunId(context.workspaceId),
           target.thread.thread.id,
           messages,
         );
@@ -3455,8 +3467,10 @@ async function dispatchWorkspace(
       }
       if (actor === "agent") {
         try {
+          const runId = options.dispatchedRunId(context.workspaceId);
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
+            ...(runId === null ? {} : { runId }),
             threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });

@@ -1,14 +1,18 @@
 -- A person can have more than one agent, each with an id from their settings
 -- file. Each agent has its own chat, and every run, its messages, and each
--- request it answers name the agent. The one agent chat a store already has
--- belongs to the default agent, and so do its runs and requests.
+-- request it answers name the agent. The agent chat the default agent's wire
+-- id names belongs to the default agent, and so do its runs and requests.
 --
 -- A message's sender now writes its requests, one per agent it wakes, so the
 -- timestamp scan, its cursor, and its queue of local messages go. The request
 -- ledger is rebuilt with the agent in its key; nothing refers to it, so the
 -- rename runs in its normal mode.
 ALTER TABLE chat_channels ADD COLUMN agent_id TEXT;
-UPDATE chat_channels SET agent_id = 'default' WHERE kind = 'agent' AND slug = 'my-agent';
+UPDATE chat_channels SET agent_id = 'default'
+WHERE kind = 'agent'
+  AND channel_id IN (SELECT w.channel_id FROM chat_channel_wire_ids AS w
+                     WHERE w.workspace_id = chat_channels.workspace_id
+                       AND w.wire_id = 'channel_wire_agent_v1');
 -- An earlier build refused another agent's chat and kept that chat's threads
 -- in a hidden group for its wire id. The chat's create never comes again, so
 -- the group becomes the agent's chat. A wire id whose suffix is not an agent id
@@ -61,3 +65,24 @@ CREATE INDEX idx_chat_dispatch_ledger_state
     ON chat_dispatch_ledger(workspace_id, state, created_at_ms, trigger_message_id);
 DROP TABLE chat_dispatch_scan_cursor;
 DROP TABLE chat_dispatch_local_discovery;
+-- Each agent keeps its own place in each thread, and agents outside a run
+-- dohc dispatched share the place keyed by ''. A store's places were both the
+-- default agent's and those agents', so each place goes to both.
+CREATE TABLE chat_agent_read_state_next (
+    workspace_id            TEXT    NOT NULL,
+    agent_id                TEXT    NOT NULL,
+    thread_id               TEXT    NOT NULL,
+    last_read_created_at_ms INTEGER NOT NULL,
+    last_read_message_id    TEXT    NOT NULL,
+    revision                INTEGER NOT NULL,
+    updated_at_ms           INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, agent_id, thread_id)
+) STRICT;
+INSERT INTO chat_agent_read_state_next
+    (workspace_id, agent_id, thread_id, last_read_created_at_ms, last_read_message_id,
+     revision, updated_at_ms)
+SELECT workspace_id, reader.agent_id, thread_id, last_read_created_at_ms, last_read_message_id,
+       revision, updated_at_ms
+FROM chat_agent_read_state, (SELECT 'default' AS agent_id UNION ALL SELECT '') AS reader;
+DROP TABLE chat_agent_read_state;
+ALTER TABLE chat_agent_read_state_next RENAME TO chat_agent_read_state;

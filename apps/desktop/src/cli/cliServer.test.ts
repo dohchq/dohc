@@ -218,6 +218,8 @@ describe("CLI socket server", () => {
   let agentRunDepth: number;
   // Whether a run dohc dispatched holds the fixture workspace's run slot.
   let dispatchedRun: string | null;
+  // The engine's id for that run, when a test claimed one.
+  let dispatchedRunId: string | null;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -425,6 +427,7 @@ describe("CLI socket server", () => {
     };
     agentRunDepth = 0;
     dispatchedRun = null;
+    dispatchedRunId = null;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -463,6 +466,7 @@ describe("CLI socket server", () => {
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
+      dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
       agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
@@ -4946,7 +4950,10 @@ describe("CLI socket server", () => {
 
     // A dispatched run sees its own agent's unread work: its chat, and each
     // message elsewhere that asked it.
+    const codexRun = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (codexRun?.run.agentId !== "codex") throw new Error("Expected Codex's run");
     dispatchedRun = "codex";
+    dispatchedRunId = codexRun.run.runId;
     const runInbox = await invoke("inbox", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -4960,6 +4967,7 @@ describe("CLI socket server", () => {
       }),
     ]);
     dispatchedRun = null;
+    dispatchedRunId = null;
 
     const humanInbox = await invoke("inbox", {
       cwd: workspaceRoot,
@@ -4991,6 +4999,44 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot,
       actor: "human",
     })).threads.map((thread) => thread.id)).not.toContain(fileThreadId);
+  });
+
+  it("keeps a message that asked two agents in each one's inbox until that agent reads it", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["codex", "default"],
+      body: "@Codex and @Nova, can you both check the plan?",
+    });
+    const target = cliThreadId(asked.thread.id);
+    const asks = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
+    const startRun = async (agentId: string) => {
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      if (claim?.run.agentId !== agentId) throw new Error(`Expected ${agentId}'s run`);
+      dispatchedRun = agentId;
+      dispatchedRunId = claim.run.runId;
+      return claim.run.runId;
+    };
+
+    // An agent outside a run reads the thread with its own place.
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    const codexRun = await startRun("codex");
+    expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    expect(await asks()).toEqual([]);
+    await dispatchStore.completeRun({ runId: codexRun, exitCode: 0 });
+
+    await startRun("default");
+    expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    expect(await asks()).toEqual([]);
   });
 
   it("toggles reactions with main-derived actor identity", async () => {

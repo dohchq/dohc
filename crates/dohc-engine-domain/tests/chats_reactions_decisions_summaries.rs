@@ -1751,7 +1751,7 @@ fn agent_read_negative_coordinate_noops_without_revision() {
     seed_channel(&mut store);
     start(&mut store, "thread", "opening", 20, false);
     let state = LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, "thread", -1, "before", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", -1, "before", None, 30, &NO_FAULTS)
         .expect("negative coordinate");
     assert_eq!(
         state.last_read_created_at_ms, 0,

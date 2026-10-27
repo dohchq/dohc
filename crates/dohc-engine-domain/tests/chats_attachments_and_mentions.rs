@@ -861,7 +861,7 @@ fn mention_unread_filter_uses_agent_coordinate_tie_break() {
         20,
     );
     LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, "thread", 20, "a-message", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 20, "a-message", None, 30, &NO_FAULTS)
         .expect("mark read");
     let rows = LinkedChatStore::new(&mut store)
         .list_mentions_for_handle(
@@ -992,7 +992,7 @@ fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
 }
 
 #[test]
-fn an_agent_lists_the_unread_messages_that_asked_it() {
+fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     LinkedChatStore::new(&mut store)
@@ -1020,53 +1020,96 @@ fn an_agent_lists_the_unread_messages_that_asked_it() {
         "Opening",
         21,
     );
-    for (message_id, agent_id, now_ms) in [
-        ("asks-research", "research", 30),
-        ("asks-nova", "default", 31),
-    ] {
-        send_naming(
-            &mut store,
-            "group-thread",
-            message_id,
-            ChatActorKind::Human,
-            None,
-            &[agent_id],
-            "Can you look?",
-            now_ms,
-            &NO_FAULTS,
-        )
-        .expect("send");
-    }
-    let unread = |store: &mut EngineStore, after: Option<(i64, String)>| {
+    send_naming(
+        &mut store,
+        "group-thread",
+        "asks-both",
+        ChatActorKind::Human,
+        None,
+        &["research", "default"],
+        "Can you both look?",
+        30,
+        &NO_FAULTS,
+    )
+    .expect("send");
+    let unread = |store: &mut EngineStore, run_id: &str, after: Option<(i64, String)>| {
         LinkedChatStore::new(store)
-            .list_agent_unread_requests(WS, "research", after, 10)
-            .expect("requests")
-            .into_iter()
-            .map(|request| request.message_id)
-            .collect::<Vec<_>>()
+            .list_agent_unread_requests(WS, run_id, after, 10)
+            .map(|requests| {
+                requests
+                    .into_iter()
+                    .map(|request| request.message_id)
+                    .collect::<Vec<_>>()
+            })
     };
-    assert_eq!(unread(&mut store, None), vec!["direct", "asks-research"]);
+    let read = |store: &mut EngineStore, run_id: Option<&str>| {
+        LinkedChatStore::new(store)
+            .mark_thread_read_by_agent(
+                WS,
+                run_id,
+                "group-thread",
+                30,
+                "asks-both",
+                None,
+                40,
+                &NO_FAULTS,
+            )
+            .expect("read");
+    };
+
+    let research = LinkedChatStore::new(&mut store)
+        .claim_next_pending(WS, "run-1", "", None, 35, &NO_FAULTS)
+        .expect("claim")
+        .expect("research's run");
+    assert_eq!(research.run.agent_id, "research");
     assert_eq!(
-        unread(&mut store, Some((20, "direct".to_owned()))),
-        vec!["asks-research"]
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct", "asks-both"]
+    );
+    assert_eq!(
+        unread(&mut store, "run-1", Some((20, "direct".to_owned()))).expect("requests"),
+        vec!["asks-both"]
+    );
+    read(&mut store, None);
+    assert_eq!(
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct", "asks-both"],
+        "an agent outside a run keeps its own place."
+    );
+    read(&mut store, Some("run-1"));
+    assert_eq!(
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct"]
+    );
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    assert_eq!(
+        unread(&mut store, "run-1", None).unwrap_err().code(),
+        "run-not-found",
+        "a run that ended no longer reads as its agent."
     );
 
-    LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(
-            WS,
-            "group-thread",
-            30,
-            "asks-research",
-            None,
-            40,
-            &NO_FAULTS,
-        )
-        .expect("read");
-    assert_eq!(unread(&mut store, None), vec!["direct"]);
-    let error = LinkedChatStore::new(&mut store)
-        .list_agent_unread_requests(WS, "code--review", None, 10)
-        .unwrap_err();
-    assert_eq!(error.code(), "invalid-input");
+    let default = LinkedChatStore::new(&mut store)
+        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .expect("claim")
+        .expect("the default agent's run");
+    assert_eq!(default.run.agent_id, "default");
+    assert_eq!(
+        unread(&mut store, "run-2", None).expect("requests"),
+        vec!["asks-both"],
+        "research reading the message leaves it unread for the default agent."
+    );
+    read(&mut store, Some("run-2"));
+    assert!(
+        unread(&mut store, "run-2", None)
+            .expect("requests")
+            .is_empty()
+    );
+    assert_eq!(
+        unread(&mut store, "no-such-run", None).unwrap_err().code(),
+        "run-not-found"
+    );
 }
 
 #[test]

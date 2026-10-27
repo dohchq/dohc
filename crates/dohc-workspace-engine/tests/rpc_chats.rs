@@ -3973,6 +3973,37 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         ),
         (Some(10), Some("message"))
     );
+    // A caller names a run, never an agent, and only a running run moves its
+    // agent's place.
+    let up_to = json!({ "createdAtMs": 999, "messageId": "z" });
+    let named_agent = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "agentId": "codex", "threadId": "thread", "upTo": up_to }),
+    )
+    .await;
+    let unknown_run = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "runId": "no-such-run", "threadId": "thread", "upTo": up_to }),
+    )
+    .await;
+    assert_eq!(
+        (
+            named_agent.code,
+            unknown_run.code,
+            unknown_run.message.as_str()
+        ),
+        (
+            ErrorCode::InvalidParams,
+            ErrorCode::InvalidParams,
+            "run-not-found"
+        )
+    );
 
     call(
         &transport,
