@@ -19,6 +19,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_reader_source(false).await
+    }
+
+    async fn with_reader_source(keep_reader: bool) -> Self {
         let data: serde_json::Value = serde_json::from_str(include_str!(
             "../../../dohc-engine-collab/tests/reader-resolver.json")).unwrap();
         let source = data["source"].as_str().unwrap().to_owned();
@@ -49,7 +53,9 @@ impl Fixture {
             _ => panic!("expected a snapshot proof to control the rollback retry"),
         };
         let before = wire.transact().state_vector();
-        wire.get_or_insert_map("meta").remove(&mut wire.transact_mut(), "dohcMarkdownSourceReader");
+        if !keep_reader {
+            wire.get_or_insert_map("meta").remove(&mut wire.transact_mut(), "dohcMarkdownSourceReader");
+        }
         let doc = Ydoc::wire();
         doc.apply(&original.encode_full_state()).unwrap();
         doc.apply(&wire.transact().encode_state_as_update_v1(&before)).unwrap();
@@ -571,6 +577,74 @@ async fn markdown_hold_no_session_recovery_keeps_debt_when_an_outside_head_repla
         assert_eq!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.len(), 1);
         assert_eq!(store.table_row_count("moments")?, 2);
         assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_absent_reader_snapshot_refuses_before_the_hold_and_keeps_consent_unused() {
+    for unsafe_witness in [false, true] {
+        let f = Fixture::with_reader_source(true).await;
+        let mode = if unsafe_witness { "witness-unsafe" } else { "witness-safe" };
+        f.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            Arc::new(Reader::new(Some(super::super::reader_tests::fake_reader(&f.scratch, mode)))))))
+            .await.unwrap();
+        f.actor.run(|store, _| {
+            store.write_with(&NoFaults, |tx| tx.execute("DELETE FROM snapshots", [])
+                .map_err(StorageError::persist_public))?;
+            Ok(())
+        }).await.unwrap();
+        std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+        let grant = Arc::new(MarkdownConversionConsent::new(f.key.clone(), "owner-session".into(),
+            Some(f.claim.clone()), None, hex_sha256(f.source.as_bytes()), None));
+        assert!(matches!(f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+            ContentKind::Richdoc, Some(f.claim.clone()), None, "owner-session".into(), Arc::new(()),
+            20, Arc::new(NoFaults), CancellationToken::new(), None, Some(grant.clone())).await,
+            Err(RuntimeError::Collab(CollabError::MarkdownReaderUnavailable))));
+        assert!(!grant.is_consumed());
+        assert!(!f.scratch.path().join("note.md").exists());
+        let key = f.key.clone();
+        f.actor.run(move |store, _| {
+            assert_eq!(store.table_row_count("snapshots")?, 0);
+            assert_eq!(store.table_row_count("moments")?, 1);
+            assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+            assert_eq!(store.table_row_count("live_device_settlements")?, 0);
+            assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
+            Ok(())
+        }).await.unwrap();
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn markdown_hold_absent_head_without_reader_source_still_reaches_the_session_guard() {
+    let f = Fixture::new().await;
+    f.actor.run(|store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute("DELETE FROM snapshots", [])
+            .map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+    std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+    assert!(matches!(f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+        ContentKind::Richdoc, Some(f.claim.clone()), None, "owner-session".into(), Arc::new(()),
+        20, Arc::new(NoFaults), CancellationToken::new(), None, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { head_sha256: None, .. })));
+    assert!(!f.scratch.path().join("note.md").exists());
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(store.table_row_count("snapshots")?, 0);
+        assert_eq!(store.table_row_count("moments")?, 1);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        assert_eq!(store.table_row_count("live_device_settlements")?, 0);
+        let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, WriteObligationKind::Session);
+        assert_eq!(owed[0].held_head_sha256, None);
         let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
         assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
         Ok(())
