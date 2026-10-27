@@ -244,3 +244,189 @@ fn unsafe_witness_reader(scratch: &dohc_engine_testkit::ScratchDir) -> dohc_engi
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     dohc_engine_reader::Config { node, bundle, manifest: manifest_path }
 }
+
+async fn adopted_rpc_fixture() -> (
+    dohc_engine_testkit::ScratchDir, Arc<EngineService>,
+    dohc_engine_protocol::transport::ConnectionOwner, WorkspaceHandle, LiveObjectBinding, String,
+) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+    let scratch = ScratchDir::new().unwrap();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+    let data: Value = serde_json::from_str(include_str!(
+        "../../../dohc-engine-collab/tests/reader-resolver.json")).unwrap();
+    let source = data["source"].as_str().unwrap().to_owned();
+    let source_sha = hex_sha256(source.as_bytes());
+    let wire = yrs::Doc::new();
+    wire.transact_mut().apply_update(yrs::Update::decode_v1(
+        &STANDARD.decode(data["checkpoint"].as_str().unwrap()).unwrap()).unwrap()).unwrap();
+    for key in ["dohcLineageEpoch", "dohcMarkdownSourceReader"] {
+        wire.get_or_insert_map("meta").remove(&mut wire.transact_mut(), key);
+    }
+    let doc = Ydoc::wire();
+    doc.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
+    let key = DocKey::new("w", "main", "note").unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    store.bind_root_token(token, &NoFaults).unwrap();
+    VersionedTextStore::new(&mut store).ensure_main_version("w", "main", 1, &NoFaults).unwrap();
+    VersionedTextStore::new(&mut store).write_text(&WriteText {
+        workspace_id: "w".into(), version_id: "main".into(), object_id: "note".into(),
+        path: "note.md".into(), text: source.clone(), moment_id: "source".into(),
+        metadata_origin: "test".into(), metadata_summary: None, metadata_correlation_id: None,
+        author_json: None, now_ms: 2, request_id: None,
+    }, &NoFaults).unwrap();
+    dohc_engine_collab::claim_base(&mut store, &key, ContentKind::Richdoc, &doc.encode_full_state(), &NoFaults, 3).unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap();
+    let binding = LiveObjectBinding { lineage_claim_id: marker.lineage_claim_id.clone().unwrap(), ..binding() };
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET path='note.md'", []).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO ydoc_owner_base_sources(workspace_id,version_id,object_id,lineage_claim_id,\
+            path,source_moment_id,source_blob_sha256,source_byte_length) VALUES ('w','main','note',?1,\
+            'note.md','source',?2,?3)", rusqlite::params![binding.lineage_claim_id,source_sha,source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,\
+            object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,\
+            baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
+            covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
+            max_pending_bytes,max_pending_age_ms) VALUES ('relay','adoption','w','main','note',?1,?2,'source',?3,?4,\
+            0,0,?3,?3,0,?5,0,'null','{}',1000000,1000000)",
+            rusqlite::params![binding.lineage_claim_id,serde_json::to_string(&binding).unwrap(),source_sha,
+                source.len() as i64,marker.head_update_seq]).map_err(StorageError::persist_public)
+    }).unwrap();
+    drop(store);
+    std::fs::write(scratch.path().join("note.md"), &source).unwrap();
+    let configuration = serde_json::from_value(json!({
+        "version":1,"relayNamespace":"relay",
+        "host":{"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+        "workspaces":[{"root":scratch.path(),"workspaceId":"w","maxRegistrations":4}],
+        "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,
+            "maxUploads":1,"uploadDeadlineMs":30_000},
+        "settlement":{"maxApplicationsPerSettlement":4}
+    })).unwrap();
+    let (service, owner, _ingress) = EngineService::configured_live_host(configuration).await.unwrap();
+    let workspace = lock(&service.handles).keys().next().unwrap().clone();
+    service.open(Some(&workspace)).unwrap().actor.configure_reader_resolver(Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+            dohc_engine_reader::Reader::new(Some(unsafe_witness_reader(&scratch))))))).await.unwrap();
+    (scratch, service, owner, workspace, binding, source)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_rpc_releases_the_adopted_hold_but_never_uses_a_closed_owners_mcp_grant() {
+    use dohc_engine_collab::{ContentKind, Ydoc, markdown_write_obligations};
+    use dohc_engine_collab::live_update_application::*;
+    use dohc_engine_protocol::wire::Request;
+    use dohc_engine_storage::{EngineStore, hex_sha256};
+    use dohc_engine_testkit::engine_db_path;
+    for close_owner in [false, true] {
+        let (scratch, service, owner, workspace, binding, source) = adopted_rpc_fixture().await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let modified = std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let registered = service.live_application_register(&ctx, Some(workspace.clone()),
+            json!({"binding":binding})).await.unwrap();
+        let registration_id = registered["registrationId"].as_u64().unwrap();
+        let registration = service.live_application_registration(&owner.handle(), Some(&workspace), registration_id).unwrap();
+        let doc = {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            dohc_engine_collab::load_persisted(&store, &DocKey::new("w", "main", "note").unwrap())
+                .unwrap().unwrap().doc
+        };
+        let bytes = doc.richdoc_append_paragraph("Accepted visitor edit awaiting owner consent");
+        let receipt = LiveUpdateReceipt { delivery_id: "visitor".into(), update_digest: hex_sha256(&bytes),
+            journal_cursor: 1, accepting_host_epoch: 1 };
+        let admitted = AdmittedLiveUpdate { metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate { receipt: receipt.clone(), binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Link { principal_id: "visitor-test".into(),
+                    grant_id: "edit-link".into(), grant_generation: 1 },
+                received_at_ms: 10 }, first_seen: vec![], canonical_version: None, author_snapshot: None,
+            first_seen_deletes: None, checkpoint_coverage: None,
+        }, update_bytes: bytes };
+        assert!(matches!(registration.handle.apply_with_reservation(admitted, Arc::new(NoFaults), None,
+            8 * 1024 * 1024, Some(4)).await.unwrap(), ApplicationResult::Applied(_, _)));
+        let request = |owner_session: Option<&str>| Request {
+            id: 99, method: "liveApplication.settle".into(), workspace: Some(workspace.clone()),
+            deadline_ms: Some(60_000), idempotency_key: None, progress: false,
+            params: json!({"registrationId":registration_id,"terminalReceipt":receipt,"ownerSessionId":owner_session}),
+        };
+        let error = service.live_application_settle(ctx.clone(), request(None)).await.err().unwrap();
+        assert_eq!(error.message, "markdown-write-held");
+        let notice = {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("moments").unwrap(), 1);
+            assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+            dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().remove(0)
+        };
+        assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
+        assert_eq!(std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
+        assert_eq!(notice.document.as_ref().unwrap().path.as_deref(), Some("note.md"));
+        let opened = service.ydoc_open(&ctx, Some(workspace.clone()),
+            json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}), 100).await.unwrap();
+        let session_id = opened["sessionId"].as_str().unwrap().to_owned();
+        let mut events = service.events.subscribe();
+        let error = service.ydoc_settle(&ctx, Some(workspace.clone()), json!({
+            "sessionId":session_id,"allowLossySourceSha256":hex_sha256(source.as_bytes()),
+        })).await.unwrap_err();
+        assert_eq!(error.message, "markdown-write-held");
+        let grant = lock(&service.sessions)[&session_id].conversion_consent.clone().unwrap();
+        assert!(!grant.is_consumed());
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.name == "ydoc.remoteUpdate" && event.payload["sessionId"] == session_id
+                    && event.payload["settlementWanted"] == true { break; }
+            }
+        }).await.expect("a held consent settle wakes the relay through the recovery worker");
+        if close_owner {
+            service.ydoc_close(&ctx, Some(workspace.clone()),
+                json!({"sessionId":session_id,"settle":false})).await.unwrap();
+            let mcp = service.ydoc_open(&ctx, Some(workspace.clone()), json!({
+                "versionId":"main","path":"note.md","contentKind":"richdoc",
+                "allowLossySourceSha256":hex_sha256(source.as_bytes()),
+            }), 101).await.unwrap();
+            let mcp_id = mcp["sessionId"].as_str().unwrap();
+            let error = service.live_application_settle(ctx.clone(), request(Some(&session_id))).await.err().unwrap();
+            assert_eq!(error.message, "markdown-write-held");
+            assert!(!lock(&service.sessions)[mcp_id].conversion_consent.as_ref().unwrap().is_consumed());
+            assert!(!grant.is_consumed());
+            assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
+            assert_eq!(std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+            assert!(!dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().is_empty());
+        } else {
+            let settled = service.live_application_settle(ctx.clone(), request(Some(&session_id))).await.unwrap();
+            assert_eq!(settled.response.result["status"], "settled");
+            assert_eq!(settled.response.result["settlement"]["terminalCursor"], 1);
+            assert!(grant.is_consumed());
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    if open.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("audited completion also clears its refresh debt");
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert!(store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w")).unwrap().is_empty());
+            assert!(dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().is_empty());
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 1);
+            let saved = std::fs::read_to_string(scratch.path().join("note.md")).unwrap();
+            assert_eq!(saved.matches("Accepted visitor edit awaiting owner consent").count(), 1);
+            let doc = Ydoc::wire();
+            let refreshed = open.actor.ydoc_resync(DocKey::new("w", "main", "note").unwrap(),
+                Some(binding.lineage_claim_id.clone()), dohc_engine_runtime::CancellationToken::new(), None).await.unwrap();
+            doc.apply(&refreshed.initial_update).unwrap();
+            assert!(!doc.has_markdown_witness());
+            assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("Accepted visitor edit"));
+        }
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+}
