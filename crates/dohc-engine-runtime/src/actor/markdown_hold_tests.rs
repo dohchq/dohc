@@ -1,6 +1,6 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use dohc_engine_collab::{reader_resolver, Ydoc};
+use dohc_engine_collab::{reader_resolver, LeaseRegistry, Ydoc};
 use dohc_engine_reader::Reader;
 use dohc_engine_domain::WriteText;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -488,5 +488,92 @@ async fn markdown_hold_author_capacity_keeps_coverage_and_retries_only_after_con
     }).await.unwrap();
     f.settle(true, Some(f.consent())).await.unwrap().settled().unwrap();
     f.actor.run(append("new-human")).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+struct RecoveryRoot(PathBuf);
+impl WorkspaceRootGuard for RecoveryRoot {
+    fn validate(&self, root: &std::path::Path) -> Result<(), RuntimeError> {
+        assert_eq!(root, self.0);
+        assert!(root.is_dir());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn markdown_hold_no_session_recovery_reopens_debt_without_reappending_accepted_edits() {
+    let mut f = Fixture::new().await;
+    let modified = std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap();
+    assert!(matches!(f.settle(false, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 20).unwrap().actor;
+    let resolver = reader_resolver::ReaderResolver::new(Arc::new(Reader::new(Some(
+        super::super::reader_tests::fake_reader(&f.scratch, "witness-unsafe")))));
+    f.actor.configure_reader_resolver(Arc::new(resolver)).await.unwrap();
+    let candidates = f.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    let owed = candidates[0].obligation.clone();
+    let root = f.scratch.path().to_owned();
+    assert!(matches!(f.actor.recover_markdown_write(owed.clone(), root.clone(),
+        Arc::new(RecoveryRoot(root.clone())), LeaseRegistry::new(), Arc::new(()), 21,
+        CancellationToken::new()).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    f.unchanged().await;
+    assert_eq!(std::fs::metadata(root.join("note.md")).unwrap().modified().unwrap(), modified);
+    let key = f.key.clone();
+    let accepted_sequence = f.actor.run(move |store, _| {
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        let clear = doc.clear_markdown_source_witness();
+        store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(tx, &key, &clear, None, None, 22))?;
+        Ok(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq)
+    }).await.unwrap();
+    let current = f.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_ne!(current[0].fingerprint, candidates[0].fingerprint);
+    for now in [23, 24] {
+        assert!(f.actor.recover_markdown_write(owed.clone(), root.clone(),
+            Arc::new(RecoveryRoot(root.clone())), LeaseRegistry::new(), Arc::new(()), now,
+            CancellationToken::new()).await.unwrap());
+    }
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+        assert_eq!(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq, accepted_sequence);
+        Ok(())
+    }).await.unwrap();
+    let saved = std::fs::read_to_string(root.join("note.md")).unwrap();
+    assert_eq!(saved.matches("Accepted text remains available").count(), 1);
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_no_session_recovery_keeps_debt_when_an_outside_head_replaces_the_source() {
+    let f = Fixture::new().await;
+    assert!(matches!(f.settle(false, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    let owed = f.actor.markdown_recovery_candidates("w".into()).await.unwrap().remove(0).obligation;
+    f.actor.run(|store, _| {
+        VersionedTextStore::new(store).write_text(&WriteText {
+            workspace_id: "w".into(), version_id: "main".into(), object_id: "note".into(),
+            path: "note.md".into(), text: "Outside change\n".into(), moment_id: "outside".into(),
+            metadata_origin: "capture".into(), metadata_summary: None, metadata_correlation_id: None,
+            author_json: None, now_ms: 20, request_id: None,
+        }, &NoFaults)?;
+        Ok(())
+    }).await.unwrap();
+    let root = f.scratch.path().to_owned();
+    std::fs::write(root.join("note.md"), "Outside change\n").unwrap();
+    assert!(matches!(f.actor.recover_markdown_write(owed, root.clone(),
+        Arc::new(RecoveryRoot(root.clone())), LeaseRegistry::new(), Arc::new(()), 21,
+        CancellationToken::new()).await, Err(RuntimeError::Domain(DomainError::ConflictStaleTarget))));
+    assert_eq!(std::fs::read_to_string(root.join("note.md")).unwrap(), "Outside change\n");
+    let key = f.key.clone();
+    f.actor.run(move |store, _| {
+        assert_eq!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.len(), 1);
+        assert_eq!(store.table_row_count("moments")?, 2);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 0);
+        let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+        assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted text remains available"));
+        Ok(())
+    }).await.unwrap();
     f.supervisor.close(&f.db).unwrap();
 }
