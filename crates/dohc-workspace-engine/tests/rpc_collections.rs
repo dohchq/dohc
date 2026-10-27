@@ -3969,6 +3969,8 @@ async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
+    // The local base sits at relay 20, after the foreign base at relay 11, so
+    // close lets the foreign base replace it.
     let parked = park_remote_status_update(None, 20).await;
     let db = engine_db_path(&parked.scratch).expect("engine db");
     let mut store = EngineStore::open(&db, 300).expect("fixture store");
