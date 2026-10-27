@@ -207,6 +207,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect(notice).toBeVisible({timeout: 60_000});
       await expect(notice.getByRole("button", {name: "Save recovery copy", exact: true})).toBeEnabled();
       await expect(notice.getByRole("button", {name: "Open Live documents", exact: true})).toBeVisible();
+      await expect(notice.getByRole("button", {name: "Dismiss notice", exact: true})).toBeVisible();
       await expect(notice.getByRole("button", {name: "Try again", exact: true})).toHaveCount(0);
       await screenshots(page, info, "notices");
     });
@@ -235,6 +236,14 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
 
     await test.step("Save recovery copy writes HELD and its package without changing the restored note or ending the kept edit", async () => {
       await kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true}).click();
+      const savedMessage = `Saved a recovery copy of ${PATH} in notes. Your kept edits stay on this computer.`;
+      const saved = page.getByTestId("workspace-shell-notice").filter({has: page.getByText(savedMessage, {exact: true})});
+      await expect(saved.getByText(savedMessage, {exact: true})).toBeVisible();
+      await expect(saved.getByRole("button", {name: "Open", exact: true})).toBeVisible();
+      // Hover keeps the existing success toast visible through both theme shots.
+      await saved.hover();
+      await expect(kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true})).toBeEnabled();
+      await screenshots(page, info, "after-save");
       await expect.poll(async () => readFile(join(ownerTemp.rootPath, COPY), "utf8").catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return "";
         throw error;
@@ -252,7 +261,32 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expectCliKeptEdits();
       await live.getByRole("button", {name: "Close", exact: true}).click();
       await expect(live).toHaveCount(0);
-      if (await notices.isVisible()) await page.getByTestId("notice-center-toggle").click();
+      if (!await notices.isVisible()) await page.getByTestId("notice-center-toggle").click();
+      await expect(notice).toBeVisible();
+      await screenshots(page, info, "after-save-notices");
+    });
+
+    await test.step("dismissing the notice hides only its row and leaves the edits available in Live documents and the CLI", async () => {
+      await notice.getByRole("button", {name: "Dismiss notice", exact: true}).click();
+      await expect(notice).toHaveCount(0);
+      await page.getByTestId("notice-center-toggle").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("cloud")).click();
+      await page.getByRole("button", {name: "Open live documents", exact: true}).click();
+      await expect(live).toBeVisible();
+      await live.getByRole("button", {name: "Reload", exact: true}).click();
+      await expect(live.getByTestId("live-documents-reload")).toBeEnabled();
+      await expect(kept.getByRole("button")).toHaveText(["Save recovery copy"]);
+      await expect(kept.getByRole("button", {name: `Save recovery copy of ${PATH}`, exact: true})).toBeEnabled();
+      await expectCliKeptEdits();
+      await live.getByRole("button", {name: "Close", exact: true}).click();
+      await expect(live).toHaveCount(0);
+      await page.getByTestId("notice-center-toggle").click();
+      await expect(notice).toHaveCount(0);
+      await page.getByTestId("notice-center-toggle").click();
+    });
+
+    await test.step("the restored note stays unchanged and the readable copy opens with HELD", async () => {
       await openNote(page);
       await expect(editor(page)).toContainText(BASELINE);
       await expect(editor(page)).not.toContainText(R1);
@@ -260,7 +294,6 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await waitForWorkspaceFile(page, workspace.workspaceId, COPY);
       await openNote(page, COPY);
       await expect(editor(page)).toContainText(HELD);
-      await screenshots(page, info, "after-save");
     });
     for (const app of apps) {
       expect(app.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
