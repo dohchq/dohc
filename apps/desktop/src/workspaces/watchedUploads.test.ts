@@ -61,32 +61,6 @@ it("does not start a queued watched push once capture shutdown begins", async ()
   await f.sync.stop();
 });
 
-it("rechecks shutdown after waiting on the capture chain", async () => {
-  vi.useFakeTimers(); const f = fixture(); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
-  f.answer(true); await vi.advanceTimersByTimeAsync(0);
-  let release!: () => void; const gate = new Promise<void>(resolve => {release = resolve;});
-  const run = f.capture.runRelaySync;
-  f.capture.runRelaySync = async task => {await gate; return run(task);};
-  f.edit(); await vi.advanceTimersByTimeAsync(0);
-  Object.defineProperty(f.capture, "shuttingDown", {value: true});
-  release(); await vi.advanceTimersByTimeAsync(0);
-  expect(f.push).toHaveBeenCalledTimes(1);
-  await f.sync.stop();
-});
-
-it("starts the 250 ms window at the real push after capture becomes available", async () => {
-  vi.useFakeTimers(); const f = fixture(); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
-  f.answer(true); await vi.advanceTimersByTimeAsync(0);
-  let release!: () => void; const gate = new Promise<void>(resolve => {release = resolve;});
-  const run = f.capture.runRelaySync;
-  f.capture.runRelaySync = async task => {await gate; f.capture.runRelaySync = run; return run(task);};
-  f.edit(); await vi.advanceTimersByTimeAsync(100); release(); await vi.advanceTimersByTimeAsync(0);
-  expect(f.push).toHaveBeenCalledTimes(2); f.edit();
-  await vi.advanceTimersByTimeAsync(249); expect(f.push).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(1); expect(f.push).toHaveBeenCalledTimes(3);
-  await f.sync.stop();
-});
-
 it.each([[false, 1], [true, 1], [false, 0], [true, 0]] as const)("keeps a durable wake arriving during a push (ordinary: %s, accepted: %s)", async (ordinary, pushed) => {
   vi.useFakeTimers(); const f = fixture(); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
   f.answer(true); await vi.advanceTimersByTimeAsync(0);
@@ -357,16 +331,5 @@ it("rechecks a wake even if a watched push reports draining multiple edits", asy
   finish(); await vi.advanceTimersByTimeAsync(150);
   expect(f.push).toHaveBeenCalledTimes(3);
   f.edit(); await vi.advanceTimersByTimeAsync(250); expect(f.push).toHaveBeenCalledTimes(4);
-  await f.sync.stop();
-});
-
-it("keeps a new edit arriving after the push result while capture releases the chain", async () => {
-  vi.useFakeTimers(); const f = fixture(); await f.sync.start(); await vi.advanceTimersByTimeAsync(0);
-  f.answer(true); await vi.advanceTimersByTimeAsync(0);
-  // The fixture edits during the outer capture gate's completion, after push has returned.
-  const run = f.capture.runRelaySync;
-  f.capture.runRelaySync = async task => {const result = await run(task); f.edit("after.md"); f.capture.runRelaySync = run; return result;};
-  f.edit(); await vi.advanceTimersByTimeAsync(250);
-  expect(f.push).toHaveBeenCalledTimes(3);
   await f.sync.stop();
 });

@@ -417,7 +417,7 @@ impl ActorHandle {
                                 tokio::task::spawn_blocking(move || checkpoint())
                             )
                             .await,
-                            Ok(Ok(()))
+                            Ok(Ok(_))
                         ) {
                             result.materialized = false;
                             return result;

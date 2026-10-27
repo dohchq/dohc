@@ -1,4 +1,4 @@
-import { FileText, GitFork, ListFilter, RefreshCw } from "lucide-react";
+import { FileText, GitFork, ListFilter, MessageSquare, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -13,6 +13,7 @@ import { graphWalk, degrees, emptyGraph, withChatMentions, type GraphData, type 
 import { bridge } from "../bridge";
 import { isChatMentionPageChanged } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
+import { IconButton } from "../ui/controls";
 
 type WorkspaceGraphNode = GraphNode;
 
@@ -917,6 +918,9 @@ export function GraphView(props: {
     [graph, rows, variant],
   );
   const notice = graphStatus(graph, rows.length, shownEdgeCount);
+  const docCount = `${graph.nodes.length} doc${graph.nodes.length === 1 ? "" : "s"}`;
+  const linkCount = `${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"}`;
+  const counts = `${docCount} · ${linkCount}`;
 
   return (
     <div
@@ -934,40 +938,50 @@ export function GraphView(props: {
       }
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
-        <GitFork size={13} aria-hidden className="text-subtle" />
-        <output data-testid="graph-doc-count" className="font-mono text-[11px] text-muted">
-          {graph.nodes.length} doc{graph.nodes.length === 1 ? "" : "s"}
-        </output>
-        <span aria-hidden className="text-subtle">
-          ·
+        <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
+        <span title={counts} className="flex min-w-0 items-center gap-2 overflow-hidden text-[11px] text-muted">
+          <output data-testid="graph-doc-count" className="shrink-0">
+            {docCount}
+          </output>
+          <span aria-hidden className="text-[13px] text-subtle">
+            ·
+          </span>
+          <output data-testid="graph-link-count" className="min-w-0 truncate">
+            {linkCount}
+          </output>
         </span>
-        <output data-testid="graph-link-count" className="font-mono text-[11px] text-muted">
-          {graph.edges.length} link{graph.edges.length === 1 ? "" : "s"}
-        </output>
-        {notice ? (
+        {notice && variant === "page" ? (
           <span
             data-testid="graph-unresolved-count"
-            className="inline-flex items-center gap-1.5 font-mono text-[11px] text-subtle"
+            title={notice}
+            className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
+          >
+            <ListFilter size={12} aria-hidden className="shrink-0" />
+            <span className="truncate">{notice}</span>
+          </span>
+        ) : notice ? (
+          // The side panel has room for the counts only, so the notice is its icon.
+          <span
+            data-testid="graph-unresolved-count"
+            role="img"
+            aria-label={notice}
+            title={notice}
+            className="inline-flex shrink-0 text-subtle"
           >
             <ListFilter size={12} aria-hidden />
-            {notice}
           </span>
         ) : null}
         {props.chatMentionsAvailable ? (
-          <button
-            type="button"
+          <IconButton
             data-testid="graph-chat-mentions-toggle"
+            aria-label="Chat mentions"
             aria-pressed={includeChatMentions}
             title="Show chat and heading mentions"
             onClick={() => setIncludeChatMentions((value) => !value)}
-            className={`ml-auto rounded-md border px-2 py-1 text-[10px] transition-colors ${
-              includeChatMentions
-                ? "border-accent/50 bg-accent/10 text-accent"
-                : "border-line text-subtle hover:bg-hover hover:text-ink"
-            }`}
+            className="ml-auto shrink-0 aria-pressed:bg-selected aria-pressed:text-ink"
           >
-            Chat mentions
-          </button>
+            <MessageSquare size={13} aria-hidden />
+          </IconButton>
         ) : (
           <span className="ml-auto" />
         )}
@@ -976,7 +990,7 @@ export function GraphView(props: {
           aria-label="Refresh graph"
           title="Refresh graph"
           onClick={load}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+          className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -1035,14 +1049,14 @@ export function GraphView(props: {
                           : "text-muted hover:bg-hover hover:text-ink"
                       }`}
                     >
-                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 font-mono text-[10px] text-subtle">
+                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 text-[10px] font-semibold tabular-nums text-subtle">
                         {degree(node)}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] text-ink">
                           {node.title}
                         </span>
-                        <span className="block truncate font-mono text-[10px] text-subtle">
+                        <span className="block truncate text-[10px] text-subtle">
                           {node.kind === "heading"
                             ? node.filePath
                             : node.kind === "chat-thread"
@@ -1050,7 +1064,7 @@ export function GraphView(props: {
                               : node.path}
                         </span>
                       </span>
-                      <span className="font-mono text-[10px] text-subtle">
+                      <span className="text-[10px] tabular-nums text-subtle">
                         {node.incoming}/{node.outgoing}
                       </span>
                     </button>

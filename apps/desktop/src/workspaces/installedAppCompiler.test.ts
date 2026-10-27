@@ -8,7 +8,7 @@ const failure = (reason: CompilerProcessError["reason"], diagnostics?: string) =
   Object.assign(new CompilerProcessError(reason, "Compiler exited (1)."), { diagnostics });
 
 it("keeps safe timeout details through the installed adapter, Electron, and Notice copy", () => {
-  const details = "Last stage: Add-Type done; elapsed=20000ms; owner spawned=5ms, PowerShell running=500ms, Add-Type done=19000ms; stderr tail: [redacted stderr]";
+  const details = "Last stage: job assigned; elapsed=20000ms; owner spawned=5ms, owner running=50ms, job assigned=19000ms; stderr tail: [redacted stderr]";
   const error = Object.assign(failure("timeout"), { details });
   const translated = appBuildError(error) as Error;
   const received = new Error(`Error invoking remote method 'desktop:prepare-app': ${String(ipcWireError(translated))}`);

@@ -1,5 +1,7 @@
 export interface ChatListFixtureApi {
   append(): void;
+  appendMarkdown(): void;
+  markdown(id: string): void;
   grow(id: string): void;
   prepend(): void;
   reorder(): void;

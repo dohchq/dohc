@@ -376,7 +376,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
-import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -901,12 +901,12 @@ function cloudLogin(): CloudLogin {
       allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
-        cipher: {
+        cipher: mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env }) ? {
           isAvailable: () => safeStorage.isEncryptionAvailable(),
           encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
           decrypt: (cipherText) =>
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-        },
+        } : undefined,
       }),
     });
   }
@@ -5220,8 +5220,14 @@ const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
+    // A window's reads that came before this open, such as its settings, read again.
+    notifyRenderer({workspaceId});
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
+      reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+      automationHosts.open(workspaceId);
+      void lease.state.collectionAutomations.workspaceOpened();
+    });
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });

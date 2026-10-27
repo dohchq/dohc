@@ -13,6 +13,7 @@ import {
   type OwnerAdmissionPending,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
 import { startRelayWatch } from "./relayWatch";
@@ -294,7 +295,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  // Share the ordinary pass and capture chains; this pass only pushes.
+  // Shares the ordinary pass chain; this pass only pushes, so it stays off the
+  // capture chain like every push.
   function runWatchedUpload(): void {
     watchedQueued = true;
     const result = chain.then(async () => {
@@ -302,18 +304,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       const before = visibleState();
       const eventsBefore = changeEvents;
       try {
-        const pushed = await options.capture.runRelaySync(async () => {
-          if (!watchedDirty || !canUploadWatched()) return;
-          watchedDirty = false;
-          lastWatchedStart = Date.now();
-          const result = await pushWithIdentity({
-            push: () => operations.push(),
-            claim,
-          });
-          watchedDirty ||= result.pushed > 0 && result.hasMore;
-          return result;
+        watchedDirty = false;
+        lastWatchedStart = Date.now();
+        const pushed = await pushWithIdentity({
+          push: () => operations.push(),
+          claim,
         });
-        if (!pushed) return;
+        watchedDirty ||= pushed.pushed > 0 && pushed.hasMore;
         watchedPushPaused = pushed.pushed === 0 && !watchedDirty;
         sharingDeclined = mergeSharingDeclined([...sharingDeclined, ...pushed.sharingDeclined]);
         ownerAdmissionPending = pushed.ownerAdmissionPending;
@@ -400,6 +397,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     displacedDueAtMs: number | null | undefined,
     countsAsAttempt: boolean,
   ): void {
+    // Quit stopped waiting for the relay. Nothing failed, and sync is ending.
+    if (error instanceof EngineWorkspaceShuttingDownError) return;
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
@@ -479,46 +478,47 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
-    const pullResult = await options.capture.runRelaySync(
-      async (materializePage) => {
-        const pull = async () => {
-          const ended = options.pullStarting?.();
-          try {
-            return await operations.pull(materializePage);
-          } finally {
-            ended?.();
-          }
-        };
-        // A join-bootstrap engine is pull-only until its first pull succeeds:
-        // a fresh join must never append ops before it has the remote state.
-        if (!bootstrapPass) {
-          try {
-            await push();
-          } catch (error) {
-            if (!(error instanceof RelayOriginDivergedError)) throw error;
-            // The local engine.db was restored-from-older or cloned, so its
-            // origin diverged from the relay's authoritative record. Re-baseline
-            // onto a fresh origin — preserving local-only work as conflicts where
-            // it clashes, never dropping it — then push under the fresh origin.
-            await operations.recoverOrigin();
-            await push();
-          }
-        }
+    // Only the pull writes workspace files, so only the pull runs on the
+    // capture chain. The push and origin recovery wait on the relay without
+    // holding up capture, document opens or History.
+    const pull = () =>
+      options.capture.runRelaySync(async (materializePage) => {
+        const ended = options.pullStarting?.();
         try {
-          return await pull();
-        } catch (error) {
-          if (!(error instanceof RelayOriginDivergedError)) throw error;
-          // A pull can find that this machine's local origin disagrees with its
-          // own relay echo. Re-baseline that origin, preserve its local suffix,
-          // and retry the pass instead of backing off against the same page.
-          await operations.recoverOrigin();
-          if (!bootstrapPass) {
-            await push();
-          }
-          return pull();
+          return await operations.pull(materializePage);
+        } finally {
+          ended?.();
         }
-      },
-    );
+      });
+    // A join-bootstrap engine is pull-only until its first pull succeeds:
+    // a fresh join must never append ops before it has the remote state.
+    if (!bootstrapPass) {
+      try {
+        await push();
+      } catch (error) {
+        if (!(error instanceof RelayOriginDivergedError)) throw error;
+        // The local engine.db was restored-from-older or cloned, so its
+        // origin diverged from the relay's authoritative record. Re-baseline
+        // onto a fresh origin — preserving local-only work as conflicts where
+        // it clashes, never dropping it — then push under the fresh origin.
+        await operations.recoverOrigin();
+        await push();
+      }
+    }
+    let pullResult: PullWorkspaceFromRelayResult;
+    try {
+      pullResult = await pull();
+    } catch (error) {
+      if (!(error instanceof RelayOriginDivergedError)) throw error;
+      // A pull can find that this machine's local origin disagrees with its
+      // own relay echo. Re-baseline that origin, preserve its local suffix,
+      // and retry the pass instead of backing off against the same page.
+      await operations.recoverOrigin();
+      if (!bootstrapPass) {
+        await push();
+      }
+      pullResult = await pull();
+    }
     // Only a fully successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
@@ -556,9 +556,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     nextBackoffMs = initialBackoffMs;
     setSyncFailure(null);
     if (ownerAdmissionPending.length > 0 && !pushHasMore) scheduleBackoff();
-    // Release the capture chain between bounded pushes. Each pass pulls before
-    // the next timer admits more work, so document opens and writes can proceed.
-    // Bootstrap also needs a normal pass after its initial pull.
+    // A bounded push leaves the rest to another pass, and each pass releases
+    // the capture chain after its pull, so document opens and writes can
+    // proceed between them. Bootstrap also needs a normal pass after its
+    // initial pull.
     if ((pushHasMore || bootstrapPass) && !stopped && !authExpired) {
       continuationTimer = setTimeout(() => {
         continuationTimer = undefined;
@@ -644,7 +645,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         try {
           applied = await doPass(retryClaim);
         } catch (error) {
-          failed = true;
+          failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
