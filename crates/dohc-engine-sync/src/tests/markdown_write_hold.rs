@@ -177,3 +177,65 @@ fn markdown_hold_coalesced_recovery_does_not_credit_a_later_provisional_author()
     assert_eq!(saved.text.matches("Later content has no verified author").count(), 1);
     assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
 }
+
+#[test]
+fn markdown_hold_live_and_ended_session_drains_consume_rows_without_a_file_receipt() {
+    for live in [false, true] {
+        let mut f = Fixture::new();
+        f.base();
+        let delta = f.doc.richdoc_append_paragraph("Parked content survives the session drain");
+        let op = f.op(1, &delta, false);
+        apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, &AlwaysLive).unwrap();
+        let drained = if live {
+            crate::drain_deferred_ydoc_for_live_session(&mut f.store, &mut f.cache, &f.key,
+                Some(&f.claim), &NoFaults).unwrap()
+        } else {
+            assert!(matches!(crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+                &mut f.store, &mut f.cache, &f.key, &AlwaysLive, &NoFaults),
+                Err(SyncError::LiveDocumentBindingActive)));
+            assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+            crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(&mut f.store, &mut f.cache,
+                &f.key, &NoLiveLeases, &NoFaults).unwrap()
+        };
+        assert_eq!(drained.drained, 1);
+        assert_eq!(drained.refusals.len(), 1);
+        assert!(matches!(&drained.refusals[0].reason,
+            RefusalReason::InvalidInput { reason } if reason == "markdown-write-held"));
+        assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+        f.assert_absent();
+        let persisted = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+        assert_eq!(persisted.project(ContentKind::Richdoc).unwrap().content
+            .matches("Parked content survives the session drain").count(), 1);
+        assert!(f.pending().iter().all(|owed| owed.kind == Kind::SyncProjection));
+    }
+}
+
+#[test]
+fn markdown_hold_delayed_drain_cleanup_survives_restart_and_keeps_the_refusal() {
+    let mut f = Fixture::new();
+    f.base();
+    let delta = f.doc.richdoc_append_paragraph("Retained cleanup content");
+    let op = f.op(1, &delta, false);
+    apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, &AlwaysLive).unwrap();
+    let (first, _unacknowledged) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut f.store, &mut f.cache, &f.key, &NoFaults).unwrap();
+    assert_eq!(first.drained, 1);
+    assert!(first.refusals.is_empty());
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    let sequence = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+    f.assert_absent();
+    drop(f.store);
+    f.store = EngineStore::open(&f.db, 3000).unwrap();
+    f.cache = WriterDocCache::new();
+    let (second, cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut f.store, &mut f.cache, &f.key, &NoFaults).unwrap();
+    assert_eq!(second.drained, 1);
+    assert_eq!(dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq, sequence);
+    let refusal = crate::complete_deferred_ydoc_drain_cleanup(&mut f.store, cleanup, &NoFaults)
+        .unwrap().expect("the terminal hold travels with delayed cleanup");
+    assert!(matches!(refusal.reason, RefusalReason::InvalidInput { reason } if reason == "markdown-write-held"));
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 1);
+    f.assert_absent();
+    assert!(!crate::list_refusal_notices(&f.store, "ws").unwrap().is_empty());
+}
