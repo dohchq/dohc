@@ -416,6 +416,47 @@ describe("table gestures while the note changes", () => {
     expect(tableTextGrid(editor)).toEqual(before);
   });
 
+  function deleteColumnOf(editor: Editor, label: string) {
+    let cell = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === "tableHeader" && node.textContent === label) cell = pos;
+    });
+    editor.chain().setTextSelection(cell + 2).deleteColumn().run();
+  }
+
+  it.each(["synced", "local"])("cancels a column width resize when a %s edit deletes its column", async (origin) => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(origin === "synced" ? collaborator : editor, "A2");
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "A3"]);
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", ""]);
+  });
+
+  it("finishes a column width resize on the same column after a local edit deletes the column before it", async () => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(editor, "A1");
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A2", "A3"]);
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [[160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    // Saving the width changes the cell, but the handle stays on its edge.
+    expect(editor.state.doc.nodeAt(columnResizingPluginKey.getState(editor.state)!.activeHandle)?.textContent)
+      .toBe("A2");
+  });
+
   it("cancels a row height resize after a synced edit above the table", async () => {
     const { editor, collaborator } = await setup();
     const before = tableNode(editor);

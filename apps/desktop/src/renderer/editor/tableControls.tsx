@@ -86,6 +86,7 @@ import {
   TableMap,
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
+import { Mapping } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const tableControlsKey = new PluginKey("dohc-table-controls");
@@ -1955,11 +1956,19 @@ export function makeTableControlsPlugin(
 
   return new Plugin({
     key: tableControlsKey,
-    appendTransaction(transactions, _oldState, state) {
+    appendTransaction(transactions, oldState, state) {
       if (!transactions.some((tr) => tr.docChanged)) return null;
       const resize = columnResizingPluginKey.getState(state);
-      if (resize?.dragging && resize.activeHandle === -1) {
-        return state.tr.setMeta(columnResizingPluginKey, { setDragging: null });
+      if (!resize?.dragging) return null;
+      // prosemirror-tables moves the handle of a deleted cell onto the next
+      // cell. A deleted cell's start and end map to one position.
+      const handle = columnResizingPluginKey.getState(oldState)?.activeHandle ?? -1;
+      const size = handle > -1 ? oldState.doc.nodeAt(handle)?.nodeSize ?? 0 : 0;
+      const mapping = new Mapping();
+      transactions.forEach((tr) => mapping.appendMapping(tr.mapping));
+      const cellDeleted = size > 0 && mapping.map(handle, -1) === mapping.map(handle + size, -1);
+      if (resize.activeHandle === -1 || cellDeleted) {
+        return state.tr.setMeta(columnResizingPluginKey, { setHandle: -1 });
       }
       return null;
     },
