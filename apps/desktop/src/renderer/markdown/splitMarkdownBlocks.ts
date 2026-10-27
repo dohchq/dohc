@@ -1,15 +1,20 @@
 // Splits markdown source into block-safe chunks for incremental rendering
 // (Phase 16: a 250KB document parses ~575ms as one tree; the first visible
 // window parses in single-digit ms). Chunk boundaries sit only at blank lines
-// outside fenced code, so each chunk parses to the same blocks it would inside
-// the full document. Reference-style link definitions are collected doc-wide
-// and appended to every chunk (definitions render nothing), so links keep
-// resolving across chunk boundaries.
+// outside fenced code, and never between a table and its row-height comment,
+// so each chunk parses to the same blocks it would inside the full document.
+// Reference-style link definitions are collected doc-wide and appended to
+// every chunk (definitions render nothing), so links keep resolving across
+// chunk boundaries.
 
 const CHUNK_TARGET_BYTES = 4 * 1024;
 
 const FENCE_RE = /^\s{0,3}(```|~~~)/;
 const LINK_DEF_RE = /^\s{0,3}\[[^\]]+\]:\s+\S/;
+// A table's row-height comment names the table under it, even across blank
+// lines (@dohc/ydoc-projection/table-row-heights). A line that may hold one
+// keeps the blank lines and the block after it in its segment.
+const ROW_HEIGHTS_COMMENT = "<!-- dohc:table row-heights=";
 
 export function splitMarkdownBlocks(source: string): string[] {
   const lines = source.split("\n");
@@ -19,6 +24,7 @@ export function splitMarkdownBlocks(source: string): string[] {
   const definitions: string[] = [];
   let current: string[] = [];
   let fence: string | null = null;
+  let afterRowHeights = false;
 
   const flush = () => {
     if (current.length === 0) return;
@@ -32,9 +38,11 @@ export function splitMarkdownBlocks(source: string): string[] {
     else if (fence !== null && fenceMatch && line.trim().startsWith(fence)) fence = null;
 
     if (fence === null && line.trim() === "") {
-      flush();
+      if (afterRowHeights) current.push(line);
+      else flush();
       continue;
     }
+    afterRowHeights = line.includes(ROW_HEIGHTS_COMMENT);
     if (fence === null && LINK_DEF_RE.test(line)) definitions.push(line);
     current.push(line);
   }

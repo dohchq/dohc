@@ -10,8 +10,13 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import type { Nodes, Parents, Root } from "mdast";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  TABLE_ROW_HEIGHTS_RE,
+  tableRowHeights,
+} from "@dohc/ydoc-projection/table-row-heights";
 import {
   activateReadOnlyLinkHref,
   type WorkspaceLinkTarget,
@@ -46,11 +51,39 @@ const scheduleIdle: IdleScheduler = (cb) => {
   return () => clearTimeout(id);
 };
 
+// The editor reads a resized row's height from the comment above its table
+// and sets it on the row. Read that one comment with the projection's own
+// rule and set the same height, so a row does not grow when the editor
+// replaces the read body. Any other comment stays text, as in the editor.
+function remarkTableRowHeights() {
+  return (tree: Root) => applyTableRowHeights(tree);
+}
+
+function applyTableRowHeights(parent: Parents): void {
+  const children: Nodes[] = parent.children;
+  for (let index = 0; index < children.length; index += 1) {
+    const node = children[index];
+    const next = children[index + 1];
+    if (node.type === "html" && next?.type === "table") {
+      const annotation = TABLE_ROW_HEIGHTS_RE.exec(node.value);
+      if (!annotation) continue;
+      for (const [row, height] of tableRowHeights(annotation[1])) {
+        const tableRow = next.children[row];
+        if (tableRow) tableRow.data = { hProperties: { style: `height: ${height}px` } };
+      }
+      children.splice(index, 1);
+    } else if ("children" in node) {
+      applyTableRowHeights(node);
+    }
+  }
+}
+
 // GFM is what people actually write in a README: tables, strikethrough, bare
 // URLs, task lists. Chunk boundaries sit at blank lines, and no GFM block
 // carries one, so every chunk parses the same extensions the whole document
-// would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape.
-const REMARK_PLUGINS = [remarkGfm];
+// would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape, and
+// remarkTableRowHeights takes only numbers from one kind of comment.
+const REMARK_PLUGINS = [remarkGfm, remarkTableRowHeights];
 
 // Links reach the document that mounted them through context, so a chunk's
 // rendered elements hold nothing of the document and can be reused.
