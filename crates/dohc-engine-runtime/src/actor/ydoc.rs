@@ -3620,7 +3620,7 @@ type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(
 #[cfg(any(test, feature = "fault-injection"))]
 thread_local! {
     static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
-    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
+    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&mut EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(any(test, feature = "fault-injection"))]
 fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
@@ -3634,7 +3634,7 @@ impl ActorHandle {
     pub async fn markdown_settlement_fault_for_harness(
         &self,
         fault: impl FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError> + Send + 'static,
-        after_rollback: impl FnOnce(&EngineStore) -> Result<(), RuntimeError> + Send + 'static,
+        after_rollback: impl FnOnce(&mut EngineStore) -> Result<(), RuntimeError> + Send + 'static,
     ) -> Result<(), RuntimeError> {
         self.run(move |_, _| {
             MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |conn| {
