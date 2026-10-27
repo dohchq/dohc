@@ -209,15 +209,15 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
         assert!(checked.load(std::sync::atomic::Ordering::Acquire));
         assert!(Arc::ptr_eq(&grant, lock(&sessions)["owner"].conversion_consent.as_ref().unwrap()));
         assert!(grant.is_consumed());
-        actor.run(|store, _| {
-            assert_eq!(store.table_row_count("moments")?, 2);
-            assert_eq!(store.table_row_count("materialization_jobs")?, 1);
-            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
-            let debt = store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))?;
+        {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("moments").unwrap(), 2);
+            assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 1);
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 1);
+            let debt = store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w")).unwrap();
             assert_eq!(debt.len(), 1);
             assert_eq!(debt[0].kind, markdown_write_obligations::Kind::WitnessRefresh);
-            Ok(())
-        }).await.unwrap();
+        }
         supervisor.close(&db).unwrap();
     }
 }
