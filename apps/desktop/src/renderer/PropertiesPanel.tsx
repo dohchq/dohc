@@ -346,6 +346,14 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (!entry || text === undefined || sameFrontmatterValue(listItems(text), entryValue(entry))) return;
     commit(entries.map((row, i) => (i === index ? { ...row, value: text } : row)));
   }
+  // Switching or closing a tab from the keyboard unmounts the panel without a
+  // blur, so a list still being typed saves here. This runs before the
+  // editor's own unmount flush, which writes it.
+  const settleOnUnmount = useRef(() => {});
+  settleOnUnmount.current = () => {
+    if (listDraft) settleList(listDraft.index);
+  };
+  useLayoutEffect(() => () => settleOnUnmount.current(), []);
 
   // Where focus goes once the pills render: a pill's name, or the +.
   const line = useRef<HTMLDivElement | null>(null);

@@ -936,6 +936,34 @@ describe("PropertiesPanel", () => {
     expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags:\n  - kyoto\n  - きょうと\n---\n\nBody\n");
   });
 
+  it("saves a list still being typed when the panel closes without a blur, as a keyboard tab switch does", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags:\n  - kyoto\n---\n\nBody\n";
+    const view = render(<PropertiesPanel body={body} onChange={onChange} />);
+
+    await user.type(screen.getByLabelText("Property tags value"), ", nara");
+    expect(onChange).not.toHaveBeenCalled();
+    view.unmount();
+
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags:\n  - kyoto\n  - nara\n---\n\nBody\n");
+  });
+
+  it("saves a live document's list still being typed when the panel closes without a blur", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags:\n  - kyoto\n---\n\nBody\n");
+    try {
+      const view = render(<PropertiesPanel ydoc={doc} />);
+      await user.type(screen.getByLabelText("Property tags value"), ", nara");
+      expect(frontmatterMapValues(doc.getMap("frontmatter")).tags).toEqual(["kyoto"]);
+      view.unmount();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter")).tags).toEqual(["kyoto", "nara"]);
+    } finally {
+      doc.destroy();
+    }
+  });
+
   it("writes nothing when a list edit leaves the same items, so the list stays as written", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

@@ -1357,6 +1357,30 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("writes a list property still being typed when the tab switches from the keyboard", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    await screen.findByTestId("properties-panel");
+    // Focus stays in the pill: no blur and no Enter before the view goes.
+    await user.type(screen.getByLabelText("Property tags value"), ", nara");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n  - nara\n---\n\n# Plan\n",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
   it("keeps a pending WYSIWYG body edit when the title changes before debounce", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\ntitle: Plan\n---\n\n# Plan\n",
