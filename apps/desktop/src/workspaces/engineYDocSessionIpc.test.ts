@@ -2301,6 +2301,47 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
     });
 
+    it("leaves the edit unapplied when consent preparation is pending", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const pending = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-witness-check-pending", retry: "afterBackoff" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(pending);
+      const h = harness(session);
+
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(pending);
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("does not retry an edit after its lineage changes during consent settlement", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const settling = deferred<void>();
+      const release = deferred<SettleResult>();
+      vi.mocked(session.settleNow).mockImplementationOnce(() => {
+        settling.resolve();
+        return release.promise;
+      });
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const edited = h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) });
+      const refused = expect(edited).rejects.toThrow();
+      await settling.promise;
+      h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+      release.resolve({ materialized: true } as SettleResult);
+      await refused;
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      await h.ipc.shutdown();
+    });
+
     it("does not retry capacity without consent or retry a second capacity refusal", async () => {
       for (const allowLossySourceSha256 of [undefined, "a".repeat(64)]) {
         const session = editableSession();
