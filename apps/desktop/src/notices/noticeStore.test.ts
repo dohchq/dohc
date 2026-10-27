@@ -1298,7 +1298,7 @@ it("says some author names did not sync, for one or more saves, without suggesti
   const first = await computer(null, { refusalNotices });
   const [row] = (await first.store.list()).notices;
   expect(row).toMatchObject({
-    title: "Some author names for “n.md” did not sync",
+    title: "Some author names did not sync for “n.md”",
     body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
     target: { path: "n.md" },
   });
@@ -1317,11 +1317,11 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   const first = await computer(null, { refusalNotices });
   const titles = (await first.store.list()).notices.map(row => row.title);
   expect(titles).toHaveLength(3);
-  expect(titles).toContain("Some author names for a file did not sync");
-  expect(titles).toContain("Some author names for “n.md” did not sync");
+  expect(titles).toContain("Some author names did not sync");
+  expect(titles).toContain("Some author names did not sync for “n.md”");
   const cut = titles.find(title => title.includes("…"))!;
   expect([...cut]).toHaveLength(120);
-  expect(cut).toMatch(/^Some author names for “a+…” did not sync$/u);
+  expect(cut).toMatch(/^Some author names did not sync for “a+…”$/u);
 });
 
 it("keeps the refusals it words for itself equal to the engine's", () => {

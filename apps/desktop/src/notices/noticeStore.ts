@@ -190,16 +190,16 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
   return rows.filter(row => !keys.has(coordinateKey(row)));
 }
 
-// Names the file, cut to fit a title, and says "a file" for a name a title
-// can't hold.
+// Names the file last, cut to fit a title, so a row's two-line clamp cuts only
+// the name. A name a title can't hold is left out.
 function unattributedTitle(path: string | null | undefined): string {
-  const [lead, tail] = ["Some author names for ", " did not sync"];
-  if (!path) return `${lead}a file${tail}`;
+  const lead = "Some author names did not sync";
+  if (!path) return lead;
   // Room for the name between its two quotes.
-  const room = NOTICE_TITLE_MAX_CHARS - lead.length - tail.length - 2;
+  const room = NOTICE_TITLE_MAX_CHARS - lead.length - " for ".length - 2;
   const name = [...path.slice(path.lastIndexOf("/") + 1)];
-  const title = `${lead}“${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”${tail}`;
-  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a file${tail}`;
+  const title = `${lead} for “${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
+  return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
 const RelayRow = z.object({

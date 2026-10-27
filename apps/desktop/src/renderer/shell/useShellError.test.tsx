@@ -230,7 +230,7 @@ describe("useShellError", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "dohc could not verify who changed this file. The file will share without author names.";
     const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
-      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names for “n.md” did not sync",
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
       body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.", detail: `${reason}\nWorkspace: ws-a`,
       target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
     act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
