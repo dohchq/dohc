@@ -159,6 +159,9 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
         let expected = grant.clone();
         let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let checked_retry = checked.clone();
+        let rollback_source = source.clone();
+        let rollback_path = scratch.path().join("note.md");
+        let rollback_mtime = std::fs::metadata(&rollback_path).unwrap().modified().unwrap();
         actor.markdown_settlement_fault_for_harness(move |conn| {
             assert_eq!(conn.query_row("SELECT count(*) FROM live_device_settlements", [],
                 |row| row.get::<_, i64>(0)).unwrap(), 1);
@@ -175,6 +178,14 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             assert_eq!(store.table_row_count("materialization_jobs")?, 0);
             assert_eq!(store.table_row_count("live_device_settlements")?, 0);
             assert!(store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))?.is_empty());
+            let head = VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap();
+            assert_eq!(head.text, rollback_source);
+            assert_eq!(head.blob_sha256, hex_sha256(rollback_source.as_bytes()));
+            assert_eq!(std::fs::read_to_string(&rollback_path).unwrap(), rollback_source);
+            assert_eq!(std::fs::metadata(&rollback_path).unwrap().modified().unwrap(), rollback_mtime);
+            let key = DocKey::new("w", "main", "note").unwrap();
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            assert!(doc.project(ContentKind::Richdoc)?.content.contains("Accepted visitor edit"));
             checked_retry.store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         }).await.unwrap();
@@ -198,6 +209,15 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
         assert!(checked.load(std::sync::atomic::Ordering::Acquire));
         assert!(Arc::ptr_eq(&grant, lock(&sessions)["owner"].conversion_consent.as_ref().unwrap()));
         assert!(grant.is_consumed());
+        actor.run(|store, _| {
+            assert_eq!(store.table_row_count("moments")?, 2);
+            assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+            let debt = store.read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(debt.len(), 1);
+            assert_eq!(debt[0].kind, markdown_write_obligations::Kind::WitnessRefresh);
+            Ok(())
+        }).await.unwrap();
         supervisor.close(&db).unwrap();
     }
 }
