@@ -21,7 +21,6 @@ import {
   listItems,
 } from "./markdown/frontmatter";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
-import { isComposingKey } from "./ui/keys";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
@@ -311,19 +310,16 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
-  // The list being typed in: its row, the key it was read with, the list it
-  // started from, and the text so far. It saves when the person leaves it or
-  // presses Enter. Until then it sits apart from the rows, so a change to
-  // another property leaves it alone. Once its row moves, holds a newer list
-  // or shares its name, the row shows what the document holds and the text
-  // is dropped.
-  const [listDraft, setListDraft] = useState<{ index: number; key: string; base: unknown; text: string } | null>(null);
-  const duplicates = duplicateKeySet(entries);
+  // The list being typed in: its row, the key it was read with, and the text
+  // so far. Each edit saves at once, as any other value does. The row shows
+  // the text as typed, such as a trailing comma, while it still reads as the
+  // list the document holds; once the document holds another list, the row
+  // shows that.
+  const [listDraft, setListDraft] = useState<{ index: number; key: string; text: string } | null>(null);
   function draftText(index: number): string | undefined {
     const entry = entries[index];
     return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
-      && !duplicates.has(entry.key.trim().toLowerCase())
-      && sameFrontmatterValue(listDraft.base, entryValue(entry))
+      && sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
       ? listDraft.text
       : undefined;
   }
@@ -331,20 +327,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (listDraft && draftText(listDraft.index) === undefined) setListDraft(null);
   });
 
-  function setValue(index: number, value: string) {
-    const entry = entries[index];
-    if (entry?.list) setListDraft({ index, key: entry.sourceKey ?? entry.key, base: entryValue(entry), text: value });
-    else commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
-  }
-
   // A list edit that leaves the same items writes nothing, so the file keeps
   // the list as it was written.
-  function settleList(index: number) {
+  function setValue(index: number, value: string) {
     const entry = entries[index];
-    const text = draftText(index);
-    setListDraft(null);
-    if (!entry || text === undefined || sameFrontmatterValue(listItems(text), entryValue(entry))) return;
-    commit(entries.map((row, i) => (i === index ? { ...row, value: text } : row)));
+    if (entry?.list) {
+      setListDraft({ index, key: entry.sourceKey ?? entry.key, text: value });
+      if (sameFrontmatterValue(listItems(value), entryValue(entry))) return;
+    }
+    commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
   // Where focus goes once the pills render: a pill's name, or the +.
@@ -372,6 +363,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }
 
   const isEmpty = entries.length === 0;
+  const duplicates = duplicateKeySet(entries);
 
   return (
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
@@ -425,8 +417,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
-                  onBlur={entry.list ? () => settleList(index) : undefined}
-                  onKeyDown={entry.list ? (event) => { if (event.key === "Enter" && !isComposingKey(event)) settleList(index); } : undefined}
+                  // Leaving the list shows it as the document holds it.
+                  onBlur={entry.list ? () => setListDraft(null) : undefined}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}

@@ -69,7 +69,6 @@ import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
-import { leaveEditorField } from "./shell/leaveEditorField";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
@@ -3534,7 +3533,6 @@ export function DesktopWorkspaceShell(props: {
     const group = activeGroup(current);
     const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
     if (tab) {
-      leaveEditorField();
       void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
@@ -3550,9 +3548,7 @@ export function DesktopWorkspaceShell(props: {
     (step: 1 | -1) => {
       const group = activeGroup(wbRef.current);
       const path = adjacentTabPath(group, step);
-      if (path === null) return;
-      leaveEditorField();
-      activateEditorTab(group.id, path);
+      if (path !== null) activateEditorTab(group.id, path);
     },
     [activateEditorTab],
   );
@@ -4409,15 +4405,9 @@ export function DesktopWorkspaceShell(props: {
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
-      "new-file": () => {
-        leaveEditorField();
-        openNewPage("");
-      },
+      "new-file": () => openNewPage(""),
       "new-file-at-path": () => setNewFileOpen(true),
-      "new-drawing": () => {
-        leaveEditorField();
-        void createUntitledDrawing();
-      },
+      "new-drawing": () => void createUntitledDrawing(),
       "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
       "quick-open": () => setQuickOpenOpen(true),

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLayoutEffect, useState } from "react";
@@ -888,32 +888,34 @@ describe("PropertiesPanel", () => {
     expect(onChange).toHaveBeenLastCalledWith(body.replace("status: draft", "status: ready"));
   });
 
-  it("saves a list's items when the person leaves it, not on each keystroke", async () => {
+  it("saves a list's items as you type, and shows the text as typed until you leave it", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const body = "---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n";
     render(<PropertiesPanel body={body} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
     expect(propertyValue("tags")).toBe("kyoto, food");
 
-    await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+    await user.type(input, ", ");
     expect(onChange).not.toHaveBeenCalled();
-    await user.tab();
+    expect(propertyValue("tags")).toBe("kyoto, food, ");
 
-    expect(onChange).toHaveBeenCalledTimes(1);
+    await user.type(input, "ramen ,");
     expect(onChange).toHaveBeenLastCalledWith(body.replace("  - food\n", "  - food\n  - ramen\n"));
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen ,");
+    await user.tab();
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen");
   });
 
-  it("keeps each list item text when Enter saves it, trimmed and without blank items", async () => {
+  it("writes each list item as text, trimmed and without blank items", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const body = "---\ntags:\n  - kyoto\n---\n\nBody\n";
-    render(<PropertiesPanel body={body} onChange={onChange} />);
+    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\n---\n\nBody\n"} onChange={onChange} />);
     const input = screen.getByLabelText("Property tags value");
 
     await user.clear(input);
-    await user.type(input, " 2026,yes , null,, ~, 1.0, ramen ,{Enter}");
+    await user.type(input, " 2026,yes , null,, ~, 1.0, ramen ,");
 
-    expect(onChange).toHaveBeenCalledTimes(1);
     const written = onChange.mock.lastCall?.[0] as string;
     expect(written).toBe(
       "---\ntags:\n  - '2026'\n  - yes\n  - 'null'\n  - '~'\n  - '1.0'\n  - ramen\n---\n\nBody\n",
@@ -921,29 +923,12 @@ describe("PropertiesPanel", () => {
     expect(parseFrontmatter(written).meta.tags).toEqual(["2026", "yes", "null", "~", "1.0", "ramen"]);
   });
 
-  it("leaves a list unsaved while Enter only confirms an IME composition", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\n---\n\nBody\n"} onChange={onChange} />);
-    const input = screen.getByLabelText("Property tags value");
-
-    await user.type(input, ", きょうと");
-    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
-    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
-    expect(onChange).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags:\n  - kyoto\n  - きょうと\n---\n\nBody\n");
-  });
-
   it("writes nothing when a list edit leaves the same items, so the list stays as written", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
-    const input = screen.getByLabelText("Property tags value");
 
-    await user.clear(input);
-    await user.type(input, "kyoto ,food, ,");
+    await user.type(screen.getByLabelText("Property tags value"), " ,, ");
     await user.tab();
 
     expect(onChange).not.toHaveBeenCalled();
@@ -954,14 +939,15 @@ describe("PropertiesPanel", () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     render(<PropertiesPanel body={"---\ntags:\n  - kyoto\nstatus: draft\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
 
-    await user.clear(screen.getByLabelText("Property tags value"));
-    await user.type(screen.getByLabelText("Property tags value"), " , {Enter}");
+    await user.clear(input);
+    await user.type(input, " , ");
 
-    expect(onChange).toHaveBeenLastCalledWith("---\ntags: []\nstatus: draft\n---\n\nBody\n");
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags: []\nstatus: draft\n---\n\nBody\n");
   });
 
-  it("saves a live document's list as its items, and writes nothing when they're the same", async () => {
+  it("saves a live document's list as you type, and writes nothing when the items stay the same", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n");
     const frontmatter = doc.getMap("frontmatter");
@@ -970,16 +956,13 @@ describe("PropertiesPanel", () => {
       const input = screen.getByLabelText("Property tags value");
       const before = Y.encodeStateAsUpdate(doc);
 
-      await user.clear(input);
-      await user.type(input, "kyoto ,food,");
+      await user.type(input, " ,,");
       await user.tab();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(propertyValue("tags")).toBe("kyoto, food");
 
       const changed = trackChangedProperties(frontmatter);
       await user.type(input, ", 2026");
-      expect(changed).toEqual(new Set());
-      await user.keyboard("{Enter}");
 
       expect(changed).toEqual(new Set(["tags"]));
       expect(frontmatterMapValues(frontmatter).tags).toEqual(["kyoto", "food", "2026"]);
@@ -990,21 +973,20 @@ describe("PropertiesPanel", () => {
     }
   });
 
-  it("keeps a live document's typed list items when another device changes a property first", async () => {
+  it("keeps a live document's typed list text when another device changes another property", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
     const replica = new Y.Doc();
     try {
       render(<PropertiesPanel ydoc={doc} />);
       Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
-      await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+      await user.type(screen.getByLabelText("Property tags value"), ", ramen,");
 
       setFrontmatterValue(replica, "status", "ready");
       act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
-      expect(propertyValue("status")).toBe("ready");
-      expect(propertyValue("tags")).toBe("kyoto, food, ramen");
-      await user.tab();
 
+      expect(propertyValue("status")).toBe("ready");
+      expect(propertyValue("tags")).toBe("kyoto, food, ramen,");
       expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food", "ramen"], status: "ready" });
     } finally {
       replica.destroy();
@@ -1012,14 +994,14 @@ describe("PropertiesPanel", () => {
     }
   });
 
-  it("shows another device's newer list in place of typed items, and writes nothing over it", async () => {
+  it("shows another device's newer list in place of the typed text, and writes nothing over it", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\ntags: [kyoto, food]\n---\n\nBody\n");
     const replica = new Y.Doc();
     try {
       render(<PropertiesPanel ydoc={doc} />);
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka,");
       Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
-      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
 
       setFrontmatterValue(replica, "tags", ["paris"]);
       act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
@@ -1033,7 +1015,7 @@ describe("PropertiesPanel", () => {
     }
   });
 
-  it("drops typed list items once another device moves their row, and writes nothing", async () => {
+  it("keeps typed list items saved when another device moves their row", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\nowner: Sam\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
     const replica = new Y.Doc();
@@ -1044,87 +1026,57 @@ describe("PropertiesPanel", () => {
 
       replica.getMap("frontmatter").delete("owner");
       act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
-      expect(propertyValue("tags")).toBe("kyoto, food");
+
+      expect(propertyValue("tags")).toBe("kyoto, food, osaka");
       expect(propertyValue("status")).toBe("draft");
-      await user.tab();
-
-      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food"], status: "draft" });
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food", "osaka"], status: "draft" });
     } finally {
       replica.destroy();
       doc.destroy();
     }
   });
 
-  it("drops typed list items when another device adds the same name, and writes nothing", async () => {
-    const user = userEvent.setup();
-    const doc = receivedYDoc("---\ntags: [kyoto, food]\n---\n\nBody\n");
-    const replica = new Y.Doc();
-    const sync = () => act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
-    try {
-      render(<PropertiesPanel ydoc={doc} />);
-      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
-      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
-
-      setFrontmatterValue(replica, "Tags", "x");
-      sync();
-      expect(screen.queryAllByTestId("property-duplicate")).not.toHaveLength(0);
-      replica.getMap("frontmatter").delete("Tags");
-      sync();
-      expect(propertyValue("tags")).toBe("kyoto, food");
-      await user.click(screen.getByLabelText("Property tags value"));
-      await user.tab();
-
-      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food"] });
-    } finally {
-      replica.destroy();
-      doc.destroy();
-    }
-  });
-
-  it("keeps a local file's typed list items when the file changes first", async () => {
+  it("keeps a local file's typed list text when the file changes another property", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const body = "---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n";
-    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
-    await user.type(screen.getByLabelText("Property tags value"), ", ramen");
+    const { rerender } = render(<PropertiesPanel body={"---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n"} onChange={onChange} />);
+    await user.type(screen.getByLabelText("Property tags value"), ", ramen,");
+    const saved = onChange.mock.lastCall?.[0] as string;
+    expect(saved).toBe("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: draft\n---\n\nBody\n");
 
-    rerender(<PropertiesPanel body={body.replace("draft", "ready")} onChange={onChange} />);
-    expect(propertyValue("tags")).toBe("kyoto, food, ramen");
-    await user.tab();
+    rerender(<PropertiesPanel body={saved.replace("draft", "ready")} onChange={onChange} />);
+    expect(propertyValue("status")).toBe("ready");
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen,");
+    await user.type(screen.getByLabelText("Property tags value"), " osaka");
 
-    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: ready\n---\n\nBody\n");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\n  - osaka\nstatus: ready\n---\n\nBody\n");
   });
 
-  it("edits a local list from what Enter saved, before the file catches up", async () => {
+  it("edits a local list from what it saved, before the file catches up", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const body = "---\ntags: [kyoto, food]\n---\n\nBody\n";
-    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
     const input = screen.getByLabelText("Property tags value");
 
-    await user.type(input, ", osaka{Enter}, rome");
-    const saved = onChange.mock.lastCall?.[0] as string;
-    expect(saved).toBe("---\ntags:\n  - kyoto\n  - food\n  - osaka\n---\n\nBody\n");
-    rerender(<PropertiesPanel body={saved} onChange={onChange} />);
-    expect(propertyValue("tags")).toBe("kyoto, food, osaka, rome");
-
-    await user.clear(input);
-    await user.type(input, "kyoto, food{Enter}");
-    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n---\n\nBody\n");
+    await user.type(input, ", osaka");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - osaka\n---\n\nBody\n");
+    await user.type(input, ", rome");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - osaka\n  - rome\n---\n\nBody\n");
   });
 
-  it("shows a local file's newer list in place of typed items, and writes nothing over it", async () => {
+  it("shows a local file's newer list in place of the typed text, and writes nothing over it", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const body = "---\ntags: [kyoto, food]\n---\n\nBody\n";
     const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
-    await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+    await user.type(screen.getByLabelText("Property tags value"), ", osaka,");
+    const writes = onChange.mock.calls.length;
 
     rerender(<PropertiesPanel body={body.replace("[kyoto, food]", "[paris]")} onChange={onChange} />);
     expect(propertyValue("tags")).toBe("paris");
     await user.tab();
 
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange).toHaveBeenCalledTimes(writes);
   });
 
   it("shows why a list or map can't be edited, with its whole value, to the keyboard as well as the pointer", async () => {

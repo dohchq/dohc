@@ -51,7 +51,6 @@ const csvMode = (name: "Table" | "Raw") =>
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
-import { leaveEditorField } from "./shell/leaveEditorField";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // These tests need a note past the WYSIWYG limit, not the limit itself. A
@@ -1358,7 +1357,7 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
-  it("writes a list property and a pending body edit when a shortcut leaves the field and switches the tab at once", async () => {
+  it("writes a list property still being typed and a pending body edit when the editor goes", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
       truncated: false,
@@ -1373,16 +1372,33 @@ describe("markdown editor unmount flush", () => {
     await user.click(editor);
     await user.type(editor, "Draft!");
     await user.type(screen.getByLabelText("Property tags value"), ", nara");
-    // A shortcut leaves the field and switches the tab in one event.
-    act(() => {
-      leaveEditorField();
-      view.unmount();
-    });
+    // A shortcut changes the tab with focus still in the list.
+    view.unmount();
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
     expect(written).toContain("tags:\n  - kyoto\n  - nara\n");
     expect(written).toContain("Draft!");
+  });
+
+  it("keeps a list property still being typed when Ctrl+/ switches the editor to source", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    const field = screen.getByLabelText("Property tags value");
+    await user.type(field, ", nara");
+    fireEvent.keyDown(field, { key: "/", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("WYSIWYG"));
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText.mock.lastCall?.[0].text).toContain("tags:\n  - kyoto\n  - nara\n");
   });
 
   it("keeps a pending WYSIWYG body edit when the title changes before debounce", async () => {
