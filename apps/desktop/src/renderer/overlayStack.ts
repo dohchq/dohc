@@ -8,6 +8,12 @@ const openListeners = new Set<() => void>();
 
 export function pushOverlay(id: symbol): void {
   escapeStack.push(id);
+  announceOverlayOpen();
+}
+
+/** Tells listeners a dialog opened. Overlay calls it. A modal dialog drawn
+ * without Overlay, such as the page icon picker, calls it when it opens. */
+export function announceOverlayOpen(): void {
   for (const listener of [...openListeners]) listener();
 }
 
