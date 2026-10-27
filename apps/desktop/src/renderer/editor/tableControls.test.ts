@@ -342,6 +342,14 @@ describe("table gestures while the note changes", () => {
     expect(tableTextGrid(collaborator)).toEqual(before);
     expect(source.getAttribute("aria-grabbed")).toBe("false");
     expectNoDragChrome(editor);
+
+    // The grip stays in place through the edit, so a new drag from it works.
+    drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
+    const moved = band === "row"
+      ? [before[1]!, before[2]!, before[0]!]
+      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+    expect(tableTextGrid(editor)).toEqual(moved);
+    expect(tableTextGrid(collaborator)).toEqual(moved);
   });
 
   function mouse(target: EventTarget, type: string, clientX: number) {
