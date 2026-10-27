@@ -54,7 +54,7 @@ export const CAPABILITIES = {
   "file.text.write": capability("Save workspace text if its expected content hash still matches.", {ipc: ["writeWorkspaceText"]}),
   "file.asset.write": capability("Write an image attachment inside a writable workspace.", {ipc: ["writeWorkspaceAsset"]}),
   "file.image.pick": capability("Read user-selected images for insertion into a writable workspace.", {ipc: ["pickImageFiles"]}),
-  "file.external.open": capability("Open a contained workspace file with its system application.", {ipc: ["openFileExternally"]}),
+  "file.external.open": capability("Open a contained workspace file with its system application.", {ipc: ["openFileExternally", "readExternalOpen"]}),
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"]}),
   "access.refresh": capability("Request paced Sharing observations through the desktop or CLI.", {ipc: ["requestAccessRefresh"], mcpReason: "Available through dohc access refresh; no desktop MCP tool."}),

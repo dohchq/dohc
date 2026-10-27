@@ -1090,6 +1090,10 @@ export type OpenFileExternallyPayload = z.infer<
   typeof OpenFileExternallyPayload
 >;
 
+// What Open externally gives for a file: the file itself, or a read-only copy.
+export const ReadExternalOpenResult = z.object({ readOnlyCopy: z.boolean() });
+export type ReadExternalOpenResult = z.infer<typeof ReadExternalOpenResult>;
+
 export const WriteWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
