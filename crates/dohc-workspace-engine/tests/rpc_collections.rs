@@ -3552,6 +3552,21 @@ async fn wait_for_record_events(
 }
 
 fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
+    assert_eq!(notices.len(), 2, "one field change and one update: {notices:?}");
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| notice.name == RECORD_UPDATED_EVENT)
+            .count(),
+        1,
+        "exactly one record update fires: {notices:?}"
+    );
+    for notice in notices {
+        assert_eq!(
+            notice.payload["source"],
+            json!({ "originId": PARKED_REMOTE_ORIGIN, "originSeq": 0 })
+        );
+    }
     assert!(
         notices
             .iter()
@@ -3740,6 +3755,117 @@ fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
             )
         })
         .expect("count deferred updates")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
+    let parked = park_remote_status_update().await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut events = parked.service.events().subscribe();
+    let connection = rusqlite::Connection::open(&db).expect("fixture connection");
+    let claim: String = connection
+        .query_row(
+            "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .expect("original claim");
+    // As in the lineage replacement tests, move the durable claim ahead of
+    // the session without letting that fixture write drain the queue.
+    let replacement = "f".repeat(64);
+    connection
+        .execute(
+            "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id=?2 AND path='tasks/alpha.md'",
+            rusqlite::params![replacement, WORKSPACE_ID],
+        )
+        .expect("replace claim");
+    let (state, _) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert_eq!(state["lineageClaimId"], json!(replacement));
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    connection
+        .execute(
+            "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id=?2 AND path='tasks/alpha.md'",
+            rusqlite::params![claim, WORKSPACE_ID],
+        )
+        .expect("restore original claim");
+    drop(connection);
+    // This handshake returns to the original claim without draining it.
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        301,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+
+    let (_, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        302,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).expect("resynced document");
+    assert!(
+        doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("status: remote")
+    );
+    assert_eq!(deferred_update_rows(&parked.scratch), 0);
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    call(
+        &parked.transport,
+        &parked.handle,
+        303,
+        "ydoc.settle",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    call(
+        &parked.transport,
+        &parked.handle,
+        304,
+        "ydoc.close",
+        json!({ "sessionId": parked.live_session_id, "settle": false }),
+    )
+    .await;
+    while let Ok(notice) = events.try_recv() {
+        assert!(
+            !notice.name.starts_with("record."),
+            "no repeated event: {notice:?}"
+        );
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
 }
 
 /// The engine-internal collection reconcile pass (record-id adoption,
