@@ -241,6 +241,10 @@ async fn outside_races_dispatch_the_third_observed_proof_before_holding() {
 }
 
 fn crashing_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
+    fake_reader(scratch, "startup-crash")
+}
+
+pub(super) fn fake_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
     use dohc_engine_storage::hex_sha256;
     use serde_json::json;
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
@@ -260,7 +264,7 @@ fn crashing_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
     let mut manifest = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
     let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &manifest.to_string())
-        .replace("MODE", "\"startup-crash\"");
+        .replace("MODE", &serde_json::to_string(mode).unwrap());
     let bundle = scratch.path().join("crashing-reader.cjs");
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();

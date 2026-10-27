@@ -2397,6 +2397,9 @@ fn record_file_holds_head(
     publication_state_bytes: Option<&[u8]>,
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
+    if live_audit.is_none() {
+        store.read_with(|conn| dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key))?;
+    }
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
             "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
@@ -2465,6 +2468,8 @@ fn record_file_holds_head(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
+            #[cfg(test)]
+            markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2691,12 +2696,15 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    #[cfg(test)]
+    MARKDOWN_BEFORE_SETTLE.with(|slot| slot.borrow_mut().take())
+        .map(|check| check(store)).transpose()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     if live_audit.is_none() {
         store.read_with(|conn| {
-            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
+            dohc_engine_collab::owner_outbox::draft::require_ordinary_write(conn, key)?;
             dohc_engine_collab::live_update_application::require_restore_generation(
                 conn,
                 key,
@@ -3361,6 +3369,8 @@ pub(super) fn ydoc_settle_on_store(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
+            #[cfg(test)]
+            markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -3385,6 +3395,8 @@ pub(super) fn ydoc_settle_on_store(
             path,
             content_kind == ContentKind::Richdoc,
         )?;
+        #[cfg(test)]
+        if live_audit.is_none() { markdown_settlement_test_fault(tx)?; }
         Ok((Some((result, reconcile_required)), uses_consent))
     })?;
     let (settlement, uses_consent) = match outcome {
@@ -3602,6 +3614,23 @@ pub(super) fn refresh_markdown_witnesses_on_store(
 #[cfg(test)]
 #[path = "markdown_refresh_tests.rs"]
 mod markdown_refresh_tests;
+
+#[cfg(test)]
+type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError>>;
+#[cfg(test)]
+thread_local! {
+    static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
+    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
+    MARKDOWN_SETTLEMENT_FAULT.with(|slot| slot.borrow_mut().take())
+        .map(|fault| fault(conn)).transpose().map(|_| ())
+}
+
+#[cfg(test)]
+#[path = "markdown_hold_tests.rs"]
+mod markdown_hold_tests;
 
 pub(super) fn refresh_head_materialized_in(
     conn: &rusqlite::Connection, key: &DocKey, path: &str, sha256: &str,

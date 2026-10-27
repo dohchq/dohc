@@ -113,6 +113,34 @@ fn identity_mismatch_stays_unavailable_without_rehashing() {
     ));
     finish(&mut reader);
 }
+#[test]
+fn markdown_witness_pipe_checks_identities_and_carries_no_checkpoint() {
+    for (mode, expected) in [("ok", Some(true)), ("witness-unsafe", Some(false)),
+        ("witness-source-mismatch", None), ("witness-projection-mismatch", None)] {
+        let (_directory, config) = fixture(mode);
+        let mut reader = Reader::new(Some(config));
+        let request = CheckMarkdownWitness {
+            source: b"source only".to_vec(), source_sha256: wire::sha(b"source only"),
+            projection_sha256: wire::sha(b"projection"),
+        };
+        let result = run(reader.check_markdown_witness(request.clone()));
+        if let Some(expected) = expected {
+            match result.unwrap() {
+                Outcome::WitnessChecked { source_sha256, projection_sha256, checker_identity, keeps_meaning } => {
+                    assert_eq!(source_sha256, request.source_sha256);
+                    assert_eq!(projection_sha256, request.projection_sha256);
+                    assert_eq!(Some(checker_identity), reader.checker_identity());
+                    assert_eq!(keeps_meaning, expected);
+                }
+                _ => panic!("expected a checked witness"),
+            }
+        } else {
+            assert!(result.is_err());
+        }
+        finish(&mut reader);
+    }
+}
+
 fn wait(reader: &Reader, predicate: impl Fn(&State) -> bool) {
     let end = Instant::now() + Duration::from_secs(15);
     let mut s = reader.shared.state.lock().unwrap();
