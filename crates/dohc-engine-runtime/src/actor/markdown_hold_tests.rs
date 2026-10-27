@@ -802,3 +802,98 @@ async fn markdown_hold_third_proof_returns_pending_and_wakes_recovery_without_us
         f.supervisor.close(&f.db).unwrap();
     }
 }
+
+#[tokio::test]
+async fn markdown_hold_safe_expired_and_native_notes_save_without_conversion_consent() {
+    for native in [false, true] {
+        for absent in [false, true] {
+            let f = Fixture::new().await;
+            let reader = Arc::new(Reader::new(Some(super::super::reader_tests::fake_reader(&f.scratch, "witness-safe"))));
+            f.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(reader.clone())))
+                .await.unwrap();
+            let key = f.key.clone();
+            f.actor.run(move |store, _| {
+                let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+                assert!(doc.preserved_markdown_source(&doc.project(ContentKind::Richdoc)?.content).is_none());
+                if native {
+                    let update = doc.clear_markdown_source_witness();
+                    store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                        tx, &key, &update, None, None, 9))?;
+                }
+                if absent {
+                    store.write_with(&NoFaults, |tx| tx.execute("DELETE FROM snapshots", [])
+                        .map_err(StorageError::persist_public))?;
+                }
+                Ok(())
+            }).await.unwrap();
+            if absent { std::fs::remove_file(f.scratch.path().join("note.md")).unwrap(); }
+            let saved = f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+                ContentKind::Richdoc, Some(f.claim.clone()),
+                (!absent).then(|| hex_sha256(f.source.as_bytes())), "owner-session".into(),
+                Arc::new(()), 10, Arc::new(NoFaults), CancellationToken::new(), None, None)
+                .await.unwrap().settled().unwrap();
+            assert!(saved.materialized);
+            assert_eq!(reader.dispatch_count(), if native { 0 } else { 1 });
+            let file = std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap();
+            assert!(file.contains("Accepted text remains available"));
+            f.actor.run(|store, _| {
+                assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+                assert_eq!(store.table_row_count("materialization_jobs")?, 1);
+                assert_eq!(store.table_row_count("live_device_settlements")?, 0);
+                Ok(())
+            }).await.unwrap();
+            f.supervisor.close(&f.db).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn markdown_hold_converted_head_allows_ordinary_edits_before_and_after_witness_clear() {
+    let f = Fixture::new().await;
+    f.settle(false, Some(f.consent())).await.unwrap().settled().unwrap();
+    for cleared in [false, true] {
+        let key = f.key.clone();
+        let head = f.actor.run(move |store, cache| {
+            if cleared { refresh_markdown_witnesses_on_store(store, cache, &key, 20)?; }
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            assert_eq!(doc.has_markdown_witness(), !cleared);
+            let update = doc.richdoc_append_paragraph(if cleared { "After witness clear" } else { "Before witness clear" });
+            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                tx, &key, &update, None, None, 21))?;
+            Ok(VersionedTextStore::new(store).read_text("w", "main", "note.md")?.unwrap().blob_sha256)
+        }).await.unwrap();
+        assert_ne!(head, hex_sha256(f.source.as_bytes()));
+        assert!(f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+            ContentKind::Richdoc, Some(f.claim.clone()), Some(head), "reopened-session".into(),
+            Arc::new(()), 22, Arc::new(NoFaults), CancellationToken::new(), None, None)
+            .await.unwrap().settled().unwrap().materialized);
+    }
+    let file = std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap();
+    for text in ["Accepted text remains available", "Before witness clear", "After witness clear"] {
+        assert_eq!(file.matches(text).count(), 1);
+    }
+    f.actor.run(|store, _| {
+        assert_eq!(store.table_row_count("moments")?, 4);
+        assert_eq!(store.table_row_count("materialization_jobs")?, 3);
+        assert!(store.read_with(|conn| write_obligations::pending_in(conn, "w"))?.is_empty());
+        Ok(())
+    }).await.unwrap();
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_hold_reopened_or_other_device_session_cannot_reuse_the_old_grant() {
+    for session_id in ["reopened-owner", "other-device"] {
+        let f = Fixture::new().await;
+        let grant = f.consent();
+        let modified = std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap();
+        assert!(matches!(f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+            ContentKind::Richdoc, Some(f.claim.clone()), Some(hex_sha256(f.source.as_bytes())),
+            session_id.into(), Arc::new(()), 10, Arc::new(NoFaults), CancellationToken::new(), None,
+            Some(grant.clone())).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+        assert!(!grant.is_consumed());
+        f.unchanged().await;
+        assert_eq!(std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
