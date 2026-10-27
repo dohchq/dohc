@@ -128,6 +128,11 @@ Existing strings do not all follow these rules, and some surfaces use two words 
 The editor's link picker says `page links` in its accessible name and `No files match` in its empty state.
 Settle the word across every surface before you change any string.
 A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
+When a list waits on a cause, say what the list will show once the cause is fixed.
+Do not reuse another surface's question.
+Signed out, the Sharing view's **Shared with me** says `Connect a server to get what others share with you.`
+About's Access asks who has access, so it keeps `Connect your server to check who has access.`
+Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
 
 ## Where messages go

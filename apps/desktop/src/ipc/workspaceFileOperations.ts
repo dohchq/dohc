@@ -27,6 +27,7 @@ import {
   PickImageFilesPayload,
   PickImageFilesResult,
   OpenFileExternallyPayload,
+  ReadExternalOpenResult,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
 
@@ -162,5 +163,11 @@ export const workspaceFileOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "External file open stopped because this window changed workspaces.",
     payload: OpenFileExternallyPayload,
+  },
+  readExternalOpen: {
+    capabilityId: "file.external.open", channel: "desktop:read-external-open",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "External file open stopped because this window changed workspaces.",
+    payload: OpenFileExternallyPayload, result: ReadExternalOpenResult,
   },
 } satisfies OperationTable;

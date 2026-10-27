@@ -681,7 +681,7 @@ export function EngineMomentDiffPage({
               Any edits you made since are saved into history first.
             </p>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              <span className="font-mono text-ink">{moment.path}</span>
+              <span className="text-ink">{moment.path}</span>
               <br />
               {restoreDetail}
             </p>

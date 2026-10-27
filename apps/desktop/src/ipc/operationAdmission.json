@@ -33,6 +33,7 @@
   "desktop:write-workspace-asset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
   "desktop:pick-image-files": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "exactRendererWorkspaceReferences.capture/withReference" } },
   "desktop:open-file-externally": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-external-open": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:retry-held-capture": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-file-chats": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-bookmarks": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
