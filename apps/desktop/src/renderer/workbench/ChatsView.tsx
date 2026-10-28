@@ -4716,7 +4716,13 @@ export function ChatsView(props: {
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
             {...(agentDm ? {
-              draft: { value: newThreadBody, onChange: setNewThreadBody, autoFocus: props.focusNewPost },
+              draft: {
+                value: newThreadBody,
+                onChange: setNewThreadBody,
+                poll: newThreadPoll,
+                onPollChange: (next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id }),
+                autoFocus: props.focusNewPost,
+              },
             } : {})}
           />
         ) : (

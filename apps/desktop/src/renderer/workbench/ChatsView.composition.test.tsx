@@ -157,6 +157,25 @@ describe("ChatsView My agent", () => {
     expect(bridgeMock.startChannelThread.mock.lastCall?.[0]).not.toHaveProperty("title");
   });
 
+  it("keeps a poll drafted in an agent DM across a switch to Posts", async () => {
+    const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentDm], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-my-agent"));
+    const composer = await screen.findByTestId("chats-lane-composer");
+    await waitFor(() => expect((composer as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(composer, { target: { value: "Lunch?" } });
+    fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
+    ["Soup", "Salad"].forEach((choice, index) => {
+      fireEvent.change(screen.getAllByTestId("chats-lane-poll-choice")[index]!, { target: { value: choice } });
+    });
+    fireEvent.click(screen.getByTestId("chats-group-lane-posts"));
+    fireEvent.click(screen.getByTestId("chats-group-lane-chat"));
+    expect(((await screen.findByTestId("chats-lane-composer")) as HTMLTextAreaElement).value).toBe("Lunch?");
+    expect(screen.getAllByTestId("chats-lane-poll-choice").map((input) => (input as HTMLInputElement).value)).toEqual(["Soup", "Salad"]);
+  });
+
   it("names a set-up agent under Agents and offers Manage, with no card in the conversation", async () => {
     const user = userEvent.setup();
     const onSetupAgent = vi.fn();

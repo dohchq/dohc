@@ -54,9 +54,15 @@ export function ChatLane(props: {
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
   workspacePath?: string;
-  // An agent DM's unsent message, kept with the tab's other drafts so a
-  // request handed to the agent lands here.
-  draft?: { value: string; onChange: (value: string) => void; autoFocus?: boolean };
+  // An agent DM's unsent message and poll, kept with the tab's other drafts so
+  // a request handed to the agent lands here.
+  draft?: {
+    value: string;
+    onChange: (value: string) => void;
+    poll: ComposerPollDraft | null;
+    onPollChange: (poll: ComposerPollDraft | null) => void;
+    autoFocus?: boolean;
+  };
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -66,7 +72,9 @@ export function ChatLane(props: {
   const [ownComposer, setOwnComposer] = useState("");
   const composer = props.draft?.value ?? ownComposer;
   const setComposer = props.draft?.onChange ?? setOwnComposer;
-  const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
+  const [ownPoll, setOwnPoll] = useState<ComposerPollDraft | null>(null);
+  const poll = props.draft ? props.draft.poll : ownPoll;
+  const setPoll = props.draft?.onPollChange ?? setOwnPoll;
   const [sending, setSending] = useState(false);
   const [dispatch, setDispatch] = useState<ChatDispatchStateForThreadResult | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -173,7 +181,7 @@ export function ChatLane(props: {
     setMessages([]);
     setDecisions([]);
     setOwnComposer("");
-    setPoll(null);
+    setOwnPoll(null);
     setSending(false);
     setDispatch(null);
     setStopping(false);
