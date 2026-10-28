@@ -166,6 +166,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // R11a durable Y.Doc tables.
     "ydoc_docs",
     "markdown_write_obligations",
+    "markdown_write_obligation_notice_dismissals",
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
@@ -804,6 +805,8 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "markdown_write_obligations",
+            "markdown_write_obligation_notice_dismissals",
             "live_audit_base_publications",
             "live_audit_bases",
             "live_audit_base_conflicts",
