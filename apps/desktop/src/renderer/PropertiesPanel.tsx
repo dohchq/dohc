@@ -126,6 +126,19 @@ function entryValue(entry: FrontmatterEntry): unknown {
   return entry.list ? listItems(entry.value) : entry.value;
 }
 
+// A pill added here has no key until it saves, so it carries a number of its own.
+type Row = FrontmatterEntry & { added?: number };
+
+function rowId(row: Row): string | number | undefined {
+  return row.sourceKey ?? row.added;
+}
+
+// Rows read from storage, then each pill added here that has no name it can
+// save, which storage doesn't hold.
+function withAdded(read: FrontmatterEntry[], shown: Row[]): Row[] {
+  return [...read, ...shown.filter((row) => row.sourceKey === undefined && propertyKey(row) === null)];
+}
+
 // The key a row saves under. A name left as it was read keeps that exact key,
 // spaces included, and so does a name cleared or changed to a reserved one.
 function propertyKey(entry: FrontmatterEntry): string | null {
@@ -247,7 +260,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     () => (ydoc ? liveEntries(ydoc) : frontmatterEntries(body)),
     [body, ydoc, ydocRevision],
   );
-  const [entries, setEntries] = useState<FrontmatterEntry[]>(() =>
+  const [entries, setEntries] = useState<Row[]>(() =>
     editableEntries(sourceEntries),
   );
 
@@ -263,7 +276,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     // This can apply after the person's next keystroke has changed the
     // document, so a live document's rows read the document as it is now.
     setEntries((shown) =>
-      ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries),
+      withAdded(ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries), shown),
     );
     setEditRefused(false);
   }, [sourceEntries, ydoc]);
@@ -296,36 +309,32 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       }
       setEditRefused(false);
     } catch {
-      setEntries(previous);
+      setEntries(withAdded(previous, entries));
       setEditRefused(true);
     }
   }
 
   // A name another property has can't be saved. It stays on its pill, apart
   // from the rows that save, so every other property keeps saving as you type.
-  // It goes once its row holds another property or no other has the name.
-  const [heldName, setHeldName] = useState<{ index: number; key: string | undefined; text: string } | null>(null);
-  function heldText(index: number): string | undefined {
-    const entry = entries[index];
-    return entry && heldName?.index === index && heldName.key === entry.sourceKey
-      && nameTaken(index, heldName.text, entries)
-      ? heldName.text
-      : undefined;
-  }
+  // It goes once its pill goes or no other property has the name.
+  const [heldName, setHeldName] = useState<{ row: string | number | undefined; text: string } | null>(null);
+  const heldRow = heldName
+    ? entries.findIndex((entry, index) => rowId(entry) === heldName.row && nameTaken(index, heldName.text, entries))
+    : -1;
   useLayoutEffect(() => {
-    if (heldName && heldText(heldName.index) === undefined) setHeldName(null);
+    if (heldName && heldRow === -1) setHeldName(null);
   });
 
   function setKey(index: number, key: string) {
     const entry = entries[index];
     if (entry && nameTaken(index, key, entries)) {
-      setHeldName({ index, key: entry.sourceKey, text: key });
+      setHeldName({ row: rowId(entry), text: key });
       // The row keeps the name it was read with until the new name is free.
       const read = entry.sourceKey ?? "";
       if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
       return;
     }
-    if (heldName?.index === index) setHeldName(null);
+    if (index === heldRow) setHeldName(null);
     const next = entries.map((row, i) => (i === index ? { ...row, key } : row));
     if (shouldDeferKeyCommit(index, key, next)) {
       setEntries(next);
@@ -375,18 +384,17 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     element?.focus();
   });
 
+  const added = useRef(0);
   function add() {
     focusNext.current = entries.length;
-    setEntries((current) => [...current, { key: "", value: "" }]);
+    added.current += 1;
+    const row: Row = { key: "", value: "", added: added.current };
+    setEntries((current) => [...current, row]);
   }
 
   // Focus moves to the next pill, else the one before, else the +.
   function remove(index: number) {
     focusNext.current = index < entries.length - 1 ? index : index > 0 ? index - 1 : "add";
-    // A held name goes with its pill, or moves up with it.
-    if (heldName && heldName.index >= index) {
-      setHeldName(heldName.index === index ? null : { ...heldName, index: heldName.index - 1 });
-    }
     commit(entries.filter((_, i) => i !== index));
   }
 
@@ -403,7 +411,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
-          const held = heldText(index);
+          const held = index === heldRow ? heldName?.text : undefined;
           const duplicate = held !== undefined || duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (

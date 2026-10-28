@@ -105,6 +105,22 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it.each([false, true])("keeps a held name on its pill when removing a pill above it is refused (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\nc: x\nowner: y\n---\n\nBody";
+    const doc = markdownToYDoc(initialBody);
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={vi.fn()} />);
+      await user.clear(screen.getByLabelText("Property 3 name"));
+      await user.type(screen.getByLabelText("Property 3 name"), "owner");
+      await user.click(screen.getByLabelText("Remove property a"));
+
+      expect(screen.getByTestId("properties-locked")).toBeTruthy();
+      expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -571,6 +587,52 @@ describe("PropertiesPanel", () => {
 
     expect(screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value)).toEqual(["owner", ""]);
     expect(screen.queryByTestId("property-duplicate")).toBeNull();
+  });
+
+  it("keeps a new property held for its name, with its value, when another property saves", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+    await user.type(screen.getByLabelText("Property 3 name"), "owner");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\n---\n\nBody\n");
+    expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+
+    await user.clear(screen.getByLabelText("Property 3 name"));
+    await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\nlead: Ada\n---\n\nBody\n");
+  });
+
+  it("keeps a new property with no name, with its value, until it has one", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+
+    await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\nlead: Ada\n---\n\nBody\n");
+  });
+
+  it("keeps a new property's name still being typed when another property saves", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "own");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "own");
+    expect(parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta).toEqual({ owner: "Sam", status: "draft!", own: "" });
   });
 
   it.each([
@@ -1323,6 +1385,29 @@ describe("PropertiesPanel", () => {
       await user.type(screen.getByLabelText("Property status value"), "!");
 
       expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", " owner ": "Ada", status: "draft!" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps a live document's new property held for its name, with its value, when another property saves", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nowner: Sam\nstatus: draft\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.type(screen.getByLabelText("Property 3 name"), "owner");
+      await user.type(screen.getByLabelText("Property status value"), "!");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", status: "draft!" });
+      expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+
+      await user.clear(screen.getByLabelText("Property 3 name"));
+      await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", status: "draft!", lead: "Ada" });
     } finally {
       doc.destroy();
     }
