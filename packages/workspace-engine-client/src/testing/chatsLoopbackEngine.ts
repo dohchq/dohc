@@ -103,6 +103,23 @@ function strictObject(
   return object;
 }
 
+// The daemon's rule: only an agent's message names its agent, and only a
+// person's message names agents, each by a valid id.
+function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; namedAgentIds: string[] } {
+  const authorAgentId = optionalString(params, "authorAgentId");
+  if (authorAgentId !== undefined && (params.authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
+    throw new Error("invalid-input");
+  }
+  const named = params.namedAgentIds ?? [];
+  const namedAgentIds = Array.isArray(named)
+    ? named.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
+    : [];
+  if (!Array.isArray(named) || namedAgentIds.length !== named.length || (named.length > 0 && params.authorKind !== "human")) {
+    throw new Error("invalid-input");
+  }
+  return { authorAgentId, namedAgentIds };
+}
+
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
   const value = object[key];
   if (typeof value !== "string") throw new Error(code);
@@ -1058,13 +1075,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return value === undefined ? "" : normalizeTrimmed(value, code);
   }
 
-  // Mirrors the daemon's message hash: the author's agent, then each named
-  // agent once, in first-named order. The handler validates both.
+  // Mirrors the daemon's message hash, which it takes after checking the
+  // agents: the author's agent, then each named agent once, in first-named order.
   private agentsFingerprint(params: ChatsJsonObject): [string, string] {
-    const named = Array.isArray(params.namedAgentIds)
-      ? params.namedAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
-      : [];
-    return [optionalString(params, "authorAgentId") ?? "", [...new Set(named)].join(",")];
+    const { authorAgentId, namedAgentIds } = messageAgents(params);
+    return [authorAgentId ?? "", [...new Set(namedAgentIds)].join(",")];
   }
 
   private normalizedOrigin(params: ChatsJsonObject): string {
@@ -1545,18 +1560,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
     if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
-    const authorAgentId = optionalString(params, "authorAgentId");
-    if (authorAgentId !== undefined && (authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
-      throw new Error("invalid-input");
-    }
-    const namedAgentIds = params.namedAgentIds ?? [];
-    if (
-      !Array.isArray(namedAgentIds) ||
-      namedAgentIds.some((agentId) => typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) ||
-      (namedAgentIds.length > 0 && authorKind !== "human")
-    ) {
-      throw new Error("invalid-input");
-    }
+    const { authorAgentId, namedAgentIds } = messageAgents(params);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1616,7 +1620,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (authorKind === "human" && origin !== "cli") {
       const thread = state.threads.get(threadId);
       const chatAgent = thread?.channelId ? state.channels.get(thread.channelId)?.agentId : undefined;
-      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...(namedAgentIds as string[])]) {
+      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...namedAgentIds]) {
         const key = dispatchKey(messageId, agentId);
         if (state.dispatches.has(key)) continue;
         state.dispatches.set(key, {
