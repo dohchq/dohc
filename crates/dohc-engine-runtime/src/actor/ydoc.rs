@@ -3428,7 +3428,7 @@ fn ydoc_settle_attempt_on_store(
         if uses_consent {
             write_obligations::record_in(tx, &WriteObligation {
                 kind: WriteObligationKind::WitnessRefresh,
-                source_sha256: current_witness_sha.map(ToOwned::to_owned),
+                source_sha256: witness_source_sha256.clone(),
                 settled_head_sha256: Some(result.snapshot.blob_sha256.clone()),
                 held_checkpoint_sha256: None, held_head_sha256: None,
                 ..obligation.clone()
