@@ -373,10 +373,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     const onAgentRequestsChanged = options.onAgentRequestsChanged;
     if (!onAgentRequestsChanged) return;
+    // A closed workspace's store throws before it returns a promise.
     void (threadId === undefined
       ? Promise.resolve(null)
-      : options.chatStoreFor(workspace)
-          .findThreadChannelId({ workspaceId: workspace.workspaceId, threadId })
+      : Promise.resolve()
+          .then(() => options.chatStoreFor(workspace)
+            .findThreadChannelId({ workspaceId: workspace.workspaceId, threadId }))
           .catch(() => null)
     ).then((channelId) => onAgentRequestsChanged(workspace, channelId)).catch(reportError);
   }

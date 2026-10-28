@@ -132,6 +132,8 @@ interface FixtureOptions {
   // Agents after the default one, which `runner` sets up.
   agents?: Agent[];
   dispatchNoticeFailures?: Error[];
+  // While set, the workspace's chat store throws, as a closed workspace's does.
+  chatStoreClosed?: { closed: boolean };
   pumpWorkspace?: boolean;
   pumpWorkspaces?: ChatDispatchWorkspace[];
   onQueueSync?: (
@@ -592,6 +594,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     listSyncWorkspaces: () =>
       options.pumpWorkspaces ?? (options.pumpWorkspace ? [workspace] : []),
     chatStoreFor: () => {
+      if (options.chatStoreClosed?.closed) throw new Error("This workspace is closed.");
       storeResolves.chat += 1;
       return chat;
     },
@@ -2311,6 +2314,29 @@ describe("chatDispatchService", () => {
     })).resolves.toBe(true);
 
     await vi.waitFor(() => expect(fixture.agentRequestGroups).toEqual([channel.id]));
+  });
+
+  it("still queues a wake when its workspace closes before the group lookup", async () => {
+    const store = { closed: false };
+    const fixture = await createFixture({ chatStoreClosed: store });
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Stamp the finish date" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#stamp", chainDepth: 1 },
+      body: "Stamp today's tasks.",
+    });
+    store.closed = true;
+
+    await expect(fixture.service.recordTrigger(fixture.workspace, {
+      triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default",
+    })).resolves.toBe(true);
+
+    await vi.waitFor(() => expect(fixture.agentRequestGroups).toEqual([null]));
+    expect(fixture.errors).toEqual([]);
   });
 
   it("tells the person once when a run finishes, naming its thread", async () => {
