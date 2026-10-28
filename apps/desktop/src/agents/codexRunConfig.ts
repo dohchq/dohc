@@ -12,7 +12,8 @@ const isTable = (value: unknown): value is Table =>
 export interface CodexConfigFiles {
   // The system requirements, which can choose a Windows sandbox.
   requirements: readonly string[];
-  // The system config, then the user config, which wins.
+  // The system config, the user config, then on Unix the managed config.
+  // Each wins over the ones before it.
   config: readonly string[];
 }
 
@@ -26,7 +27,10 @@ export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platfo
   const system = platform === "win32" ? path.join(env.ProgramData || "C:\\ProgramData", "OpenAI", "Codex") : "/etc/codex";
   return {
     requirements: [path.join(system, "requirements.toml")],
-    config: [path.join(system, "config.toml"), path.join(codexHome, "config.toml")],
+    config: [
+      path.join(system, "config.toml"), path.join(codexHome, "config.toml"),
+      ...(platform === "win32" ? [] : [path.join(system, "managed_config.toml")]),
+    ],
   };
 }
 
@@ -76,6 +80,24 @@ function workspaceWrite(tables: readonly Table[], key: "network_access" | "exclu
     if (typeof setting === "boolean") value = setting;
   }
   return value;
+}
+
+// Whether Codex may reach a model without the saved login that
+// `codex login status` reports: through CODEX_API_KEY, or through a model
+// provider other than OpenAI's. The system requirements' provider wins over
+// the config's. A file dohc can't read counts as maybe. dohc doesn't read
+// macOS managed preferences or a Windows policy that moves the requirements.
+export function codexMayRunWithoutLogin(
+  env: NodeJS.ProcessEnv,
+  files: CodexConfigFiles | null,
+  read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): boolean {
+  if (env.CODEX_API_KEY) return true;
+  const tables = files && readConfigTables([...files.config, ...files.requirements], read);
+  if (tables === null) return true;
+  let provider = "openai";
+  for (const table of tables) if (typeof table.model_provider === "string") provider = table.model_provider;
+  return provider !== "openai";
 }
 
 const lowerAscii = (key: string) => key.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
