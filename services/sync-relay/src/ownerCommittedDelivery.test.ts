@@ -204,6 +204,18 @@ it("resumes a held file settlement without reconnecting or accepting the deliver
   expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
 });
 
+// Proves: an ordinary settle reuses this connection's settlement of the same
+// terminal, and one its owner wants, as after consenting to a held write, asks the host again.
+it("settles a terminal again when its owner wants it, past the settlement an ordinary settle reuses", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 2, materialized: true});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  expect(settled).toEqual([receipt(2)]);
+  expect(await f.consumer.settleWanted(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
 it("leaves an earlier unresolved file write to backoff without settling", async () => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
   const overloaded = new DaemonRefusalError({code: "OVERLOADED",message: "settlement-materialization-pending",retry: "afterBackoff"}, undefined);

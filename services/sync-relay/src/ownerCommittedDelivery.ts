@@ -57,8 +57,8 @@ export class OwnerCommittedDelivery {
   }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
-  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<SettlementOutcome>;
-  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
+  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal,wanted?: boolean): Promise<SettlementOutcome>;
+  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal,wanted = false): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
     const document = parseLiveDocumentKey(value), key = JSON.stringify(document), c = this.connection;
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
@@ -189,6 +189,7 @@ export class OwnerCommittedDelivery {
       if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
+      if (!wanted && adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
       const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
       if (settlementPending(settled)) return settled;
@@ -212,6 +213,8 @@ export class OwnerCommittedDelivery {
     finally {this.#active.delete(key);}
   }
   settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
+  /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
+  settleWanted(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal,true); }
   async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
     const restore = this.connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");

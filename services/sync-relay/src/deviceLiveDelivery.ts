@@ -146,8 +146,8 @@ export function createDeviceLiveDelivery(options: {
     async run(registration, kind) {
       if (kind === "settle") {
         const document = documentFor(registration.binding), consumer = consumers.get(document.workspaceId);
-        if (!consumer) return false;
-        await runDocument(document, registration.invalidated, joined => consumer.settle(document, joined));
+        if (!(consumer instanceof OwnerCommittedDelivery)) return false;
+        await runDocument(document, registration.invalidated, joined => consumer.settleWanted(document, joined));
         return false;
       }
       const outcome = await drain(documentFor(registration.binding), registration.invalidated);
