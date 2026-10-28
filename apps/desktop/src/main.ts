@@ -369,7 +369,6 @@ import {
 import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
-  resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -542,7 +541,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { firstAgent, firstAgentWithLaunch, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, firstAgent, firstAgentWithLaunch, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -2746,9 +2745,13 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentRunDepth(lease.state.activity),
     ),
-  dispatchedAgentRun: (workspaceId: string) =>
+  dispatchedAgent: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
-      workspaceActivity.dispatchedAgentRun(lease.state.activity),
+      workspaceActivity.dispatchedAgent(lease.state.activity),
+    ),
+  dispatchedRunId: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
   agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
@@ -3067,7 +3070,7 @@ const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createRec
 // derives it — the renderer never supplies identity. At alpha the desktop's
 // preferred local profile name. Email remains an auth/contact identifier and
 // is never reused as a public chat display name.
-let cachedAgentName: string | undefined;
+let cachedAgents: readonly Agent[] = [];
 let cachedPreferredName: string | undefined;
 function localUserDisplayName(): string {
   return cachedPreferredName ?? "You";
@@ -3573,30 +3576,8 @@ const chatDispatchService = createChatDispatchService({
   }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
-  readDispatchAgent: async () =>
-    firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings),
-  identityFor: (workspace, target) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      await warmCredentialCache();
-      lease.assertCurrent();
-      const registered = canonicalWorkspaceFor(lease);
-      const verifiedUserId = target
-        ? (
-            await chatRelayIdentityFor(
-              registered.workspaceId,
-              target,
-              linkedChatStoreFor(lease),
-            )
-          ).authorUserId
-        : resolveWorkspaceRelayAuthorId(registered, cachedCredentials);
-      const settings = (await readCachedUserSettingsFile(stateDir())).settings;
-      lease.assertCurrent();
-      return {
-        displayName: firstAgent(settings)?.name ?? "Agent",
-        ownerDisplayName: localUserDisplayName(),
-        ...(verifiedUserId ? { verifiedUserId } : {}),
-      };
-    }),
+  readDispatchAgents: async () =>
+    listAgents((await readCachedUserSettingsFile(stateDir())).settings),
   stateDir,
   appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
@@ -3895,8 +3876,14 @@ const automationScheduler = new AutomationScheduler({
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
+// The agent an automation wakes: the first agent, when dohc can start it.
+async function readyAgent(): Promise<{ id: string; name: string } | null> {
+  const agent = firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings);
+  return agent?.enabled ? { id: agent.id, name: agent.name } : null;
+}
+
 async function agentRunnerReady(): Promise<boolean> {
-  return firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
+  return (await readyAgent()) !== null;
 }
 
 async function wakeAutomationAgent(
@@ -3915,17 +3902,17 @@ async function wakeAutomationAgent(
       resolveAttachments: async () => [],
     };
     await wakeAgent({
-      runnerReady: agentRunnerReady,
-      agentChannelId: async () => {
+      readyAgent,
+      agentChannelId: async (agent) => {
         signal.throwIfAborted();
-        return (await place.store.ensureAgentChannel({ workspaceId })).id;
+        return (await place.store.ensureAgentChannel({ workspaceId, agentId: agent.id, name: agent.name })).id;
       },
       threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
       start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
       send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-      recordTrigger: ({ triggerMessageId, threadId }) => {
+      recordTrigger: ({ triggerMessageId, threadId, agentId }) => {
         signal.throwIfAborted();
-        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId });
+        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId, agentId });
       },
       scan: () => {
         signal.throwIfAborted();
@@ -4915,8 +4902,12 @@ const chatWrites = createChatWrites({
   currentCredentials: () => cachedCredentials,
   currentCredentialGeneration: () => credentialCacheGeneration,
   localUserDisplayName,
-  agentDisplayName: async () =>
-    firstAgent((await readCachedUserSettingsFile(stateDir())).settings)?.name ?? "Agent",
+  agentDisplayName: async (agentId) => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    return (agentId ? listAgents(settings).find(({ id }) => id === agentId) : firstAgent(settings))?.name ?? "Agent";
+  },
+  agentIdsNamedIn: async (body) =>
+    agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5913,7 +5904,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
-      cachedAgentName = firstAgent(settings)?.name;
+      cachedAgents = listAgents(settings);
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
       applyThemeMode(settings.appearance.themeMode);
       session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -6274,7 +6265,7 @@ function applyThemeMode(themeMode: ThemeMode): void {
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
   stateDir,
-  setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
+  setCachedNames: (preferredName, agents) => { cachedPreferredName = preferredName; cachedAgents = agents; },
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
@@ -6477,7 +6468,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, agentName: (agentId) => cachedAgents.find(({ id }) => id === agentId)?.name, localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {

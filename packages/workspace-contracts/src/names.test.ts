@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
 import { scanMentionTokens, normalizeHandle, activeMentionQuery } from "./chatMentions";
 
@@ -37,4 +37,14 @@ it("uses the Unicode version checked by the shared boundary fixtures", () => {
 it.each(boundaries.cases)("shares the engine byte boundary: $name", ({ input, maxBytes, expected }) => {
   expect(truncateName(input, maxBytes)).toBe(expected);
   expect(nameByteLength(truncateName(input, maxBytes))).toBeLessThanOrEqual(maxBytes);
+});
+it("loads and truncates at code points when Intl.Segmenter is unavailable", async () => {
+  vi.stubGlobal("Intl", { Segmenter: undefined });
+  vi.resetModules();
+  try {
+    const fallback = await import("./names");
+    expect(fallback.truncateName("😀😀", 5)).toBe("😀");
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

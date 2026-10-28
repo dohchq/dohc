@@ -32,6 +32,7 @@ export interface LiveAgentDispatchStoreHandle {
   requeueFailedTrigger(input: {
     workspaceId: string;
     triggerMessageId: string;
+    agentId: string;
     runId: string;
   }): Promise<boolean>;
   listAppQuitRecoveries(workspaceId: string): Promise<ChatDispatchRecovery[]>;
@@ -139,22 +140,6 @@ export function createLiveAgentDispatchStore(
   };
 
   const store: AwaitableAgentDispatchStore = {
-    recordEligibleTriggers: async (input) => {
-      assertWorkspaceId(input.workspaceId);
-      return await invoke(
-        async (adapter) =>
-          await adapter.request(
-            CHATS_METHOD.dispatchRecordEligibleTriggers,
-            {
-              ...(input.verifiedUserId
-                ? { verifiedUserId: input.verifiedUserId }
-                : {}),
-            },
-            { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
-          ),
-        { retryTransportErrors: true },
-      );
-    },
     recordTrigger: async (input) =>
       await invoke(async (adapter) => await adapter.recordTrigger(input)),
     claimNextPending: async (workspaceId, claimOptions = {}) =>
@@ -169,6 +154,7 @@ export function createLiveAgentDispatchStore(
             CHATS_METHOD.dispatchFailPendingForThread,
             {
               threadId: input.threadId,
+              agentId: input.agentId,
               reason: input.reason,
             },
             { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
@@ -445,6 +431,7 @@ export function createLiveAgentDispatchStore(
               page.dispatches.some(
                 (candidate) =>
                   candidate.triggerMessageId === input.triggerMessageId &&
+                  candidate.agentId === input.agentId &&
                   candidate.state === "pending",
               )
             ) {

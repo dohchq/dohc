@@ -4,9 +4,11 @@ import {
   loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
   nullPrototypeRecord,
+  sameFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
-import { Plus, X } from "lucide-react";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { Lock, Plus, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
@@ -16,6 +18,7 @@ import {
   frontmatterEntries,
   frontmatterEntriesFromPairs,
   type FrontmatterEntry,
+  listItems,
 } from "./markdown/frontmatter";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
 
@@ -118,7 +121,7 @@ function entryValue(entry: FrontmatterEntry): unknown {
   if (entry.sourceValue === entry.value && Object.hasOwn(entry, "rawValue")) {
     return entry.rawValue;
   }
-  return entry.value;
+  return entry.list ? listItems(entry.value) : entry.value;
 }
 
 function propertyKey(entry: FrontmatterEntry): string | null {
@@ -209,6 +212,31 @@ function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
     .map(({ entry }) => entry);
 }
 
+// A value the pill shows but can't change, such as a list with a comma in an
+// item. The lock is always there; the pointer or keyboard focus shows why,
+// with the whole value.
+function ReadOnlyValue(props: { label: string; value: string; reason: string }) {
+  const tooltip = useTooltip();
+  return (
+    <span {...tooltip.hoverProps} className="relative inline-flex min-w-0 items-center gap-1">
+      <input
+        {...tooltip.focusProps}
+        data-testid="property-value"
+        aria-label={props.label}
+        value={props.value}
+        readOnly
+        spellCheck={false}
+        className={`${PILL_FIELD} cursor-default text-ink`}
+      />
+      <Lock size={11} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      <Tooltip {...tooltip.tooltipProps}>
+        <span className="block wrap-anywhere">{props.value}</span>
+        <span data-testid="property-read-only" className="mt-0.5 block text-muted">{props.reason}</span>
+      </Tooltip>
+    </span>
+  );
+}
+
 export function PropertiesPanel(props: PropertiesPanelProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
@@ -282,8 +310,32 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
+  // The list being typed in: its row, the key it was read with, and the text
+  // so far. Each edit saves at once, as any other value does. The row shows
+  // the text as typed, such as a trailing comma, while it still reads as the
+  // list the document holds; once the document holds another list, the row
+  // shows that.
+  const [listDraft, setListDraft] = useState<{ index: number; key: string; text: string } | null>(null);
+  function draftText(index: number): string | undefined {
+    const entry = entries[index];
+    return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
+      && sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
+      ? listDraft.text
+      : undefined;
+  }
+  useLayoutEffect(() => {
+    if (listDraft && draftText(listDraft.index) === undefined) setListDraft(null);
+  });
+
+  // A list edit that leaves the same items writes nothing, so the file keeps
+  // the list as it was written.
   function setValue(index: number, value: string) {
-    commit(entries.map((entry, i) => (i === index ? { ...entry, value } : entry)));
+    const entry = entries[index];
+    if (entry?.list) {
+      setListDraft({ index, key: entry.sourceKey ?? entry.key, text: value });
+      if (sameFrontmatterValue(listItems(value), entryValue(entry))) return;
+    }
+    commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
   // Where focus goes once the pills render: a pill's name, or the +.
@@ -351,11 +403,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <span data-testid="property-duplicate" className={TOPMATTER_FLAG} title="Use a unique property name.">
                   duplicate name
                 </span>
+              ) : entry.readOnly !== undefined ? (
+                <ReadOnlyValue label={`Property ${entry.key || index + 1} value`} value={entry.value} reason={entry.readOnly} />
               ) : (
                 <input
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
-                  value={entry.value}
+                  value={draftText(index) ?? entry.value}
                   // A value longer than the pill ends in an ellipsis; its
                   // tooltip holds all of it.
                   title={entry.value || undefined}
@@ -363,6 +417,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
+                  // Leaving the list shows it as the document holds it. Switching
+                  // to another window blurs the field without leaving it.
+                  onBlur={entry.list
+                    ? (event) => {
+                        if (event.currentTarget.ownerDocument.activeElement !== event.currentTarget) setListDraft(null);
+                      }
+                    : undefined}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}

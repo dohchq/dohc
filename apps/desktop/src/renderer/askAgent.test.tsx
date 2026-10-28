@@ -48,7 +48,7 @@ describe("agentRequestText", () => {
 });
 
 describe("agentIsSetUp", () => {
-  const setup = { workspaceId: "ws-1", runnerConfigured: true, runnerEnabled: true, agentRunActive: false };
+  const setup = { workspaceId: "ws-1", runnerConfigured: true, runnerEnabled: true, agentRunActive: false, agents: [] };
   it("needs a name and a runner that is on", () => {
     expect(agentIsSetUp({ ...setup, agentName: "Scout" })).toBe(true);
     expect(agentIsSetUp(setup)).toBe(false);

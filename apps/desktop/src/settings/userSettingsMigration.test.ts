@@ -194,15 +194,17 @@ describe("an agent entry dohc cannot use", () => {
         "Agent B": testAgent({ name: "Bee" }),
         "agent-same": testAgent({ name: " nova " }),
         "agent-list": ["not", "an", "agent"],
+        "dohc-mcp": testAgent({ name: "Mick" }),
       },
     }));
     const read = await readUserSettingsFile(root);
     expect(Object.keys(read.settings.agents)).toEqual(["default"]);
     expect(read.agentProblems).toEqual([
       { id: "agent-hue", name: "Atlas", problem: expect.stringMatching(/^hue: /) },
-      { id: "Agent B", name: "Bee", problem: "An agent's id is up to 64 lowercase letters, digits and dashes, starting with a letter." },
+      { id: "Agent B", name: "Bee", problem: "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash." },
       { id: "agent-same", name: "nova", problem: "Another agent has this name." },
       { id: "agent-list", problem: expect.any(String) },
+      { id: "dohc-mcp", name: "Mick", problem: "dohc-mcp stands for agents that give no name. Give this agent another id." },
     ]);
   });
 });
