@@ -430,6 +430,30 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
+  // Focus that leaves Notices for the workbench closes it, as a press outside
+  // does. Focus that moves within it or leaves the window keeps it open.
+  it("closes when focus moves out of it, not when focus leaves the window", async () => {
+    render(<button type="button">Search</button>);
+    const outside = screen.getByRole("button", { name: "Search" });
+    renderNotices({ agentActive: true });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const panel = screen.getByTestId("notice-center");
+    const action = within(panel).getByRole("button", { name: "Open History" });
+    act(() => {
+      panel.focus();
+      action.focus();
+      action.blur();
+    });
+    expect(screen.getByTestId("notice-center")).toBe(panel);
+
+    act(() => {
+      action.focus();
+      outside.focus();
+    });
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+    expect(document.activeElement).toBe(outside);
+  });
+
   // Saved edits still reach others, never live ones. Sync cannot clear the
   // refusal, so the notice offers the document, never Try again.
   it("says saved edits reach others when dohc syncs and offers to open the document", async () => {
@@ -715,6 +739,116 @@ describe("notice center", () => {
 
     rerender(view(true));
     await waitFor(() => expect(document.activeElement).toBe(restore));
+  });
+
+  // Notices opens above every dialog, as the toasts do, when a toast's Open
+  // fails and shows the reason there. Over a dialog, Tab stays in Notices,
+  // and Escape closes Notices, not the dialog, and gives focus back to the
+  // dialog, not to the Notices button behind it. Opening a dialog closes
+  // Notices.
+  describe("over a dialog", () => {
+    const failedOpen = (onClose: () => void = () => undefined) => (
+      <>
+        {noticeElement({
+          sentNotices: [sentRow("a")],
+          sentNoticeToast: sentRow("a"),
+          onHideSentNoticeToast: vi.fn(),
+          onOpenSentNotice: async () => "The automation's file is gone.",
+        })}
+        <Overlay onClose={onClose}>
+          <button type="button">Close</button>
+        </Overlay>
+      </>
+    );
+    const openFromToast = async () => {
+      fireEvent.click(screen.getByTestId("sent-notice-toast-open"));
+      const panel = await screen.findByTestId("notice-center");
+      await waitFor(() => expect(document.activeElement).toBe(panel));
+      return panel;
+    };
+
+    it("opens on the toasts' layer and closes on Escape without closing the dialog", async () => {
+      const onClose = vi.fn();
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
+      expect(panel.className).toContain("z-60");
+      expect(panel.className).not.toContain("z-20");
+
+      fireEvent.keyDown(panel, { key: "Escape" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      await waitFor(() => expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull());
+    });
+
+    it("keeps Tab in Notices", async () => {
+      render(failedOpen());
+      const panel = await openFromToast();
+      const controls = [...panel.querySelectorAll<HTMLElement>("button:not([disabled])")];
+      const last = controls[controls.length - 1]!;
+      last.focus();
+      fireEvent.keyDown(last, { key: "Tab" });
+      expect(document.activeElement).toBe(controls[0]);
+    });
+
+    it("closes when a dialog opens", async () => {
+      const view = (dialog: boolean) => (
+        <>
+          {noticeElement({ sentNotices: [sentRow("a")] })}
+          {dialog ? (
+            <Overlay onClose={() => undefined}>
+              <button type="button">Close</button>
+            </Overlay>
+          ) : null}
+        </>
+      );
+      const { rerender } = render(view(false));
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      rerender(view(true));
+      await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when F6 takes focus back to the dialog", async () => {
+      const onClose = vi.fn();
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
+      fireEvent.keyDown(panel, { key: "F6" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when Tab finds nothing to reach in it", async () => {
+      const view = (rows: SentNotice[]) => (
+        <>
+          {noticeElement({
+            sentNotices: rows,
+            sentNoticeToast: sentRow("a"),
+            onHideSentNoticeToast: vi.fn(),
+            onOpenSentNotice: async () => "The automation's file is gone.",
+          })}
+          <Overlay onClose={() => undefined}>
+            <button type="button">Close</button>
+          </Overlay>
+        </>
+      );
+      const { rerender } = render(view([sentRow("a")]));
+      const panel = await openFromToast();
+      rerender(view([]));
+      expect(panel.querySelector("button:not([disabled])")).toBeNull();
+      fireEvent.keyDown(panel, { key: "Tab" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("lifts a corner-hosted panel out of its host, as its toasts are", async () => {
+      const { container } = render(noticeElement({ sentNotices: [sentRow("a")], host: "corner" }));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const panel = screen.getByTestId("notice-center");
+      expect(panel.parentElement).toBe(document.body);
+      expect(container.contains(panel)).toBe(false);
+    });
   });
 
   // A dialog opened over the one F6 left takes focus when the toast goes:
