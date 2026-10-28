@@ -81,13 +81,13 @@ function codexReplyServer(args) {
   const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", profile, "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
-  if (args.length !== 1 + 2 * keys.length + 5 ||
+  if (args.length !== 1 + 2 * keys.length + 3 ||
     !command || !profile || cwd !== dirname(command) ||
     config.get("default_permissions") !== `'${profile.slice("permissions.".length)}'` ||
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
-    JSON.stringify(args.slice(-5)) !== JSON.stringify(["--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]) ||
+    JSON.stringify(args.slice(-3)) !== JSON.stringify(["--skip-git-repo-check", "--ephemeral", "-"]) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
     config.get("mcp_servers.dohc.enabled_tools") !== "['dohc_reply_to_chat']" ||
     config.get("mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode") !== "'approve'") {
