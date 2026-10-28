@@ -65,16 +65,22 @@ fn audit_error(error: ApplicationError) -> ApplicationError {
 impl LiveSettlementAudit {
     pub fn markdown_retry_inputs(&self) -> serde_json::Value {
         serde_json::to_value(crate::markdown_write_obligations::AuditedRetry {
-            namespace: self.namespace.clone(), binding: self.binding.clone(),
-            terminal_cursor: self.terminal_cursor, head_update_seq: self.observed_head,
-        }).expect("audited retry inputs are serializable")
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        })
+        .expect("audited retry inputs are serializable")
     }
 
     pub fn markdown_operation_id(&self) -> String {
         crate::markdown_write_obligations::AuditedRetry {
-            namespace: self.namespace.clone(), binding: self.binding.clone(),
-            terminal_cursor: self.terminal_cursor, head_update_seq: self.observed_head,
-        }.operation_id()
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        }
+        .operation_id()
     }
 
     /// A compensated filesystem marker can be restored only for this retained projection.

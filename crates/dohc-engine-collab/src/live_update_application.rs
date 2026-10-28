@@ -1386,15 +1386,33 @@ pub fn apply_committed(
         i64,
     ) -> Result<(), ApplicationError>,
 ) -> Result<ApplicationResult, ApplicationError> {
-    apply_committed_with_settlement_limit(store, cache, handle, event, faults, working_reserve_bytes, None, follow_up)
+    apply_committed_with_settlement_limit(
+        store,
+        cache,
+        handle,
+        event,
+        faults,
+        working_reserve_bytes,
+        None,
+        follow_up,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn apply_committed_with_settlement_limit(
-    store: &mut EngineStore, cache: &mut WriterDocCache, handle: &ApplicationHandle,
-    event: AdmittedLiveUpdate, faults: &dyn FaultInjector, working_reserve_bytes: usize,
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    handle: &ApplicationHandle,
+    event: AdmittedLiveUpdate,
+    faults: &dyn FaultInjector,
+    working_reserve_bytes: usize,
     max_applications: Option<usize>,
-    follow_up: impl FnOnce(&Transaction<'_>, &str, &LiveObjectBinding, i64) -> Result<(), ApplicationError>,
+    follow_up: impl FnOnce(
+        &Transaction<'_>,
+        &str,
+        &LiveObjectBinding,
+        i64,
+    ) -> Result<(), ApplicationError>,
 ) -> Result<ApplicationResult, ApplicationError> {
     event.validate()?;
     let held = handle

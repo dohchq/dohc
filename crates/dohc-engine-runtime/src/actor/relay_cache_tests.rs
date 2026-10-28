@@ -710,7 +710,6 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await

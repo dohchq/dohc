@@ -157,7 +157,6 @@ async fn settle_document_successor(
             Arc::new(NoFaults),
             dohc_engine_runtime::CancellationToken::new(),
             None,
-
             None,
         )
         .await

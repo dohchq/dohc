@@ -1052,6 +1052,7 @@ fn version_create_with_shipped_snapshots(
 mod chat;
 mod file_export_lane;
 mod hosted_replica;
+mod markdown_write_hold;
 mod ordinary_pull_progress;
 mod outbound_authors;
 pub(crate) mod owner_publication;
@@ -1071,7 +1072,6 @@ mod ydoc_drain;
 mod ydoc_live_echo;
 mod ydoc_projection_authors;
 mod ydoc_restore;
-mod markdown_write_hold;
 
 #[test]
 fn publication_budget_splits_batches_and_keeps_non_settlement_errors_retryable() {

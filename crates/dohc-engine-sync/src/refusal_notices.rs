@@ -218,22 +218,49 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
         })
         .collect::<Result<Vec<_>, SyncError>>()?;
     for owed in dohc_engine_collab::markdown_write_obligations::pending_in(conn, workspace_id)
-        .map_err(crate::ydoc_apply::map_collab_hard_error)? {
-        let Some(checkpoint) = owed.held_checkpoint_sha256 else { continue; };
-        let dismissed: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM markdown_write_obligation_notice_dismissals \
+        .map_err(crate::ydoc_apply::map_collab_hard_error)?
+    {
+        let Some(checkpoint) = owed.held_checkpoint_sha256 else {
+            continue;
+        };
+        let dismissed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM markdown_write_obligation_notice_dismissals \
              WHERE obligation_order=?1 AND checkpoint_sha256=?2 AND head_sha256 IS ?3)",
-            params![owed.order,checkpoint,owed.held_head_sha256], |row| row.get(0)).map_err(SyncError::corrupt)?;
-        if dismissed { continue; }
-        let identity = serde_json::json!([workspace_id,"lineage",owed.key.version_id,
-            owed.key.object_id,owed.lineage_claim_id]);
+                params![owed.order, checkpoint, owed.held_head_sha256],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if dismissed {
+            continue;
+        }
+        let identity = serde_json::json!([
+            workspace_id,
+            "lineage",
+            owed.key.version_id,
+            owed.key.object_id,
+            owed.lineage_claim_id
+        ]);
         notices.push(RefusalNotice {
-            notice_id: format!("sync-refusal-{}", hex_sha256(identity.to_string().as_bytes())),
+            notice_id: format!(
+                "sync-refusal-{}",
+                hex_sha256(identity.to_string().as_bytes())
+            ),
             refusal_coordinates: vec![RefusalCoordinate::LocalObligation {
-                obligation_order: owed.order, checkpoint_sha256: checkpoint, head_sha256: owed.held_head_sha256,
-            }], origin_id: None, origin_seq: None, reason: "markdown-write-held".into(),
-            document: Some(RefusalDocument {version_id: Some(owed.key.version_id), object_id: owed.key.object_id,
-                lineage_claim_id: owed.lineage_claim_id, path: Some(owed.path), conflict_id: None}),
+                obligation_order: owed.order,
+                checkpoint_sha256: checkpoint,
+                head_sha256: owed.held_head_sha256,
+            }],
+            origin_id: None,
+            origin_seq: None,
+            reason: "markdown-write-held".into(),
+            document: Some(RefusalDocument {
+                version_id: Some(owed.key.version_id),
+                object_id: owed.key.object_id,
+                lineage_claim_id: owed.lineage_claim_id,
+                path: Some(owed.path),
+                conflict_id: None,
+            }),
         });
     }
     Ok(notices)
@@ -271,7 +298,12 @@ fn delete_row(
     row: &RefusalNotice,
 ) -> Result<(), SyncError> {
     for coordinate in &row.refusal_coordinates {
-        if let RefusalCoordinate::LocalObligation {obligation_order, checkpoint_sha256, head_sha256} = coordinate {
+        if let RefusalCoordinate::LocalObligation {
+            obligation_order,
+            checkpoint_sha256,
+            head_sha256,
+        } = coordinate
+        {
             tx.execute("INSERT INTO markdown_write_obligation_notice_dismissals \
                 (obligation_order,checkpoint_sha256,head_sha256) VALUES (?1,?2,?3) \
                 ON CONFLICT(obligation_order) DO UPDATE SET checkpoint_sha256=excluded.checkpoint_sha256,head_sha256=excluded.head_sha256",
@@ -390,21 +422,39 @@ mod tests {
 
     #[test]
     fn markdown_hold_notice_dismissal_preserves_debt_and_new_checkpoints() {
-        use dohc_engine_collab::markdown_write_obligations::{self as obligations, Kind, Obligation};
+        use dohc_engine_collab::markdown_write_obligations::{
+            self as obligations, Kind, Obligation,
+        };
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("../../dohc-engine-storage/src/markdown_write_obligations.sql")).unwrap();
+        conn.execute_batch(include_str!(
+            "../../dohc-engine-storage/src/markdown_write_obligations.sql"
+        ))
+        .unwrap();
         conn.execute_batch("CREATE TABLE replication_pending_refusals(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,\
             reason_message TEXT,reason_code TEXT,report_id TEXT);\
             CREATE TABLE replication_log(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,payload_json TEXT)").unwrap();
         let mut owed = Obligation {
-            order: 0, key: dohc_engine_collab::DocKey::new("ws", "main", "note").unwrap(),
-            lineage_claim_id: "claim".into(), operation_id: "session".into(), kind: Kind::Session,
-            path: "note.md".into(), retry_inputs: json!({}), held_checkpoint_sha256: Some("first".into()),
-            held_head_sha256: None, source_sha256: None, settled_head_sha256: None,
+            order: 0,
+            key: dohc_engine_collab::DocKey::new("ws", "main", "note").unwrap(),
+            lineage_claim_id: "claim".into(),
+            operation_id: "session".into(),
+            kind: Kind::Session,
+            path: "note.md".into(),
+            retry_inputs: json!({}),
+            held_checkpoint_sha256: Some("first".into()),
+            held_head_sha256: None,
+            source_sha256: None,
+            settled_head_sha256: None,
         };
         obligations::record_in(&conn, &owed, 1).unwrap();
         let shown = rows(&conn, "ws").unwrap().remove(0);
-        assert!(matches!(&shown.refusal_coordinates[0], RefusalCoordinate::LocalObligation { head_sha256: None, .. }));
+        assert!(matches!(
+            &shown.refusal_coordinates[0],
+            RefusalCoordinate::LocalObligation {
+                head_sha256: None,
+                ..
+            }
+        ));
         let tx = conn.transaction().unwrap();
         delete_row(&tx, "ws", &shown).unwrap();
         tx.commit().unwrap();

@@ -171,7 +171,6 @@ async fn settle_with_parked_remote_update(queued: bool) {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
-
                 None,
             )
             .await
@@ -195,7 +194,6 @@ async fn settle_with_parked_remote_update(queued: bool) {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
-
                 None,
             )
             .await
@@ -297,7 +295,6 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -379,7 +376,6 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -452,7 +448,6 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -546,7 +541,6 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -619,7 +613,6 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -706,7 +699,6 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -783,7 +775,6 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -831,7 +822,6 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             faults.clone(),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -880,7 +870,6 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -962,7 +951,6 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -1012,7 +1000,6 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await
@@ -1041,7 +1028,6 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await

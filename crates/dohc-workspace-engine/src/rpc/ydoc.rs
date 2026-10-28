@@ -53,7 +53,8 @@ struct AuthorSettlementQueue {
 
 impl AuthorSettlementQueue {
     fn try_queue(&mut self, now: Instant) -> bool {
-        if self.queued || self.held
+        if self.queued
+            || self.held
             || self
                 .retry_after
                 .is_some_and(|retry_after| now < retry_after)
@@ -69,7 +70,9 @@ impl AuthorSettlementQueue {
         self.retry_after = failed.then(|| now + AUTHOR_SETTLEMENT_RETRY_DELAY);
     }
 
-    fn changed_inputs(&mut self) { self.held = false; }
+    fn changed_inputs(&mut self) {
+        self.held = false;
+    }
 
     fn hold(&mut self) {
         self.queued = false;
@@ -81,9 +84,16 @@ impl AuthorSettlementQueue {
 type EditorDraftRead = (Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>);
 
 fn validate_conversion_source(source: Option<&str>) -> Result<(), WireError> {
-    if source.is_some_and(|source| source.len() != 64 || !source.bytes().all(|byte|
-        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))) {
-        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-source-digest"));
+    if source.is_some_and(|source| {
+        source.len() != 64
+            || !source
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-source-digest",
+        ));
     }
     Ok(())
 }
@@ -767,7 +777,6 @@ impl EngineService {
                         Arc::new(NoFaults),
                         cancellation.token(),
                         None,
-
                         None,
                     )
                     .await;
@@ -792,9 +801,13 @@ impl EngineService {
         if action == "release"
             && let Some(values) = stops.as_array_mut()
         {
-            for ((value, materialized), reason) in values.iter_mut().zip(materialized).zip(settlement_reasons) {
+            for ((value, materialized), reason) in
+                values.iter_mut().zip(materialized).zip(settlement_reasons)
+            {
                 value["materialized"] = json!(materialized);
-                if let Some(reason) = reason { value["settlementReason"] = json!(reason); }
+                if let Some(reason) = reason {
+                    value["settlementReason"] = json!(reason);
+                }
             }
         }
         Ok(json!({"stops":stops}))
@@ -1422,9 +1435,20 @@ impl EngineService {
             draft.descriptor
         });
         let conversion_consent = if let Some(source) = params.allow_lossy_source_sha256 {
-            Some(open.actor.ydoc_conversion_consent(state.key.clone(), params.path.clone(),
-                session_id.clone(), state.lineage_claim_id.clone(), state.restore_generation, source,
-                cancellation.token()).await.map_err(map_runtime)?)
+            Some(
+                open.actor
+                    .ydoc_conversion_consent(
+                        state.key.clone(),
+                        params.path.clone(),
+                        session_id.clone(),
+                        state.lineage_claim_id.clone(),
+                        state.restore_generation,
+                        source,
+                        cancellation.token(),
+                    )
+                    .await
+                    .map_err(map_runtime)?,
+            )
         } else {
             None
         };
@@ -1698,11 +1722,18 @@ impl EngineService {
                 if let Ok(append) = &outcome
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
-                    if !append.outcome.deduped { session.author_settlement.changed_inputs(); }
-                    if session.first_update_pending && require_empty && append.lineage_originated_here
+                    if !append.outcome.deduped {
+                        session.author_settlement.changed_inputs();
+                    }
+                    if session.first_update_pending
+                        && require_empty
+                        && append.lineage_originated_here
                         && let Some(claim) = append.lineage_claim_id.clone()
-                        && let Some(consent) = session.conversion_consent.as_ref()
-                            .and_then(|consent| consent.for_originated_claim(claim)) {
+                        && let Some(consent) = session
+                            .conversion_consent
+                            .as_ref()
+                            .and_then(|consent| consent.for_originated_claim(claim))
+                    {
                         session.conversion_consent = Some(Arc::new(consent));
                     }
                     session.first_update_pending = false;
@@ -1733,7 +1764,8 @@ impl EngineService {
                                 session.conversion_consent.clone(),
                             )
                         });
-                        let Some((key, path, kind, lineage, head, restore, consent)) = pending else {
+                        let Some((key, path, kind, lineage, head, restore, consent)) = pending
+                        else {
                             return;
                         };
                         let settle_now = match now_ms() {
@@ -1763,7 +1795,6 @@ impl EngineService {
                                 Arc::new(NoFaults),
                                 CancellationToken::new(),
                                 restore,
-
                                 consent,
                             )
                             .await
@@ -1790,7 +1821,9 @@ impl EngineService {
                                 true
                             }
                             Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
-                                eprintln!("engine: queued author coverage settlement held: {error}");
+                                eprintln!(
+                                    "engine: queued author coverage settlement held: {error}"
+                                );
                                 if let Some(session) = lock(&sessions).get_mut(&session_id) {
                                     session.author_settlement.hold();
                                 }
@@ -1941,12 +1974,23 @@ impl EngineService {
         };
         if let Some(source) = params.allow_lossy_source_sha256 {
             let (_, view) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-            let consent = open.actor.ydoc_conversion_consent(view.key, view.path,
-                params.session_id.clone(), view.lineage_claim_id, view.restore_generation, source,
-                cancellation.token()).await.map_err(map_runtime)?;
+            let consent = open
+                .actor
+                .ydoc_conversion_consent(
+                    view.key,
+                    view.path,
+                    params.session_id.clone(),
+                    view.lineage_claim_id,
+                    view.restore_generation,
+                    source,
+                    cancellation.token(),
+                )
+                .await
+                .map_err(map_runtime)?;
             let mut sessions = lock(&self.sessions);
-            let session = sessions.get_mut(&params.session_id)
-                .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+            let session = sessions.get_mut(&params.session_id).ok_or_else(|| {
+                WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found")
+            })?;
             session.conversion_consent = Some(consent);
         }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
@@ -2243,9 +2287,21 @@ impl EngineService {
         let (state, owner_draft) = match draft {
             Some(draft) => (
                 dohc_engine_runtime::actor::YdocResyncState {
-                    head_blob_sha256: open.actor.ydoc_open_state(open.workspace_id.clone(), now_ms()?, false,
-                        Some(session.key.clone()), session.key.version_id.clone(), session.path.clone(),
-                        Some(session.content_kind), cancellation.token()).await.map_err(map_runtime)?.head_blob_sha256,
+                    head_blob_sha256: open
+                        .actor
+                        .ydoc_open_state(
+                            open.workspace_id.clone(),
+                            now_ms()?,
+                            false,
+                            Some(session.key.clone()),
+                            session.key.version_id.clone(),
+                            session.path.clone(),
+                            Some(session.content_kind),
+                            cancellation.token(),
+                        )
+                        .await
+                        .map_err(map_runtime)?
+                        .head_blob_sha256,
                     initial_update: draft.initial_update,
                     lineage_claim_id: Some(draft.descriptor.binding.lineage_claim_id.clone()),
                     lineage_originated_here: false,
@@ -2674,7 +2730,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn markdown_hold_queued_author_driver_waits_for_consent_and_retries_only_unaccepted_work() {
+    async fn markdown_hold_queued_author_driver_waits_for_consent_and_retries_only_unaccepted_work()
+    {
         use dohc_engine_domain::{VersionedTextStore, WriteText};
         use dohc_engine_storage::EngineStore;
         let scratch = ScratchDir::new().unwrap();
@@ -2683,64 +2740,161 @@ mod tests {
         let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
         let source = "- parent\n  - child\n";
         let doc = dohc_engine_collab::Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source).unwrap();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
         doc.richdoc_append_paragraph("Accepted before queueing");
         let key = DocKey::new("capacity-hold", "main", "note").unwrap();
         {
             let mut store = EngineStore::open(&db, 1).unwrap();
             store.bind_root_token(token, &NoFaults).unwrap();
-            VersionedTextStore::new(&mut store).ensure_main_version("capacity-hold", "main", 1, &NoFaults).unwrap();
-            VersionedTextStore::new(&mut store).write_text(&WriteText {
-                workspace_id: "capacity-hold".into(), version_id: "main".into(), object_id: "note".into(),
-                path: "note.md".into(), text: source.into(), moment_id: "source".into(),
-                metadata_origin: "test".into(), metadata_summary: None, metadata_correlation_id: None,
-                author_json: None, now_ms: 2, request_id: None,
-            }, &NoFaults).unwrap();
-            dohc_engine_collab::record_local_update(&mut store, &mut dohc_engine_collab::WriterDocCache::new(),
-                &key, &doc.encode_full_state(), dohc_engine_collab::LocalAppend {
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("capacity-hold", "main", 1, &NoFaults)
+                .unwrap();
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "capacity-hold".into(),
+                        version_id: "main".into(),
+                        object_id: "note".into(),
+                        path: "note.md".into(),
+                        text: source.into(),
+                        moment_id: "source".into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
                     marker: Some(dohc_engine_collab::MarkerCreation {
-                        path: Some("note.md"), content_kind: ContentKind::Richdoc, regime: Regime::LocalOnly,
-                    }), ..Default::default()
-                }, &NoFaults, 3, |_, _, _| Ok(())).unwrap();
+                        path: Some("note.md"),
+                        content_kind: ContentKind::Richdoc,
+                        regime: Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
         }
         std::fs::write(scratch.path().join("note.md"), source).unwrap();
-        let modified = std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap();
+        let modified = std::fs::metadata(scratch.path().join("note.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
         let service = EngineService::new();
-        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
-            "rootDir":scratch.path(),"workspaceId":"capacity-hold","captureMode":"none",
-        })).await.unwrap();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir":scratch.path(),"workspaceId":"capacity-hold","captureMode":"none",
+                }),
+            )
+            .await
+            .unwrap();
         let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
         let open = service.open(Some(&handle)).unwrap();
-        open.actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
-            Arc::new(dohc_engine_reader::Reader::new(Some(super::super::markdown_recovery::tests::witness_reader(
-                &scratch, "witness-unsafe"))))))).await.unwrap();
-        let (session, egress) = service.ydoc_open(&RequestContext::unbounded(), Some(handle.clone()),
-            json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}), 1).await.unwrap();
+        open.actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(
+                        super::super::markdown_recovery::tests::witness_reader(
+                            &scratch,
+                            "witness-unsafe",
+                        ),
+                    )),
+                )),
+            ))
+            .await
+            .unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}),
+                1,
+            )
+            .await
+            .unwrap();
         drop(egress);
         let id = session["sessionId"].as_str().unwrap();
-        let params = |author: &str, update: &[u8]| json!({
-            "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
-            "expectedLineageClaimId":session["lineageClaimId"],
-            "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0},
-        });
-        service.ydoc_record_update(&RequestContext::unbounded(), Some(handle.clone()), None,
-            params("first", &doc.richdoc_append_paragraph("First admitted edit"))).await.unwrap();
+        let params = |author: &str, update: &[u8]| {
+            json!({
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId":session["lineageClaimId"],
+                "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0},
+            })
+        };
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params(
+                    "first",
+                    &doc.richdoc_append_paragraph("First admitted edit"),
+                ),
+            )
+            .await
+            .unwrap();
         let raw = rusqlite::Connection::open(&db).unwrap();
         let folded: Vec<_> = (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS - 1)
-            .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"})).collect();
-        raw.execute("UPDATE ydoc_docs SET pending_authors_json=?1", [json!(folded).to_string()]).unwrap();
-        service.ydoc_record_update(&RequestContext::unbounded(), Some(handle.clone()), None,
-            params("first", &doc.richdoc_append_paragraph("Known author fills coverage"))).await.unwrap();
+            .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"}))
+            .collect();
+        raw.execute(
+            "UPDATE ydoc_docs SET pending_authors_json=?1",
+            [json!(folded).to_string()],
+        )
+        .unwrap();
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params(
+                    "first",
+                    &doc.richdoc_append_paragraph("Known author fills coverage"),
+                ),
+            )
+            .await
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
-                if lock(&service.sessions).get(id).unwrap().author_settlement.held { break; }
+                if lock(&service.sessions)
+                    .get(id)
+                    .unwrap()
+                    .author_settlement
+                    .held
+                {
+                    break;
+                }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("the real queued driver suspends on the hold");
+        })
+        .await
+        .expect("the real queued driver suspends on the hold");
         let unaccepted = doc.richdoc_append_paragraph("Retry this unaccepted edit once");
         for author in ["new-author", "another-new-author"] {
-            let error = service.ydoc_record_update(&RequestContext::unbounded(), Some(handle.clone()), None,
-                params(author, &unaccepted)).await.unwrap_err();
+            let error = service
+                .ydoc_record_update(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    None,
+                    params(author, &unaccepted),
+                )
+                .await
+                .unwrap_err();
             assert_eq!(error.message, "ydoc-author-capacity");
             let sessions = lock(&service.sessions);
             let queue = &sessions.get(id).unwrap().author_settlement;
@@ -2748,8 +2902,17 @@ mod tests {
             assert!(!queue.queued);
             assert!(queue.retry_after.is_none());
         }
-        assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
-        assert_eq!(std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::metadata(scratch.path().join("note.md"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
         {
             let store = EngineStore::open_read_only(&db).unwrap();
             assert_eq!(store.table_row_count("moments").unwrap(), 1);
@@ -2759,11 +2922,30 @@ mod tests {
         service.ydoc_settle(&RequestContext::unbounded(), Some(handle.clone()),
             json!({"sessionId":id,"allowLossySourceSha256":dohc_engine_storage::hex_sha256(source.as_bytes())}))
             .await.unwrap();
-        assert!(!lock(&service.sessions).get(id).unwrap().author_settlement.held);
-        service.ydoc_record_update(&RequestContext::unbounded(), Some(handle.clone()), None,
-            params("new-author", &unaccepted)).await.unwrap();
-        service.ydoc_settle(&RequestContext::unbounded(), Some(handle.clone()), json!({"sessionId":id}))
-            .await.unwrap();
+        assert!(
+            !lock(&service.sessions)
+                .get(id)
+                .unwrap()
+                .author_settlement
+                .held
+        );
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("new-author", &unaccepted),
+            )
+            .await
+            .unwrap();
+        service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":id}),
+            )
+            .await
+            .unwrap();
         let saved = std::fs::read_to_string(scratch.path().join("note.md")).unwrap();
         assert_eq!(saved.matches("Retry this unaccepted edit once").count(), 1);
         assert!(saved.contains("Known author fills coverage"));

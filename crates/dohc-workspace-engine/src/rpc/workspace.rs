@@ -186,7 +186,9 @@ impl OpenWorkspace {
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
-        if let Some(recovery) = lock(&self.markdown_recovery).as_ref() { recovery.request_shutdown(); }
+        if let Some(recovery) = lock(&self.markdown_recovery).as_ref() {
+            recovery.request_shutdown();
+        }
         self.observation.request_shutdown();
         if let Some(projection) = lock(&self.collection_projection).as_ref() {
             projection.request_shutdown();
@@ -217,7 +219,9 @@ impl OpenWorkspace {
             .take()
             .inspect(|task| task.abort());
         [
-            lock(&self.markdown_recovery).take().and_then(super::markdown_recovery::MarkdownRecovery::begin_shutdown),
+            lock(&self.markdown_recovery)
+                .take()
+                .and_then(super::markdown_recovery::MarkdownRecovery::begin_shutdown),
             undo,
             capture,
             recovery,
@@ -1353,9 +1357,15 @@ impl EngineService {
         );
         if requested_mode == WorkspaceOpenMode::Full {
             let open = self.open(Some(&handle))?;
-            *lock(&open.markdown_recovery) = Some(super::markdown_recovery::MarkdownRecovery::spawn(
-                &open, handle.clone(), self.sessions.clone(), self.leases.scoped(&open.root),
-                self.self_writes.scoped(&open.root), self.events.clone()));
+            *lock(&open.markdown_recovery) =
+                Some(super::markdown_recovery::MarkdownRecovery::spawn(
+                    &open,
+                    handle.clone(),
+                    self.sessions.clone(),
+                    self.leases.scoped(&open.root),
+                    self.self_writes.scoped(&open.root),
+                    self.events.clone(),
+                ));
             let recovery = open.clone();
             let fence = self.version_fence();
             let recovery_handle = handle.clone();

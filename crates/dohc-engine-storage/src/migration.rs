@@ -8356,23 +8356,67 @@ mod tests {
         drop(conn);
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true).unwrap();
-        assert_eq!(run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
-            MigrationOutcome::Applied { newly_applied: 0 });
-        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations WHERE completed=0", [],
-            |row| row.get::<_, i64>(0)).unwrap(), 2);
-        assert_eq!(conn.query_row("SELECT json_extract(retry_inputs_json,'$.headUpdateSeq')
-            FROM markdown_write_obligations WHERE kind='audited-settle'", [],
-            |row| row.get::<_, i64>(0)).unwrap(), 12);
-        assert_eq!(conn.query_row("SELECT source_sha256,settled_head_sha256
-            FROM markdown_write_obligations WHERE kind='witness-refresh'", [],
-            |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?))).unwrap(),
-            ("source".to_owned(),"converted".to_owned()));
-        conn.execute("DELETE FROM markdown_write_obligation_notice_dismissals", []).unwrap();
-        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations WHERE completed=0", [],
-            |row| row.get::<_, i64>(0)).unwrap(), 2);
-        conn.execute("DELETE FROM versions WHERE workspace_id='w' AND version_id='main'", []).unwrap();
-        assert_eq!(conn.query_row("SELECT count(*) FROM markdown_write_obligations", [],
-            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations WHERE completed=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT json_extract(retry_inputs_json,'$.headUpdateSeq')
+            FROM markdown_write_obligations WHERE kind='audited-settle'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            12
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT source_sha256,settled_head_sha256
+            FROM markdown_write_obligations WHERE kind='witness-refresh'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("source".to_owned(), "converted".to_owned())
+        );
+        conn.execute(
+            "DELETE FROM markdown_write_obligation_notice_dismissals",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations WHERE completed=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='w' AND version_id='main'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {

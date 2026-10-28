@@ -47,7 +47,11 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
 }
 
 async fn seed_parked_update_kind(scratch: &ScratchDir, markdown: bool) -> DocKey {
-    let source = if markdown { "Imported source\n" } else { "before" };
+    let source = if markdown {
+        "Imported source\n"
+    } else {
+        "before"
+    };
     let db = engine_db_path(scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -81,8 +85,11 @@ async fn seed_parked_update_kind(scratch: &ScratchDir, markdown: bool) -> DocKey
     let mut store = EngineStore::open(&db, 100).expect("open store");
     let doc = dohc_engine_collab::Ydoc::wire();
     if markdown {
-        doc.rewrite_content_to_markdown_preserving_source(dohc_engine_collab::ContentKind::Richdoc, source)
-            .unwrap();
+        doc.rewrite_content_to_markdown_preserving_source(
+            dohc_engine_collab::ContentKind::Richdoc,
+            source,
+        )
+        .unwrap();
     } else {
         doc.plaintext_insert(0, source);
     }
@@ -169,50 +176,132 @@ async fn markdown_hold_open_resync_and_close_keep_the_file_and_consume_only_park
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let (claim, counts) = {
             let store = EngineStore::open_read_only(&db).unwrap();
-            let claim = dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap().lineage_claim_id;
+            let claim = dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id;
             let counts = ["moments", "materialization_jobs", "live_device_settlements"]
                 .map(|table| store.table_row_count(table).unwrap());
             (claim, counts)
         };
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 200).unwrap().actor;
-        actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
-            Arc::new(dohc_engine_reader::Reader::new(Some(markdown_witness_reader(&scratch))))))).await.unwrap();
+        actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(markdown_witness_reader(&scratch))),
+                )),
+            ))
+            .await
+            .unwrap();
         let update = match operation {
-            "open" => actor.ydoc_open_state(WS.into(), 201, true, Some(key.clone()), "main".into(),
-                PATH.into(), Some(ContentKind::Richdoc), CancellationToken::new()).await.unwrap().initial_update,
-            "resync" => actor.ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
-                .await.unwrap().initial_update,
+            "open" => {
+                actor
+                    .ydoc_open_state(
+                        WS.into(),
+                        201,
+                        true,
+                        Some(key.clone()),
+                        "main".into(),
+                        PATH.into(),
+                        Some(ContentKind::Richdoc),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+                    .initial_update
+            }
+            "resync" => {
+                actor
+                    .ydoc_resync(key.clone(), claim.clone(), CancellationToken::new(), None)
+                    .await
+                    .unwrap()
+                    .initial_update
+            }
             _ => {
-                actor.ydoc_close_session_materialized(scratch.path().to_owned(), key.clone(), Arc::new(()),
-                    201, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
-                actor.ydoc_open_state(WS.into(), 202, true, Some(key.clone()), "main".into(),
-                    PATH.into(), Some(ContentKind::Richdoc), CancellationToken::new()).await.unwrap().initial_update
+                actor
+                    .ydoc_close_session_materialized(
+                        scratch.path().to_owned(),
+                        key.clone(),
+                        Arc::new(()),
+                        201,
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                actor
+                    .ydoc_open_state(
+                        WS.into(),
+                        202,
+                        true,
+                        Some(key.clone()),
+                        "main".into(),
+                        PATH.into(),
+                        Some(ContentKind::Richdoc),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+                    .initial_update
             }
         };
         let doc = Ydoc::wire();
         doc.apply(&update).unwrap();
-        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content
-            .matches("Accepted parked Markdown edit").count(), 1);
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .unwrap()
+                .content
+                .matches("Accepted parked Markdown edit")
+                .count(),
+            1
+        );
         assert!(doc.has_markdown_witness());
         assert_eq!(deferred_rows(&db), 0);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
         supervisor.close(&db).unwrap();
         let actor = supervisor.open(&db, 203).unwrap().actor;
-        let reopened = actor.ydoc_resync(key.clone(), claim, CancellationToken::new(), None).await.unwrap();
-        assert_eq!(reopened.head_blob_sha256.as_deref(), Some(hex_sha256(&bytes).as_str()));
+        let reopened = actor
+            .ydoc_resync(key.clone(), claim, CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.head_blob_sha256.as_deref(),
+            Some(hex_sha256(&bytes).as_str())
+        );
         let doc = Ydoc::wire();
         doc.apply(&reopened.initial_update).unwrap();
-        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content
-            .matches("Accepted parked Markdown edit").count(), 1);
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .unwrap()
+                .content
+                .matches("Accepted parked Markdown edit")
+                .count(),
+            1
+        );
         {
             let store = EngineStore::open_read_only(&db).unwrap();
-            assert_eq!(["moments", "materialization_jobs", "live_device_settlements"]
-                .map(|table| store.table_row_count(table).unwrap()), counts);
-            assert!(!store.read_with(|conn| markdown_write_obligations::pending_in(conn, WS)).unwrap().is_empty());
-            assert!(dohc_engine_sync::list_refusal_notices(&store, WS).unwrap().iter()
-                .any(|notice| notice.reason == "markdown-write-held"));
+            assert_eq!(
+                ["moments", "materialization_jobs", "live_device_settlements"]
+                    .map(|table| store.table_row_count(table).unwrap()),
+                counts
+            );
+            assert!(
+                !store
+                    .read_with(|conn| markdown_write_obligations::pending_in(conn, WS))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                dohc_engine_sync::list_refusal_notices(&store, WS)
+                    .unwrap()
+                    .iter()
+                    .any(|notice| notice.reason == "markdown-write-held")
+            );
         }
         supervisor.close(&db).unwrap();
     }
@@ -224,18 +313,31 @@ fn markdown_witness_reader(root: &ScratchDir) -> dohc_engine_reader::Config {
     let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
     assert!(output.status.success());
     let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let node = std::path::PathBuf::from(runtime.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
+    let node = std::path::PathBuf::from(
+        runtime
+            .as_object_mut()
+            .unwrap()
+            .remove("path")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
     runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
     let mut manifest = serde_json::json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
     let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
-        .replace("MANIFEST", &manifest.to_string()).replace("MODE", "\"witness-unsafe\"");
+        .replace("MANIFEST", &manifest.to_string())
+        .replace("MODE", "\"witness-unsafe\"");
     let bundle = root.path().join("reader.cjs");
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
     manifest["sources"] = serde_json::json!([]);
     let manifest_path = root.path().join("reader-manifest.json");
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
-    dohc_engine_reader::Config { node, bundle, manifest: manifest_path }
+    dohc_engine_reader::Config {
+        node,
+        bundle,
+        manifest: manifest_path,
+    }
 }
 
 /// #1009 (open window): the post-lease open runs its conflict freeze before

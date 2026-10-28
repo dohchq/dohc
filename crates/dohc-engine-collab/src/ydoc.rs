@@ -597,9 +597,13 @@ impl Ydoc {
     pub fn has_markdown_witness(&self) -> bool {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let txn = self.doc.transact();
-        [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
-            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY]
-            .iter().any(|key| meta.get(&txn, *key).is_some())
+        [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ]
+        .iter()
+        .any(|key| meta.get(&txn, *key).is_some())
     }
 
     /// Resolve exact Markdown only after its lightweight projection witness
@@ -1002,7 +1006,8 @@ impl Ydoc {
             } else {
                 MarkdownWriteSafety::SafeWitness
             },
-            witness_source_sha256: self.markdown_source_reference()
+            witness_source_sha256: self
+                .markdown_source_reference()
                 .map(|reference| reference.source_sha256),
         })
     }
@@ -1694,8 +1699,12 @@ impl Ydoc {
     pub fn clear_markdown_source_witness(&self) -> Vec<u8> {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.with_delta(|txn| {
-            for key in [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
-                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY, MARKDOWN_SOURCE_READER_META_KEY] {
+            for key in [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ] {
                 meta.remove(txn, key);
             }
         })
@@ -11470,24 +11479,35 @@ mod projection_tests {
     fn clear_markdown_witness_is_meta_only_with_a_large_source_and_private_tail() {
         let doc = Ydoc::wire();
         let source = "source paragraph\n\n".repeat(8_000);
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+            .unwrap();
         witness_source(&doc, &source);
         doc.doc.get_or_insert_map(ROOT_META).insert(
-            &mut doc.doc.transact_mut(), MARKDOWN_SOURCE_READER_META_KEY, "reader-identity",
+            &mut doc.doc.transact_mut(),
+            MARKDOWN_SOURCE_READER_META_KEY,
+            "reader-identity",
         );
         let peer = Ydoc::wire();
         peer.apply(&doc.encode_full_state()).unwrap();
         let tail = doc.richdoc_append_paragraph("Owner's unsettled tail");
         let mut before = doc.canonical_content();
-        for key in [MARKDOWN_SOURCE_META_KEY, MARKDOWN_SOURCE_SHA_META_KEY,
-            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY, MARKDOWN_SOURCE_READER_META_KEY] {
+        for key in [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            MARKDOWN_SOURCE_READER_META_KEY,
+        ] {
             before[ROOT_META].as_object_mut().unwrap().remove(key);
         }
         let update = doc.clear_markdown_source_witness();
         assert!(!doc.has_markdown_witness());
         assert!(!doc.has_reader_source());
         assert_eq!(doc.canonical_content(), before);
-        assert!(doc.project(ContentKind::Richdoc).unwrap().content.contains("Owner's unsettled tail"));
+        assert!(doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Owner's unsettled tail"));
         // Delivery in either order keeps a tail the clearing peer has not seen.
         peer.apply(&update).unwrap();
         peer.apply(&tail).unwrap();

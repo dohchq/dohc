@@ -8,6 +8,12 @@ use super::search::search_domain;
 use super::versions::ensure_mutation_version_on_store;
 use crate::error::RuntimeError;
 use crate::search::upsert_file_search_index;
+use dohc_engine_collab::markdown_write_obligations::{
+    self as write_obligations, Kind as WriteObligationKind, Obligation as WriteObligation,
+};
+use dohc_engine_collab::markdown_write_safety::{
+    self, MarkdownConversionConsent, MarkdownWriteSafety,
+};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LineageClaimStatus,
     OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
@@ -33,8 +39,6 @@ use dohc_engine_storage::{
     hex_sha256, put_binary_blob,
 };
 use dohc_engine_sync::{SharingDeclined, ydoc_update_payload};
-use dohc_engine_collab::markdown_write_safety::{self, MarkdownConversionConsent, MarkdownWriteSafety};
-use dohc_engine_collab::markdown_write_obligations::{self as write_obligations, Kind as WriteObligationKind, Obligation as WriteObligation};
 use rusqlite::{OptionalExtension, params};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -928,31 +932,62 @@ impl ActorHandle {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_conversion_consent(
-        &self, key: DocKey, path: String, session_id: String,
-        lineage_claim_id: Option<String>, restore_generation: Option<i64>, source_sha256: String,
+        &self,
+        key: DocKey,
+        path: String,
+        session_id: String,
+        lineage_claim_id: Option<String>,
+        restore_generation: Option<i64>,
+        source_sha256: String,
         token: CancellationToken,
     ) -> Result<Arc<MarkdownConversionConsent>, RuntimeError> {
         self.run(move |store, _| {
-            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-            let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
-            if marker.path.as_deref() != Some(path.as_str()) || marker.lineage_claim_id != lineage_claim_id {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let marker =
+                dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
+            if marker.path.as_deref() != Some(path.as_str())
+                || marker.lineage_claim_id != lineage_claim_id
+            {
                 return Err(DomainError::ConflictStaleTarget.into());
             }
             store.read_with(|conn| {
                 dohc_engine_collab::owner_outbox::draft::require_ordinary_write(conn, &key)?;
-                dohc_engine_collab::live_update_application::require_restore_generation(conn, &key, restore_generation)
+                dohc_engine_collab::live_update_application::require_restore_generation(
+                    conn,
+                    &key,
+                    restore_generation,
+                )
             })?;
             let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
-            let reference = doc.markdown_source_reference().filter(|reference|
-                reference.source_sha256 == source_sha256 && doc.markdown_source(reference).is_some());
-            if reference.is_none() { return Err(CollabError::MarkdownReaderUnavailable.into()); }
-            let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &path)?;
-            if head.as_ref().is_some_and(|head| head.object_id != key.object_id) {
+            let reference = doc.markdown_source_reference().filter(|reference| {
+                reference.source_sha256 == source_sha256 && doc.markdown_source(reference).is_some()
+            });
+            if reference.is_none() {
+                return Err(CollabError::MarkdownReaderUnavailable.into());
+            }
+            let head = VersionedTextStore::new(store).read_text(
+                &key.workspace_id,
+                &key.version_id,
+                &path,
+            )?;
+            if head
+                .as_ref()
+                .is_some_and(|head| head.object_id != key.object_id)
+            {
                 return Err(DomainError::ConflictStaleTarget.into());
             }
-            Ok(Arc::new(MarkdownConversionConsent::new(key, session_id, lineage_claim_id,
-                restore_generation, source_sha256, head.map(|head| head.blob_sha256))))
-        }).await
+            Ok(Arc::new(MarkdownConversionConsent::new(
+                key,
+                session_id,
+                lineage_claim_id,
+                restore_generation,
+                source_sha256,
+                head.map(|head| head.blob_sha256),
+            )))
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2217,16 +2252,33 @@ pub(super) fn ydoc_record_update_on_store(
         now_ms,
         |tx, outcome, _update_sha| {
             // Maintenance appends are accepted live state. Their file index waits for settlement.
-            if !claim_triggers && actor_origin_id.as_deref() == Some("engine") && attribution.is_none() {
-                let head = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
-                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
-                let fields = head.snapshot.as_ref().map(|snapshot| {
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&snapshot.text)
+            if !claim_triggers
+                && actor_origin_id.as_deref() == Some("engine")
+                && attribution.is_none()
+            {
+                let head =
+                    select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
+                        .map_err(|error| {
+                            CollabError::Storage(StorageError::persist_public(error))
+                        })?;
+                let fields = head
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(
+                            &snapshot.text,
+                        )
                         .map_or_else(|| serde_json::json!({}), |(fields, _)| fields)
-                }).unwrap_or_else(|| serde_json::json!({}));
-                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(tx,
-                    &key.workspace_id, &key.version_id, &key.object_id, &fields)
-                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &fields,
+                )
+                .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
             }
             if !journal_local_append_in_tx(
                 tx,
@@ -2400,7 +2452,9 @@ fn record_file_holds_head(
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
     if live_audit.is_none() {
-        store.read_with(|conn| dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key))?;
+        store.read_with(|conn| {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)
+        })?;
     }
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
@@ -2698,10 +2752,29 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
-    let result = ydoc_settle_attempt_on_store(store, doc_cache, root_dir, key, path,
-        content_kind, drain_deferred, expected_lineage_claim_id, expected_head_sha.clone(),
-        settled_content_override, session_id, self_writes, now_ms, faults, token,
-        root_guard, live_audit, restore_generation, kind, use_reader, conversion_consent);
+    let result = ydoc_settle_attempt_on_store(
+        store,
+        doc_cache,
+        root_dir,
+        key,
+        path,
+        content_kind,
+        drain_deferred,
+        expected_lineage_claim_id,
+        expected_head_sha.clone(),
+        settled_content_override,
+        session_id,
+        self_writes,
+        now_ms,
+        faults,
+        token,
+        root_guard,
+        live_audit,
+        restore_generation,
+        kind,
+        use_reader,
+        conversion_consent,
+    );
     if super::pending_reader_preparation(&result).is_some() {
         // Persist the retry before the async driver starts the requested preparation.
         let head = dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
@@ -2753,13 +2826,18 @@ pub(super) fn ydoc_settle_on_store(
         }
     } else if matches!(&result, Ok(YdocSettleOutcome::Settled(_))) && live_audit.is_none() {
         // Equality and replay can complete a preparation intent without entering the write transaction.
-        let owed = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
-        for owed in owed.into_iter().filter(|owed| owed.key == *key
-            && owed.lineage_claim_id == expected_lineage_claim_id.unwrap_or("")
-            && owed.operation_id == session_id
-            && owed.kind == settlement_obligation_kind(kind, session_id, false)) {
-            match store.write_with(&NoFaults, |tx| write_obligations::complete_in(tx, &owed, now_ms))? {
-                TxnOutcome::Committed(()) => {},
+        let owed =
+            store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
+        for owed in owed.into_iter().filter(|owed| {
+            owed.key == *key
+                && owed.lineage_claim_id == expected_lineage_claim_id.unwrap_or("")
+                && owed.operation_id == session_id
+                && owed.kind == settlement_obligation_kind(kind, session_id, false)
+        }) {
+            match store.write_with(&NoFaults, |tx| {
+                write_obligations::complete_in(tx, &owed, now_ms)
+            })? {
+                TxnOutcome::Committed(()) => {}
                 TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
             }
         }
@@ -2767,13 +2845,24 @@ pub(super) fn ydoc_settle_on_store(
     result
 }
 
-fn settlement_obligation_kind(kind: SettlementKind, session_id: &str, audited: bool) -> WriteObligationKind {
-    if audited { WriteObligationKind::AuditedSettle }
-    else if kind == SettlementKind::CollectionAdoption { WriteObligationKind::CollectionAdoption }
-    else if session_id.starts_with("collection-relation-cleanup:") { WriteObligationKind::RelationCleanup }
-    else if session_id == "owner-live-stop" { WriteObligationKind::OwnerStop }
-    else if session_id == "link-rewrite-baseline" { WriteObligationKind::LinkBaseline }
-    else { WriteObligationKind::Session }
+fn settlement_obligation_kind(
+    kind: SettlementKind,
+    session_id: &str,
+    audited: bool,
+) -> WriteObligationKind {
+    if audited {
+        WriteObligationKind::AuditedSettle
+    } else if kind == SettlementKind::CollectionAdoption {
+        WriteObligationKind::CollectionAdoption
+    } else if session_id.starts_with("collection-relation-cleanup:") {
+        WriteObligationKind::RelationCleanup
+    } else if session_id == "owner-live-stop" {
+        WriteObligationKind::OwnerStop
+    } else if session_id == "link-rewrite-baseline" {
+        WriteObligationKind::LinkBaseline
+    } else {
+        WriteObligationKind::Session
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2801,8 +2890,10 @@ fn ydoc_settle_attempt_on_store(
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     #[cfg(any(test, feature = "fault-injection"))]
-    MARKDOWN_BEFORE_SETTLE.with(|slot| slot.borrow_mut().take())
-        .map(|check| check(store)).transpose()?;
+    MARKDOWN_BEFORE_SETTLE
+        .with(|slot| slot.borrow_mut().take())
+        .map(|check| check(store))
+        .transpose()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -3217,15 +3308,23 @@ fn ydoc_settle_attempt_on_store(
         })));
     }
     if let Some(override_text) = settled_content_override.as_deref() {
-        let source_preserving = projection.markdown_write_safety == MarkdownWriteSafety::SourcePreserving
+        let source_preserving = projection.markdown_write_safety
+            == MarkdownWriteSafety::SourcePreserving
             && override_text == projection.content;
-        let audited_restore = live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
-        let adoption = kind == SettlementKind::CollectionAdoption && head_probe.as_ref().is_some_and(|head| {
-            let split = |text: &str| dohc_engine_domain::collections::markdown_frontmatter_json_with_body(text)
-                .map_or((serde_json::json!({}), text.to_owned()), |(fields, body)| (fields, body.to_owned()));
-            let (fields, body) = split(override_text);
-            fields == doc.frontmatter_json() && body == split(&head.text).1
-        });
+        let audited_restore =
+            live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
+        let adoption = kind == SettlementKind::CollectionAdoption
+            && head_probe.as_ref().is_some_and(|head| {
+                let split = |text: &str| {
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(text)
+                        .map_or(
+                            (serde_json::json!({}), text.to_owned()),
+                            |(fields, body)| (fields, body.to_owned()),
+                        )
+                };
+                let (fields, body) = split(override_text);
+                fields == doc.frontmatter_json() && body == split(&head.text).1
+            });
         if !(source_preserving || audited_restore || adoption) {
             return Err(CollabError::FrontmatterEditRefused.into());
         }
@@ -3497,7 +3596,9 @@ fn ydoc_settle_attempt_on_store(
     };
     let Some((write, collection_reconcile_required)) = settlement else {
         return Err(RuntimeError::MarkdownWriteHeld {
-            key: key.clone(), path: path.to_owned(), head_sha256: probe_sha,
+            key: key.clone(),
+            path: path.to_owned(),
+            head_sha256: probe_sha,
             checkpoint_sha256,
         });
     };
@@ -3620,31 +3721,51 @@ fn ydoc_settle_attempt_on_store(
 }
 
 pub(super) fn refresh_markdown_witnesses_on_store(
-    store: &mut EngineStore, cache: &mut WriterDocCache, key: &DocKey, now_ms: i64,
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    now_ms: i64,
 ) -> Result<(), RuntimeError> {
     let pending = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
-    for owed in pending.into_iter().filter(|owed| owed.key == *key && owed.kind == WriteObligationKind::WitnessRefresh) {
+    for owed in pending
+        .into_iter()
+        .filter(|owed| owed.key == *key && owed.kind == WriteObligationKind::WitnessRefresh)
+    {
         let marker = dohc_engine_collab::read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
         if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
-            || marker.path.as_deref() != Some(owed.path.as_str()) {
+            || marker.path.as_deref() != Some(owed.path.as_str())
+        {
             continue;
         }
         let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))?;
-        let restore_generation = store.read_with(|conn|
-            dohc_engine_collab::live_update_application::restore_generation(conn, key))?;
-        let source = doc.markdown_source_reference().and_then(|reference|
-            doc.markdown_source(&reference).map(|_| reference.source_sha256));
+        let restore_generation = store.read_with(|conn| {
+            dohc_engine_collab::live_update_application::restore_generation(conn, key)
+        })?;
+        let source = doc.markdown_source_reference().and_then(|reference| {
+            doc.markdown_source(&reference)
+                .map(|_| reference.source_sha256)
+        });
         if source.as_deref() != owed.source_sha256.as_deref() {
             match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
                 dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key)?;
-                dohc_engine_collab::live_update_application::require_restore_generation(tx, key, restore_generation)?;
-                let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
-                if current_marker.lineage_claim_id != marker.lineage_claim_id || current_marker.path != marker.path {
+                dohc_engine_collab::live_update_application::require_restore_generation(
+                    tx,
+                    key,
+                    restore_generation,
+                )?;
+                let current_marker =
+                    dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                if current_marker.lineage_claim_id != marker.lineage_claim_id
+                    || current_marker.path != marker.path
+                {
                     return Err(CollabError::MarkdownReaderUnavailable);
                 }
                 let current = dohc_engine_collab::load_doc_in(tx, key)?;
-                let source = current.markdown_source_reference().and_then(|reference|
-                    current.markdown_source(&reference).map(|_| reference.source_sha256));
+                let source = current.markdown_source_reference().and_then(|reference| {
+                    current
+                        .markdown_source(&reference)
+                        .map(|_| reference.source_sha256)
+                });
                 if source.as_deref() != owed.source_sha256.as_deref() {
                     write_obligations::complete_in(tx, &owed, now_ms)?;
                 }
@@ -3654,29 +3775,66 @@ pub(super) fn refresh_markdown_witnesses_on_store(
                 TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
             }
         }
-        let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &owed.path)?;
-        let Some(head) = head.filter(|head| head.object_id == key.object_id
-            && Some(head.blob_sha256.as_str()) == owed.settled_head_sha256.as_deref()
-            && Some(head.blob_sha256.as_str()) != owed.source_sha256.as_deref()) else { continue; };
-        if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref() != Some(head.blob_sha256.as_str())
-            || store.read_with(|conn| dohc_engine_sync::open_sync_conflict_for_object(
-                conn, &key.workspace_id, &key.version_id, &key.object_id))?.is_some() {
+        let head = VersionedTextStore::new(store).read_text(
+            &key.workspace_id,
+            &key.version_id,
+            &owed.path,
+        )?;
+        let Some(head) = head.filter(|head| {
+            head.object_id == key.object_id
+                && Some(head.blob_sha256.as_str()) == owed.settled_head_sha256.as_deref()
+                && Some(head.blob_sha256.as_str()) != owed.source_sha256.as_deref()
+        }) else {
+            continue;
+        };
+        if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+            != Some(head.blob_sha256.as_str())
+            || store
+                .read_with(|conn| {
+                    dohc_engine_sync::open_sync_conflict_for_object(
+                        conn,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                    )
+                })?
+                .is_some()
+        {
             continue;
         }
-        if !store.read_with(|conn| refresh_head_materialized_in(conn, key, &owed.path, &head.blob_sha256))? {
+        if !store.read_with(|conn| {
+            refresh_head_materialized_in(conn, key, &owed.path, &head.blob_sha256)
+        })? {
             continue;
         }
         let update = doc.clear_markdown_source_witness();
         let resolver = cache.reader_resolver.clone();
-        let outcome = dohc_engine_collab::record_local_update(store, cache, key, &update,
+        let outcome = dohc_engine_collab::record_local_update(
+            store,
+            cache,
+            key,
+            &update,
             dohc_engine_collab::LocalAppend {
-                marker: None, actor_origin_id: None, attribution: None,
-                lineage_guard: dohc_engine_collab::LineageGuard::Expect(marker.lineage_claim_id.as_deref()),
-                restore_generation, ensure_parent_row: false, require_empty_lineage: false,
-                is_seed: false, seed_source_sha256: None, request_id: None,
-            }, &dohc_engine_storage::NoFaults, now_ms, |tx, outcome, _| {
-                let current = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
-                let fresh = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                marker: None,
+                actor_origin_id: None,
+                attribution: None,
+                lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                    marker.lineage_claim_id.as_deref(),
+                ),
+                restore_generation,
+                ensure_parent_row: false,
+                require_empty_lineage: false,
+                is_seed: false,
+                seed_source_sha256: None,
+                request_id: None,
+            },
+            &dohc_engine_storage::NoFaults,
+            now_ms,
+            |tx, outcome, _| {
+                let current =
+                    dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                let fresh = write_obligations::pending_in(tx, &key.workspace_id)?
+                    .into_iter()
                     .find(|row| row.order == owed.order);
                 let snapshot: Option<(String, String)> = tx.query_row(
                     "SELECT object_id,blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
@@ -3694,11 +3852,26 @@ pub(super) fn refresh_markdown_witnesses_on_store(
                         && row.settled_head_sha256 == owed.settled_head_sha256) {
                     return Err(CollabError::MarkdownReaderUnavailable);
                 }
-                journal_local_append_in_tx(tx, key, &owed.path, marker.content_kind, &update,
-                    None, None, None, resolver.as_deref(), &mut None, outcome, now_ms)?;
+                journal_local_append_in_tx(
+                    tx,
+                    key,
+                    &owed.path,
+                    marker.content_kind,
+                    &update,
+                    None,
+                    None,
+                    None,
+                    resolver.as_deref(),
+                    &mut None,
+                    outcome,
+                    now_ms,
+                )?;
                 write_obligations::complete_in(tx, &owed, now_ms)
-            })?;
-        if matches!(outcome, TxnOutcome::Crashed { .. }) { return Err(RuntimeError::OperationCrashed); }
+            },
+        )?;
+        if matches!(outcome, TxnOutcome::Crashed { .. }) {
+            return Err(RuntimeError::OperationCrashed);
+        }
     }
     Ok(())
 }
@@ -3716,8 +3889,11 @@ thread_local! {
 }
 #[cfg(any(test, feature = "fault-injection"))]
 fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
-    MARKDOWN_SETTLEMENT_FAULT.with(|slot| slot.borrow_mut().take())
-        .map(|fault| fault(conn)).transpose().map(|_| ())
+    MARKDOWN_SETTLEMENT_FAULT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|fault| fault(conn))
+        .transpose()
+        .map(|_| ())
 }
 
 #[cfg(feature = "fault-injection")]
@@ -3729,15 +3905,19 @@ impl ActorHandle {
         after_rollback: impl FnOnce(&mut EngineStore) -> Result<(), RuntimeError> + Send + 'static,
     ) -> Result<(), RuntimeError> {
         self.run(move |_, _| {
-            MARKDOWN_SETTLEMENT_FAULT.with(|slot| *slot.borrow_mut() = Some(Box::new(move |conn| {
-                let result = fault(conn);
-                if result.is_err() {
-                    MARKDOWN_BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(after_rollback)));
-                }
-                result
-            })));
+            MARKDOWN_SETTLEMENT_FAULT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |conn| {
+                    let result = fault(conn);
+                    if result.is_err() {
+                        MARKDOWN_BEFORE_SETTLE
+                            .with(|slot| *slot.borrow_mut() = Some(Box::new(after_rollback)));
+                    }
+                    result
+                }))
+            });
             Ok(())
-        }).await
+        })
+        .await
     }
 }
 
@@ -3746,7 +3926,10 @@ impl ActorHandle {
 mod markdown_hold_tests;
 
 pub(super) fn refresh_head_materialized_in(
-    conn: &rusqlite::Connection, key: &DocKey, path: &str, sha256: &str,
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    path: &str,
+    sha256: &str,
 ) -> Result<bool, CollabError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM snapshots s JOIN ydoc_docs d \

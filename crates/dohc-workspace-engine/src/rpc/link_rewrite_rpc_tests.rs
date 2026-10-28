@@ -74,7 +74,9 @@ async fn two_thousand_sources_forward_and_undo_through_rpc() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and_pristine_peers() {
-    use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_collab::{
+        ContentKind, DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
     let root = ScratchDir::new().unwrap();
     let binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(&root, binding).unwrap();
@@ -82,92 +84,232 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
     let nested = format!("- parent\n  - child\n\n{BODY}\n");
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(binding, &NoFaults).unwrap();
-    VersionedTextStore::new(&mut store).ensure_main_version(WS, "main", 1, &NoFaults).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WS, "main", 1, &NoFaults)
+        .unwrap();
     let mut cache = WriterDocCache::new();
-    for (object, source) in [("held", nested.as_str()), ("pristine", nested.as_str()), ("safe", BODY)] {
+    for (object, source) in [
+        ("held", nested.as_str()),
+        ("pristine", nested.as_str()),
+        ("safe", BODY),
+    ] {
         let path = format!("{object}.md");
-        VersionedTextStore::new(&mut store).write_text(&write(object, &path, source, &format!("seed-{object}")),
-            &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &write(object, &path, source, &format!("seed-{object}")),
+                &NoFaults,
+            )
+            .unwrap();
         std::fs::write(root.join(&path), source).unwrap();
         if object != "safe" {
             let doc = Ydoc::wire();
             doc.richdoc_wikilinks_for_test(source).unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
-            if object == "held" { doc.richdoc_append_paragraph("Accepted edit awaiting a safe baseline"); }
-            dohc_engine_collab::record_local_update(&mut store, &mut cache,
-                &DocKey::new(WS, "main", object).unwrap(), &doc.encode_full_state(), LocalAppend {
-                    marker: Some(MarkerCreation { path: Some(&path), content_kind: ContentKind::Richdoc,
-                        regime: Regime::LocalOnly }), ..Default::default()
-                }, &NoFaults, 2, |_, _, _| Ok(())).unwrap();
+            if object == "held" {
+                doc.richdoc_append_paragraph("Accepted edit awaiting a safe baseline");
+            }
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut cache,
+                &DocKey::new(WS, "main", object).unwrap(),
+                &doc.encode_full_state(),
+                LocalAppend {
+                    marker: Some(MarkerCreation {
+                        path: Some(&path),
+                        content_kind: ContentKind::Richdoc,
+                        regime: Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
+                &NoFaults,
+                2,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
         }
     }
-    VersionedTextStore::new(&mut store).write_text(&write("target", "old.md", "target body", "seed-target"),
-        &NoFaults).unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("target", "old.md", "target body", "seed-target"),
+            &NoFaults,
+        )
+        .unwrap();
     std::fs::write(root.join("old.md"), "target body").unwrap();
-    store.write_with(&NoFaults, |tx| {
-        tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) \
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) \
             SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 \
-            ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [WS])
+            ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1",
+                [WS],
+            )
             .map_err(dohc_engine_storage::StorageError::persist_public)
-    }).unwrap();
+        })
+        .unwrap();
     drop(store);
-    let modified = std::fs::metadata(root.join("held.md")).unwrap().modified().unwrap();
+    let modified = std::fs::metadata(root.join("held.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service.clone());
-    let opened = service.workspace_open(&RequestContext::unbounded(), json!({
-        "rootDir":root.to_string_lossy(),"workspaceId":WS,"captureMode":"none",
-    })).await.unwrap();
+    let opened = service
+        .workspace_open(
+            &RequestContext::unbounded(),
+            json!({
+                "rootDir":root.to_string_lossy(),"workspaceId":WS,"captureMode":"none",
+            }),
+        )
+        .await
+        .unwrap();
     let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
     let open = service.open(Some(&handle)).unwrap();
     let _links_hold = open.actor.hold_link_drain();
-    open.actor.configure_reader_resolver(Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
-        Arc::new(dohc_engine_reader::Reader::new(Some(crate::rpc::markdown_recovery::tests::witness_reader(
-            &root, "witness-unsafe"))))))).await.unwrap();
+    open.actor
+        .configure_reader_resolver(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                dohc_engine_reader::Reader::new(Some(
+                    crate::rpc::markdown_recovery::tests::witness_reader(&root, "witness-unsafe"),
+                )),
+            )),
+        ))
+        .await
+        .unwrap();
     for path in ["held.md", "pristine.md"] {
-        service.ydoc_open(&RequestContext::unbounded(), Some(handle.clone()),
-            json!({"versionId":"main","path":path,"contentKind":"richdoc"}), 101)
-            .await.unwrap();
+        service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":path,"contentKind":"richdoc"}),
+                101,
+            )
+            .await
+            .unwrap();
     }
     std::fs::rename(root.join("old.md"), root.join("new.md")).unwrap();
-    open.actor.versioned_text_rename(RenameTextFile {
-        workspace_id: WS.into(), version_id: "main".into(), from_path: "old.md".into(), to_path: "new.md".into(),
-        moment_id: "rename".into(), request_id: None, metadata_origin: "api".into(), metadata_summary: None,
-        metadata_correlation_id: Some(OP.into()), author_json: None, now_ms: 3,
-    }, open.root.clone(), Arc::new(service.self_writes.scoped(&open.root)), Arc::new(NoFaults),
-        CancellationToken::new()).await.unwrap();
+    open.actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.into(),
+                version_id: "main".into(),
+                from_path: "old.md".into(),
+                to_path: "new.md".into(),
+                moment_id: "rename".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: Some(OP.into()),
+                author_json: None,
+                now_ms: 3,
+            },
+            open.root.clone(),
+            Arc::new(service.self_writes.scoped(&open.root)),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     let forward = rpc(&transport, &handle, "history.rewriteLinks", "forward-held").await;
     assert_eq!(forward["uncheckedCount"], 1);
     assert_eq!(forward["complete"], false);
     assert_eq!(forward["documents"], 2);
-    assert_eq!(std::fs::read_to_string(root.join("held.md")).unwrap(), nested);
-    assert_eq!(std::fs::metadata(root.join("held.md")).unwrap().modified().unwrap(), modified);
-    let safe = open.actor.versioned_text_read(WS.into(), "main".into(), "safe.md".into(),
-        CancellationToken::new()).await.unwrap().unwrap().text;
-    let pristine = open.actor.versioned_text_read(WS.into(), "main".into(), "pristine.md".into(),
-        CancellationToken::new()).await.unwrap().unwrap().text;
+    assert_eq!(
+        std::fs::read_to_string(root.join("held.md")).unwrap(),
+        nested
+    );
+    assert_eq!(
+        std::fs::metadata(root.join("held.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+    let safe = open
+        .actor
+        .versioned_text_read(
+            WS.into(),
+            "main".into(),
+            "safe.md".into(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .text;
+    let pristine = open
+        .actor
+        .versioned_text_read(
+            WS.into(),
+            "main".into(),
+            "pristine.md".into(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .text;
     assert!(safe.contains("new.md"));
     assert!(pristine.starts_with("- parent\n  - child\n"));
     assert!(pristine.contains("new.md"));
     {
         let reader = EngineStore::open_read_only(&db).unwrap();
-        let held = dohc_engine_collab::load_persisted(&reader, &DocKey::new(WS, "main", "held").unwrap())
-            .unwrap().unwrap().doc;
-        assert!(held.project(ContentKind::Richdoc).unwrap().content.contains("Accepted edit awaiting a safe baseline"));
-        let jobs: i64 = reader.read_with(|conn| conn.query_row(
-            "SELECT count(*) FROM materialization_jobs WHERE target_path='held.md'", [], |row| row.get(0))).unwrap();
+        let held =
+            dohc_engine_collab::load_persisted(&reader, &DocKey::new(WS, "main", "held").unwrap())
+                .unwrap()
+                .unwrap()
+                .doc;
+        assert!(
+            held.project(ContentKind::Richdoc)
+                .unwrap()
+                .content
+                .contains("Accepted edit awaiting a safe baseline")
+        );
+        let jobs: i64 = reader
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM materialization_jobs WHERE target_path='held.md'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
         assert_eq!(jobs, 0);
-        let owed = reader.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, WS)).unwrap();
+        let owed = reader
+            .read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, WS))
+            .unwrap();
         assert_eq!(owed.len(), 1);
-        assert_eq!(owed[0].kind, dohc_engine_collab::markdown_write_obligations::Kind::LinkBaseline);
+        assert_eq!(
+            owed[0].kind,
+            dohc_engine_collab::markdown_write_obligations::Kind::LinkBaseline
+        );
     }
     let undone = rpc(&transport, &handle, "history.undo", "undo-held").await;
     assert_eq!(undone["notRestored"], json!([]));
-    for (path, expected) in [("held.md", nested.as_str()), ("pristine.md", nested.as_str()), ("safe.md", BODY)] {
-        let head = open.actor.versioned_text_read(WS.into(), "main".into(), path.into(),
-            CancellationToken::new()).await.unwrap().unwrap();
+    for (path, expected) in [
+        ("held.md", nested.as_str()),
+        ("pristine.md", nested.as_str()),
+        ("safe.md", BODY),
+    ] {
+        let head = open
+            .actor
+            .versioned_text_read(
+                WS.into(),
+                "main".into(),
+                path.into(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(head.text, expected);
     }
-    assert_eq!(std::fs::metadata(root.join("held.md")).unwrap().modified().unwrap(), modified);
+    assert_eq!(
+        std::fs::metadata(root.join("held.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
     service.workspace_close(Some(handle)).await.unwrap();
 }
 

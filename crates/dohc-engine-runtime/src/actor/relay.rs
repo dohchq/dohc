@@ -2097,7 +2097,13 @@ impl ActorHandle {
                 }
                 Err(error) => {
                     let result: Result<(), RuntimeError> = Err(error);
-                    if super::wait_for_reader(&result, preparation_attempt, self.markdown_recovery.clone()).await {
+                    if super::wait_for_reader(
+                        &result,
+                        preparation_attempt,
+                        self.markdown_recovery.clone(),
+                    )
+                    .await
+                    {
                         preparation_attempt += 1;
                         continue;
                     }
@@ -2434,13 +2440,15 @@ fn execute_relay_operation(
     let client = RelaySyncClient::new(transport);
     let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
-    if outcome.is_err() && let Some(pending) = client.take_pending_preparation() {
+    if outcome.is_err()
+        && let Some(pending) = client.take_pending_preparation()
+    {
         use dohc_engine_collab::markdown_write_safety::PendingPreparation;
         return Err(match pending {
             PendingPreparation::Reader(pending) => SyncError::MarkdownReaderPending(pending).into(),
-            PendingPreparation::Witness { key, path, pending } => SyncError::MarkdownWitnessCheckPending {
-                key, path, pending,
-            }.into(),
+            PendingPreparation::Witness { key, path, pending } => {
+                SyncError::MarkdownWitnessCheckPending { key, path, pending }.into()
+            }
         });
     }
     outcome

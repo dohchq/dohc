@@ -262,8 +262,7 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
                 6,
                 ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
                 CancellationToken::new(),
-                None
-            ,
+                None,
                 None,
             )
             .await
@@ -300,7 +299,6 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
-
             None,
         )
         .await;

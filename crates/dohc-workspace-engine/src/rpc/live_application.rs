@@ -25,16 +25,21 @@ pub(crate) mod sync;
 
 fn forwarded_owner_consent(
     sessions: &Mutex<HashMap<String, super::ydoc::YdocSession>>,
-    workspace: Option<&WorkspaceHandle>, binding: &LiveObjectBinding, session_id: Option<&str>,
+    workspace: Option<&WorkspaceHandle>,
+    binding: &LiveObjectBinding,
+    session_id: Option<&str>,
 ) -> Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>> {
-    lock(sessions).get(session_id?).filter(|session| {
-        workspace == Some(&session.workspace)
-            && session.key.workspace_id == binding.workspace_id
-            && session.key.version_id == binding.main_version_id
-            && session.key.object_id == binding.object_id
-            && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
-            && session.restore_generation.unwrap_or(0) == binding.restore_fence_generation
-    }).and_then(|session| session.conversion_consent.clone())
+    lock(sessions)
+        .get(session_id?)
+        .filter(|session| {
+            workspace == Some(&session.workspace)
+                && session.key.workspace_id == binding.workspace_id
+                && session.key.version_id == binding.main_version_id
+                && session.key.object_id == binding.object_id
+                && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
+                && session.restore_generation.unwrap_or(0) == binding.restore_fence_generation
+        })
+        .and_then(|session| session.conversion_consent.clone())
         .filter(|consent| !consent.is_consumed())
 }
 
@@ -562,8 +567,12 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
-        let conversion_consent = forwarded_owner_consent(&self.sessions, request.workspace.as_ref(),
-            &registration.binding, params.owner_session_id.as_deref());
+        let conversion_consent = forwarded_owner_consent(
+            &self.sessions,
+            request.workspace.as_ref(),
+            &registration.binding,
+            params.owner_session_id.as_deref(),
+        );
         let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
@@ -600,8 +609,13 @@ impl EngineService {
                         && session.key.version_id == binding.main_version_id
                         && session.key.object_id == binding.object_id
                         && session.path == binding.current_path
-                        && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str()) {
-                        events.emit("ydoc.remoteUpdate", json!({"sessionId":id,"resyncRequired":true}));
+                        && session.lineage_claim_id.as_deref()
+                            == Some(binding.lineage_claim_id.as_str())
+                    {
+                        events.emit(
+                            "ydoc.remoteUpdate",
+                            json!({"sessionId":id,"resyncRequired":true}),
+                        );
                     }
                 }
             }

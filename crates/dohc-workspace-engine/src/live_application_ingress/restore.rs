@@ -1226,7 +1226,6 @@ mod tests {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 stale,
-
                 None,
             );
             let (record, settle) = tokio::join!(record, settle);

@@ -1387,17 +1387,31 @@ fn drain_deferred_ydoc(
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
             Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
                 match store.write_with(faults, |tx| {
-                    if let Some(leases) = recovery_leases { require_recovery_closed(tx, key, leases)?; }
-                    record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
-                        origin_id: drain_origin.to_owned(), origin_seq: drain_seq,
-                        provisional_author: false, actor_origin_id: payload.actor_origin_id.clone(),
-                        attribution: payload.attribution.clone(),
-                    }, payload_recorded_at)
+                    if let Some(leases) = recovery_leases {
+                        require_recovery_closed(tx, key, leases)?;
+                    }
+                    record_markdown_hold_in_tx(
+                        tx,
+                        &error,
+                        MarkdownProjectionRetry {
+                            origin_id: drain_origin.to_owned(),
+                            origin_seq: drain_seq,
+                            provisional_author: false,
+                            actor_origin_id: payload.actor_origin_id.clone(),
+                            attribution: payload.attribution.clone(),
+                        },
+                        payload_recorded_at,
+                    )
                 })? {
                     TxnOutcome::Committed(()) => {}
                     TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
                 }
-                projection_refusal = Some(deferred_ydoc_refusal(key, drain_origin, drain_seq, "markdown-write-held"));
+                projection_refusal = Some(deferred_ydoc_refusal(
+                    key,
+                    drain_origin,
+                    drain_seq,
+                    "markdown-write-held",
+                ));
             }
             // These rows are already ACKed and therefore cannot be retried
             // from the relay. If an identity pin now blocks projection,
@@ -3164,8 +3178,7 @@ fn preserve_incomplete_base_in_tx(
         search_policy,
         resolver,
     )?;
-    let local_needs_recovery = !open && opened.is_none()
-        && local != &incoming;
+    let local_needs_recovery = !open && opened.is_none() && local != &incoming;
     let mut recovered_paths = Vec::new();
     if open || external.is_some() || local_needs_recovery {
         let preserved = if open || local_needs_recovery {
@@ -3184,7 +3197,10 @@ fn preserve_incomplete_base_in_tx(
                 is_base_state: true,
             },
             if local_needs_recovery {
-                marker.lineage_claim_id.as_deref().unwrap_or(&payload.lineage_claim_id)
+                marker
+                    .lineage_claim_id
+                    .as_deref()
+                    .unwrap_or(&payload.lineage_claim_id)
             } else {
                 &payload.lineage_claim_id
             },
@@ -3682,11 +3698,17 @@ fn conflict_replaced_lineage_in_tx(
         .map(Some);
     }
     use dohc_engine_collab::markdown_write_safety;
-    let head_sha256 = current.snapshot.as_ref().map(|snapshot| snapshot.blob_sha256.as_str());
-    if markdown_write_safety::holds(&local_projection.markdown_write_safety,
-        local_projection.witness_source_sha256.as_deref(), head_sha256)
-        && !markdown_write_safety::check_witness(local_doc, key, path, resolver)
-            .map_err(map_collab_hard_error)? {
+    let head_sha256 = current
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.blob_sha256.as_str());
+    if markdown_write_safety::holds(
+        &local_projection.markdown_write_safety,
+        local_projection.witness_source_sha256.as_deref(),
+        head_sha256,
+    ) && !markdown_write_safety::check_witness(local_doc, key, path, resolver)
+        .map_err(map_collab_hard_error)?
+    {
         return Ok(None);
     }
     let preimage = current
@@ -4148,47 +4170,96 @@ struct MarkdownProjectionRetry {
 }
 
 fn record_markdown_hold_in_tx(
-    tx: &rusqlite::Transaction<'_>, error: &SyncError,
-    inputs: MarkdownProjectionRetry, now_ms: i64,
+    tx: &rusqlite::Transaction<'_>,
+    error: &SyncError,
+    inputs: MarkdownProjectionRetry,
+    now_ms: i64,
 ) -> Result<(), SyncError> {
-    let SyncError::MarkdownWriteHeld { key, path, head_sha256, checkpoint_sha256 } = error else {
+    let SyncError::MarkdownWriteHeld {
+        key,
+        path,
+        head_sha256,
+        checkpoint_sha256,
+    } = error
+    else {
         return Err(local_corruption("expected a held Markdown projection"));
     };
-    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
+    let marker = dohc_engine_collab::read_marker_in(tx, key)
+        .map_err(map_collab_hard_error)?
         .ok_or_else(|| local_corruption("held Markdown projection has no lineage"))?;
-    dohc_engine_collab::markdown_write_obligations::record_in(tx,
+    dohc_engine_collab::markdown_write_obligations::record_in(
+        tx,
         &dohc_engine_collab::markdown_write_obligations::Obligation {
-            order: 0, key: key.clone(), lineage_claim_id: marker.lineage_claim_id.unwrap_or_default(),
+            order: 0,
+            key: key.clone(),
+            lineage_claim_id: marker.lineage_claim_id.unwrap_or_default(),
             operation_id: format!("{}:{}", inputs.origin_id, inputs.origin_seq),
             kind: dohc_engine_collab::markdown_write_obligations::Kind::SyncProjection,
-            path: path.clone(), retry_inputs: serde_json::to_value(inputs).map_err(SyncError::corrupt)?,
-            held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: head_sha256.clone(),
-            source_sha256: None, settled_head_sha256: None,
-        }, now_ms).map_err(map_collab_hard_error)
+            path: path.clone(),
+            retry_inputs: serde_json::to_value(inputs).map_err(SyncError::corrupt)?,
+            held_checkpoint_sha256: Some(checkpoint_sha256.clone()),
+            held_head_sha256: head_sha256.clone(),
+            source_sha256: None,
+            settled_head_sha256: None,
+        },
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn project_retaining_markdown_hold_in_tx(
-    tx: &rusqlite::Transaction<'_>, key: &DocKey, path: &str, doc: &dohc_engine_collab::Ydoc,
-    content_kind: ContentKind, origin_id: &str, origin_seq: i64, now_ms: i64,
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: ContentKind,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<bool, SyncError> {
-    tx.execute_batch("SAVEPOINT markdown_base_projection").map_err(SyncError::persist)?;
-    match project_and_write_in_tx(tx, key, path, doc, content_kind, origin_id, origin_seq, now_ms,
-        search_policy, resolver) {
+    tx.execute_batch("SAVEPOINT markdown_base_projection")
+        .map_err(SyncError::persist)?;
+    match project_and_write_in_tx(
+        tx,
+        key,
+        path,
+        doc,
+        content_kind,
+        origin_id,
+        origin_seq,
+        now_ms,
+        search_policy,
+        resolver,
+    ) {
         Ok(_) => {
-            tx.execute_batch("RELEASE markdown_base_projection").map_err(SyncError::persist)?;
+            tx.execute_batch("RELEASE markdown_base_projection")
+                .map_err(SyncError::persist)?;
             Ok(false)
         }
         Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
-            tx.execute_batch("ROLLBACK TO markdown_base_projection; RELEASE markdown_base_projection")
-                .map_err(SyncError::persist)?;
-            record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
-                origin_id: origin_id.to_owned(), origin_seq, provisional_author: false,
-                actor_origin_id: None, attribution: None,
-            }, now_ms)?;
-            crate::apply::persist_refusal(tx, &deferred_ydoc_refusal(key, origin_id, origin_seq, "markdown-write-held"))?;
+            tx.execute_batch(
+                "ROLLBACK TO markdown_base_projection; RELEASE markdown_base_projection",
+            )
+            .map_err(SyncError::persist)?;
+            record_markdown_hold_in_tx(
+                tx,
+                &error,
+                MarkdownProjectionRetry {
+                    origin_id: origin_id.to_owned(),
+                    origin_seq,
+                    provisional_author: false,
+                    actor_origin_id: None,
+                    attribution: None,
+                },
+                now_ms,
+            )?;
+            crate::apply::persist_refusal(
+                tx,
+                &deferred_ydoc_refusal(key, origin_id, origin_seq, "markdown-write-held"),
+            )?;
             Ok(true)
         }
         Err(error) => Err(error),
@@ -4200,24 +4271,43 @@ pub fn retry_markdown_projection_in_tx(
     tx: &rusqlite::Transaction<'_>,
     owed: &dohc_engine_collab::markdown_write_obligations::Obligation,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
-    search_policy: Option<&SearchPolicySnapshot>, now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    now_ms: i64,
 ) -> Result<crate::BaseOrigination, SyncError> {
     let key = &owed.key;
-    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_collab_hard_error)?
+    let marker = dohc_engine_collab::read_marker_in(tx, key)
+        .map_err(map_collab_hard_error)?
         .ok_or_else(|| local_corruption("held Markdown projection has no lineage"))?;
     if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
-        || marker.path.as_deref() != Some(&owed.path) {
-        return Err(SyncError::RetryableState { reason: "ydoc-lineage-changed" });
+        || marker.path.as_deref() != Some(&owed.path)
+    {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-lineage-changed",
+        });
     }
     require_unfenced_lineage(tx, key)?;
-    dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(map_collab_hard_error)?;
-    let inputs: MarkdownProjectionRetry = serde_json::from_value(owed.retry_inputs.clone()).map_err(SyncError::corrupt)?;
+    dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key)
+        .map_err(map_collab_hard_error)?;
+    let inputs: MarkdownProjectionRetry =
+        serde_json::from_value(owed.retry_inputs.clone()).map_err(SyncError::corrupt)?;
     let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_collab_hard_error)?;
     if doc.has_pending_dependencies() {
-        return Err(SyncError::RetryableState { reason: "missing Y.Doc dependencies" });
+        return Err(SyncError::RetryableState {
+            reason: "missing Y.Doc dependencies",
+        });
     }
-    let created = project_and_write_in_tx(tx, key, &owed.path, &doc, marker.content_kind,
-        &inputs.origin_id, inputs.origin_seq, now_ms, search_policy, resolver)?;
+    let created = project_and_write_in_tx(
+        tx,
+        key,
+        &owed.path,
+        &doc,
+        marker.content_kind,
+        &inputs.origin_id,
+        inputs.origin_seq,
+        now_ms,
+        search_policy,
+        resolver,
+    )?;
     if created && inputs.provisional_author {
         let moment = ydoc_apply_moment_id(key, &owed.path, &inputs.origin_id, inputs.origin_seq);
         tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
@@ -4227,10 +4317,23 @@ pub fn retry_markdown_projection_in_tx(
             params![key.workspace_id,key.version_id,key.object_id,moment,inputs.origin_seq,now_ms])
             .map_err(SyncError::persist)?;
     }
-    let sharing = crate::originate_ydoc_base_in_tx(tx,key,&owed.path,inputs.actor_origin_id.as_deref(),
-        inputs.attribution.as_ref(),now_ms)?;
-    dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms).map_err(map_collab_hard_error)?;
-    crate::refusal_notices::clear_lineage_in_tx(tx, &key.workspace_id,&key.version_id,&key.object_id,&owed.lineage_claim_id)?;
+    let sharing = crate::originate_ydoc_base_in_tx(
+        tx,
+        key,
+        &owed.path,
+        inputs.actor_origin_id.as_deref(),
+        inputs.attribution.as_ref(),
+        now_ms,
+    )?;
+    dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms)
+        .map_err(map_collab_hard_error)?;
+    crate::refusal_notices::clear_lineage_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &owed.lineage_claim_id,
+    )?;
     Ok(sharing)
 }
 
@@ -4353,23 +4456,42 @@ pub fn project_and_write_in_tx(
         .map_err(SyncError::persist)?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc {
             dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
-                tx, &key.workspace_id, &key.version_id, &key.object_id, &doc.frontmatter_json(),
-            ).map_err(map_domain_hard_error)?;
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                &doc.frontmatter_json(),
+            )
+            .map_err(map_domain_hard_error)?;
         }
         if let Some(lineage) = lineage.as_deref() {
             crate::refusal_notices::clear_lineage_in_tx(
-                tx, &key.workspace_id, &key.version_id, &key.object_id, lineage,
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                lineage,
             )?;
         }
         return Ok(false);
     }
     use dohc_engine_collab::markdown_write_safety::{self, MarkdownWriteSafety};
-    let head_sha256 = current.snapshot.as_ref().map(|snapshot| snapshot.blob_sha256.as_str());
-    if markdown_write_safety::holds(&projection.markdown_write_safety,
-        projection.witness_source_sha256.as_deref(), head_sha256) {
-        if !markdown_write_safety::check_witness(doc, key, path, resolver).map_err(map_collab_hard_error)? {
+    let head_sha256 = current
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.blob_sha256.as_str());
+    if markdown_write_safety::holds(
+        &projection.markdown_write_safety,
+        projection.witness_source_sha256.as_deref(),
+        head_sha256,
+    ) {
+        if !markdown_write_safety::check_witness(doc, key, path, resolver)
+            .map_err(map_collab_hard_error)?
+        {
             return Err(SyncError::MarkdownWriteHeld {
-                key: key.clone(), path: path.to_owned(), head_sha256: head_sha256.map(ToOwned::to_owned),
+                key: key.clone(),
+                path: path.to_owned(),
+                head_sha256: head_sha256.map(ToOwned::to_owned),
                 checkpoint_sha256: hex_sha256(&doc.encode_full_state()),
             });
         }
@@ -4377,12 +4499,21 @@ pub fn project_and_write_in_tx(
     }
     if content_kind == dohc_engine_collab::ContentKind::Richdoc {
         dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
-            tx, &key.workspace_id, &key.version_id, &key.object_id, &doc.frontmatter_json(),
-        ).map_err(map_domain_hard_error)?;
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &doc.frontmatter_json(),
+        )
+        .map_err(map_domain_hard_error)?;
     }
     if let Some(lineage) = lineage.as_deref() {
         crate::refusal_notices::clear_lineage_in_tx(
-            tx, &key.workspace_id, &key.version_id, &key.object_id, &lineage,
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &lineage,
         )?;
     }
     let preimage = current
@@ -4429,8 +4560,14 @@ pub fn project_and_write_in_tx(
     }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     dohc_engine_collab::markdown_write_obligations::advance_refresh_head_in(
-        tx, key, lineage.as_deref(), head_sha256, &result.snapshot.blob_sha256, now_ms,
-    ).map_err(map_collab_hard_error)?;
+        tx,
+        key,
+        lineage.as_deref(),
+        head_sha256,
+        &result.snapshot.blob_sha256,
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)?;
     // Later envelopes may supersede this disk projection; the history moment already covers its interval.
     if !(replayed && result.deduped) {
         dohc_engine_collab::author_coverage::advance_in(tx, key, false)
@@ -4987,16 +5124,24 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
                         && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
                 }) {
-                Some(dohc_engine_collab::load_doc_in(tx, &claim_key)
-                    .map_err(map_collab_hard_error)?)
+                Some(
+                    dohc_engine_collab::load_doc_in(tx, &claim_key)
+                        .map_err(map_collab_hard_error)?,
+                )
             } else {
                 None
             };
             let losing_projection = match losing_doc.as_ref() {
                 Some(doc) => {
-                    let marker = marker_before.as_ref()
+                    let marker = marker_before
+                        .as_ref()
                         .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
-                    Some(project_ydoc_with_store(tx, &claim_key, doc, marker.content_kind)?)
+                    Some(project_ydoc_with_store(
+                        tx,
+                        &claim_key,
+                        doc,
+                        marker.content_kind,
+                    )?)
                 }
                 None => None,
             };
@@ -5451,13 +5596,22 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         crate::apply::MutationOutcome::Applied(applied)
                     }
                     Err(error @ SyncError::MarkdownWriteHeld { .. }) => {
-                        tx.execute_batch("ROLLBACK TO dohc_ydoc_projection; RELEASE dohc_ydoc_projection")
-                            .map_err(SyncError::persist)?;
-                        record_markdown_hold_in_tx(tx, &error, MarkdownProjectionRetry {
-                            origin_id: op.origin_id.clone(), origin_seq: op.origin_seq,
-                            provisional_author, actor_origin_id: payload.actor_origin_id.clone(),
-                            attribution: payload.attribution.clone(),
-                        }, op.recorded_at_ms)?;
+                        tx.execute_batch(
+                            "ROLLBACK TO dohc_ydoc_projection; RELEASE dohc_ydoc_projection",
+                        )
+                        .map_err(SyncError::persist)?;
+                        record_markdown_hold_in_tx(
+                            tx,
+                            &error,
+                            MarkdownProjectionRetry {
+                                origin_id: op.origin_id.clone(),
+                                origin_seq: op.origin_seq,
+                                provisional_author,
+                                actor_origin_id: payload.actor_origin_id.clone(),
+                                attribution: payload.attribution.clone(),
+                            },
+                            op.recorded_at_ms,
+                        )?;
                         crate::apply::MutationOutcome::RefusedRetainingMutation {
                             reason: "markdown-write-held".to_owned(),
                         }
@@ -5998,8 +6152,9 @@ fn validate_retryable_ydoc_identity(
 pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
         CollabError::MarkdownReaderPending(pending) => SyncError::MarkdownReaderPending(pending),
-        CollabError::MarkdownWitnessCheckPending { key, path, pending } =>
-            SyncError::MarkdownWitnessCheckPending { key, path, pending },
+        CollabError::MarkdownWitnessCheckPending { key, path, pending } => {
+            SyncError::MarkdownWitnessCheckPending { key, path, pending }
+        }
         CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
             reason: "dohc could not verify this file. Try again.",
         },

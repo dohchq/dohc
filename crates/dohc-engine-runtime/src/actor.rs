@@ -41,8 +41,8 @@ pub use history_operations::{HistoryOperation, HistoryUndoResult};
 pub use link_documents::{DocumentIsOpen, DocumentResync};
 mod journal;
 mod live_application;
-mod materialization;
 mod markdown_recovery;
+mod materialization;
 mod relay;
 #[cfg(unix)]
 mod retained;
@@ -64,9 +64,9 @@ pub use capture::{
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
-pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use markdown_recovery::MarkdownRecoveryCandidate;
 use markdown_recovery::MarkdownRecoverySignal;
+pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
@@ -635,16 +635,28 @@ fn pending_reader_preparation<R>(
             dohc_engine_collab::live_update_application::ApplicationError::Collab(
                 dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
             ),
-        )) => Some(dohc_engine_collab::markdown_write_safety::PendingPreparation::Reader(pending.clone())),
-        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending { key, path, pending }))
-        | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { key, path, pending }))
+        )) => Some(
+            dohc_engine_collab::markdown_write_safety::PendingPreparation::Reader(pending.clone()),
+        ),
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending {
+            key,
+            path,
+            pending,
+        }))
+        | Err(RuntimeError::Collab(
+            dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { key, path, pending },
+        ))
         | Err(RuntimeError::LiveApplication(
             dohc_engine_collab::live_update_application::ApplicationError::Collab(
                 dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { key, path, pending },
             ),
-        )) => Some(dohc_engine_collab::markdown_write_safety::PendingPreparation::Witness {
-            key: key.clone(), path: path.clone(), pending: pending.clone(),
-        }),
+        )) => Some(
+            dohc_engine_collab::markdown_write_safety::PendingPreparation::Witness {
+                key: key.clone(),
+                path: path.clone(),
+                pending: pending.clone(),
+            },
+        ),
         _ => None,
     }
 }
@@ -701,7 +713,9 @@ impl ActorHandle {
             let work = work.clone();
             let result = self.run(move |store, cache| work(store, cache)).await;
             if !wait_for_reader(&result, attempt, self.markdown_recovery.clone()).await {
-                if result.is_ok() { self.markdown_recovery.wake.notify_one(); }
+                if result.is_ok() {
+                    self.markdown_recovery.wake.notify_one();
+                }
                 return result;
             }
         }
@@ -1178,7 +1192,9 @@ fn worker_main(
                 }
             }
         }
-        let changes_before = store.read_with(|conn| Ok::<_, StorageError>(conn.total_changes())).unwrap_or(0);
+        let changes_before = store
+            .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
+            .unwrap_or(0);
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
@@ -1196,8 +1212,12 @@ fn worker_main(
                 break;
             }
         }
-        let changes_after = store.read_with(|conn| Ok::<_, StorageError>(conn.total_changes())).unwrap_or(0);
-        if changes_after != changes_before { markdown_recovery.wake.notify_one(); }
+        let changes_after = store
+            .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
+            .unwrap_or(0);
+        if changes_after != changes_before {
+            markdown_recovery.wake.notify_one();
+        }
         store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;

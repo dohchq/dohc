@@ -115,19 +115,29 @@ fn identity_mismatch_stays_unavailable_without_rehashing() {
 }
 #[test]
 fn markdown_witness_pipe_checks_identities_and_carries_no_checkpoint() {
-    for (mode, expected) in [("ok", Some(true)), ("witness-unsafe", Some(false)),
-        ("witness-source-mismatch", None), ("witness-projection-mismatch", None),
-        ("witness-over-cap", None)] {
+    for (mode, expected) in [
+        ("ok", Some(true)),
+        ("witness-unsafe", Some(false)),
+        ("witness-source-mismatch", None),
+        ("witness-projection-mismatch", None),
+        ("witness-over-cap", None),
+    ] {
         let (_directory, config) = fixture(mode);
         let mut reader = Reader::new(Some(config));
         let request = CheckMarkdownWitness {
-            source: b"source only".to_vec(), source_sha256: wire::sha(b"source only"),
+            source: b"source only".to_vec(),
+            source_sha256: wire::sha(b"source only"),
             projection_sha256: wire::sha(b"projection"),
         };
         let result = run(reader.check_markdown_witness(request.clone()));
         if let Some(expected) = expected {
             match result.unwrap() {
-                Outcome::WitnessChecked { source_sha256, projection_sha256, checker_identity, keeps_meaning } => {
+                Outcome::WitnessChecked {
+                    source_sha256,
+                    projection_sha256,
+                    checker_identity,
+                    keeps_meaning,
+                } => {
                     assert_eq!(source_sha256, request.source_sha256);
                     assert_eq!(projection_sha256, request.projection_sha256);
                     assert_eq!(Some(checker_identity), reader.checker_identity());
@@ -146,38 +156,70 @@ fn markdown_witness_pipe_checks_identities_and_carries_no_checkpoint() {
 fn markdown_witness_source_cap_is_two_megabytes_and_invalid_inputs_start_no_child() {
     let (_directory, config) = fixture("ok");
     let mut reader = Reader::new(Some(config));
-    for fault in ["over-cap", "source-digest", "projection-digest", "source-bytes"] {
-        let source = if fault == "over-cap" { vec![b'x'; 2 * 1024 * 1024 + 1] } else { b"source".to_vec() };
-        let mut request = CheckMarkdownWitness { source_sha256: wire::sha(&source), source,
-            projection_sha256: wire::sha(b"projection") };
+    for fault in [
+        "over-cap",
+        "source-digest",
+        "projection-digest",
+        "source-bytes",
+    ] {
+        let source = if fault == "over-cap" {
+            vec![b'x'; 2 * 1024 * 1024 + 1]
+        } else {
+            b"source".to_vec()
+        };
+        let mut request = CheckMarkdownWitness {
+            source_sha256: wire::sha(&source),
+            source,
+            projection_sha256: wire::sha(b"projection"),
+        };
         match fault {
             "source-digest" => request.source_sha256 = "invalid".into(),
             "projection-digest" => request.projection_sha256 = "g".repeat(64),
             "source-bytes" => request.source_sha256 = wire::sha(b"other source"),
-            _ => {},
+            _ => {}
         }
-        fail(run(reader.check_markdown_witness(request)), Failure::TooLarge);
+        fail(
+            run(reader.check_markdown_witness(request)),
+            Failure::TooLarge,
+        );
     }
     assert_eq!(reader.shared.state.lock().unwrap().lifecycle.0, 0);
     let source = vec![b'x'; 2 * 1024 * 1024];
-    assert!(matches!(run(reader.check_markdown_witness(CheckMarkdownWitness {
-        source_sha256: wire::sha(&source), source, projection_sha256: wire::sha(b"projection"),
-    })), Ok(Outcome::WitnessChecked { keeps_meaning: true, .. })));
+    assert!(matches!(
+        run(reader.check_markdown_witness(CheckMarkdownWitness {
+            source_sha256: wire::sha(&source),
+            source,
+            projection_sha256: wire::sha(b"projection"),
+        })),
+        Ok(Outcome::WitnessChecked {
+            keeps_meaning: true,
+            ..
+        })
+    ));
     finish(&mut reader);
 }
 
 #[test]
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG and DOHC_READER_FIXTURES for the real staged bundle"]
 fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
-    let config = serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
-    let checkpoint = fs::read(PathBuf::from(std::env::var_os("DOHC_READER_FIXTURES").unwrap())
-        .join("note.checkpoint")).unwrap();
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let checkpoint = fs::read(
+        PathBuf::from(std::env::var_os("DOHC_READER_FIXTURES").unwrap()).join("note.checkpoint"),
+    )
+    .unwrap();
     let examples: Value = serde_json::from_str(include_str!(
-        "../../../packages/ydoc-projection/src/fixtures/commonmark-edit-meaning.json")).unwrap();
+        "../../../packages/ydoc-projection/src/fixtures/commonmark-edit-meaning.json"
+    ))
+    .unwrap();
     let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true)];
     sources.extend([148, 161, 192, 193, 572, 575, 577].map(|number| {
-        let example = examples["examples"].as_array().unwrap().iter()
-            .find(|row| row["example"] == number).unwrap();
+        let example = examples["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["example"] == number)
+            .unwrap();
         (example["markdown"].as_str().unwrap().to_owned(), false)
     }));
     let mut reader = Reader::new(Some(config));
@@ -187,18 +229,35 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         input.document.object_id = "fixture".into();
         input.source = source.as_bytes().to_vec();
         input.checkpoint = checkpoint.clone();
-        let Outcome::Constructed { proof, .. } = run(reader.request(input)).unwrap()
-            else { panic!("the real reader must import the meaning control"); };
-        let input = CheckMarkdownWitness { source: source.into_bytes(), source_sha256: proof.source_sha256,
-            projection_sha256: proof.projection_sha256 };
-        let Outcome::WitnessChecked { keeps_meaning, checker_identity, .. } =
-            run(reader.check_markdown_witness(input.clone())).unwrap()
-            else { panic!("the real pipe must answer the witness request"); };
+        let Outcome::Constructed { proof, .. } = run(reader.request(input)).unwrap() else {
+            panic!("the real reader must import the meaning control");
+        };
+        let input = CheckMarkdownWitness {
+            source: source.into_bytes(),
+            source_sha256: proof.source_sha256,
+            projection_sha256: proof.projection_sha256,
+        };
+        let Outcome::WitnessChecked {
+            keeps_meaning,
+            checker_identity,
+            ..
+        } = run(reader.check_markdown_witness(input.clone())).unwrap()
+        else {
+            panic!("the real pipe must answer the witness request");
+        };
         assert_eq!(keeps_meaning, expected);
         assert_eq!(Some(checker_identity), reader.checker_identity());
-        let wrong = CheckMarkdownWitness { projection_sha256: wire::sha(b"different projection"), ..input };
-        assert!(matches!(run(reader.check_markdown_witness(wrong)),
-            Ok(Outcome::WitnessChecked { keeps_meaning: false, .. })));
+        let wrong = CheckMarkdownWitness {
+            projection_sha256: wire::sha(b"different projection"),
+            ..input
+        };
+        assert!(matches!(
+            run(reader.check_markdown_witness(wrong)),
+            Ok(Outcome::WitnessChecked {
+                keeps_meaning: false,
+                ..
+            })
+        ));
     }
     finish(&mut reader);
 }
