@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { z } from "zod";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
-import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   isNoticeBody,
   isAutomationWake,
@@ -749,7 +748,9 @@ export function createNoticeStore(deps: {
           // Says only what holds for every refused save: its author names did not sync.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = markdownHeld ? lossyNoteRefusal(document?.path || "a file") : attributionRefused
+          const body = markdownHeld
+            ? `A change to ${name} is waiting. Saving it would also change parts dohc can't show, such as raw HTML or reference links.${target.path ? " Open the note to review it." : ""}`
+            : attributionRefused
             ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
             : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
