@@ -10,14 +10,15 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { cliGroupKind, FILES_GROUP } from "../cli/cliServer";
 
-// A run sees the newest messages of its thread, within a size its agent can
-// read at once, and always the message that asked for it.
+// A run sees the message that asked for it and every message after it, since
+// its claim answers each request queued there. Older messages fill the rest
+// of a size its agent can read at once.
 export const RUNNER_CONTEXT_MESSAGES = 40;
 export const RUNNER_CONTEXT_CHARS = 48_000;
 
 type RunnerThreadStore = Pick<
   LinkedChatStore,
-  "getMessage" | "getThread" | "listMessagesPage" | "listThreadDecisions"
+  "getThread" | "listMessagesPage" | "listThreadDecisions"
 >;
 
 interface RunnerThreadContextInput {
@@ -62,32 +63,29 @@ export async function buildRunnerThreadContext(
   const { workspaceId, threadId } = input;
   const { thread, channel, messageCount } = await input.store.getThread({ workspaceId, threadId });
   // The engine cuts a page at a byte budget, so long messages take more than one.
-  const newest = async (): Promise<ChatMessage[]> => {
+  const read = async (after: number | null, limit: number): Promise<ChatMessage[]> => {
     const read: ChatMessage[] = [];
-    let after = messageCount > RUNNER_CONTEXT_MESSAGES
-      ? messageCount - RUNNER_CONTEXT_MESSAGES - 1
-      : null;
     do {
       const page = await input.store.listMessagesPage({
         workspaceId,
         threadId,
         ...(after === null ? {} : { afterMessageOrder: after }),
-        limit: RUNNER_CONTEXT_MESSAGES - read.length,
+        limit: Math.min(limit - read.length, RUNNER_CONTEXT_MESSAGES),
       });
       read.push(...page.messages);
       after = page.messages.length > 0 ? page.nextAfterMessageOrder : null;
-    } while (after !== null && read.length < RUNNER_CONTEXT_MESSAGES);
+    } while (after !== null && read.length < limit);
     return read;
   };
   const [newestMessages, decisions, dispatch] = await Promise.all([
-    newest(),
+    read(messageCount > RUNNER_CONTEXT_MESSAGES ? messageCount - RUNNER_CONTEXT_MESSAGES - 1 : null, RUNNER_CONTEXT_MESSAGES),
     input.store.listThreadDecisions(workspaceId, threadId),
     readThreadDispatchState(input.dispatchStore, workspaceId, threadId),
   ]);
   let messages = newestMessages;
   if (!messages.some((message) => message.id === input.askingMessageId)) {
-    const asking = await input.store.getMessage({ workspaceId, messageId: input.askingMessageId });
-    messages = [asking, ...messages.slice(messages.length < RUNNER_CONTEXT_MESSAGES ? 0 : 1)];
+    const all = await read(null, Number.POSITIVE_INFINITY);
+    messages = all.slice(Math.max(0, all.findIndex((message) => message.id === input.askingMessageId)));
   }
   const decisionByMessage = new Map(
     decisions.map((decision) => [
@@ -127,9 +125,8 @@ export async function buildRunnerThreadContext(
     return markdown.replace("\n\n", `\n${note}\n\n`);
   };
   let markdown = render(messages);
-  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > 1) {
-    const oldest = messages.findIndex((message) => message.id !== input.askingMessageId);
-    messages = messages.toSpliced(oldest, 1);
+  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > 1 && messages[0]?.id !== input.askingMessageId) {
+    messages = messages.slice(1);
     markdown = render(messages);
   }
   return markdown;

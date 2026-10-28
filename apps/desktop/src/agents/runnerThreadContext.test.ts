@@ -187,22 +187,28 @@ describe("buildRunnerThreadContext", () => {
     expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
   });
 
-  it("keeps the asking message when it is older than the newest 40", async () => {
+  it("reads on from the asking message when it is older than the newest 40", async () => {
     await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
-    const ids = shownIds(await context("m_0"));
-    expect(ids).toHaveLength(40);
-    expect(ids[0]).toBe("m_0");
-    expect(ids.slice(1)).toEqual(Array.from({ length: 39 }, (_, index) => `m_${index + 6}`));
+    const markdown = await context("m_2");
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 43 }, (_, index) => `m_${index + 2}`));
+    expect(markdown).toContain("2 earlier messages in this thread aren't shown.");
   });
 
-  it("drops the oldest messages past 48,000 characters, but never the asking one", async () => {
+  it("drops the oldest messages past 48,000 characters, but none from the asking one on", async () => {
     await seedThread(Array.from({ length: 20 }, (_, index) => `${index}`.padEnd(5_000, ".")));
-    const markdown = await context("m_0");
+    const markdown = await context("m_15");
     expect(markdown.length).toBeLessThanOrEqual(48_000);
     const ids = shownIds(markdown);
-    expect(ids[0]).toBe("m_0");
-    expect(ids.at(-1)).toBe("m_19");
+    expect(ids.slice(-5)).toEqual(["m_15", "m_16", "m_17", "m_18", "m_19"]);
     expect(ids.length).toBeGreaterThan(5);
     expect(markdown).toContain(`${20 - ids.length} earlier messages in this thread aren't shown.`);
+  });
+
+  // A claim answers every request queued in its thread, not only the asking one.
+  it("keeps a later request past 48,000 characters", async () => {
+    await seedThread(["first request".padEnd(30_000, "."), "second request".padEnd(30_000, ".")]);
+    const markdown = await context("m_0");
+    expect(shownIds(markdown)).toEqual(["m_0", "m_1"]);
+    expect(markdown.length).toBeGreaterThan(48_000);
   });
 });
