@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { composeArgs, deploymentChecks, readSettings, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
+import { composeArgs, deploymentChecks, readSettings, startupWaitSeconds, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
 const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
 const envFile = values['env-file'];
@@ -35,7 +35,7 @@ else {
     if ((values.start || values.running) && compose.status === 0 && deploymentOk) {
       let upOk = true;
       if (values.start) {
-        const up = spawnSync('docker', composeArgs(envFile, settings, 'up', '-d', '--wait', '--wait-timeout', '180'), { stdio: 'inherit' });
+        const up = spawnSync('docker', composeArgs(envFile, settings, 'up', '-d', '--wait', '--wait-timeout', String(startupWaitSeconds)), { stdio: 'inherit' });
         upOk = up.status === 0;
         record('compose startup', upOk);
       }

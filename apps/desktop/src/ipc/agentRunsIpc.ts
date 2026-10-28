@@ -222,7 +222,7 @@ export function createAgentRunsIpc<
         });
       await openWorkspaceActivity(workspace);
       return RunnerSelfTestResult.parse(
-        await chatDispatchService.runnerSelfTest(workspace.workspaceId),
+        await chatDispatchService.runnerSelfTest(workspace.workspaceId, input.agentId),
       );
     });
   }

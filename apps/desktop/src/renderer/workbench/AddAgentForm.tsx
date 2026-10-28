@@ -4,7 +4,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
+import { DEFAULT_AGENT_ID, firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
@@ -101,9 +101,10 @@ export function AddAgentForm(props: {
     if (!(await save()) || !requests.isCurrent(token)) return;
     setCheck({ status: "running" });
     try {
-      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId });
+      // The save above made the first agent when there was none.
+      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: firstAgent(settings)?.id ?? DEFAULT_AGENT_ID });
       if (!requests.isCurrent(token)) return;
-      if (!result.ok) props.onError(result.detail);
+      if (!result.ok) props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
@@ -113,7 +114,7 @@ export function AddAgentForm(props: {
         detail: ipcErrorMessage(cause, "The check could not start."),
       });
     }
-  }, [props.workspaceId, props.onError, requests, save]);
+  }, [props.workspaceId, props.onError, requests, save, settings]);
 
   const submit = useCallback(
     async (event: FormEvent) => {
@@ -160,7 +161,7 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy} checkLabel="Check"
+        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
           onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>

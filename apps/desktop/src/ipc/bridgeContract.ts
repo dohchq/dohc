@@ -5798,6 +5798,7 @@ export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
 export const RunnerSelfTestPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  agentId: AgentId,
 }).strict();
 export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 
@@ -5867,6 +5868,8 @@ export const stoppedRunOperations = {
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
   detail: z.string().min(1).max(2_000),
+  // The run's log, when the check started a runner.
+  logPath: z.string().min(1).max(4_096).optional(),
 }).strict();
 export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
 
@@ -5884,6 +5887,13 @@ export const SetAppPinnedPayload = z.object({
   pinned: z.boolean(),
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
+// Ids of entries in the settings file, broken ones included, so Undo can put
+// back an order with an entry dohc could not use.
+export const OrderAgentsPayload = z.object({
+  order: z.array(z.string().min(1).max(256)).max(256),
+}).strict();
+export type OrderAgentsPayload = z.infer<typeof OrderAgentsPayload>;
 
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
