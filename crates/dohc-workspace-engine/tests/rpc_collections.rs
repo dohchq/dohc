@@ -3780,7 +3780,19 @@ async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
         .expect("original claim");
     // As in the lineage replacement tests, move the durable claim ahead of
     // the session without letting that fixture write drain the queue.
-    let replacement = "f".repeat(64);
+    let replacement_doc = Ydoc::wire();
+    replacement_doc
+        .rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n"),
+        )
+        .expect("replacement base");
+    let store = EngineStore::open(&db, 300).expect("open replacement store");
+    let replacement = store
+        .put_binary_blob(&replacement_doc.encode_full_state())
+        .expect("store replacement base");
+    drop(store);
+    assert_ne!(replacement, claim);
     connection
         .execute(
             "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id=?2 AND path='tasks/alpha.md'",
