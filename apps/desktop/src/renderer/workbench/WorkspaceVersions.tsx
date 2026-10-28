@@ -58,6 +58,10 @@ const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
 // The version breadcrumb in the titlebar: shows the active version, switches
 // on click, creates inline, and opens compare / merge.
+function mergeIdentity(workspaceId: string, versionId: string): string {
+  return `version-merge:${workspaceId}:${versionId}`;
+}
+
 export function VersionMenu(props: {
   workspaceId: string;
   // The workspace is not ready for a version change.
@@ -78,7 +82,10 @@ export function VersionMenu(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
-  onError: (message: string, cause: unknown, retry?: () => void) => void;
+  // A create or merge failure names what failed, and a later success of the
+  // same create or merge takes its notice back, whichever control ran it.
+  onError: (message: string, cause: unknown, retry?: () => void, identity?: string) => void;
+  clearError: (identity: string) => void;
   // Bumped by the shell when version state changed outside this menu, so the
   // selector re-reads the active version instead of showing a stale name.
   refreshKey?: number;
@@ -285,6 +292,7 @@ export function VersionMenu(props: {
         setNameError("Give the new version a name.");
         return;
       }
+      const identity = `version-create:${workspaceId}:${trimmed}`;
       const token = beginOperation();
       setBusy("create");
       setNameError(null);
@@ -300,6 +308,7 @@ export function VersionMenu(props: {
         setSnapshot(result);
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
+        props.clearError(identity);
         setMenu(false);
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
@@ -314,13 +323,13 @@ export function VersionMenu(props: {
           setMenuOpen(true);
           setNewName(trimmed);
           void performCreate(trimmed);
-        });
+        }, identity);
       } finally {
         releaseOperation?.();
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, setMenu, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, workspaceId],
+    [beginOperation, setMenu, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
 
   // A failed merge is a notice. Its Try again reopens the dialog for the same
@@ -331,6 +340,7 @@ export function VersionMenu(props: {
       setMergeSource(null);
       void refresh().catch(() => undefined);
       const fallback = `Could not merge ${version.name} into Main.`;
+      const identity = mergeIdentity(workspaceId, version.id);
       const retry = () => {
         const token = snapshotToken.current;
         void refresh().then(
@@ -338,17 +348,17 @@ export function VersionMenu(props: {
             if (current === null) return;
             const found = current.versions.find((candidate) => candidate.id === version.id);
             if (found) setMergeSource({ version: found, runOnOpen: true });
-            else props.onError(`${version.name} no longer exists, so it can't merge into Main.`, null);
+            else props.onError(`${version.name} no longer exists, so it can't merge into Main.`, null, undefined, identity);
           },
           (readError: unknown) => {
             if (token !== snapshotToken.current) return;
-            props.onError(ipcErrorMessage(readError, fallback), readError, retry);
+            props.onError(ipcErrorMessage(readError, fallback), readError, retry, identity);
           },
         );
       };
-      props.onError(ipcErrorMessage(error, fallback), error, retry);
+      props.onError(ipcErrorMessage(error, fallback), error, retry, identity);
     },
-    [props.onError, refresh],
+    [props.onError, refresh, workspaceId],
   );
 
   if (!snapshot) return null;
@@ -522,6 +532,7 @@ export function VersionMenu(props: {
           activeTabDirty={props.activeTabDirty}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+          onMerged={() => props.clearError(mergeIdentity(workspaceId, mergeSource.version.id))}
           onFailed={(error) => failMerge(mergeSource.version, error)}
           onClose={() => {
             setMergeSource(null);
@@ -562,6 +573,8 @@ export function VersionMergeDialog(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  // The merge ran. The owner takes back an earlier failure's notice.
+  onMerged: () => void;
   // The merge failed. The owner closes the dialog and reports it.
   onFailed: (error: unknown) => void;
   onClose: () => void;
@@ -589,6 +602,7 @@ export function VersionMergeDialog(props: {
       });
       if (!liveToken.isCurrent(token)) return;
       props.onWorkspaceStateChanged();
+      props.onMerged();
       // The merge's own count decides the stage: the rows are the first page
       // of all open conflicts, and a lingering sync conflict must not turn a
       // clean merge into a conflicted one. The rows gate it too: a count
@@ -617,7 +631,7 @@ export function VersionMergeDialog(props: {
     } finally {
       releaseOperation?.();
     }
-  }, [props.beginLineageOperation, props.onFailed, props.onWorkspaceStateChanged, source.id, workspaceId]);
+  }, [props.beginLineageOperation, props.onFailed, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
 
   useEffect(() => {
     if (props.runOnOpen) void runMerge();

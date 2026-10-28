@@ -43,6 +43,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={onWorkspaceStateChanged}
         onError={onError}
+        clearError={() => {}}
       />,
     );
     await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft"));
@@ -79,6 +80,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={() => {}}
         onError={onError}
+        clearError={() => {}}
       />,
     );
 
@@ -101,6 +103,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
           onOpenCompare={() => {}}
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}
+          clearError={() => {}}
           refreshKey={refreshKey}
         />
       );
@@ -121,6 +124,7 @@ function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVers
   const props = {
     onWorkspaceStateChanged: vi.fn(),
     onError: vi.fn<ComponentProps<typeof VersionMenu>["onError"]>(),
+    clearError: vi.fn<ComponentProps<typeof VersionMenu>["clearError"]>(),
   };
   render(
     <VersionMenu
@@ -223,7 +227,7 @@ describe("VersionMenu", () => {
     await openOn(user, "Draft");
     await user.click(screen.getByTestId("version-new"));
     await user.type(screen.getByTestId("version-new-input"), "Ideas{Enter}");
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(expect.any(String), failure, expect.any(Function)));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(expect.any(String), failure, expect.any(Function), "version-create:ws-1:Ideas"));
     expect(screen.getByTestId<HTMLInputElement>("version-new-input").value).toBe("Ideas");
     expect(screen.queryByTestId("version-menu-error")).toBeNull();
 
@@ -237,6 +241,23 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Ideas"));
     expect(bridgeMock.createWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", name: "Ideas" });
     expect(props.onWorkspaceStateChanged).toHaveBeenCalledWith("ideas");
+    expect(props.clearError).toHaveBeenCalledWith("version-create:ws-1:Ideas");
+  });
+
+  it("takes back a create failure's notice when the name field creates it", async () => {
+    bridgeMock.createWorkspaceVersion.mockRejectedValueOnce(acrossIpc("desktop:create-workspace-version", "Error: The engine stopped."));
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-new"));
+    await user.type(screen.getByTestId("version-new-input"), "Ideas{Enter}");
+    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+    expect(props.clearError).not.toHaveBeenCalled();
+
+    const ideas = { id: "ideas", name: "Ideas", kind: "named" as const, createdAtMs: 3, canMergeIntoMain: false };
+    bridgeMock.createWorkspaceVersion.mockResolvedValueOnce({ versions: [MAIN, DRAFT, ideas], activeVersionId: "ideas" });
+    await user.type(screen.getByTestId("version-new-input"), "{Enter}");
+    await waitFor(() => expect(props.clearError).toHaveBeenCalledWith(props.onError.mock.calls[0]![3]));
   });
 
   it("reports a failed merge with a Try again that reopens the dialog and merges", async () => {
@@ -247,8 +268,9 @@ describe("VersionMenu", () => {
     await openOn(user, "Draft");
     await user.click(screen.getByTestId("version-merge"));
     await user.click(screen.getByTestId("version-merge-confirm"));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(expect.any(String), failure, expect.any(Function)));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(expect.any(String), failure, expect.any(Function), "version-merge:ws-1:draft"));
     expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
+    expect(props.clearError).not.toHaveBeenCalled();
 
     bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
       mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null,
@@ -257,6 +279,7 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main."));
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(2);
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", versionId: "draft" });
+    expect(props.clearError).toHaveBeenCalledWith("version-merge:ws-1:draft");
   });
 
   it("says so when Try again finds the version is gone", async () => {
@@ -270,7 +293,7 @@ describe("VersionMenu", () => {
 
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     act(() => props.onError.mock.calls[0]![2]!());
-    await waitFor(() => expect(props.onError).toHaveBeenLastCalledWith("Draft no longer exists, so it can't merge into Main.", null));
+    await waitFor(() => expect(props.onError).toHaveBeenLastCalledWith("Draft no longer exists, so it can't merge into Main.", null, undefined, "version-merge:ws-1:draft"));
     expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(1);
   });
@@ -288,7 +311,7 @@ describe("VersionMenu", () => {
     bridgeMock.listWorkspaceVersions.mockRejectedValueOnce(unreadable);
     act(() => props.onError.mock.calls[0]![2]!());
     await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(2));
-    expect(props.onError).toHaveBeenLastCalledWith(expect.any(String), unreadable, expect.any(Function));
+    expect(props.onError).toHaveBeenLastCalledWith(expect.any(String), unreadable, expect.any(Function), "version-merge:ws-1:draft");
 
     bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
       mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null,

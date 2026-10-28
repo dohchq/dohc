@@ -97,7 +97,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       <VersionMergeDialog workspaceId="ws-1"
         source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
         activeTabDirty={false} beginLineageOperation={mergeBegin}
-        onWorkspaceStateChanged={mergeChanged} onFailed={() => {}} onClose={() => {}} />
+        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onFailed={() => {}} onClose={() => {}} />
     ));
     if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
@@ -399,6 +399,7 @@ describe("VersionMergeDialog conflict paging", () => {
         activeTabDirty={false}
         beginLineageOperation={async () => () => {}}
         onWorkspaceStateChanged={() => {}}
+        onMerged={() => {}}
         onFailed={() => {}}
         onClose={() => {}}
       />,
@@ -694,7 +695,7 @@ it("returns focus after a press on blank space closes the Versions menu", async 
     useFocusSurface(root, () => root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'));
     return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
       <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
-        onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} />
+        onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}} />
     </div>;
   }
   render(<Shell />);
