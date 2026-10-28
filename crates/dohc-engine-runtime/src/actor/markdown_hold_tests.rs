@@ -558,7 +558,7 @@ impl WorkspaceRootGuard for RecoveryRoot {
 
 #[tokio::test]
 async fn markdown_hold_dismissal_survives_restart_recovery_until_the_document_changes() {
-    for queued in [false, true] {
+    for (queued, file_change) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut f = Fixture::new().await;
         assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
         let checkpoint = f.actor.run(|store, _| {
@@ -591,23 +591,77 @@ async fn markdown_hold_dismissal_survives_restart_recovery_until_the_document_ch
             assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
             Ok(())
         }).await.unwrap();
-        let key = f.key.clone();
-        f.actor.run(move |store, cache| {
-            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
-            let update = doc.richdoc_append_paragraph("A new edit needs a new Notice");
-            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
-                tx, &key, &update, None, None, 22))?;
-            cache.remove(&key);
-            Ok(())
-        }).await.unwrap();
-        assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+        if file_change {
+            let key = f.key.clone();
+            let sequence = f.actor.run(move |store, _| {
+                store.write_with(&NoFaults, |tx| tx.execute("DELETE FROM snapshots WHERE object_id='note'", [])
+                    .map_err(StorageError::persist_public))?;
+                Ok(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq)
+            }).await.unwrap();
+            std::fs::remove_file(f.scratch.path().join("note.md")).unwrap();
+            let result = if queued {
+                f.actor.ydoc_settle_queued(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+                    ContentKind::Richdoc, Some(f.claim.clone()), None, "owner-session".into(), Arc::new(()),
+                    23, Arc::new(NoFaults), CancellationToken::new(), None, None).await
+            } else {
+                f.actor.ydoc_settle(f.scratch.path().to_owned(), f.key.clone(), "note.md".into(),
+                    ContentKind::Richdoc, Some(f.claim.clone()), None, "owner-session".into(), Arc::new(()),
+                    23, Arc::new(NoFaults), CancellationToken::new(), None, None).await
+            };
+            assert!(matches!(result, Err(RuntimeError::MarkdownWriteHeld { .. })));
+            let key = f.key.clone();
+            f.actor.run(move |store, _| {
+                assert_eq!(dohc_engine_collab::read_marker(store, &key)?.unwrap().head_update_seq, sequence);
+                let owed = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+                assert_eq!(owed.len(), 1);
+                assert!(owed[0].held_head_sha256.is_none());
+                Ok(())
+            }).await.unwrap();
+            assert!(!f.scratch.path().join("note.md").exists());
+        } else {
+            let key = f.key.clone();
+            f.actor.run(move |store, cache| {
+                let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+                let update = doc.richdoc_append_paragraph("A new edit needs a new Notice");
+                store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                    tx, &key, &update, None, None, 22))?;
+                cache.remove(&key);
+                Ok(())
+            }).await.unwrap();
+            assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+            f.unchanged().await;
+        }
         f.actor.run(|store, _| {
             assert_eq!(dohc_engine_sync::list_refusal_notices(store, "w")?.len(), 1);
             Ok(())
         }).await.unwrap();
-        f.unchanged().await;
         f.supervisor.close(&f.db).unwrap();
     }
+}
+
+#[tokio::test]
+async fn markdown_hold_audited_rehold_preserves_a_dismissal_for_the_same_head_and_sequence() {
+    let f = Fixture::new().await;
+    f.adopt().await;
+    let (_owner, host) = f.audited_host().await;
+    assert!(matches!(f.audited_settle(&host, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    f.actor.run(|store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE markdown_write_obligations SET held_checkpoint_sha256=?1",
+            [hex_sha256(b"live audited checkpoint encoding")]).map_err(StorageError::persist_public))?;
+        let notices = dohc_engine_sync::list_refusal_notices(store, "w")?;
+        assert_eq!(notices.len(), 1);
+        dohc_engine_sync::dismiss_refusal_notice(store, "w", &notices[0].notice_id,
+            &notices[0].refusal_coordinates, &NoFaults)?;
+        Ok(())
+    }).await.unwrap();
+    assert!(matches!(f.audited_settle(&host, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+    f.actor.run(|store, _| {
+        assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+        Ok(())
+    }).await.unwrap();
+    f.unchanged().await;
+    f.supervisor.close(&f.db).unwrap();
 }
 
 #[tokio::test]

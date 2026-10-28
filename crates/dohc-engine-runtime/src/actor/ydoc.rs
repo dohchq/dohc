@@ -3324,7 +3324,10 @@ fn ydoc_settle_attempt_on_store(
             }
             if let Some(previous) = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
                 .find(|row| row.key == *key && row.lineage_claim_id == obligation.lineage_claim_id
-                    && row.kind == obligation.kind && row.operation_id == obligation.operation_id
+                    && row.kind == obligation.kind
+                    && (row.operation_id == obligation.operation_id
+                        || live_audit.is_some_and(|audit| row.operation_id == audit.markdown_operation_id()))
+                    && row.held_head_sha256 == current_sha
                     && row.held_checkpoint_sha256.is_some()
                     && row.retry_inputs.get("headUpdateSeq").and_then(serde_json::Value::as_i64)
                         == Some(current_marker.head_update_seq)) {
