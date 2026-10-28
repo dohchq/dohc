@@ -518,8 +518,11 @@ export function createDesktopCliServer<State>(
                 if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
                 const page = await capture.listOpenConflictsPage(afterConflictId);
                 const admitted = historyPathAdmission(policy);
+                // After a rename, a side can sit at another path than its conflict.
+                const shown = (conflict: (typeof page.conflicts)[number]) =>
+                  [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
                 return {
-                  conflicts: page.conflicts.filter(conflict => admitted(conflict.path)).map(versionConflictForIpc),
+                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
                   nextAfterConflictId: page.nextAfterConflictId,
                 };
               },

@@ -433,12 +433,13 @@ describe("desktop CLI workspace context", () => {
       };
       f.capture.compareVersions.mockImplementation(async (_id, options) => pages[options?.afterPath ?? "first"]!);
       const side = (path: string, text: string) => ({ exists: true, path, contentKind: "text" as const, text });
-      const conflict = (id: string, path: string) => ({
+      const conflict = (id: string, path: string, incomingPath = path) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
-        base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
+        base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
         status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
-      f.capture.listOpenConflictsPage.mockResolvedValue({
-        conflicts: [conflict("c1", "notes.md"), conflict("c2", "private/journal.md")], nextAfterConflictId: null });
+      // c3's incoming side sits at a path History does not track.
+      f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
+        conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
       await f.create().startDesktopCliServer();
       const token = "a".repeat(64);
       const send = async (request: CliRequestWithoutToken) => {
