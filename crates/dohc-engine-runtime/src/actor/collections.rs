@@ -2325,6 +2325,202 @@ mod collection_relation_cleanup_tests {
     }
 
     #[test]
+    #[ignore = "Main's source validation rejects the adopted reference-link body after relation cleanup"]
+    fn adopted_lossy_relation_cleanup_preserves_source_without_opening() {
+        assert_adopted_lossy_relation_cleanup_preserves_source(false);
+    }
+
+    #[test]
+    #[ignore = "Main's source validation rejects the adopted reference-link body after relation cleanup"]
+    fn adopted_lossy_relation_cleanup_preserves_source_after_opening() {
+        assert_adopted_lossy_relation_cleanup_preserves_source(true);
+    }
+
+    fn assert_adopted_lossy_relation_cleanup_preserves_source(reopen_note: bool) {
+        use dohc_engine_domain::DeleteTextFile;
+
+        const PACKING: &str = "tasks/packing.md";
+        const FLIGHTS: &str = "tasks/flights.md";
+        const SOURCE: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Packing list\n\n<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
+        const TARGET: &str = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Book flights\n";
+
+        let scratch = ScratchDir::new().unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+            .unwrap();
+        std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+        for (object, path, text, moment) in [
+            (
+                "schema",
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+                "schema-moment",
+            ),
+            (SOURCE_OBJECT_ID, PACKING, SOURCE, "packing-moment"),
+            ("flights-object", FLIGHTS, TARGET, "flights-moment"),
+        ] {
+            write_text(&mut store, object, path, text, moment, 2);
+            std::fs::write(scratch.path().join(path), text).unwrap();
+        }
+        let mut cache = WriterDocCache::new();
+        let token = CancellationToken::new();
+        let leases = LeaseRegistry::default();
+        let reconcile = |store: &mut EngineStore, cache: &mut WriterDocCache, now_ms| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                WORKSPACE_ID,
+                VERSION_ID,
+                scratch.path(),
+                None,
+                &leases,
+                &(),
+                now_ms,
+                &NoFaults,
+                &token,
+                None,
+                &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
+            )
+            .unwrap()
+        };
+        reconcile(&mut store, &mut cache, 3);
+
+        for (path, seed) in [
+            (
+                PACKING,
+                // Adoption seed from the isolated desktop reproduction at 303027d41.
+                include_bytes!("../../tests/fixtures/adopted-lossy-packing-seed.bin").to_vec(),
+            ),
+            (FLIGHTS, {
+                let doc = Ydoc::wire();
+                doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, TARGET)
+                    .unwrap();
+                doc.encode_full_state()
+            }),
+        ] {
+            let state = ydoc_open_state_on_store(
+                &mut store,
+                &mut cache,
+                WORKSPACE_ID,
+                4,
+                false,
+                None,
+                VERSION_ID,
+                path,
+                Some(ContentKind::Richdoc),
+                false,
+                &token,
+            )
+            .unwrap();
+            assert!(!state.lineage_existing);
+            ydoc_record_update_on_store(
+                &mut store,
+                &mut cache,
+                &state.key,
+                path,
+                ContentKind::Richdoc,
+                state.regime,
+                &seed,
+                None,
+                None,
+                state.lineage_claim_id,
+                true,
+                state.owner_seed_source,
+                None,
+                false,
+                4,
+                &NoFaults,
+                &token,
+                None,
+            )
+            .unwrap();
+        }
+        reconcile(&mut store, &mut cache, 5);
+        assert_eq!(
+            std::fs::read(scratch.path().join(PACKING)).unwrap(),
+            SOURCE.as_bytes()
+        );
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
+        let seeded = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let reference = seeded.doc.markdown_source_reference().unwrap();
+        assert_eq!(seeded.doc.markdown_source(&reference).as_deref(), Some(SOURCE));
+        assert_eq!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap()
+                .head_update_seq,
+            1,
+            "adoption must leave only the file seed, with no intervening edit"
+        );
+        let adopted: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT adoption_state FROM collection_records WHERE file_path=?1",
+                    [PACKING],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(adopted, "adopted");
+
+        if reopen_note {
+            let state = ydoc_open_state_on_store(
+                &mut store,
+                &mut cache,
+                WORKSPACE_ID,
+                6,
+                false,
+                None,
+                VERSION_ID,
+                PACKING,
+                Some(ContentKind::Richdoc),
+                false,
+                &token,
+            )
+            .unwrap();
+            assert!(state.lineage_existing);
+        }
+        std::fs::remove_file(scratch.path().join(FLIGHTS)).unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: VERSION_ID.into(),
+                    path: FLIGHTS.into(),
+                    moment_id: "flights-delete".into(),
+                    request_id: None,
+                    metadata_origin: "explorer".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 7,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        reconcile(&mut store, &mut cache, 8);
+        let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
+        let without_relation = SOURCE.replace(&format!("related: {TARGET_ID}\n"), "");
+        let cleaned = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let reference = cleaned.doc.markdown_source_reference().unwrap();
+        assert_eq!(
+            cleaned.doc.markdown_source(&reference).as_deref(),
+            Some(without_relation.as_str()),
+            "the cleanup delta must retain the exact body in its source witness"
+        );
+        assert!(
+            actual == SOURCE.as_bytes() || actual == without_relation.as_bytes(),
+            "cleanup changed the body (reopen_note={reopen_note}): {}",
+            String::from_utf8_lossy(&actual),
+        );
+    }
+
+    #[test]
     fn absent_relation_target_cleanup_refreshes_only_the_index() {
         let scratch = ScratchDir::new().expect("scratch directory");
         let mut store = EngineStore::open(
