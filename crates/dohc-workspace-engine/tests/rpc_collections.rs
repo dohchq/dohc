@@ -3986,7 +3986,8 @@ async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
     // The local base sits at relay 20, after the foreign base at relay 11, so
-    // close lets the foreign base replace it.
+    // the foreign base wins once the session ends. Until then, the live drain
+    // must leave it and its delta queued.
     let parked = park_remote_status_update(None, 20).await;
     let db = engine_db_path(&parked.scratch).expect("engine db");
     let mut store = EngineStore::open(&db, 300).expect("fixture store");
@@ -4000,7 +4001,7 @@ async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
         })
         .expect("record object");
     // The foreign base matches the prefix's result. Its next update changes
-    // the field, so close has a record fact to emit after replacing the base.
+    // the field, so draining it would emit a record fact.
     let foreign = Ydoc::wire();
     foreign
         .rewrite_content_to_markdown(
@@ -4056,34 +4057,8 @@ async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
     .await;
     let prefix = wait_for_record_events(&mut events).await;
     assert_parked_drain_events(&prefix);
+    // The foreign base and its delta stay queued, and send nothing.
     assert_eq!(deferred_update_rows(&parked.scratch), 2);
-    while let Ok(notice) = events.try_recv() {
-        assert!(!notice.name.starts_with("record."), "{notice:?}");
-        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
-    }
-    call(
-        &parked.transport,
-        &parked.handle,
-        301,
-        "ydoc.close",
-        json!({ "sessionId": parked.live_session_id, "settle": false }),
-    )
-    .await;
-    let foreign = wait_for_record_events(&mut events).await;
-    assert_eq!(foreign.len(), 2, "{foreign:?}");
-    assert_eq!(foreign[0].name, RECORD_FIELD_CHANGED_EVENT);
-    assert_eq!(foreign[1].name, RECORD_UPDATED_EVENT);
-    for notice in &foreign {
-        assert_eq!(notice.payload["recordId"], json!(RECORD_ID));
-        assert_eq!(
-            notice.payload["source"],
-            json!({ "originId": "foreign-record-editor", "originSeq": 1 })
-        );
-    }
-    assert_eq!(foreign[0].payload["field"], json!("status"));
-    assert_eq!(foreign[0].payload["previous"], json!("remote"));
-    assert_eq!(foreign[0].payload["next"], json!("foreign"));
-    assert_eq!(deferred_update_rows(&parked.scratch), 0);
     while let Ok(notice) = events.try_recv() {
         assert!(!notice.name.starts_with("record."), "{notice:?}");
         assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
