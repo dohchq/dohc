@@ -6611,7 +6611,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
-    pushRecorded: async workspace => activity.pushRecorded(workspace.workspaceId),
+    pushRecorded: activity.pushRecorded,
     ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {

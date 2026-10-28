@@ -104,8 +104,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   relayShareJsonWithCredentials: RelayShareRequest;
   // A request names its document; a release its binding.
   ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
-  // Sends everything sync recorded for the workspace. Rejects when a pass fails.
-  pushRecorded(workspace: Workspace): Promise<void>;
+  // Sends everything sync recorded for an open workspace. Rejects when a pass fails.
+  pushRecorded(workspaceId: string): Promise<void>;
   // The document at a path now, or where an object's document is now. Null when there is none.
   liveDocument(workspace: Workspace, target: {path: string} | {objectId: string}): Promise<OwnerLiveStop["document"] | null>;
   // Holds off editors of the path while the change runs: refused while one holds it.
@@ -261,7 +261,7 @@ export function createOwnerLiveDocumentActions<
    */
   const resume = async (input: {workspaceId: string; path: string}, operation: Operation): Promise<void> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
-    await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace));
+    await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
     operation.assertCurrent();
     await withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
       let result: unknown;
@@ -392,7 +392,7 @@ export function createRelaySharesIpcHandlers<
 
   const retryOwnerLiveShare: Handlers["retryOwnerLiveShare"] = async (input, { operation }) => {
     return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace));
+      await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
       const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
         `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
           method: "POST", body: JSON.stringify({shareId: input.shareId, retry: true}),
@@ -453,7 +453,7 @@ export function createRelaySharesIpcHandlers<
 
   // Edit access hosts the shared notes for live editing.
   const beforeEditHosting = (operation: Operation, access: string) =>
-    access === "edit" ? pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace)) : Promise.resolve();
+    access === "edit" ? pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId)) : Promise.resolve();
 
   // Grant side: create a share on the SYNC RELAY for a synced workspace.
   // Selector validation (secret refusal, traversal, caps) is server-side —
@@ -591,8 +591,10 @@ export function createRelaySharesIpcHandlers<
 
   // Restores what a removal ended, from the receipt the removal returned.
   // The same account transport as the removal, so the Undo on a notice works
-  // after the dialog that removed it has closed and names no workspace.
+  // after the dialog that removed it has closed. Undo can restore Edit access,
+  // so it first sends what sync recorded for the removal's workspace.
   const undoRelayShare: Handlers["undoRelayShare"] = async (input) => {
+    await pushRecordedFirst(() => dependencies.pushRecorded(input.workspaceId));
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
       {
