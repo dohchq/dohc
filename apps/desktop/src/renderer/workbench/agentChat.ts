@@ -29,6 +29,18 @@ export function agentChatIdentity(
   };
 }
 
+/**
+ * Home, a file mention and the graph name an agent's chat without its agent.
+ * The listed chat names it, so a chat without one takes the listed chat.
+ */
+export function withListedAgent<T extends Pick<ChatChannelRecord, "id" | "kind" | "agentId">>(
+  channel: T,
+  listed: readonly ChatChannelRecord[],
+): T | ChatChannelRecord {
+  if (channel.kind !== "agent" || channel.agentId) return channel;
+  return listed.find((entry) => entry.id === channel.id) ?? channel;
+}
+
 /** Agents' chats in the order the settings file lists their agents, then chats whose agent is gone. */
 export function orderAgentChats<T extends Pick<ChatChannelRecord, "kind" | "agentId">>(
   channels: readonly T[],

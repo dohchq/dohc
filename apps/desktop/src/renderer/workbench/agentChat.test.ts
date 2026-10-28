@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { agentChatIdentity, orderAgentChats, type SettingsAgent } from "./agentChat";
+import type { ChatChannelRecord } from "../../ipc/bridgeContract";
+import { agentChatIdentity, orderAgentChats, withListedAgent, type SettingsAgent } from "./agentChat";
 import { goneAgentPresentation } from "./actorPresentation";
 
 const AGENTS: SettingsAgent[] = [
@@ -65,5 +66,25 @@ describe("orderAgentChats", () => {
       "gone-chat",
       "older-chat",
     ]);
+  });
+});
+
+describe("withListedAgent", () => {
+  const listed = (id: string, kind: ChatChannelRecord["kind"], agentId?: string): ChatChannelRecord => ({
+    id, name: id, slug: id, kind, createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0, ...(agentId ? { agentId } : {}),
+  });
+  const channels = [listed("nova-chat", "agent", "default"), listed("general", "channel")];
+
+  it("gives an agent's chat opened without its agent the listed chat", () => {
+    expect(withListedAgent({ id: "nova-chat", kind: "agent" as const, name: "My agent" }, channels)).toBe(channels[0]);
+  });
+
+  it("keeps a chat that names its agent, a group, and a chat that isn't listed", () => {
+    const named = { id: "nova-chat", kind: "agent" as const, agentId: "scout" };
+    const group = { id: "general", kind: "channel" as const };
+    const unlisted = { id: "elsewhere", kind: "agent" as const };
+    expect(withListedAgent(named, channels)).toBe(named);
+    expect(withListedAgent(group, channels)).toBe(group);
+    expect(withListedAgent(unlisted, channels)).toBe(unlisted);
   });
 });

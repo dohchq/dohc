@@ -18,7 +18,7 @@ import {
 } from "./PostCard";
 import { AgentName, ChatAvatar, LinkHolderMark, useAgentInk } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
-import { agentChatIdentity, orderAgentChats } from "./agentChat";
+import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -607,6 +607,10 @@ export function ChatsView(props: {
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
+  // For openChannel and openThread: an agent's chat opened without its agent
+  // takes the listed chat (withListedAgent).
+  const latestChannels = useRef<readonly ChatChannelRecord[]>([]);
+  latestChannels.current = overview.status === "ready" ? overview.channels : [];
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, PostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
@@ -1618,7 +1622,7 @@ export function ChatsView(props: {
     async (channel: ChatChannelRecord) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel });
+      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -1921,7 +1925,7 @@ export function ChatsView(props: {
       const refreshSeq = ++threadRefreshSeq.current;
       setNav({
         level: "thread",
-        channel,
+        channel: withListedAgent(channel, latestChannels.current),
         thread,
         ...(focusMessageId ? { focusMessageId } : {}),
       });
@@ -3849,8 +3853,7 @@ export function ChatsView(props: {
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
                     : item.channel.kind === "agent"
-                      // Home's channel carries no agent id; the listed chat does.
-                      ? agentChatIdentity(overview.channels.find((entry) => entry.id === item.channel?.id) ?? item.channel, settingsAgents).label
+                      ? agentChatIdentity(withListedAgent(item.channel, overview.channels), settingsAgents).label
                       : `#${item.channel.name}`
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
