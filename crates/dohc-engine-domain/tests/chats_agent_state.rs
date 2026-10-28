@@ -842,13 +842,42 @@ fn app_quit_failure_remains_durably_recoverable_after_handling() {
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         (rows.len(), rows[0].attempt_count),
         (1, 1),
         "A crash after marking the failure handled but before requeue must leave the app-quit run recoverable."
     );
+}
+
+#[test]
+fn app_quit_recoveries_for_a_thread_skip_other_threads() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger-1", "thread", "run-1", 20);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-1", "app-quit", Some(143), 21, &NO_FAULTS)
+        .expect("fail run-1");
+    claimed_run(&mut store, "trigger-2", "other-thread", "run-2", 30);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-2", "app-quit", Some(143), 31, &NO_FAULTS)
+        .expect("fail run-2");
+    let chats = LinkedChatStore::new(&mut store);
+    let runs = |thread_id| {
+        chats
+            .list_app_quit_recoveries(WS, thread_id, None, 10)
+            .expect("recoveries")
+            .into_iter()
+            .map(|recovery| recovery.run.run_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(runs(None), ["run-1", "run-2"]);
+    assert_eq!(
+        runs(Some("thread")),
+        ["run-1"],
+        "drop the thread filter -> a thread lists another thread's stopped runs."
+    );
+    assert_eq!(runs(Some("absent")), Vec::<String>::new());
 }
 
 #[test]
@@ -862,7 +891,7 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
         .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         rows.first()
@@ -894,7 +923,7 @@ fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
     let (_scratch, mut store) = open_store();
     assert!(
         LinkedChatStore::new(&mut store)
-            .latest_run_for_thread(WS, "thread")
+            .latest_run_for_thread(WS, "thread", None)
             .expect("empty")
             .is_none()
     );
@@ -908,22 +937,58 @@ fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
         .expect("fail");
     let chats = LinkedChatStore::new(&mut store);
     let run = chats
-        .latest_run_for_thread(WS, "thread")
+        .latest_run_for_thread(WS, "thread", None)
         .expect("read")
         .expect("run");
     assert_eq!(run.run_id, "run-2");
     assert_eq!(run.exit_code, Some(7));
     assert!(
         chats
-            .latest_run_for_thread(OTHER_WS, "thread")
+            .latest_run_for_thread(OTHER_WS, "thread", None)
             .expect("other workspace")
             .is_none()
     );
     assert!(
         chats
-            .latest_run_for_thread(WS, "other-thread")
+            .latest_run_for_thread(WS, "other-thread", None)
             .expect("other thread")
             .is_none()
+    );
+}
+
+#[test]
+fn latest_run_for_an_agent_skips_other_agents_runs_in_the_thread() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run-default", 20);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .complete_dispatch(WS, "run-default", 143, 21, &NO_FAULTS)
+        .expect("complete");
+    chats
+        .enqueue_dispatch(WS, "trigger", "nova", "thread", 19, &NO_FAULTS)
+        .expect("enqueue nova");
+    chats
+        .claim_next_pending(WS, "run-nova", "agent", None, 30, &NO_FAULTS)
+        .expect("claim nova")
+        .expect("nova claim");
+    let latest = |agent_id| {
+        chats
+            .latest_run_for_thread(WS, "thread", agent_id)
+            .expect("read")
+            .map(|run| run.run_id)
+    };
+    assert_eq!(latest(None).as_deref(), Some("run-nova"));
+    assert_eq!(
+        latest(Some("default")).as_deref(),
+        Some("run-default"),
+        "drop the agent filter -> another agent's later run hides this agent's latest run."
+    );
+    assert_eq!(latest(Some("nova")).as_deref(), Some("run-nova"));
+    assert_eq!(latest(Some("absent")), None);
+    assert!(
+        chats
+            .latest_run_for_thread(WS, "thread", Some("Not an id"))
+            .is_err()
     );
 }
 
@@ -956,7 +1021,7 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
     let mut store = EngineStore::open(&db, 1).expect("migrate");
     let mut chats = LinkedChatStore::new(&mut store);
     let recoveries = chats
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         recoveries

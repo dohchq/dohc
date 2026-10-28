@@ -9,8 +9,10 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatDispatchStoppedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
+  ChatRunRecord,
   ChatThreadRecord,
   CloudStatusResult,
   DatabaseSnapshotResult,
@@ -847,6 +849,50 @@ function ChatThreadSpecimen() {
         threadLocked={false}
         flashMessageId={null}
         runRecords={{}}
+        stoppedRun={null}
+        stoppedRunBusy={false}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
+// A run dohc's quit or restart stopped: under the request when it posted
+// nothing, under its last post when it did.
+const STOPPED_REQUEST = chatMessage("opening", "Draft day 2 from the bookings, and add the ferry times.", 0);
+const STOPPED_REPLY: ChatMessageRecord = {
+  id: "stopped-reply", threadId: "post-plain", authorKind: "agent", authorDisplayName: "Claude Code",
+  presentation: neutralPresentation, body: "Ferry times are in day-2.md. Starting on the hotels next.",
+  createdAtMs: CHAT_AT + 60_000, parentMessageId: "opening",
+};
+const STOPPED_RUN: ChatRunRecord = {
+  runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
+  startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
+};
+function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"]; posted: boolean; retryable?: boolean; busy?: boolean }) {
+  return (
+    <div className="w-[560px]">
+      <ThreadMessages
+        nav={CHAT_THREAD_NAV}
+        messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
+        stoppedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", ending: props.ending, retryable: props.retryable ?? true }}
+        stoppedRunBusy={props.busy ?? false}
+        onRetryStoppedRun={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -2381,6 +2427,18 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
           <ChatThreadSpecimen />
+        </Specimen>
+        <Specimen label="stopped when dohc quit, before the agent posted">
+          <ChatStoppedRunSpecimen ending="quit" posted={false} />
+        </Specimen>
+        <Specimen label="stopped when dohc restarted, after the agent posted">
+          <ChatStoppedRunSpecimen ending="restarted" posted />
+        </Specimen>
+        <Specimen label="stopped, Try again pressed">
+          <ChatStoppedRunSpecimen ending="quit" posted={false} busy />
+        </Specimen>
+        <Specimen label="stopped again after its second attempt">
+          <ChatStoppedRunSpecimen ending="quit" posted retryable={false} />
         </Specimen>
       </Section>
 
