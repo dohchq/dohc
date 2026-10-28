@@ -15,6 +15,7 @@ export function useChatDispatchNotices(
   ready: boolean,
   report: ReturnType<typeof useShellError>["reportShellFailure"],
   clear: ReturnType<typeof useShellError>["clearKind"],
+  clearIdentity: ReturnType<typeof useShellError>["clearIdentity"],
   // Opens main's trust dialog, for a request Restricted Mode holds.
   trustWorkspace: () => void,
   openChat: (nav: Extract<ChatsNav, { level: "thread" }>) => void,
@@ -29,7 +30,10 @@ export function useChatDispatchNotices(
     if (!ready) return;
     let active = true;
     let revision = -1;
-    const shown = new Map<ChatDispatchNotice["reason"], string>();
+    // Each paused chat has its own row; another reason has one row.
+    const rowOf = (notice: ChatDispatchNotice) =>
+      notice.reason === "budget-paused" ? `chat-budget-paused:${notice.threadId}` : notice.reason;
+    const shown = new Map<string, string>();
     const isCurrent = () => active && currentWorkspace.current === workspaceId;
     const findThread = async (channelId: string, threadId: string, lane: "posts" | "chat") =>
       (await bridge().listChannelThreads({ workspaceId, channelId, lane })).threads.find((entry) => entry.id === threadId);
@@ -52,14 +56,24 @@ export function useChatDispatchNotices(
     const receive = (event: ChatDispatchNoticesEvent) => {
       if (!isCurrent() || event.workspaceId !== workspaceId || event.revision <= revision) return;
       revision = event.revision;
+      const rows = new Set(event.notices.map(rowOf));
       for (const reason of Object.keys(kinds) as Array<ChatDispatchNotice["reason"]>) {
-        const notice = event.notices.find((item) => item.reason === reason);
-        if (!notice) { clear(kinds[reason]); shown.delete(reason); continue; }
-        if (shown.get(reason) === notice.id) continue;
-        shown.set(reason, notice.id);
+        if (!event.notices.some((item) => item.reason === reason)) clear(kinds[reason]);
+      }
+      for (const row of shown.keys()) {
+        if (rows.has(row)) continue;
+        shown.delete(row);
+        if (row.startsWith("chat-budget-paused:")) clearIdentity(row);
+      }
+      for (const notice of event.notices) {
+        const { reason } = notice;
+        const row = rowOf(notice);
+        if (shown.get(row) === notice.id) continue;
+        shown.set(row, notice.id);
         const pausedIn = notice.channelId;
         report({
           message: notice.message, kind: kinds[reason],
+          ...(reason === "budget-paused" ? { identity: row } : {}),
           // Nothing failed: the request waits for the person.
           ...(reason === "restricted" ? {
             tone: "warning" as const,
@@ -69,7 +83,9 @@ export function useChatDispatchNotices(
           ...(reason === "budget-paused" ? {
             tone: "warning" as const, title: "Agent replies paused",
             ...(pausedIn ? {
-              action: { label: "Open", run: () => { if (isCurrent()) void openPaused(pausedIn, notice.threadId); } },
+              // Landing in the chat reads the notice: its toast closes and
+              // its row stays until Resume or the person dismisses it.
+              action: { label: "Open", reads: true, run: () => { if (isCurrent()) void openPaused(pausedIn, notice.threadId); } },
             } : {}),
           } : {}),
           details: [
@@ -81,7 +97,7 @@ export function useChatDispatchNotices(
             if (!isCurrent()) return;
             void bridge().dismissChatDispatchNotice({ workspaceId, id: notice.id }).catch((cause: unknown) => {
               if (!isCurrent()) return;
-              shown.delete(reason);
+              shown.delete(row);
               report({ message: "dohc could not dismiss this notice. Open this workspace again to try again.", cause });
             });
           },
@@ -93,5 +109,5 @@ export function useChatDispatchNotices(
       if (isCurrent()) report({ message: "dohc could not load dispatch notices. Open this workspace again to try again.", cause });
     });
     return () => { active = false; unsubscribe(); };
-  }, [workspaceId, ready, report, clear]);
+  }, [workspaceId, ready, report, clear, clearIdentity]);
 }

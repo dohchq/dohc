@@ -3557,6 +3557,9 @@ const chatDispatchService = createChatDispatchService({
   onDispatchNotice: (workspace, notice) => {
     withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
   },
+  onThreadResumed: (workspace, threadId) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.clear(workspace.workspaceId, "budget-paused", threadId));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),

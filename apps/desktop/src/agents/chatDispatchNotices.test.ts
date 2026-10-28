@@ -41,6 +41,20 @@ it("clears a forgotten workspace without clearing another workspace", () => {
   expect(notices.register("b").notices).toHaveLength(1);
 });
 
+it("keeps a pause per thread, and takes back only the thread that resumed", () => {
+  const publish = vi.fn();
+  const notices = createChatDispatchNotices(publish);
+  notices.report("a", { reason: "budget-paused", threadId: "t1", message: "Paused in #launch." });
+  notices.report("a", { reason: "budget-paused", threadId: "t2", message: "Paused in #general." });
+  notices.report("a", { reason: "budget-paused", threadId: "t1", message: "Paused in #launch again." });
+  expect(notices.register("a").notices.map(({ threadId, message }) => [threadId, message])).toEqual([
+    ["t1", "Paused in #launch again."], ["t2", "Paused in #general."],
+  ]);
+  notices.clear("a", "budget-paused", "t1");
+  expect(notices.register("a").notices.map(({ threadId }) => threadId)).toEqual(["t2"]);
+  expect(publish).toHaveBeenLastCalledWith(notices.register("a"));
+});
+
 it("takes back one reason's notice and leaves the others", () => {
   const publish = vi.fn();
   const notices = createChatDispatchNotices(publish);

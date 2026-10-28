@@ -2922,7 +2922,7 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openChatsNavInTab = chatEditors.open;
   useChatDispatchNotices(
-    workspaceId, workspaceIsReady, reportShellFailure, clearKind,
+    workspaceId, workspaceIsReady, reportShellFailure, clearKind, clearIdentity,
     () => void trustWorkspace(),
     (nav) => { openChatsNavInTab(nav); },
   );

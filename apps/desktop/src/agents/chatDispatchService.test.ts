@@ -185,6 +185,7 @@ interface Fixture {
   }>;
   errors: unknown[];
   dispatchNotices: Array<{ workspace: ChatDispatchWorkspace; notice: Omit<ChatDispatchNotice, "id"> }>;
+  resumed: string[];
   notices: PostNoticeInput[];
   // Where the service keeps the runs whose notice is owed, and its own
   // view of them, which changes only once the file does.
@@ -540,6 +541,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const attributions: Fixture["attributions"] = [];
   const errors: unknown[] = [];
   const dispatchNotices: Fixture["dispatchNotices"] = [];
+  const resumed: string[] = [];
   const notices: PostNoticeInput[] = [];
   const owedRunNoticesPath = join(stateRoot, "owed-run-notices.json");
   const owedRunNotices = createOwedRunNotices(() => owedRunNoticesPath);
@@ -677,6 +679,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       if (error) throw error;
       dispatchNotices.push({ workspace, notice });
     },
+    onThreadResumed: (_workspace, threadId) => resumed.push(threadId),
     runNotices: {
       // One notice per id, as the notice store keeps them.
       post: async (input) => {
@@ -718,6 +721,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     attributions,
     errors,
     dispatchNotices,
+    resumed,
     notices,
     owedRunNoticesPath,
     owedRunNotices,
@@ -1990,6 +1994,8 @@ describe("chatDispatchService", () => {
 
     await fixture.service.resumeThreadDispatch(WORKSPACE_ID, pending.threadId);
     expect(await fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId)).toBe(false);
+    // Main takes back this thread's pause notice.
+    expect(fixture.resumed).toEqual([pending.threadId]);
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toMatchObject({
       liveRunId: expect.any(String),

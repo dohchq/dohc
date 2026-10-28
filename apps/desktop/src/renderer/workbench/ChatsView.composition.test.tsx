@@ -739,16 +739,6 @@ describe("ChatsView agent offer", () => {
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
   });
 
-  it("names dispatch's cause and opens Settings → Agents when no runner command is set", async () => {
-    const user = userEvent.setup();
-    const onSetupAgent = vi.fn();
-    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false, agents: [] }, onSetupAgent));
-    await user.click(await screen.findByTestId("chats-channel"));
-    expect((await pickAgent(user, "chats-new-thread")).dataset.state).toBe("no-command");
-    await user.click(screen.getByTestId("composer-agent-offer-setup"));
-    expect(onSetupAgent).toHaveBeenCalledOnce();
-  });
-
   it("follows a thread's dispatch once read, and leaves when another thread opens", async () => {
     const user = userEvent.setup();
     const dispatch = deferred<ChatDispatchStateForThreadResult>();

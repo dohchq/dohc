@@ -4049,7 +4049,6 @@ export function ChatsView(props: {
             onRosterPick={agentOffer.onRosterPick}
             rosterScope={agentOffer.scope}
             agentOffer={agentOffer.offer}
-            onSetUpAgent={props.onSetupAgent}
           />
         </div>
       </div>
@@ -4141,7 +4140,6 @@ export function ChatsView(props: {
               onRosterPick={agentOffer.onRosterPick}
               rosterScope={agentOffer.scope}
               agentOffer={agentOffer.offer}
-              onSetUpAgent={props.onSetupAgent}
             />
           ) : (
             <ComposerNotice testId="chats-dm-ended">
@@ -4402,7 +4400,6 @@ export function ChatsView(props: {
                 onRosterPick={agentOffer.onRosterPick}
                 rosterScope={agentOffer.scope}
                 agentOffer={agentOffer.offer}
-                onSetUpAgent={props.onSetupAgent}
               />
             </div>
           )}
@@ -4716,7 +4713,6 @@ export function ChatsView(props: {
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
-            onSetupAgent={props.onSetupAgent}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
             {...(agentDm ? {
@@ -4755,7 +4751,6 @@ export function ChatsView(props: {
                   onRosterPick={agentOffer.onRosterPick}
                   rosterScope={agentOffer.scope}
                   agentOffer={agentOffer.offer}
-                  onSetUpAgent={props.onSetupAgent}
                 />
               </div>
             ) : null}

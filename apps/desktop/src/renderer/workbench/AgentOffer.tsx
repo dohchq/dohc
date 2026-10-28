@@ -9,14 +9,12 @@ import {
   type AgentRosterPick,
 } from "../offers/agentAddressed";
 import { ownAgentPresentation } from "./actorPresentation";
-import { agentMentionId } from "../../settings/userSettings";
 import { ChatAvatar } from "./ChatAvatar";
 import type { AgentSetupSummary } from "./ChatsView";
 
 // The words for a state, and the width below which the folder chip hides so
 // the words are never cut: a post measures the offer, a stream composer
-// measures the composer. Dispatch's own notice names the two causes a send
-// does not start a run. An unknown state says nothing about running.
+// measures the composer. An unknown state says nothing about running.
 const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: { post: string; stream: string } }> = {
   runs: { words: "Runs when you send", hideFolder: { post: "@max-[15rem]:hidden", stream: "@max-[16rem]/composer:hidden" } },
   working: { words: "Runs after the current run", hideFolder: { post: "@max-[17rem]:hidden", stream: "@max-[18rem]/composer:hidden" } },
@@ -24,8 +22,6 @@ const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: { pos
     words: "Replies paused · runs after Resume",
     hideFolder: { post: "@max-[21rem]:hidden", stream: "@max-[22rem]/composer:hidden" },
   },
-  "runner-off": { words: "Chat runner is off in Settings" },
-  "no-command": { words: "No chat runner is set up" },
   unknown: { words: null },
 };
 
@@ -61,12 +57,10 @@ export function useAgentOffer(input: {
   const agent = pick?.scope === scope ? pick.agent : null;
   const offer = useMemo(() => {
     if (!agent) return null;
-    const picked = setup?.agents.find(({ id }) => agentMentionId(id) === agent.id);
     return detectAgentAddressed(workspaceId, agent, {
       workspaceId: setup ? setup.workspaceId : workspaceId,
       agentId: agent.id,
       presentation: ownAgentPresentation,
-      runner: setup ? { command: picked !== undefined, enabled: picked?.enabled === true } : null,
       runActive: setup ? setup.agentRunActive : null,
       paused: dispatch ? dispatch.paused : null,
       liveRun: dispatch ? dispatch.liveRunId !== null : null,
@@ -84,12 +78,10 @@ export function useAgentOffer(input: {
 export const AgentOffer = memo(function AgentOffer(props: {
   offer: AgentAddressedOffer;
   surface: "post" | "stream";
-  onSetUp?: () => void;
 }) {
   const { offer } = props;
   const { words } = STATES[offer.state];
   const hideFolder = STATES[offer.state].hideFolder?.[props.surface];
-  const blocked = offer.state === "runner-off" || offer.state === "no-command";
   return (
     <div
       role="status"
@@ -115,18 +107,6 @@ export const AgentOffer = memo(function AgentOffer(props: {
       </span>
       <span className="sr-only">{offer.agent.label}{offer.working ? ", agent working" : ""}</span>
       {words ? <span data-testid="composer-agent-offer-words" className="min-w-0 truncate" title={words}>{words}</span> : null}
-      {blocked && props.onSetUp ? (
-        <button
-          type="button"
-          data-testid="composer-agent-offer-setup"
-          aria-label="Set up the chat runner in Settings → Agents"
-          title="Settings → Agents"
-          onClick={props.onSetUp}
-          className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
-        >
-          Set up
-        </button>
-      ) : null}
       {offer.state === "unknown" && offer.reach ? (
         // Alone, the folder needs its verb.
         <span data-testid="composer-agent-offer-reach" className="min-w-0 truncate" title={`Reaches ${offer.reach}`}>

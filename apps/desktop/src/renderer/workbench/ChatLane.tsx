@@ -48,7 +48,6 @@ export function ChatLane(props: {
   revision: number;
   // What a picked agent's offer says. The lane does not read its dispatch.
   agentSetup?: AgentSetupSummary | null;
-  onSetupAgent?: () => void;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
@@ -386,7 +385,6 @@ export function ChatLane(props: {
           onRosterPick={agentOffer.onRosterPick}
           rosterScope={agentOffer.scope}
           agentOffer={agentOffer.offer}
-          onSetUpAgent={props.onSetupAgent}
         />
       )}
     </div>

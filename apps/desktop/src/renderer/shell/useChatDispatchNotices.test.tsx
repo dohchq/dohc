@@ -28,7 +28,7 @@ function setup() {
   const openChat = vi.fn();
   const mount = (workspaceId = "a", ready = true) => renderHook((props) => {
     const errors = useShellError(props.workspaceId);
-    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, trust, openChat);
+    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, errors.clearIdentity, trust, openChat);
     return errors;
   }, { initialProps: { workspaceId, ready } });
   return { store, register, dismiss, mount, listeners, removed, trust, openChat };
@@ -170,4 +170,31 @@ it.each([
   expect(paused?.action?.label).toBe("Open");
   await act(async () => paused?.action?.run());
   expect(h.openChat).toHaveBeenCalledWith({ level: "thread", channel, thread });
+});
+
+it("lands Open in the paused chat, closing its toast and keeping its row", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
+  const hook = h.mount();
+  await act(async () => {});
+  const [paused] = hook.result.current.shellErrors;
+  expect(paused?.seen).toBe(false);
+  await act(async () => hook.result.current.runShellErrorAction(paused!.id));
+  expect(h.openChat).toHaveBeenCalledWith({ level: "thread", channel: GROUP, thread: GROUP_CHAT });
+  expect(hook.result.current.shellErrors).toEqual([{ ...paused, seen: true }]);
+  expect(h.dismiss).not.toHaveBeenCalled();
+});
+
+it("takes back a resumed chat's pause, and keeps another chat's", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
+  h.store.report("a", { reason: "budget-paused", threadId: WAKE_POST.id, channelId: AGENT_DM.id, message: "Paused in \"Nova\"." });
+  h.store.report("a", notice("no-runner"));
+  const hook = h.mount();
+  await act(async () => {});
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Paused in #Planning.", "Paused in \"Nova\".", "Agent dispatch notice: no-runner."]);
+  act(() => h.store.clear("a", "budget-paused", GROUP_CHAT.id));
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Paused in \"Nova\".", "Agent dispatch notice: no-runner."]);
+  act(() => h.store.clear("a", "budget-paused", WAKE_POST.id));
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Agent dispatch notice: no-runner."]);
 });

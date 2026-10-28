@@ -134,9 +134,8 @@ export function MentionComposer(props: {
   onRosterPick?: (pick: AgentRosterPick | null) => void;
   rosterScope?: string;
   // What sending to the picked agent does. The parent derives it from the
-  // pick it was told about; Set up opens Settings → Agents.
+  // pick it was told about.
   agentOffer?: AgentAddressedOffer | null;
-  onSetUpAgent?: () => void;
   // Bars on a stream composer's top edge, such as Replying to. The agent
   // offer floats above them.
   above?: ReactNode;
@@ -877,7 +876,7 @@ export function MentionComposer(props: {
             ) : null}
             {pollButton("post")}
             {props.agentOffer ? (
-              <AgentOffer offer={props.agentOffer} surface="post" onSetUp={props.onSetUpAgent} />
+              <AgentOffer offer={props.agentOffer} surface="post" />
             ) : (
               <span className="flex-1" />
             )}
@@ -959,7 +958,7 @@ export function MentionComposer(props: {
       {pollBlock}
       {form}
       {props.agentOffer ? (
-        <AgentOffer offer={props.agentOffer} surface="stream" onSetUp={props.onSetUpAgent} />
+        <AgentOffer offer={props.agentOffer} surface="stream" />
       ) : null}
     </div>
   );

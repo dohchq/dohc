@@ -183,6 +183,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   onAgentRequestsChanged?(workspace: ChatDispatchWorkspace, channelId: string | null): void;
   onPausedChanged?(paused: boolean): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
+  // A paused thread resumed, so its pause notice is over.
+  onThreadResumed?(workspace: ChatDispatchWorkspace, threadId: string): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth, for the person main names.
   setRunAttribution(
@@ -1546,6 +1548,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         paused: false,
       });
       notifyRunUpdated(workspace, threadId);
+      try {
+        options.onThreadResumed?.(workspace, threadId);
+      } catch (error) {
+        reportError(error);
+      }
       budgetBypassThreads.add(threadKey(workspaceId, threadId));
       await scanAndDrain(workspace);
     });
