@@ -11,6 +11,126 @@ use std::path::PathBuf;
 use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_undone_relation_delete_completes_once_and_skips_later_gates() {
+    use dohc_engine_domain::{DeleteTextFile, reconcile_collections_in_tx, set_collection_adoption_state_in_tx};
+    const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let scratch = ScratchDir::new().unwrap();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    store.bind_root_token(token, &NoFaults).unwrap();
+    VersionedTextStore::new(&mut store).ensure_main_version("w", "main", 1, &NoFaults).unwrap();
+    let source = format!("---\nid: {RECORD}\nrelated: {TARGET}\n---\n\nHeld source\n");
+    let target = format!("---\nid: {TARGET}\n---\n\nTarget\n");
+    std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+    for (object, path, text) in [
+        ("schema", "tasks/collection.yaml", "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n"),
+        ("held", "tasks/a.md", source.as_str()),
+        ("target", "tasks/b.md", target.as_str()),
+        ("other", "other.txt", "Original source\n"),
+    ] {
+        VersionedTextStore::new(&mut store).write_text(&WriteText {
+            workspace_id: "w".into(), version_id: "main".into(), object_id: object.into(),
+            path: path.into(), text: text.into(), moment_id: object.into(), metadata_origin: "test".into(),
+            metadata_summary: None, metadata_correlation_id: None, author_json: None, now_ms: 2, request_id: None,
+        }, &NoFaults).unwrap();
+        std::fs::write(scratch.path().join(path), text).unwrap();
+    }
+    store.write_with(&NoFaults, |tx| {
+        reconcile_collections_in_tx(tx, "w", "main")?;
+        set_collection_adoption_state_in_tx(tx, "w", "main", "tasks/a.md", RECORD, "adopted")?;
+        set_collection_adoption_state_in_tx(tx, "w", "main", "tasks/b.md", TARGET, "adopted")?;
+        Ok::<_, dohc_engine_domain::DomainError>(())
+    }).unwrap();
+    VersionedTextStore::new(&mut store).delete_text_file(&DeleteTextFile {
+        workspace_id: "w".into(), version_id: "main".into(), path: "tasks/b.md".into(),
+        moment_id: "delete-target".into(), metadata_origin: "test".into(), metadata_summary: None,
+        metadata_correlation_id: Some("dohc-operation:delete-target".into()), author_json: None,
+        now_ms: 3, request_id: None,
+    }, &NoFaults).unwrap();
+    std::fs::remove_file(scratch.path().join("tasks/b.md")).unwrap();
+    let held = DocKey::new("w", "main", "held").unwrap();
+    let other = DocKey::new("w", "main", "other").unwrap();
+    let other_doc = Ydoc::wire();
+    other_doc.plaintext_insert(0, "Original source\n");
+    for (key, path, kind) in [(&held, "tasks/a.md", ContentKind::Richdoc), (&other, "other.txt", ContentKind::Plaintext)] {
+        let doc = Ydoc::wire();
+        if kind == ContentKind::Richdoc {
+            doc.rewrite_content_to_markdown(kind, &source).unwrap();
+            doc.richdoc_append_paragraph("Accepted edits stay canonical");
+            let wire = yrs::Doc::new();
+            wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(),
+                "dohcMarkdownSourceSha256", hex_sha256(source.as_bytes()));
+            wire.get_or_insert_map("meta").insert(&mut wire.transact_mut(),
+                "dohcMarkdownSourceProjectionSha256", "f".repeat(64));
+            doc.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
+        } else {
+            doc.apply(&other_doc.encode_full_state()).unwrap();
+        }
+        dohc_engine_collab::claim_base(&mut store, key, kind, &doc.encode_full_state(), &NoFaults, 4).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id,key.version_id,key.object_id,path])
+            .map_err(StorageError::persist_public)).unwrap();
+    }
+    let other_claim = dohc_engine_collab::read_marker(&store, &other).unwrap().unwrap().lineage_claim_id;
+    drop(store);
+    let service = EngineService::new();
+    let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+        "rootDir":scratch.path(),"workspaceId":"w","captureMode":"none",
+    })).await.unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let open = service.open(Some(&handle)).unwrap();
+    open.shutdown_capture().await;
+    let result = open.actor.reconcile_collections("w".into(), "main".into(), scratch.path().to_owned(),
+        service.leases.clone(), Arc::new(()), 10, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
+    assert_eq!(result.held_documents.len(), 1);
+    let pending = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].obligation.kind, Kind::RelationCleanup);
+    open.actor.history_undo_in_turns("w".into(), "dohc-operation:delete-target".into(), "undo-delete".into(),
+        None, open.root.clone(), Arc::new(NoFaults), 11,
+        [open.capture_apply_gate.clone(), open.session_ops.clone()], Arc::new(()), None,
+        CancellationToken::new()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(run(Arc::downgrade(&open), handle.clone(), service.sessions.clone(),
+        service.leases.clone(), service.self_writes.scoped(&open.root), service.events.clone(), cancel.clone(), Some(send)));
+    let wake = open.actor.markdown_recovery_wake();
+    wake.notify_one();
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv()).await.unwrap().unwrap(), vec![held]);
+    assert!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty());
+    let capture = open.capture_apply_gate.lock().await;
+    let sessions = open.session_ops.lock().await;
+    let mut head = hex_sha256(b"Original source\n");
+    for turn in 0..2 {
+        let update = other_doc.plaintext_insert(0, &format!("Edit {turn} "));
+        open.actor.ydoc_record_update(other.clone(), "other.txt".into(), ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly, update, None, None, other_claim.clone(), false,
+            None, None, 20 + turn, Arc::new(NoFaults), CancellationToken::new(), None).await.unwrap();
+        let saved = open.actor.ydoc_settle(scratch.path().to_owned(), other.clone(), "other.txt".into(),
+            ContentKind::Plaintext, other_claim.clone(), Some(head), "other-owner".into(), Arc::new(()),
+            30 + turn, Arc::new(NoFaults), CancellationToken::new(), None, None).await.unwrap().settled().unwrap();
+        head = saved.sha256;
+        wake.notify_one();
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv()).await
+            .expect("completed cleanup scans do not wait for either gate").unwrap().is_empty());
+    }
+    cancel.cancel();
+    task.await.unwrap();
+    while let Ok(attempts) = passes.try_recv() { assert!(attempts.is_empty()); }
+    drop(sessions);
+    drop(capture);
+    let store = EngineStore::open_read_only(&db).unwrap();
+    assert!(store.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, "w")).unwrap().is_empty());
+    assert!(dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(), source);
+    service.workspace_close(Some(handle)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
     let scratch = ScratchDir::new().unwrap();
     let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

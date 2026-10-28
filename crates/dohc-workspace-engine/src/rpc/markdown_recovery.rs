@@ -95,12 +95,24 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
                 Err(_) => { blocked.insert(document); continue; }
             };
             let outcome = if matches!(owed.kind, Kind::CollectionAdoption | Kind::RelationCleanup) {
-                open.actor.reconcile_collections_guarded(open.workspace_id.clone(), owed.key.version_id.clone(),
+                match open.actor.reconcile_collections_guarded(open.workspace_id.clone(), owed.key.version_id.clone(),
                     open.root.clone(), leases.clone(), Arc::new(writes.clone()), now, Arc::new(NoFaults),
-                    cancel.clone(), root_guard).await.map(|result| {
+                    cancel.clone(), root_guard).await {
+                    Ok(result) => {
                         crate::events::emit_automation_claimed(&events, &open.workspace_id, &result.automation_claims);
-                        result.held_documents.is_empty() && !result.lease_held && !result.waits_for_pull
-                    })
+                        match open.actor.markdown_recovery_candidates(open.workspace_id.clone()).await {
+                            Ok(pending) if !pending.iter().any(|row| row.obligation.order == owed.order) => Ok(true),
+                            Ok(_) if !result.waits_for_pull && !result.markdown_obligation_candidates.iter()
+                                .any(|(key, kind, operation)| key == &owed.key && kind == &owed.kind
+                                    && operation == &owed.operation_id) => {
+                                open.actor.complete_markdown_obligation(owed.clone(), now).await.map(|()| true)
+                            }
+                            Ok(_) => Ok(false),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
             } else if owed.kind == Kind::Session && active.is_some() {
                 let (id, path, kind, lineage, head, generation, consent) = active.unwrap();
                 match open.actor.ydoc_settle(open.root.clone(), owed.key.clone(), path, kind, lineage,

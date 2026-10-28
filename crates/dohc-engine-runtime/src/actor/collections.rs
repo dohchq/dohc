@@ -2171,6 +2171,7 @@ pub type CollectionCommitListener = Arc<dyn Fn(&CollectionReconciliation) + Send
 #[derive(Debug, Default)]
 pub struct CollectionReconciliation {
     pub held_documents: Vec<(DocKey, String)>,
+    pub markdown_obligation_candidates: Vec<(DocKey, dohc_engine_collab::markdown_write_obligations::Kind, String)>,
     /// An adoption candidate or relation-cleanup source still has a live lease.
     pub lease_held: bool,
     /// Workspace paths the reconciliation rewrote: record id adoptions and
@@ -2240,6 +2241,22 @@ fn reconcile_collections_on_store(
     let mut pending_seed_objects = HashSet::new();
     let mut lease_held = false;
     let mut held_documents = Vec::new();
+    let mut markdown_obligation_candidates = Vec::new();
+    for candidate in &reconciliation.adoptions {
+        markdown_obligation_candidates.push((
+            DocKey::new(workspace_id, version_id, &candidate.object_id)?,
+            dohc_engine_collab::markdown_write_obligations::Kind::CollectionAdoption,
+            format!("collection-adoption:{}", candidate.record_id),
+        ));
+    }
+    for candidate in &reconciliation.relation_cleanups {
+        markdown_obligation_candidates.push((
+            DocKey::new(workspace_id, version_id, &candidate.source_object_id)?,
+            dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup,
+            format!("collection-relation-cleanup:{}:{}:{}",
+                candidate.source_record_id, candidate.field_name, candidate.target_record_id),
+        ));
+    }
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -2385,6 +2402,7 @@ fn reconcile_collections_on_store(
     }
     Ok(CollectionReconciliation {
         held_documents,
+        markdown_obligation_candidates,
         lease_held,
         changed_paths,
         automation_claims,
