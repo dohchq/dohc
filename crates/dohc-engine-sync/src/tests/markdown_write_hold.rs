@@ -6,6 +6,96 @@ use yrs::{Map, ReadTxn, Transact};
 const PATH: &str = "notes/held.md";
 const ORIGIN: &str = "held-peer";
 
+fn unsafe_witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
+    use dohc_engine_storage::hex_sha256;
+    let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+    let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+    assert!(output.status.success());
+    let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let node = std::path::PathBuf::from(runtime.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
+    runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
+    let mut manifest = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
+    let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
+        .replace("MANIFEST", &manifest.to_string()).replace("MODE", "\"witness-unsafe\"");
+    let bundle = scratch.path().join("unsafe-witness-reader.cjs");
+    std::fs::write(&bundle, &script).unwrap();
+    manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
+    manifest["sources"] = json!([]);
+    let manifest_path = scratch.path().join("reader-manifest.json");
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    dohc_engine_reader::Config { node, bundle, manifest: manifest_path }
+}
+
+#[tokio::test]
+async fn markdown_hold_winning_lineage_keeps_the_losing_source_and_recovers_local_edits() {
+    use dohc_engine_storage::hex_sha256;
+    for deferred in [false, true] {
+        let mut f = Fixture::new();
+        let source = "<div>Source meaning stays in this file</div>\n";
+        let source_sha = seed_text_head(&mut f.store, &f.key.object_id, PATH, source);
+        std::fs::create_dir_all(f.scratch.path().join("notes")).unwrap();
+        std::fs::write(f.scratch.path().join(PATH), source).unwrap();
+        let modified = std::fs::metadata(f.scratch.path().join(PATH)).unwrap().modified().unwrap();
+        let local = Ydoc::wire();
+        local.richdoc_append_paragraph("Source meaning stays in this file");
+        let wire = yrs::Doc::new();
+        let meta = wire.get_or_insert_map("meta");
+        let projection_sha = hex_sha256(local.project(ContentKind::Richdoc).unwrap().content.as_bytes());
+        {
+            let mut tx = wire.transact_mut();
+            meta.insert(&mut tx, "dohcMarkdownSource", source);
+            meta.insert(&mut tx, "dohcMarkdownSourceSha256", source_sha.as_str());
+            meta.insert(&mut tx, "dohcMarkdownSourceProjectionSha256", projection_sha.as_str());
+        }
+        local.apply(&wire.transact().encode_state_as_update_v1(&yrs::StateVector::default())).unwrap();
+        let base = local.encode_full_state();
+        dohc_engine_collab::claim_base_at_relay(&mut f.store, &f.key, ContentKind::Richdoc, &base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(), &NoFaults, 1000).unwrap();
+        f.store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE ydoc_docs SET path=?1,last_settled_sha=?2", params![PATH, source_sha])
+            .map_err(SyncError::persist)).unwrap();
+        let update = local.richdoc_append_paragraph("Losing local edits need their own copy");
+        f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+            tx, &f.key, &update, None, None, 1001)).unwrap();
+        let incoming = Ydoc::wire();
+        incoming.apply(&base).unwrap();
+        incoming.richdoc_append_paragraph("Winning lineage text");
+        let bytes = incoming.encode_full_state();
+        f.claim = f.store.put_binary_blob(&bytes).unwrap();
+        let resolver = std::sync::Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+            std::sync::Arc::new(dohc_engine_reader::Reader::new(Some(unsafe_witness_reader(&f.scratch))))));
+        f.cache.reader_resolver = Some(resolver.clone());
+        let mut op = f.op(0, &bytes, true);
+        op.relay_seq = Some(10);
+        let leases: &dyn LeaseProbe = if deferred { &AlwaysLive } else { &NoLiveLeases };
+        loop {
+            let result = if deferred {
+                apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, leases).unwrap();
+                drain_deferred_ydoc_for_key(&mut f.store, &mut f.cache, &f.key, &NoFaults).map(|_| ())
+            } else {
+                apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, leases).map(|_| ())
+            };
+            match result {
+                Ok(()) => break,
+                Err(SyncError::MarkdownWitnessCheckPending { pending, .. }) => pending.resolve().await,
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        let saved = VersionedTextStore::new(&mut f.store).read_text("ws", "main", PATH).unwrap().unwrap();
+        assert_eq!(saved.text, source);
+        assert_eq!(saved.blob_sha256, source_sha);
+        assert_eq!(std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap(), source);
+        assert_eq!(std::fs::metadata(f.scratch.path().join(PATH)).unwrap().modified().unwrap(), modified);
+        let recovered: Vec<String> = f.store.read_with(|conn| {
+            let mut stmt = conn.prepare("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.path<>?1")?;
+            stmt.query_map([PATH], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()
+        }).unwrap();
+        assert!(recovered.iter().any(|text| text.contains("Losing local edits need their own copy")));
+        assert_eq!(f.store.table_row_count("conflicts").unwrap(), 0);
+        assert_eq!(read_replication_acked_seq(&f.store, "ws", ORIGIN).unwrap(), 0);
+    }
+}
+
 struct Fixture {
     scratch: ScratchDir,
     db: std::path::PathBuf,

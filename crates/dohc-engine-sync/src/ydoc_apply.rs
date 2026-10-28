@@ -468,7 +468,7 @@ fn apply_deferred_base(
         };
         let losing_projection = match (losing_doc.as_ref(), marker_before.as_ref()) {
             (Some(doc), Some(marker)) => {
-                Some(project_ydoc_with_store(tx, &key, doc, marker.content_kind)?.content)
+                Some(project_ydoc_with_store(tx, &key, doc, marker.content_kind)?)
             }
             (None, _) => None,
             (Some(_), None) => {
@@ -618,8 +618,8 @@ fn apply_deferred_base(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: payload.is_base_state,
             },
-            losing_claim_id.as_deref(), losing_projection.as_deref(), losing_authors.as_deref(), last_settled_sha.as_deref(),
-            &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy,
+            losing_claim_id.as_deref(), losing_doc.as_ref(), losing_projection.as_ref(), losing_authors.as_deref(), last_settled_sha.as_deref(),
+            &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy, resolver,
         )?;
         if let Some(opened) = conflict {
             record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, opened)?;
@@ -3001,7 +3001,8 @@ fn preserve_base_sides_in_tx(
     path: &str,
     incoming: crate::ydoc_recovery::RecoveryEnvelopeBinding<'_>,
     losing_claim_id: Option<&str>,
-    losing_projection: Option<&str>,
+    losing_doc: Option<&dohc_engine_collab::Ydoc>,
+    losing_projection: Option<&dohc_engine_collab::Projection>,
     losing_authors: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
@@ -3009,16 +3010,18 @@ fn preserve_base_sides_in_tx(
     origin_seq: i64,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<(Option<i64>, Vec<String>), SyncError> {
     let mut recovered_paths = Vec::new();
     // Equal projections need neither a choice nor a second copy.
-    if let (Some(claim), Some(local)) = (losing_claim_id, losing_projection)
-        && hex_sha256(local.as_bytes()) != hex_sha256(incoming_content.as_bytes())
+    if let (Some(claim), Some(doc), Some(local)) = (losing_claim_id, losing_doc, losing_projection)
+        && hex_sha256(local.content.as_bytes()) != hex_sha256(incoming_content.as_bytes())
     {
         if let Some(opened) = conflict_replaced_lineage_in_tx(
             tx,
             key,
             path,
+            doc,
             local,
             losing_authors,
             last_settled_sha,
@@ -3027,6 +3030,7 @@ fn preserve_base_sides_in_tx(
             origin_seq,
             now_ms,
             search_policy,
+            resolver,
         )? {
             return Ok((Some(opened), recovered_paths));
         }
@@ -3036,7 +3040,7 @@ fn preserve_base_sides_in_tx(
             path,
             incoming,
             claim,
-            local,
+            &local.content,
             losing_authors,
             origin_id,
             origin_seq,
@@ -3129,7 +3133,8 @@ fn preserve_incomplete_base_in_tx(
     }
     // Merge the durable updates as wire data: a full-state encode alone omits
     // unresolved insertions and deletions.
-    let local = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?.content;
+    let local_projection = project_ydoc_with_store(tx, key, &doc, marker.content_kind)?;
+    let local = &local_projection.content;
     let pending_authors = dohc_engine_collab::author_coverage::reserved_in(tx, key)
         .map_err(map_collab_hard_error)?
         .json();
@@ -3146,7 +3151,7 @@ fn preserve_incomplete_base_in_tx(
     let mut recovered_paths = Vec::new();
     if open || external.is_some() {
         let preserved = if open {
-            local.clone()
+            local.to_owned()
         } else {
             text::read(tx, &external.unwrap().blob_sha256).map_err(SyncError::corrupt)?
         };
@@ -3180,7 +3185,7 @@ fn preserve_incomplete_base_in_tx(
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        if let Some(prior) = prior.filter(|prior| prior != &incoming && prior != &local) {
+        if let Some(prior) = prior.filter(|prior| prior != &incoming && prior != local) {
             let recovery = crate::ydoc_recovery::create_recovery_in_tx(
                 tx,
                 key,
@@ -3202,7 +3207,8 @@ fn preserve_incomplete_base_in_tx(
         tx,
         key,
         &payload.path,
-        &local,
+        &doc,
+        &local_projection,
         (pending_authors != "[]").then_some(pending_authors.as_str()),
         snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
         &incoming,
@@ -3210,6 +3216,7 @@ fn preserve_incomplete_base_in_tx(
         origin_seq,
         now_ms,
         search_policy,
+        resolver,
     )?
     .unwrap_or(0);
     let mut updates = vec![doc.encode_full_state()];
@@ -3627,7 +3634,8 @@ fn conflict_replaced_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     path: &str,
-    local_content: &str,
+    local_doc: &dohc_engine_collab::Ydoc,
+    local_projection: &dohc_engine_collab::Projection,
     author_json: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
@@ -3635,11 +3643,13 @@ fn conflict_replaced_lineage_in_tx(
     origin_seq: i64,
     now_ms: i64,
     search_policy: Option<&SearchPolicySnapshot>,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<Option<i64>, SyncError> {
     if open_sync_conflict_id(tx, key)?.is_some() {
         return Ok(None);
     }
     let current = validate_retryable_ydoc_identity(tx, key, path)?;
+    let local_content = local_projection.content.as_str();
     let local_sha = hex_sha256(local_content.as_bytes());
     if current.snapshot.as_ref().is_some_and(|snapshot| {
         snapshot.blob_sha256 != local_sha && Some(snapshot.blob_sha256.as_str()) != last_settled_sha
@@ -3663,6 +3673,14 @@ fn conflict_replaced_lineage_in_tx(
             now_ms,
         )
         .map(Some);
+    }
+    use dohc_engine_collab::markdown_write_safety;
+    let head_sha256 = current.snapshot.as_ref().map(|snapshot| snapshot.blob_sha256.as_str());
+    if markdown_write_safety::holds(&local_projection.markdown_write_safety,
+        local_projection.witness_source_sha256.as_deref(), head_sha256)
+        && !markdown_write_safety::check_witness(local_doc, key, path, resolver)
+            .map_err(map_collab_hard_error)? {
+        return Ok(None);
     }
     let preimage = current
         .snapshot
@@ -4957,19 +4975,23 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
                 return Ok(result);
             }
-            let losing_projection = if local_unpublished
+            let losing_doc = if local_unpublished
                 || marker_before.as_ref().is_some_and(|marker| {
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
                         && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
                 }) {
-                let doc = dohc_engine_collab::load_doc_in(tx, &claim_key)
-                    .map_err(map_collab_hard_error)?;
-                let marker = marker_before
-                    .as_ref()
-                    .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
-                Some(project_ydoc_with_store(tx, &claim_key, &doc, marker.content_kind)?.content)
+                Some(dohc_engine_collab::load_doc_in(tx, &claim_key)
+                    .map_err(map_collab_hard_error)?)
             } else {
                 None
+            };
+            let losing_projection = match losing_doc.as_ref() {
+                Some(doc) => {
+                    let marker = marker_before.as_ref()
+                        .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
+                    Some(project_ydoc_with_store(tx, &claim_key, doc, marker.content_kind)?)
+                }
+                None => None,
             };
             let losing_authors = if losing_projection.is_some() {
                 dohc_engine_collab::author_coverage::reserved_in(tx, &claim_key)
@@ -5087,7 +5109,8 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 &base_path,
                 incoming.clone(),
                 losing_claim_id.as_deref(),
-                losing_projection.as_deref(),
+                losing_doc.as_ref(),
+                losing_projection.as_ref(),
                 losing_authors.as_deref(),
                 losing_last_settled_sha.as_deref(),
                 &projection.content,
@@ -5095,6 +5118,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 op.origin_seq,
                 op.recorded_at_ms,
                 search_policy.as_ref(),
+                reader_resolver.as_deref(),
             )?;
             if let Some(conflicts_opened) = conflict {
                 record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
