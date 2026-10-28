@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, sessionVerdict, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -108,7 +108,7 @@ it('judges a session state as its live note', () => {
 it('settles a session by its witness when the source keeps its meaning, edited or not', () => {
   const respelled = seeded('Title\n=====\n\n* one\n')
   expect(witnessKeepsMeaning(respelled)).toBe(true)
-  expect(sessionVerdict(Y.encodeStateAsUpdate(respelled), null)).toEqual({ lossy: false, witnessKeepsMeaning: true })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(respelled), null)).toBe(false)
   respelled.getMap('frontmatter').set('status', 'done')
   expect(witnessKeepsMeaning(respelled)).toBe(true)
   expect(witnessKeepsMeaning(seeded('# Plan\n\nText.'))).toBe(true)
@@ -117,9 +117,9 @@ it('settles a session by its witness when the source keeps its meaning, edited o
 it('checks the whole session when its witness records a lossy source, or a projection the import no longer gives', () => {
   const lossy = seeded('<details>\n\nHidden.\n</details>\n')
   expect(witnessKeepsMeaning(lossy)).toBe(false)
-  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy), null)).toEqual({ lossy: true, witnessKeepsMeaning: false })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true)
   lossy.getMap('frontmatter').set('status', 'done')
-  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy), null)).toEqual({ lossy: true, witnessKeepsMeaning: false })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true)
   const reopened = new Y.Doc()
   Y.applyUpdate(reopened, Y.encodeStateAsUpdate(lossy))
   expect(isLossyDocument(reopened, null)).toBe(true)

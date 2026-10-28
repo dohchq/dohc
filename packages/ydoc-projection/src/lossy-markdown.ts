@@ -118,22 +118,6 @@ export function checkMarkdownWitness(source: unknown, sourceSha: unknown, projec
   return projectionSha === sha256(canonical) && sameMarkdownMeaning(source, canonical)
 }
 
-/**
- * isLossyDocument for a session's encoded state, and whether its witness
- * alone settled it, so the caller can remember that witness.
- */
-export function sessionVerdict(state: Uint8Array, headSha256: string | null): { lossy: boolean; witnessKeepsMeaning: boolean } {
-  const doc = new Y.Doc()
-  try {
-    Y.applyUpdate(doc, state)
-    const keeps = witnessKeepsMeaning(doc)
-    return { lossy: !keeps && (headSha256 === null
-      || headSha256 === doc.getMap('meta').get('dohcMarkdownSourceSha256')), witnessKeepsMeaning: keeps }
-  } finally {
-    doc.destroy()
-  }
-}
-
 /** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */
 export function unreadNoteRefusal(path: string): string {
   return `dohc couldn't read ${path} to check it, so nothing changed. Try again.`

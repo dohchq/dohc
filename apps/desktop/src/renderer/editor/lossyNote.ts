@@ -21,7 +21,7 @@ const STORED_VERDICTS = 'dohc.lossyNoteVerdicts';
 const checker = `${checkerUrl.slice(checkerUrl.lastIndexOf('/') + 1)} ${navigator.userAgent}`;
 const verdicts = storedVerdicts();
 const checks = new Map<string, Promise<boolean>>();
-type Answer = {lossy: boolean; witnessKeepsMeaning?: boolean};
+type Answer = {lossy: boolean};
 const requests = new Map<number, {resolve: (answer: Answer) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
 let worker: Worker | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,13 +76,13 @@ function idle(): void {
 function startWorker(): Worker {
   const started = new Worker(checkerUrl, {type: 'module'});
   started.onerror = () => {if (worker === started) stop(new Error('The note check stopped.'));};
-  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; witnessKeepsMeaning?: boolean; error?: string}>) => {
+  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; error?: string}>) => {
     if (worker !== started) return;
     const request = requests.get(data.id);
     if (!request) return;
     requests.delete(data.id);
     clearTimeout(request.timer);
-    if (typeof data.lossy === 'boolean') request.resolve({lossy: data.lossy, witnessKeepsMeaning: data.witnessKeepsMeaning});
+    if (typeof data.lossy === 'boolean') request.resolve({lossy: data.lossy});
     else request.reject(new Error(data.error ?? 'The note check failed.'));
     if (!requests.size) idle();
   };
