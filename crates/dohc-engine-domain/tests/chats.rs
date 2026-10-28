@@ -3163,18 +3163,27 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     // Two triggers in two threads (a claim marks only same-thread pendings done).
-    chats
-        .start_channel_thread(
-            &start_thread("agent-1", "t1", "mA", "@agent A", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("t1");
-    chats
-        .start_channel_thread(
-            &start_thread("agent-1", "t2", "mB", "@agent B", ChatActorKind::Human, 21),
-            &NO_FAULTS,
-        )
-        .expect("t2");
+    // An agent DM keeps one conversation, so each asks for its own thread.
+    for (thread_id, message_id, body, now) in
+        [("t1", "mA", "@agent A", 20), ("t2", "mB", "@agent B", 21)]
+    {
+        chats
+            .start_channel_thread(
+                &StartChannelThread {
+                    own_thread: true,
+                    ..start_thread(
+                        "agent-1",
+                        thread_id,
+                        message_id,
+                        body,
+                        ChatActorKind::Human,
+                        now,
+                    )
+                },
+                &NO_FAULTS,
+            )
+            .expect(thread_id);
+    }
     chats
         .enqueue_dispatch(WS, "mA", "default", "t1", 22, &NO_FAULTS)
         .expect("enq A");
@@ -3861,6 +3870,8 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     let start_y = {
         let mut start = start_thread("agent-x", "t-y", "m-y", "@agent", ChatActorKind::Human, 24);
         start.workspace_id = WS.to_owned();
+        // Its own thread, not t-x's conversation in the same agent DM.
+        start.own_thread = true;
         start
     };
     chats

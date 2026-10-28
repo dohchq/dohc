@@ -5928,7 +5928,7 @@ fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEn
                 channel_id: channel_id.to_owned(),
                 thread_id: "notes-thread".to_owned(),
                 message_id: "notes-message".to_owned(),
-                title: Some("Notes".to_owned()),
+                title: None,
                 lane: ChatThreadLane::Posts,
                 own_thread: false,
                 author_kind: ChatActorKind::Human,
