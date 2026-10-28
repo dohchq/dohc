@@ -55,6 +55,7 @@ export type Notice = {
   command?: string;
   // Closes the notice's toast once its row is read. The row stays.
   onRead?: () => void;
+  read?: boolean;
   Icon: typeof Bell;
 };
 
@@ -1225,6 +1226,7 @@ export function NoticeCenter(props: {
         ...(!error.seen && props.onHideWorkspaceError
           ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
           : {}),
+        read: error.seen,
         timeMs: error.atMs,
         // A success has nothing to report, so it has nothing to copy.
         copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
@@ -1564,7 +1566,7 @@ export function NoticeCenter(props: {
       return kept.length === current.size ? current : new Set(kept);
     });
   }, [notices, props.workspaceId, setAsideKey]);
-  const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
+  const unreadNotices = notices.filter((notice) => !notice.read && !localRead.has(localReadKey(props.workspaceId, notice)));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
   // The update toast closes once its row is read.
