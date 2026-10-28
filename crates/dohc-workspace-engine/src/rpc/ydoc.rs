@@ -2398,6 +2398,10 @@ impl EngineService {
 mod owner_draft_editor_tests;
 
 #[cfg(test)]
+#[path = "markdown_resync_tests.rs"]
+mod markdown_resync_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_name_matches_only_its_exact_spelling_on_disk() {
