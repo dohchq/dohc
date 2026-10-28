@@ -3,6 +3,7 @@ use dohc_engine_collab::{CollabError, LeaseRegistry};
 use dohc_engine_collab::markdown_write_obligations::{self as obligations, Kind, Obligation};
 use dohc_engine_domain::{DomainError, VersionedTextStore};
 use dohc_engine_storage::{NoFaults, TxnOutcome, hex_sha256};
+use rusqlite::{OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
