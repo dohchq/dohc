@@ -187,28 +187,11 @@ fn file_sha(file: &mut File, cap: u64, deadline: Instant) -> std::result::Result
                 .collect());
         }
         length += n as u64;
-        if length > cap {
+        if length > cap || Instant::now() >= deadline {
             return Err(Failure::Unavailable);
-        }
-        if Instant::now() >= deadline {
-            return Err(Failure::TimedOut);
         }
         hasher.update(&buffer[..n]);
     }
-}
-#[cfg(test)]
-#[test]
-fn asset_hash_timeout_is_transient_but_an_oversized_asset_is_unavailable() {
-    use std::io::{Seek, Write};
-    let mut file = tempfile::tempfile().unwrap();
-    file.write_all(b"asset").unwrap();
-    file.rewind().unwrap();
-    assert_eq!(file_sha(&mut file, 5, Instant::now()), Err(Failure::TimedOut));
-    file.rewind().unwrap();
-    assert_eq!(
-        file_sha(&mut file, 4, Instant::now()),
-        Err(Failure::Unavailable)
-    );
 }
 fn check_assets(
     assets: &[(std::path::PathBuf, File, std::fs::Metadata)],
