@@ -5,7 +5,7 @@ import {
   type DesktopUserSettings,
   type DesktopUserSettingsResult,
 } from "../settings/userSettings";
-import { settingsWithAgent } from "../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { readableAccent } from "./accentColor";
 import { applyLookSettings, differsOnlyInLook, initTheme } from "./theme";
@@ -73,6 +73,12 @@ describe("applying the settings file's look", () => {
       ...read(DEFAULT_USER_SETTINGS),
       ignored: [{ key: "editor.fontSize", reason: "invalid" }],
     })).toBe(false);
+    // dohc uses the agents in the order the file lists them.
+    const claude = testAgent({ name: "Claude Code" }), codex = testAgent({ name: "Codex" });
+    expect(differsOnlyInLook(
+      read({ ...DEFAULT_USER_SETTINGS, agents: { default: claude, codex } }),
+      read({ ...DEFAULT_USER_SETTINGS, agents: { codex, default: claude } }),
+    )).toBe(false);
   });
 });
 

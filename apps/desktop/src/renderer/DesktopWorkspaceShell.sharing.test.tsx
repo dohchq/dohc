@@ -1817,14 +1817,14 @@ describe("chats surface after a failed capture build", () => {
 });
 
 // #687/#589: the note's precedence and exact copy are pinned at the
-// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// AgentList layer, but every test there hands
 // sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
 // would leave every other suite green. This test drives the real command
 // palette -> Settings -> Agents path through the shell itself.
-describe("runner note reaches the card through the shell's own wiring", () => {
+describe("the Check note reaches Settings › Agents through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
@@ -1839,10 +1839,10 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     await user.keyboard("mcp");
     await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
-        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+        "The workspace engine starts when dohc starts. Restart dohc to check an agent.",
       ),
     );
   });
@@ -1858,7 +1858,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
       ),
     );
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
         "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
