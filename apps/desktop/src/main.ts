@@ -339,8 +339,8 @@ import { automationFailedNoticeId } from "@dohc/automation-executor/automation-f
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { localAutomationStoreFolder } from "./automations/localAutomationStore";
-import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
-import { wakeAgent } from "./automations/automationAgentWake";
+import { findChatMessage, hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
+import { wakeAgent, wokenAgent, type WokenAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -541,7 +541,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, firstAgent, firstAgentWithLaunch, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, automationAgent, firstAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -3885,14 +3885,14 @@ const automationScheduler = new AutomationScheduler({
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
-// The agent an automation wakes: the first agent, when dohc can start it.
-async function readyAgent(): Promise<{ id: string; name: string } | null> {
-  const agent = firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings);
-  return agent?.enabled ? { id: agent.id, name: agent.name } : null;
+// The agent an automation wakes, on or off: dispatch says when it is off.
+async function readyAgent(): Promise<WokenAgent | null> {
+  return wokenAgent((await readCachedUserSettingsFile(stateDir())).settings);
 }
 
+// A wake that needs a runner waits while the automation agent is off.
 async function agentRunnerReady(): Promise<boolean> {
-  return (await readyAgent()) !== null;
+  return automationAgent((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
 }
 
 async function wakeAutomationAgent(
@@ -3911,6 +3911,16 @@ async function wakeAutomationAgent(
       resolveAttachments: async () => [],
     };
     await wakeAgent({
+      posted: async (messageId) => {
+        signal.throwIfAborted();
+        const posted = await findChatMessage(place.store, workspaceId, messageId);
+        if (posted === null) return null;
+        const channelId = await place.store.findThreadChannelId({ workspaceId, threadId: posted.threadId });
+        const agentId = channelId === null ? undefined
+          : (await place.store.listChannels({ workspaceId })).find((channel) => channel.id === channelId)?.agentId;
+        if (agentId === undefined) throw new Error("dohc could not find the agent chat this automation's message is in.");
+        return { threadId: posted.threadId, agentId };
+      },
       readyAgent,
       agentChannelId: async (agent) => {
         signal.throwIfAborted();

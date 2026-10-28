@@ -302,7 +302,7 @@ describe("ChatsView My agent", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check-result").dataset.state).toBe("ok"),
     );
-    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" });
+    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a", agentId: "default" });
     await user.click(screen.getByTestId("chats-add-agent-submit"));
     await waitFor(() => expect(screen.queryByTestId("chats-add-agent")).toBeNull());
     // The check and the add each wrote the same settings: the name, the

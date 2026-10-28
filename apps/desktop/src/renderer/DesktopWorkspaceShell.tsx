@@ -2059,14 +2059,21 @@ export function DesktopWorkspaceShell(props: {
     tryStateLane.set(null);
   }, [tryStateLane]);
   const reportSettingsFailure = useCallback(
-    (message: string, cause?: unknown, retry?: () => Promise<void>) => {
+    (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
-      reportShellFailure({ message, cause, retry: retry ? () => {
+      reportShellFailure({ message, cause, ...(details ? { details } : {}), ...(identity !== undefined ? { identity } : {}), retry: retry ? () => {
         if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
         void retry();
       } : null });
     },
     [workspaceAdmission, workspaceId, reportShellFailure],
+  );
+  const showSettingsNotice = useCallback(
+    (message: string, undo?: () => void) => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+      showSuccessNotice(message, undo);
+    },
+    [workspaceAdmission, workspaceId, showSuccessNotice],
   );
   useUsageRecordStops(reportSettingsFailure);
 
@@ -6922,11 +6929,15 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {settingsSection ? (
-        <Overlay onClose={closeSettings}>
+        // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
+        // places itself against the window. `!` outranks the unlayered class.
+        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
+            onClearError={clearIdentity}
+            onNotice={showSettingsNotice}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
