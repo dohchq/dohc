@@ -43,6 +43,8 @@ fn start(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: at,
                 request_id: None,
             },
@@ -75,6 +77,8 @@ fn send(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: at,
                 request_id: None,
             },
@@ -120,7 +124,7 @@ fn bookmark_fixture(store: &mut EngineStore) -> String {
 fn claimed_run(store: &mut EngineStore, trigger: &str, thread: &str, run: &str, at: i64) {
     let mut chats = LinkedChatStore::new(store);
     chats
-        .enqueue_dispatch(WS, trigger, thread, at - 1, &NO_FAULTS)
+        .enqueue_dispatch(WS, trigger, "default", thread, at - 1, &NO_FAULTS)
         .expect("enqueue");
     chats
         .claim_next_pending(WS, run, "agent", None, at, &NO_FAULTS)
@@ -419,10 +423,10 @@ fn agent_read_cursor_rejects_stale_revision() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("advance");
     let error = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(
         error.code(),
@@ -439,10 +443,10 @@ fn agent_read_cursor_clamps_to_latest_and_never_moves_back() {
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "m2", ChatActorKind::Human, 20);
     let clamped = chats
-        .mark_thread_read_by_agent(WS, "thread", 999, "z", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 999, "z", None, 30, &NO_FAULTS)
         .expect("clamp");
     let backward = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 31, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 31, &NO_FAULTS)
         .expect("backward");
     assert_eq!(
         (
@@ -461,10 +465,10 @@ fn agent_read_revision_bumps_only_on_advance() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     let first = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("first");
     let replay = chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
         .expect("replay");
     assert_eq!(
         (first.revision, replay.revision),
@@ -482,10 +486,10 @@ fn agent_unread_requires_latest_human_message_beyond_cursor() {
     start(&mut chats, "agent", "a1", ChatActorKind::Human, 11);
     send(&mut chats, "agent", "a2", ChatActorKind::Agent, 12);
     chats
-        .mark_thread_read_by_agent(WS, "human", 10, "h1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "human", 10, "h1", None, 20, &NO_FAULTS)
         .expect("read");
     let rows = chats
-        .list_agent_unread_threads(WS, None, 10)
+        .list_agent_unread_threads(WS, None, None, 10)
         .expect("unread");
     assert!(
         rows.is_empty(),
@@ -501,10 +505,10 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
     start(&mut chats, "thread", "a", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "b", ChatActorKind::Human, 10);
     chats
-        .mark_thread_read_by_agent(WS, "thread", 10, "a", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "a", None, 20, &NO_FAULTS)
         .expect("read a");
     let rows = chats
-        .list_agent_unread_threads(WS, None, 10)
+        .list_agent_unread_threads(WS, None, None, 10)
         .expect("unread");
     assert_eq!(
         rows[0].latest_message_id, "b",
@@ -518,7 +522,7 @@ fn pending_dispatch_order_is_created_then_trigger() {
     let mut chats = LinkedChatStore::new(&mut store);
     for (trigger, at) in [("b", 10), ("a", 10), ("old", 9)] {
         chats
-            .enqueue_dispatch(WS, trigger, "thread", at, &NO_FAULTS)
+            .enqueue_dispatch(WS, trigger, "default", "thread", at, &NO_FAULTS)
             .expect("enqueue");
     }
     let rows = chats
@@ -667,24 +671,36 @@ fn fail_pending_is_workspace_thread_scoped() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .enqueue_dispatch(WS, "a", "target", 1, &NO_FAULTS)
+        .enqueue_dispatch(WS, "a", "default", "target", 1, &NO_FAULTS)
         .expect("a");
     chats
-        .enqueue_dispatch(WS, "b", "other", 2, &NO_FAULTS)
+        .enqueue_dispatch(WS, "a", "codex", "target", 1, &NO_FAULTS)
+        .expect("a for codex");
+    chats
+        .enqueue_dispatch(WS, "b", "default", "other", 2, &NO_FAULTS)
         .expect("b");
     chats
-        .enqueue_dispatch(OTHER_WS, "c", "target", 3, &NO_FAULTS)
+        .enqueue_dispatch(OTHER_WS, "c", "default", "target", 3, &NO_FAULTS)
         .expect("c");
     let changed = chats
-        .fail_pending_for_thread(WS, "target", "no runner", 4, &NO_FAULTS)
+        .fail_pending_for_thread(WS, "target", "default", "no runner", 4, &NO_FAULTS)
         .expect("fail");
     let pending = chats
         .list_pending_dispatches(WS, None, 10)
         .expect("pending");
     assert_eq!(
-        (changed, pending[0].trigger_message_id.as_str()),
-        (1, "b"),
-        "drop workspace/thread/state predicate -> more than one row changes."
+        (
+            changed,
+            pending
+                .iter()
+                .map(|dispatch| (
+                    dispatch.trigger_message_id.as_str(),
+                    dispatch.agent_id.as_str()
+                ))
+                .collect::<Vec<_>>()
+        ),
+        (1, vec![("a", "codex"), ("b", "default")]),
+        "drop workspace/thread/agent/state predicate -> more than one row changes."
     );
 }
 
@@ -787,7 +803,7 @@ fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
     let mut chats = LinkedChatStore::new(&mut store);
     for (trigger, at) in [("first", 10), ("covered", 11)] {
         chats
-            .enqueue_dispatch(WS, trigger, "thread", at, &NO_FAULTS)
+            .enqueue_dispatch(WS, trigger, "default", "thread", at, &NO_FAULTS)
             .expect("enqueue");
     }
     chats
@@ -826,13 +842,42 @@ fn app_quit_failure_remains_durably_recoverable_after_handling() {
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         (rows.len(), rows[0].attempt_count),
         (1, 1),
         "A crash after marking the failure handled but before requeue must leave the app-quit run recoverable."
     );
+}
+
+#[test]
+fn app_quit_recoveries_for_a_thread_skip_other_threads() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger-1", "thread", "run-1", 20);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-1", "app-quit", Some(143), 21, &NO_FAULTS)
+        .expect("fail run-1");
+    claimed_run(&mut store, "trigger-2", "other-thread", "run-2", 30);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run-2", "app-quit", Some(143), 31, &NO_FAULTS)
+        .expect("fail run-2");
+    let chats = LinkedChatStore::new(&mut store);
+    let runs = |thread_id| {
+        chats
+            .list_app_quit_recoveries(WS, thread_id, None, 10)
+            .expect("recoveries")
+            .into_iter()
+            .map(|recovery| recovery.run.run_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(runs(None), ["run-1", "run-2"]);
+    assert_eq!(
+        runs(Some("thread")),
+        ["run-1"],
+        "drop the thread filter -> a thread lists another thread's stopped runs."
+    );
+    assert_eq!(runs(Some("absent")), Vec::<String>::new());
 }
 
 #[test]
@@ -846,7 +891,7 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
         .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, 10)
+        .list_app_quit_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         rows.first()
@@ -878,7 +923,7 @@ fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
     let (_scratch, mut store) = open_store();
     assert!(
         LinkedChatStore::new(&mut store)
-            .latest_run_for_thread(WS, "thread")
+            .latest_run_for_thread(WS, "thread", None)
             .expect("empty")
             .is_none()
     );
@@ -892,21 +937,134 @@ fn latest_run_includes_unlinked_runs_and_scopes_workspace_and_thread() {
         .expect("fail");
     let chats = LinkedChatStore::new(&mut store);
     let run = chats
-        .latest_run_for_thread(WS, "thread")
+        .latest_run_for_thread(WS, "thread", None)
         .expect("read")
         .expect("run");
     assert_eq!(run.run_id, "run-2");
     assert_eq!(run.exit_code, Some(7));
     assert!(
         chats
-            .latest_run_for_thread(OTHER_WS, "thread")
+            .latest_run_for_thread(OTHER_WS, "thread", None)
             .expect("other workspace")
             .is_none()
     );
     assert!(
         chats
-            .latest_run_for_thread(WS, "other-thread")
+            .latest_run_for_thread(WS, "other-thread", None)
             .expect("other thread")
             .is_none()
+    );
+}
+
+#[test]
+fn latest_run_for_an_agent_skips_other_agents_runs_in_the_thread() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run-default", 20);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .complete_dispatch(WS, "run-default", 143, 21, &NO_FAULTS)
+        .expect("complete");
+    chats
+        .enqueue_dispatch(WS, "trigger", "nova", "thread", 19, &NO_FAULTS)
+        .expect("enqueue nova");
+    chats
+        .claim_next_pending(WS, "run-nova", "agent", None, 30, &NO_FAULTS)
+        .expect("claim nova")
+        .expect("nova claim");
+    let latest = |agent_id| {
+        chats
+            .latest_run_for_thread(WS, "thread", agent_id)
+            .expect("read")
+            .map(|run| run.run_id)
+    };
+    assert_eq!(latest(None).as_deref(), Some("run-nova"));
+    assert_eq!(
+        latest(Some("default")).as_deref(),
+        Some("run-default"),
+        "drop the agent filter -> another agent's later run hides this agent's latest run."
+    );
+    assert_eq!(latest(Some("nova")).as_deref(), Some("run-nova"));
+    assert_eq!(latest(Some("absent")), None);
+    assert!(
+        chats
+            .latest_run_for_thread(WS, "thread", Some("Not an id"))
+            .is_err()
+    );
+}
+
+/// A run dohc's quit stopped, in a store from before agent ids, belongs to the
+/// default agent after the migration, and Try again runs its request once.
+#[test]
+fn try_again_runs_a_request_from_before_agent_ids_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    let conn = rusqlite::Connection::open(&db).expect("open earlier store");
+    conn.execute_batch(
+        "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+             VALUES ('b2-ws', 'agent', 'My agent', 'my-agent', 'agent', 1, 1); \
+         INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+             VALUES ('b2-ws', 'thread', 'Thread', 10, 10, 'agent'); \
+         INSERT INTO chat_messages \
+             (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, body, created_at_ms) \
+             VALUES ('b2-ws', 'thread', 0, 'trigger', 'human', 'Ada', 'Hi', 10); \
+         INSERT INTO chat_dispatch_ledger \
+             (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+             VALUES ('b2-ws', 'trigger', 'thread', 'failed', 'run', 'app-quit', 1, 10, 30); \
+         INSERT INTO agent_run_records \
+             (workspace_id, run_id, thread_id, trigger_message_id, command, started_at_ms, ended_at_ms, exit_code, failure_reason) \
+             VALUES ('b2-ws', 'run', 'thread', 'trigger', 'agent', 20, 30, 143, 'app-quit');",
+    )
+    .expect("seed the earlier store");
+    drop(conn);
+
+    let mut store = EngineStore::open(&db, 1).expect("migrate");
+    let mut chats = LinkedChatStore::new(&mut store);
+    let recoveries = chats
+        .list_app_quit_recoveries(WS, None, None, 10)
+        .expect("recoveries");
+    assert_eq!(
+        recoveries
+            .iter()
+            .map(|row| (
+                row.run.run_id.as_str(),
+                row.run.agent_id.as_str(),
+                row.attempt_count
+            ))
+            .collect::<Vec<_>>(),
+        vec![("run", "default", 1)]
+    );
+    assert!(
+        chats
+            .requeue_failed_trigger(WS, "trigger", "run", 40, &NO_FAULTS)
+            .expect("try again")
+    );
+    assert!(
+        !chats
+            .requeue_failed_trigger(WS, "trigger", "run", 41, &NO_FAULTS)
+            .expect("try again twice"),
+        "a second Try again must not queue the request again"
+    );
+    let claim = chats
+        .claim_next_pending(WS, "run-2", "agent", None, 42, &NO_FAULTS)
+        .expect("claim")
+        .expect("the request runs again");
+    assert_eq!(
+        (
+            claim.dispatch.trigger_message_id.as_str(),
+            claim.dispatch.agent_id.as_str(),
+            claim.run.agent_id.as_str(),
+        ),
+        ("trigger", "default", "default")
+    );
+    chats
+        .complete_dispatch(WS, "run-2", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-3", "agent", None, 51, &NO_FAULTS)
+            .expect("claim")
+            .is_none(),
+        "the request ran once"
     );
 }

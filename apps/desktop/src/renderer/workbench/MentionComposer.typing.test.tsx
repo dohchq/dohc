@@ -7,7 +7,10 @@ import { MentionComposer } from "./MentionComposer";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import type { AgentRosterPick } from "../offers/agentAddressed";
 const candidates = [{ id: "agent:default", kind: "agent" as const, handle: "agent", label: "Agent" }];
-const setup = { workspaceId: "ws", runnerConfigured: true, runnerEnabled: true, agentRunActive: false };
+const setup = {
+  workspaceId: "ws", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  agents: [{ id: "default", name: "Agent", enabled: true }],
+};
 afterEach(cleanup);
 
 // With a pick, the composer also shows the agent's offer, as ChatsView does.

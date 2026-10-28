@@ -468,6 +468,7 @@ export function registerChatsIpcHandlers<
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      ...(channel.agentId !== undefined ? { agentId: channel.agentId } : {}),
       type: channel.type,
       purpose: channel.purpose,
       ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),

@@ -1,5 +1,6 @@
 import { historyCursor } from "../testing/historyPageFixture";
 import { open, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -27,6 +28,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
@@ -1284,6 +1286,50 @@ it("names the current file for a terminal binding refusal without suggesting syn
     target: { path: "renamed.md" },
   });
   expect(row!.body).not.toContain("try sync again");
+});
+
+it("says some author names did not sync, for one or more saves, without suggesting sync again", async () => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-unattributed", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }, { originId: "host", originSeq: 2 }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path: "n.md", objectId: "object-a", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  expect(row).toMatchObject({
+    title: "Some author names did not sync for “n.md”",
+    body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
+    target: { path: "n.md" },
+  });
+});
+
+it("cuts a long file name to fit the title and keeps listing other refusals", async () => {
+  const long = `${"a".repeat(120)}.md`;
+  const refusal = (noticeId: string, originSeq: number, path: string) => ({
+    noticeId, originId: "host", originSeq, refusalCoordinates: [{ originId: "host", originSeq }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path, objectId: `object-${originSeq}`, lineageClaimId: "lineage", conflictId: null },
+  });
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [
+    refusal("sync-refusal-long", 1, `notes/${long}`), refusal("sync-refusal-tab", 2, "notes/a\tb.md"), refusal("sync-refusal-short", 3, "notes/n.md"),
+    refusal("sync-refusal-folder", 4, "notes/"),
+  ] }];
+  const first = await computer(null, { refusalNotices });
+  const titles = (await first.store.list()).notices.map(row => row.title);
+  expect(titles).toHaveLength(4);
+  expect(titles.filter(title => title === "Some author names did not sync")).toHaveLength(2);
+  expect(titles).toContain("Some author names did not sync for “n.md”");
+  const cut = titles.find(title => title.includes("…"))!;
+  expect([...cut]).toHaveLength(120);
+  expect(cut).toMatch(/^Some author names did not sync for “a+…”$/u);
+});
+
+it("keeps the refusals it words for itself equal to the engine's", () => {
+  const engine = (path: string) => readFileSync(new URL(`../../../../crates/dohc-engine-sync/src/${path}`, import.meta.url), "utf8")
+    .replace(/=\s+"/g, '= "');
+  expect(engine("moment_apply/pending.rs")).toContain(`BINDING_CHANGED: &str = ${JSON.stringify(SETTLEMENT_BINDING_CHANGED)};`);
+  expect(engine("settlement_publication.rs")).toContain(`REFUSAL_MESSAGE: &str = ${JSON.stringify(SETTLEMENT_ATTRIBUTION_REFUSED)};`);
 });
 
 it("offers no Open step for a binding refusal whose file is gone", async () => {

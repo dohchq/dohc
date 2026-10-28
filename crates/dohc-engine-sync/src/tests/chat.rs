@@ -154,6 +154,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 needs_decision: true,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("decision-thread".to_owned()),
             },
@@ -177,6 +179,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: Some("local-resolver".to_owned()),
             },
@@ -3058,6 +3062,8 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("default-thread-request".to_owned()),
             },
@@ -3283,6 +3289,8 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("long-wire-local-request".to_owned()),
             },
@@ -3864,6 +3872,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 needs_decision: true,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-message-after-refusal".to_owned()),
             },
@@ -3905,6 +3915,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 33,
                 request_id: Some("authored-child-after-refusal".to_owned()),
             },
@@ -4057,6 +4069,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-thread-after-refusal".to_owned()),
             },
@@ -4080,6 +4094,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 32,
                 request_id: Some("second-local-message-after-refusal".to_owned()),
             },
@@ -5640,6 +5656,466 @@ fn reserved_agent_channel_shapes_rejected() {
     ));
 }
 
+/// A build from before agent ids refused codex's chat, then kept a thread in
+/// it in a hidden group for its wire id. After the upgrade, that group is
+/// codex's chat: the next thread in it applies, and codex's own chat on this
+/// computer is the same chat rather than one whose slug is taken.
+#[test]
+fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
+    // The suffixes of these wire ids are not agent ids.
+    let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";
+    let review = "placeholder:device-a:channel_wire_agent_v1_code--review";
+    let trailing = "placeholder:device-a:channel_wire_agent_v1_codex-";
+    let conn = rusqlite::Connection::open(&db).expect("open earlier store");
+    conn.execute(
+        "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+         VALUES ('ws', ?1, 'my-agent-codex', 'my-agent-codex', 'channel', 5, 5), \
+                ('ws', ?2, 'channel-wire-agent-v1-my-bot', 'channel-wire-agent-v1-my-bot', 'channel', 6, 6), \
+                ('ws', ?3, 'my-agent-code-review', 'my-agent-code-review', 'channel', 7, 7), \
+                ('ws', ?4, 'channel-wire-agent-v1-codex', 'channel-wire-agent-v1-codex', 'channel', 8, 8)",
+        params![codex, my_bot, review, trailing],
+    )
+    .expect("seed the hidden groups");
+    conn.execute(
+        "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+         VALUES ('ws', 'channel_wire_agent_v1_codex', ?1), ('ws', 'channel_wire_agent_v1_my_bot', ?2), \
+                ('ws', 'channel_wire_agent_v1_code--review', ?3), ('ws', 'channel_wire_agent_v1_codex-', ?4)",
+        params![codex, my_bot, review, trailing],
+    )
+    .expect("seed the wire ids");
+    conn.execute(
+        "INSERT INTO chat_channel_placeholders (workspace_id, channel_id, wire_id) \
+         VALUES ('ws', ?1, 'channel_wire_agent_v1_codex'), ('ws', ?2, 'channel_wire_agent_v1_my_bot'), \
+                ('ws', ?3, 'channel_wire_agent_v1_code--review'), ('ws', ?4, 'channel_wire_agent_v1_codex-')",
+        params![codex, my_bot, review, trailing],
+    )
+    .expect("seed the placeholders");
+    conn.execute(
+        "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+         VALUES ('ws', 'codex-first', 'First', 5, 5, ?1)",
+        params![codex],
+    )
+    .expect("seed the first thread");
+    drop(conn);
+
+    let mut engine = EngineStore::open(&db, 1_000).expect("migrate");
+    for (origin, thread_id, payload) in [
+        (
+            "device-a",
+            "codex-second",
+            json!({
+                "threadId": "codex-second", "title": "Second", "createdAtMs": 20,
+                "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
+            }),
+        ),
+        (
+            "device-c",
+            "my-bot-second",
+            json!({
+                "threadId": "my-bot-second", "title": "Second", "createdAtMs": 21,
+                "channelWireId": "channel_wire_agent_v1_my_bot"
+            }),
+        ),
+        (
+            "device-d",
+            "review-second",
+            json!({
+                "threadId": "review-second", "title": "Second", "createdAtMs": 22,
+                "channelWireId": "channel_wire_agent_v1_code--review"
+            }),
+        ),
+        (
+            "device-e",
+            "trailing-second",
+            json!({
+                "threadId": "trailing-second", "title": "Second", "createdAtMs": 23,
+                "channelWireId": "channel_wire_agent_v1_codex-"
+            }),
+        ),
+    ] {
+        let operation = envelope(origin, 0, "chat.thread.create", payload);
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults).expect(thread_id),
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new())),
+            "{thread_id} applies"
+        );
+    }
+
+    // The kind and agent of a thread's chat, and whether that chat is hidden.
+    let chat_of = |thread_id: &str| -> (String, Option<String>, bool) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT c.kind, c.agent_id, \
+                            EXISTS (SELECT 1 FROM chat_channel_placeholders p \
+                                    WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id) \
+                     FROM chat_threads t \
+                     JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     WHERE t.workspace_id = 'ws' AND t.thread_id = ?1",
+                    [thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("the thread's chat")
+    };
+    assert_eq!(
+        chat_of("codex-second"),
+        ("agent".to_owned(), Some("codex".to_owned()), false),
+        "the hidden group is codex's chat"
+    );
+    for thread_id in ["my-bot-second", "review-second", "trailing-second"] {
+        assert_eq!(
+            chat_of(thread_id),
+            ("channel".to_owned(), None, true),
+            "{thread_id}: a wire id that names no agent keeps its hidden group"
+        );
+    }
+
+    let mut chats = LinkedChatStore::new(&mut engine);
+    let chat = chats
+        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
+        .expect("codex's chat");
+    assert_eq!(chat.channel_id, codex);
+    assert_eq!(chat.slug, "my-agent-codex");
+    assert_eq!(chat.kind, ChatChannelKind::Agent);
+    assert_eq!(chat.agent_id.as_deref(), Some("codex"));
+    assert_eq!(
+        chats
+            .list_channels("ws")
+            .expect("channels")
+            .iter()
+            .filter(|summary| summary.channel.agent_id.as_deref() == Some("codex"))
+            .map(|summary| summary.thread_count)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}
+
+/// A thread whose agent's wire id maps to a group is refused, and the next op
+/// from its device still applies.
+#[test]
+fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'group', 'Group', 'group', 'channel', 1, 1); \
+                 INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1_codex', 'group');",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("a group mapped from codex's wire id");
+    let refused = envelope(
+        "device-a",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "codex-thread", "title": "Codex", "createdAtMs": 20,
+            "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+    let next = envelope(
+        "device-a",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "group-thread", "title": "Group", "createdAtMs": 21, "channelSlug": "group"
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &next, &NoFaults).expect("the next thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "device-a").expect("ack"),
+        1
+    );
+}
+
+/// An earlier build's group named "My agent notes" sends a thread before its
+/// create. The group's hidden placeholder keeps the name and takes a slug no
+/// agent chat can have, as the group's create would.
+#[test]
+fn a_hidden_group_named_like_an_agent_chat_takes_another_slug() {
+    let (_scratch, _path, mut engine) = open_store();
+    let operation = envelope(
+        "device-a",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "notes-thread", "title": "Notes", "createdAtMs": 20,
+            "channelSlug": "my-agent-notes", "channelWireId": "notes-wire"
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("the thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let (name, slug): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.name, c.slug FROM chat_threads t \
+                 JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                 WHERE t.workspace_id = 'ws' AND t.thread_id = 'notes-thread'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("the thread's group");
+    assert_eq!(name, "my-agent-notes");
+    assert_eq!(
+        slug,
+        dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "notes-wire", 0)
+    );
+}
+
+/// An earlier build's group named "My agent notes".
+fn seed_notes_group(engine: &mut EngineStore) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'notes-group', 'My agent notes', 'my-agent-notes', 'channel', 1, 1)",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("an earlier build's group");
+}
+
+fn name_and_slug(engine: &EngineStore, channel_id: &str) -> (String, String) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT name, slug FROM chat_channels WHERE workspace_id = 'ws' AND channel_id = ?1",
+                [channel_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the chat")
+}
+
+fn moved_notes_group() -> (String, String) {
+    (
+        "My agent notes".to_owned(),
+        dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "notes-group", 0),
+    )
+}
+
+/// Start a thread in `channel_id` and return the thread create it journaled.
+fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEnvelope {
+    LinkedChatStore::new(engine)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: "ws".to_owned(),
+                channel_id: channel_id.to_owned(),
+                thread_id: "notes-thread".to_owned(),
+                message_id: "notes-message".to_owned(),
+                title: Some("Notes".to_owned()),
+                lane: ChatThreadLane::Posts,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: Some("ada".to_owned()),
+                origin: None,
+                body: "Can you tidy these?".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
+                now_ms: 20,
+                request_id: Some("notes-request".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("a thread in the notes agent's chat");
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id, origin_seq, payload_json, recorded_at_ms \
+                 FROM replication_log \
+                 WHERE workspace_id = 'ws' AND op_kind = 'chat.thread.create' \
+                   AND json_extract(payload_json, '$.threadId') = 'notes-thread'",
+                [],
+                |row| {
+                    let payload_json: String = row.get(2)?;
+                    Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
+                        workspace_id: "ws".to_owned(),
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        op_kind: "chat.thread.create".to_owned(),
+                        payload: serde_json::from_str(&payload_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        recorded_at_ms: row.get(3)?,
+                        relay_seq: None,
+                    })
+                },
+            )
+        })
+        .expect("the journaled thread")
+}
+
+/// Two computers hold an earlier build's group named "My agent notes". The
+/// notes agent's chat arrives here before this computer makes it, takes its
+/// agent's slug, and the group moves off it. A thread made here in the chat
+/// reaches the other computer, whose hidden copy of the chat does the same.
+#[test]
+fn an_agent_chat_from_sync_takes_its_slug_from_a_group() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_notes_group(&mut engine);
+    let create = envelope(
+        "device-a",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "notes-chat", "name": "Notes", "slug": "my-agent-notes",
+            "kind": "agent", "createdAtMs": 5, "wireId": "channel_wire_agent_v1_notes"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &create, &NoFaults).expect("the notes agent's chat");
+    assert_eq!(
+        name_and_slug(&engine, "notes-chat"),
+        ("Notes".to_owned(), "my-agent-notes".to_owned())
+    );
+    assert_eq!(name_and_slug(&engine, "notes-group"), moved_notes_group());
+
+    let thread = journaled_thread(&mut engine, "notes-chat");
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
+    seed_notes_group(&mut peer);
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &thread, &NoFaults).expect("the other computer"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let peer_chat: (String, String) = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT kind, slug FROM chat_channels WHERE workspace_id = 'ws' AND agent_id = 'notes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the other computer's hidden chat");
+    assert_eq!(peer_chat, ("agent".to_owned(), "my-agent-notes".to_owned()));
+    assert_eq!(name_and_slug(&peer, "notes-group"), moved_notes_group());
+}
+
+/// An earlier sync or upgrade left the notes agent's chat on another slug,
+/// beside the group that holds its agent's slug. A thread made there still
+/// goes out with the agent's slug, and making the agent's chat moves the chat
+/// back onto it.
+#[test]
+fn an_agent_chat_on_another_slug_goes_back_to_its_own() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_notes_group(&mut engine);
+    let hashed = dohc_engine_domain::chats::channel_collision_slug(
+        "my-agent-notes",
+        "channel_wire_agent_v1_notes",
+        0,
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+                 VALUES ('ws', 'notes-chat', 'Notes', ?1, 'agent', 2, 2, 'notes')",
+                [&hashed],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute_batch(
+                "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1_notes', 'notes-chat')",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("the notes agent's chat on another slug");
+
+    let thread = journaled_thread(&mut engine, "notes-chat");
+    assert_eq!(thread.payload["channelSlug"], json!("my-agent-notes"));
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &thread, &NoFaults).expect("the other computer"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+
+    let chat = LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "notes-here", "notes", "Notes", 30, &NoFaults)
+        .expect("the notes agent's chat");
+    assert_eq!(
+        (chat.channel_id.as_str(), chat.slug.as_str()),
+        ("notes-chat", "my-agent-notes")
+    );
+    assert_eq!(name_and_slug(&engine, "notes-group"), moved_notes_group());
+}
+
+/// Only a crafted op can leave one agent's chat on another agent's slug. The
+/// notes agent's chat still takes its slug when it arrives, and the other chat
+/// goes back to its own when its agent's chat is made.
+#[test]
+fn an_agent_chat_takes_its_slug_from_another_agents_chat() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+                 VALUES ('ws', 'codex-chat', 'Codex', 'my-agent-notes', 'agent', 1, 1, 'codex')",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("the codex agent's chat on the notes agent's slug");
+    let create = envelope(
+        "device-a",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "notes-chat", "name": "Notes", "slug": "my-agent-notes",
+            "kind": "agent", "createdAtMs": 5, "wireId": "channel_wire_agent_v1_notes"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &create, &NoFaults).expect("the notes agent's chat");
+    assert_eq!(
+        name_and_slug(&engine, "notes-chat"),
+        ("Notes".to_owned(), "my-agent-notes".to_owned())
+    );
+    assert_eq!(
+        name_and_slug(&engine, "codex-chat"),
+        (
+            "Codex".to_owned(),
+            dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "codex-chat", 0)
+        )
+    );
+
+    let chat = LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
+        .expect("the codex agent's chat");
+    assert_eq!(
+        (chat.channel_id.as_str(), chat.slug.as_str()),
+        ("codex-chat", "my-agent-codex")
+    );
+}
+
 #[test]
 fn imported_agent_message_keeps_its_owner_display_name() {
     let (_scratch, _path, mut engine) = open_store();
@@ -5663,14 +6139,9 @@ fn imported_agent_message_keeps_its_owner_display_name() {
 }
 
 #[test]
-fn old_received_and_parked_messages_do_not_enter_local_backward_clock_discovery() {
+fn received_and_parked_messages_wake_no_agent_here() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
-    engine.write_with(&NoFaults, |tx| {
-        tx.execute("INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101)", [])
-            .map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    }).unwrap();
     applied_claims(apply_chat_envelope(
         &mut engine,
         &group_message(
@@ -5714,15 +6185,13 @@ fn old_received_and_parked_messages_do_not_enter_local_backward_clock_discovery(
         Ok::<_, dohc_engine_storage::StorageError>((
             conn.query_row("SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id IN ('received-old','parked-old')", [], |row| row.get(0))
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-            conn.query_row("SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id='ws'", [], |row| row.get(0))
+            conn.query_row("SELECT COUNT(*) FROM chat_dispatch_ledger WHERE workspace_id='ws'", [], |row| row.get(0))
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
         ))
     }).unwrap();
-    assert_eq!(counts, (2, 0));
     assert_eq!(
-        LinkedChatStore::new(&mut engine)
-            .record_eligible_triggers("ws", Some("ana"), 110, &NoFaults)
-            .unwrap(),
-        0
+        counts,
+        (2, 0),
+        "only the sender's computer records a request"
     );
 }

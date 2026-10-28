@@ -375,6 +375,16 @@ describe("notice center", () => {
     expect(await screen.findByTestId("notice-center")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Copy file paths" })).toBeNull();
   });
+
+  it("offers no Copy on a success, on the toast or the Notice row", async () => {
+    renderNotices({ workspaceErrors: [{ id: "moved", tone: "success", message: "Moved 4 files to Archived",
+      details: "Moved 4 files to Archived", atMs: 1, canRetry: false, seen: false }] });
+    expect(screen.getByTestId("workspace-shell-notice").textContent).toContain("Moved 4 files to Archived");
+    expect(screen.queryByTestId("workspace-shell-error-copy")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await screen.findByTestId("notice-moved")).toBeTruthy();
+    expect(screen.queryByTestId("notice-moved-copy")).toBeNull();
+  });
   it("offers to repair shared files whose folder projection is pending", async () => {
     const onRefreshShareView = vi.fn();
     renderNotices({

@@ -655,7 +655,7 @@ mod tests {
         // The last migration creates this table, so on this store it fails.
         Connection::open(&source)
             .unwrap()
-            .execute_batch("CREATE TABLE owner_ydoc_outbox_refusals (planted INTEGER)")
+            .execute_batch("CREATE TABLE chat_dispatch_ledger_next (planted INTEGER)")
             .unwrap();
         let before = contents(&store);
         let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();

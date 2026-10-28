@@ -107,7 +107,7 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
+import { DEFAULT_AGENT_ID, firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -148,6 +148,8 @@ export interface AgentSetupSummary {
   runnerConfigured: boolean;
   runnerEnabled: boolean;
   agentRunActive: boolean;
+  // The agents dohc can start, in the order the settings file lists them.
+  agents: Array<{ id: string; name: string; enabled: boolean }>;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -483,7 +485,8 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onError: (message: string, cause?: unknown) => void;
+  // A retry, when given, is the failure's Try again.
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
   // Removing a member is undoable for a while. The shell shows that notice
   // and holds the Undo, so it outlives this panel; a refused removal goes to
   // the same shell with Try again.
@@ -1098,10 +1101,12 @@ export function ChatsView(props: {
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
 
+  // The sidebar shows the first agent's chat.
+  const firstAgentId = (props.userSettings && firstAgent(props.userSettings)?.id) ?? DEFAULT_AGENT_ID;
   const awaitingAgentChannel = Boolean(
     props.userSettings && firstAgentWithLaunch(props.userSettings)?.enabled &&
     overview.status === "ready" &&
-    !overview.channels.some((channel) => channel.kind === "agent"),
+    !overview.channels.some((channel) => channel.kind === "agent" && channel.agentId === firstAgentId),
   );
   useEffect(() => {
     if (!awaitingAgentChannel) return;
@@ -2799,7 +2804,7 @@ export function ChatsView(props: {
   );
   const agentChannel =
     overview.status === "ready"
-      ? overview.channels.find((channel) => channel.kind === "agent") ?? null
+      ? overview.channels.find((channel) => channel.kind === "agent" && channel.agentId === firstAgentId) ?? null
       : null;
   // Agents shared by other people that reach this workspace: an agent that posted in
   // a channel shared to the user belongs to whoever shared it. Derived from
@@ -3653,6 +3658,33 @@ export function ChatsView(props: {
     }
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
+  const stoppedRun = dispatchState?.stoppedRun ?? null;
+  const retryStoppedRun = useCallback(async () => {
+    if (nav.level !== "thread" || !stoppedRun?.retryable || dispatchActionBusy) return;
+    const { id: threadId, title } = nav.thread;
+    const { runId } = stoppedRun;
+    const token = liveToken.current;
+    const refreshSeq = ++threadRefreshSeq.current;
+    const current = () => token === liveToken.current && refreshSeq === threadRefreshSeq.current;
+    const failed = (error: unknown) => withErrorWords(`dohc could not start your agent's run in "${title}" again.`, error);
+    setDispatchActionBusy(true);
+    try {
+      await bridge().retryStoppedRun({ workspaceId, threadId, runId });
+      const next = await bridge().chatDispatchStateForThread({ workspaceId, threadId });
+      if (current()) setDispatchState(next);
+    } catch (error) {
+      // A refresh of the conversation meanwhile doesn't answer the failure.
+      if (token !== liveToken.current) return;
+      // The failure's Try again can come from another conversation, so it
+      // only asks again. The run's update refreshes whichever one is open.
+      const again = () => void bridge().retryStoppedRun({ workspaceId, threadId, runId })
+        .catch((retryError: unknown) => props.onError(failed(retryError), retryError, again));
+      props.onError(failed(error), error, again);
+    } finally {
+      if (token === liveToken.current) setDispatchActionBusy(false);
+    }
+  }, [dispatchActionBusy, nav, props.onError, stoppedRun, workspaceId]);
+
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
   const onKeyDownCapture = useCallback(
@@ -4275,6 +4307,9 @@ export function ChatsView(props: {
               threadLocked={threadLocked}
               flashMessageId={flashMessageId}
               runRecords={runRecords}
+              stoppedRun={stoppedRun}
+              stoppedRunBusy={dispatchActionBusy}
+              onRetryStoppedRun={threadLocked ? undefined : retryStoppedRun}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}

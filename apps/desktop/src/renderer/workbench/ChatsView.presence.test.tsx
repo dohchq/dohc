@@ -70,6 +70,7 @@ const agentChannelRecord: ChatChannelRecord = {
   name: "My agent",
   slug: "my-agent",
   kind: "agent",
+  agentId: "default",
   createdAtMs: NOW,
   updatedAtMs: NOW,
   threadCount: 1,
