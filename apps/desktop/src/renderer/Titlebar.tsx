@@ -117,7 +117,7 @@ export function Titlebar(props: {
   return (
     <header
       data-testid={desktopPins.titlebar}
-      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel [--quick-open-width:20rem] max-[1100px]:[--quick-open-width:5rem]"
+      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel [--quick-open-width:20rem] [anchor-scope:--titlebar-names-end] max-[1100px]:[--quick-open-width:5rem]"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}
@@ -172,6 +172,9 @@ export function Titlebar(props: {
               </span>
             ) : null}
             {props.workspaceStatus}
+            {/* Where the names and their status end, past the group's edge
+                when their floors overflow it. Go to… stays clear of it. */}
+            <span aria-hidden className="-ml-0.5 w-0 self-stretch [anchor-name:--titlebar-names-end]" />
             {switcherOpen ? (
               <ul
                 role="listbox"
@@ -246,15 +249,19 @@ export function Titlebar(props: {
         ) : null}
       </div>
 
-      {/* Keep quick-open centered independently of the workspace name. */}
+      {/* Centered, unless the names at their floors reach it: then it starts
+          12px after them, as the left group ends 12px before it. */}
       {props.onQuickOpen ? (
         <button
           type="button"
           data-testid="titlebar-quick-open"
           title="Go to…"
           onClick={props.onQuickOpen}
-          style={{ width: QUICK_OPEN_WIDTH }}
-          className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
+          style={{
+            width: QUICK_OPEN_WIDTH,
+            left: `max(50% - ${QUICK_OPEN_WIDTH} / 2, anchor(--titlebar-names-end right, 0px) + 12px)`,
+          }}
+          className="titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden className="shrink-0" />
           <span className="truncate max-[1100px]:sr-only">Go to…</span>

@@ -215,8 +215,9 @@ describe("Titlebar", () => {
 
   // Below 1100px the names need the room, so Go to… and Restricted Mode show
   // only their icons, and the shortcut. Each keeps its name for tooltips and
-  // screen readers, and neither name can be cut to a sliver.
-  it("narrows Go to… and Restricted Mode below 1100px and keeps three letters of each name", () => {
+  // screen readers, each name has a floor, and Go to… stays clear of the
+  // names' end. jsdom does no layout: the window shots measure it.
+  it("sets the narrow classes, the name floors and Go to…'s anchor", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
     render(
       <Titlebar
@@ -239,6 +240,9 @@ describe("Titlebar", () => {
 
     expect(screen.getByTestId("workspace-switcher").className).toContain("min-w-[calc-size(max-content,min(size,4rem))]");
     expect(screen.getByTestId("stub-version").parentElement?.className).toContain("min-w-[calc-size(max-content,min(size,7.5rem))]");
+    expect(screen.getByTestId("titlebar").className).toContain("[anchor-scope:--titlebar-names-end]");
+    expect(document.querySelector('[class*="[anchor-name:--titlebar-names-end]"]')).not.toBeNull();
+    expect(quickOpen.getAttribute("style")).toContain("anchor(--titlebar-names-end right, 0px) + 12px");
   });
 
   it("closes the workspace switcher on Escape and returns focus to it", () => {
