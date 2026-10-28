@@ -1,3 +1,4 @@
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -56,6 +57,21 @@ function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"):
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
+
+it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
+  const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
+  expect(readError(received).title).toBe("dohc can't bring back this file, because that could stop sync");
+  expect(ipcErrorMessage(received, "Could not restore this file.")).toContain("Choose Keep this machine's copy, then copy its text from its History into a file with a new name.");
+  expect(readError(acrossIpc(new SyncedDeletionRevivalError())).words).toBe(readError(received).words);
+});
+
+it("uses History instructions for restore refusals without changing conflict instructions", () => {
+  const restore = readError(new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true));
+  expect(restore.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+  expect(restore.words).toBe("Copy its text from its History into a file with a new name.");
+  expect(restore.canRetry).toBe(false);
+  expect(readError(new SyncedDeletionRevivalError("tasks/trip.txt")).words).toBe("Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.");
+});
 
 // The engine's own list: every `ErrorCode` arm of `as_str`.
 const engineCodes = [

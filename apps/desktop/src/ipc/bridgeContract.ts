@@ -5349,7 +5349,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     review: z.array(z.discriminatedUnion("reason", [
       z.object({ path: PATH_STRING, reason: z.literal("changed-since"), changedBy: z.string().optional() }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
-      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000), refusal: z.literal("synced-deletion").optional() }).strict(),
       // History's rules could not be read, so restoring the file was refused.
       z.object({ path: PATH_STRING, reason: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
     ])),
@@ -5420,7 +5420,7 @@ export const UndoStopAndRestoreResult = z.object({
     z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),
       receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
     }).strict(),
-    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000), refusal: z.literal("synced-deletion").optional() }).strict(),
     z.object({ momentId: OPAQUE_ID, kind: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
   ])),
 }).strict();

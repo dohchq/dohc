@@ -1,7 +1,8 @@
 import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
-import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
+import { isWorkspaceUpdatingError, isConflictStaleTarget, readError } from "../../ipc/errorWords";
+import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
 import { Bot, ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -1136,6 +1137,7 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
 // hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
+  onError?: (message: string, cause: unknown) => void;
   beginLineageOperation: () => Promise<() => void>;
   onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
@@ -1241,13 +1243,18 @@ function ConflictResolver(props: {
         props.onResolved(result);
       } catch (caught) {
         if (!liveToken.isCurrent(token)) return;
-        setError(ipcErrorMessage(caught, "Could not apply that choice."));
+        const error = readError(caught).refusal === "synced-deletion"
+          ? new SyncedDeletionRevivalError(conflict.path, { cause: caught })
+          : conflict.origin === "sync" && conflict.contentKind === "text" && conflict.currentText !== null && conflict.incomingText === null && isConflictStaleTarget(caught)
+            ? new SyncedDeletionStaleError(conflict.path, { cause: caught }) : caught;
+        setError(readError(error).title ?? ipcErrorMessage(error, "Could not apply that choice."));
+        props.onError?.("Could not apply that choice.", error);
         setBusy(false);
       } finally {
         releaseOperation?.();
       }
     },
-    [conflict.conflictId, props.beginLineageOperation, props.onResolved, props.onWorkspaceStateChanged, workspaceId],
+    [conflict.conflictId, conflict.path, conflict.origin, conflict.contentKind, conflict.currentText, conflict.incomingText, props.beginLineageOperation, props.onError, props.onResolved, props.onWorkspaceStateChanged, workspaceId],
   );
 
   return (
@@ -1437,6 +1444,7 @@ function ConflictResolver(props: {
 // the window with the first page of what remains.
 function ConflictList(props: {
   workspaceId: string;
+  onError?: (message: string, cause: unknown) => void;
   beginLineageOperation: () => Promise<() => void>;
   onWorkspaceStateChanged: () => void;
   conflicts: WorkspaceVersionConflict[];
@@ -1487,6 +1495,7 @@ function ConflictList(props: {
         <ConflictResolver
           key={conflict.conflictId}
           workspaceId={props.workspaceId}
+          onError={props.onError}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
@@ -1823,6 +1832,7 @@ export function VersionComparePage(props: {
 // looks the same everywhere.
 export function ConflictReviewDialog(props: {
   workspaceId: string;
+  onError?: (message: string, cause: unknown) => void;
   beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
@@ -1979,6 +1989,7 @@ export function ConflictReviewDialog(props: {
           {state.status === "ready" && conflicts.length > 0 ? (
             <ConflictList
               workspaceId={workspaceId}
+              onError={props.onError}
               beginLineageOperation={props.beginLineageOperation}
               onWorkspaceStateChanged={props.onWorkspaceStateChanged}
               conflicts={conflicts}

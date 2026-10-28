@@ -1225,6 +1225,101 @@ async fn pinned_wal_backs_off_returns_file_locked_and_observes_cancellation() {
     drop(hold);
     close(supervisor).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn synced_deletion_refusal_skips_member_without_leaving_undo_pending() {
+    use dohc_engine_domain::{
+        ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
+        insert_text_conflict_if_absent,
+    };
+
+    let (root, mut store) = fixture();
+    seed(&mut store, &root, "guarded.md", "guarded", "retained text");
+    let base = VersionedTextStore::new(&mut store)
+        .read_text(WS, "main", "guarded.md")
+        .unwrap();
+    remove(&mut store, &root, "guarded.md", "guarded-delete");
+    seed(&mut store, &root, "safe.md", "safe", "safe text");
+    remove(&mut store, &root, "safe.md", "safe-delete");
+    let conflict = TextConflict {
+        conflict_id: "both-absent".into(),
+        workspace_id: WS.into(),
+        path: "guarded.md".into(),
+        target_version_id: "main".into(),
+        source_version_id: "main".into(),
+        created_at_ms: 4,
+        updated_at_ms: 4,
+        status: ConflictStatus::Open,
+        chosen_from: ConflictChoice::Current,
+        resolution: None,
+        metadata: ConflictMetadata::origin("sync"),
+        base: ConflictFileState::text("guarded.md", base),
+        current: ConflictFileState::text("guarded.md", None),
+        incoming: ConflictFileState::text("guarded.md", None),
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            insert_text_conflict_if_absent(tx, &conflict)
+        })
+        .unwrap();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&engine_db_path(&root).unwrap(), 5)
+        .unwrap()
+        .actor;
+    assert!(
+        actor
+            .preflight_history_undo(WS.into(), OP.into(), "guarded-undo".into(), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let result = run(&actor, &root, "guarded-undo", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(result.not_restored, ["guarded.md"]);
+    assert_eq!(result.moments.len(), 1);
+    assert_eq!(result.moments[0].object_id, "safe");
+    assert!(!root.join("guarded.md").exists());
+    let (kind, attempts, errors): (String, i64, String) = actor
+        .run(|store, _| {
+            let mut files = VersionedTextStore::new(store);
+            assert!(files.read_text(WS, "main", "guarded.md")?.is_none());
+            assert_eq!(files.read_text(WS, "main", "safe.md")?.unwrap().text, "safe text");
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT r.kind,p.attempts,p.errors_json FROM engine_requests r
+                         JOIN history_undo_plans p USING(request_id) WHERE request_id='guarded-undo'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                })
+                .map_err(StorageError::corrupt_public)
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(kind, "history-undo-complete");
+    assert_eq!(attempts, 0);
+    assert!(errors.contains(&DomainError::SyncedDeletionRevivalRefused.to_string()));
+    assert!(
+        actor
+            .pending_history_undos(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replay = run(&actor, &root, "guarded-undo", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(replay.deduped);
+    assert_eq!(replay.not_restored, result.not_restored);
+    assert_eq!(replay.moments, result.moments);
+    close(supervisor).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn repeating_member_errors_stop_after_three_attempts_across_opens() {
     let (root, mut supervisor, mut actor) = setup(3);

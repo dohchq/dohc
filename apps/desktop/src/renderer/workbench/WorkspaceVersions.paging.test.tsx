@@ -9,6 +9,7 @@ import { useRef } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
+import { readError } from "../../ipc/errorWords";
 import {
   VersionMenu,
   ConflictReviewDialog,
@@ -81,8 +82,8 @@ afterEach(() => {
 describe.each(["review", "merge"] as const)("%s conflict resolution write boundary", (surface) => {
   const remaining = { conflicts: [], nextAfterConflictId: null };
 
-  async function openSurface(beginLineageOperation: () => Promise<() => void>, changed: () => void) {
-    const conflicts = [conflict("c-1")];
+  async function openSurface(beginLineageOperation: () => Promise<() => void>, changed: () => void, row = conflict("c-1"), onError = vi.fn()) {
+    const conflicts = [row];
     bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
       mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, conflicts, nextAfterConflictId: null,
@@ -92,7 +93,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     const mergeChanged = vi.fn().mockImplementationOnce(() => {}).mockImplementation(changed);
     const view = render(surface === "review" ? (
       <ConflictReviewDialog workspaceId="ws-1" beginLineageOperation={beginLineageOperation}
-        onWorkspaceStateChanged={changed} onClose={() => {}} />
+        onWorkspaceStateChanged={changed} onClose={() => {}} onError={onError} />
     ) : (
       <VersionMergeDialog workspaceId="ws-1"
         source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
@@ -167,6 +168,38 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     expect(screen.getByTestId("version-conflict-error").textContent).toBe("Resolution refused");
     expect(changed).not.toHaveBeenCalled();
     expect(collectionWritesPaused("ws-1")).toBe(false);
+  });
+
+  it("shows the synced deletion refusal beside the conflict choice", async () => {
+    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"));
+    await openSurface(async () => () => {}, vi.fn());
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    await settle();
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe("dohc can't bring back c-1.md, because that could stop sync");
+  });
+
+  it.each(["sync-delete", "sync-edit", "merge-delete"].flatMap(shape =>
+    ["DaemonRefusalError [INVALID_PARAMS]", "VersionedTextStoreError [conflict-stale-target]"].map(wire => ({shape, wire})),
+  ))("scopes stale deletion words to $shape ($wire)", async ({shape, wire}) => {
+    const row = conflict("c-1");
+    row.origin = shape === "merge-delete" ? "merge" : "sync";
+    row.incomingText = shape === "sync-edit" ? "other text" : null;
+    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error(`${wire}: conflict-stale-target`));
+    const report = vi.fn();
+    await openSurface(async () => () => {}, vi.fn(), row, report);
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    await settle();
+    const title = "dohc can't settle the conflict in c-1.md";
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe(shape === "sync-delete" ? title : "Could not apply that choice.");
+    if (surface === "review") {
+      expect(report).toHaveBeenCalled();
+      if (shape === "sync-delete") {
+        const notice = readError(report.mock.calls[0]![1]);
+        expect(notice.words).toBe("Move your newer lines into the new file, and leave c-1.md and its copies alone. Your other files keep syncing.");
+        expect(notice.canRetry).toBe(false);
+        expect(notice.cause).toContain("changed on this machine after the conflict appeared");
+      }
+    }
   });
 });
 
