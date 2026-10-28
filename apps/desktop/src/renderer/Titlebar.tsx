@@ -25,8 +25,11 @@ type TitlebarPanelToggle = {
 // and shortcut; the header sets the width for both.
 const QUICK_OPEN_WIDTH = "var(--quick-open-width)";
 // Centered, unless the names at their floors reach it: then it starts 12px
-// after them, as the left group ends 12px before it.
+// after them, as the left group ends 12px before it. Its right edge stays,
+// so it gives up width, and its word, before it moves right.
 const QUICK_OPEN_LEFT = `max(50% - ${QUICK_OPEN_WIDTH} / 2, anchor(--titlebar-names-end right, 0px) + 12px)`;
+const QUICK_OPEN_MIN_WIDTH = "5rem";
+const QUICK_OPEN_END = `max(50% + ${QUICK_OPEN_WIDTH} / 2, ${QUICK_OPEN_LEFT} + ${QUICK_OPEN_MIN_WIDTH})`;
 
 function LayoutToggle(props: {
   label: string;
@@ -258,11 +261,11 @@ export function Titlebar(props: {
           data-testid="titlebar-quick-open"
           title="Go to…"
           onClick={props.onQuickOpen}
-          style={{ width: QUICK_OPEN_WIDTH, left: QUICK_OPEN_LEFT }}
-          className="titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
+          style={{ left: QUICK_OPEN_LEFT, right: `calc(50% - ${QUICK_OPEN_WIDTH} / 2)`, minWidth: QUICK_OPEN_MIN_WIDTH }}
+          className="@container titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden className="shrink-0" />
-          <span className="truncate max-[1100px]:sr-only">Go to…</span>
+          <span className="truncate @max-[8.5rem]:sr-only">Go to…</span>
           <kbd className="ml-auto whitespace-nowrap font-sans text-[11px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}
@@ -275,7 +278,7 @@ export function Titlebar(props: {
           data-testid="titlebar-right-group"
           className={`flex items-center justify-end-safe gap-2 ${props.onQuickOpen ? "absolute inset-y-0" : "ml-auto flex-1"}`}
           style={props.onQuickOpen
-            ? { left: `calc(${QUICK_OPEN_LEFT} + ${QUICK_OPEN_WIDTH} + 12px)`, right: `calc(${rightInset} + 16px)` }
+            ? { left: `calc(${QUICK_OPEN_END} + 12px)`, right: `calc(${rightInset} + 16px)` }
             : undefined}
         >
           {/* The button's own box: its width decides whether the label fits. */}

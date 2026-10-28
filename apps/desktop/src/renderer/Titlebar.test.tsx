@@ -235,7 +235,9 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("titlebar").className).toContain("max-[1100px]:[--quick-open-width:5rem]");
     const quickOpen = screen.getByTestId("titlebar-quick-open");
     expect(quickOpen.getAttribute("title")).toBe("Go to…");
-    expect(within(quickOpen).getByText("Go to…").className).toContain("max-[1100px]:sr-only");
+    // 5rem below 1100px, and narrower than its 20rem when the names take its room.
+    expect(quickOpen.className).toContain("@container");
+    expect(within(quickOpen).getByText("Go to…").className).toContain("@max-[8.5rem]:sr-only");
     expect(quickOpen.querySelector("kbd")?.className).not.toContain("sr-only");
     const restricted = screen.getByRole("button", { name: "Restricted Mode" });
     expect(within(restricted).getByText("Restricted Mode").className).toContain("max-[1100px]:sr-only");
