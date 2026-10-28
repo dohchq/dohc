@@ -117,7 +117,7 @@ impl Ydoc {
                 let Some((key, tail)) = after.split_once(']') else {
                     return false;
                 };
-                if label.is_empty() || label.contains(['[', ']', '\n', '\r']) {
+                if label.is_empty() || label.contains(['[', ']', '\n']) {
                     return false;
                 }
                 let Some(href) = reference_key(key).and_then(|key| definitions.get(&key)) else {
