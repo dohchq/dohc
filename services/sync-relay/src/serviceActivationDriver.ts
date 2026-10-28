@@ -136,6 +136,8 @@ export class ServiceActivationDriver {
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{return this.#blocked.get(targetKey(target))?.reason;}
+  /** Why the hosted pass left this target held, until a capture succeeds. */
+  holdReason(target:ServiceActivationTarget):ServiceHostedHold["reason"]|undefined{return this.#held.get(targetKey(target));}
   /** Allows a blocked target one more capture. Returns whether it was blocked. */
   unblock(target:ServiceActivationTarget){return this.#blocked.delete(targetKey(target));}
   // A document with no Y.Doc lineage has nothing to activate until one reaches the relay, a held

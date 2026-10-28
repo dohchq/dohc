@@ -14,10 +14,12 @@ import {
   ACCESS_ENDED_NOTE,
   AUTOMATION_NOT_HERE_NOTE,
   NOT_HERE_NOTE,
+  RUN_THREAD_NOT_HERE_NOTE,
   SHARE_LOOKUP_FAILED_NOTE,
   useSentNoticeProps,
 } from "./useSentNoticeProps";
 import type { SentNotices } from "./useSentNotices";
+import type { ChatsNav } from "../workbench/ChatsView";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -52,12 +54,15 @@ const RECEIVED = {
 
 const getRelayReceivedShare = vi.fn();
 const retryAutomationNotice = vi.fn();
+const listChatChannels = vi.fn();
+const listChannelThreads = vi.fn();
 const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
 const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
 const chatDispatchStateForThread = vi.fn(async (_payload: ChatDispatchStateForThreadPayload) => IDLE);
 const retryStoppedRun = vi.fn(async (): Promise<RetryStoppedRunResult> => ({ queued: true }));
 beforeEach(() => vi.stubGlobal("dohcDesktop", {
-  getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation, chatDispatchStateForThread, retryStoppedRun,
+  getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation, listChatChannels, listChannelThreads,
+  chatDispatchStateForThread, retryStoppedRun,
 }));
 afterEach(() => {
   cleanup();
@@ -96,6 +101,7 @@ function setup(
     openFile: vi.fn(),
     openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
     openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
+    openChat: vi.fn((_nav: ChatsNav) => undefined),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -219,6 +225,41 @@ describe("opening a sent notice", () => {
 });
 
 describe("a failed run's notice", () => {
+  it("opens a run's thread in the chat of whichever agent ran it", async () => {
+    const chat = (id: string, agentId: string) => ({
+      id, name: agentId, slug: id, kind: "agent" as const, agentId, createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0,
+    });
+    const thread = (id: string, channelId: string) => ({
+      id, channelId, title: id, createdAtMs: 0, updatedAtMs: 0, messageCount: 1, lastReadSequence: 0, unreadCount: 0,
+    });
+    listChatChannels.mockResolvedValue({ channels: [chat("chat-default", "default"), chat("chat-scout", "scout")], fileThreads: [] });
+    listChannelThreads.mockImplementation(async ({ channelId }: { channelId: string }) => ({
+      threads: [thread(channelId === "chat-scout" ? "thread-scout" : "thread-default", channelId)],
+    }));
+    const run = notice({
+      store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
+      title: "Your agent finished", target: { thread: "thread-scout", run: "run-1" },
+    });
+    const { result, openChat, openFile } = setup([run], [workspace("notes")]);
+    expect(result.current.sentNotices[0]?.openable).toBe(true);
+    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenCalledWith({ level: "thread", channel: chat("chat-scout", "scout"), thread: thread("thread-scout", "chat-scout") });
+    expect(openFile).not.toHaveBeenCalled();
+
+    // A thread that is gone, or a read that fails, says so on the row.
+    openChat.mockClear();
+    const gone = { ...run, target: { thread: "thread-gone", run: "run-2" } };
+    await expect(result.current.onOpenSentNotice(gone, live())).resolves.toBe(RUN_THREAD_NOT_HERE_NOTE);
+    listChatChannels.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBe("dohc could not open this run's thread.");
+    // Nothing opens once Open was cancelled.
+    const cancelled = new AbortController();
+    const opening = result.current.onOpenSentNotice(run, cancelled.signal);
+    cancelled.abort();
+    await expect(opening).resolves.toBeNull();
+    expect(openChat).not.toHaveBeenCalled();
+  });
+
   const failed = notice({
     kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },

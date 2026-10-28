@@ -844,6 +844,7 @@ function ChatThreadSpecimen() {
     <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
+        channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={CHAT_THREAD_MESSAGES}
         messagesLoading={false}
         threadLocked={false}
@@ -885,6 +886,7 @@ function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"
     <div className="w-[560px]">
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
+        channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
         messagesLoading={false}
         threadLocked={false}

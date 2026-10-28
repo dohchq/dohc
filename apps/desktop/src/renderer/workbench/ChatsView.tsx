@@ -16,8 +16,9 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
-import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
+import { AgentName, ChatAvatar, LinkHolderMark, useAgentInk } from "./ChatAvatar";
+import { neutralPresentation } from "./actorPresentation";
+import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -107,7 +108,8 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { DEFAULT_AGENT_ID, firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
+import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -118,7 +120,7 @@ import { publishAboutConversation, type AboutConversationEntry } from "./aboutCo
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
-import type { PresenceScopeInput } from "../../ipc/bridgeContract";
+import type { ActorPresentation, PresenceScopeInput } from "../../ipc/bridgeContract";
 import {
   CHAT_AGENT_PRESENCE_TOPIC,
   resolveAgentPresenceActivity,
@@ -386,6 +388,16 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
   );
 }
 
+// An agent chat's mark beside its name, in its agent's hue.
+function AgentMark(props: { presentation: ActorPresentation }) {
+  const ink = useAgentInk(props.presentation);
+  return (
+    <span aria-hidden data-testid="chats-channel-agent-mark" className={`shrink-0 font-mono text-[12px] ${ink}`}>
+      ◈
+    </span>
+  );
+}
+
 // One row of the chat nav: an icon, a name, and what is waiting on the right.
 // The active row is the one the panel currently shows.
 function NavRow(props: {
@@ -472,7 +484,7 @@ export function runnerProgram(command: string): string {
     if (tokens.length === 2) break;
   }
   const basename = (token: string): string => token.split(/[\\/]/u).pop() ?? token;
-  const program = tokens[0] ? basename(tokens[0]) : "";
+  const program = tokens[0] ? basename(tokens[0]).replace(/\.exe$/iu, "") : "";
   const script = tokens[1] ? basename(tokens[1]) : "";
   return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
@@ -595,6 +607,10 @@ export function ChatsView(props: {
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
+  // For openChannel and openThread: an agent's chat opened without its agent
+  // takes the listed chat (withListedAgent).
+  const latestChannels = useRef<readonly ChatChannelRecord[]>([]);
+  latestChannels.current = overview.status === "ready" ? overview.channels : [];
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, PostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
@@ -1101,12 +1117,12 @@ export function ChatsView(props: {
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
 
-  // The sidebar shows the first agent's chat.
-  const firstAgentId = (props.userSettings && firstAgent(props.userSettings)?.id) ?? DEFAULT_AGENT_ID;
+  // The sidebar shows each agent's chat, which dohc makes for each agent it can start.
+  const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings) : [], [props.userSettings]);
   const awaitingAgentChannel = Boolean(
-    props.userSettings && firstAgentWithLaunch(props.userSettings)?.enabled &&
-    overview.status === "ready" &&
-    !overview.channels.some((channel) => channel.kind === "agent" && channel.agentId === firstAgentId),
+    props.userSettings && overview.status === "ready" &&
+    runnableAgents(props.userSettings).some((agent) =>
+      !overview.channels.some((channel) => channel.kind === "agent" && channel.agentId === agent.id)),
   );
   useEffect(() => {
     if (!awaitingAgentChannel) return;
@@ -1606,7 +1622,7 @@ export function ChatsView(props: {
     async (channel: ChatChannelRecord) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel });
+      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -1909,7 +1925,7 @@ export function ChatsView(props: {
       const refreshSeq = ++threadRefreshSeq.current;
       setNav({
         level: "thread",
-        channel,
+        channel: withListedAgent(channel, latestChannels.current),
         thread,
         ...(focusMessageId ? { focusMessageId } : {}),
       });
@@ -2802,10 +2818,10 @@ export function ChatsView(props: {
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
     [joinedByWire],
   );
-  const agentChannel =
-    overview.status === "ready"
-      ? overview.channels.find((channel) => channel.kind === "agent" && channel.agentId === firstAgentId) ?? null
-      : null;
+  const agentChats = useMemo(
+    () => overview.status === "ready" ? orderAgentChats(overview.channels, settingsAgents) : [],
+    [overview, settingsAgents],
+  );
   // Agents shared by other people that reach this workspace: an agent that posted in
   // a channel shared to the user belongs to whoever shared it. Derived from
   // the Home items already read, so it costs nothing and lists exactly the
@@ -3014,15 +3030,20 @@ export function ChatsView(props: {
   // scope. With no agent channel/collaboration this channel is never built.
   const agentSummaryPresence = usePresence({
     enabled:
-      collaboration !== null && agentChannel !== null && scopeResolved,
+      collaboration !== null && agentChats.length > 0 && scopeResolved,
     transport: workspacePresenceTransport,
     topic: CHAT_AGENT_PRESENCE_TOPIC,
     clientId: collaboration?.clientId ?? "",
     displayName: collaboration?.displayName ?? "",
   });
   const conversationAgentActivity = resolveAgentPresenceActivity(presence.others);
-  const agentSummaryActivity = resolveAgentPresenceActivity(
-    agentSummaryPresence.others,
+  // The workspace runs one agent at a time, and its presence carries that
+  // agent's Settings name, so each agent's chat shows only its own activity.
+  const agentSummaryOthers = agentSummaryPresence.others;
+  const agentActivity = useCallback(
+    (name: string) => resolveAgentPresenceActivity(agentSummaryOthers.filter((peer) =>
+      (peer.state as { displayName?: unknown } | null)?.displayName === name)),
+    [agentSummaryOthers],
   );
   const peoplePresence = useMemo(
     () =>
@@ -3032,7 +3053,6 @@ export function ChatsView(props: {
 
   // About for this tab: the conversation it shows, who is here, and whether
   // it came through someone else's share. Only a tab's own page publishes.
-  const agentName = props.agentSetup?.agentName;
   const aboutConversation = useMemo<AboutConversationEntry | null>(() => {
     if (!props.editorTabPath) return null;
     if (activeDm) {
@@ -3063,7 +3083,7 @@ export function ChatsView(props: {
     if (activeChannel.kind === "agent") {
       return {
         kind: "agent",
-        name: chatEditorTitle(nav, agentName),
+        name: chatEditorTitle(nav, settingsAgents),
         channelWireId: activeWireId,
         received: false,
         // The agent is the conversation, so its own presence is not a face,
@@ -3079,7 +3099,7 @@ export function ChatsView(props: {
       received: joined === undefined ? null : joined !== null,
       present: presence.others,
     };
-  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
+  }, [activeChannel, activeDm, activeWireId, settingsAgents, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
   useEffect(() => {
     if (!props.editorTabPath || aboutConversation === null) return;
     return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
@@ -3834,7 +3854,7 @@ export function ChatsView(props: {
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
                     : item.channel.kind === "agent"
-                      ? "Agent"
+                      ? agentChatIdentity(withListedAgent(item.channel, overview.channels), settingsAgents).label
                       : `#${item.channel.name}`
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
@@ -4300,6 +4320,7 @@ export function ChatsView(props: {
           >
             <ThreadMessages
               nav={nav}
+              channelLabel={nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents).label : `#${nav.channel.name}`}
               messages={messages}
               messagesLoading={messagesLoading}
               threadLocked={threadLocked}
@@ -4413,6 +4434,11 @@ export function ChatsView(props: {
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
+    const channelAgent = nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents) : null;
+    const channelSettingsAgent = channelAgent ? settingsAgents.find((agent) => agent.id === nav.channel.agentId) : undefined;
+    // The strip under an agent's chat describes that agent's own runner.
+    const channelLaunch = channelSettingsAgent?.enabled ? channelSettingsAgent.launch : undefined;
+    const channelCommand = channelLaunch ? launchCommand(channelLaunch) : "";
     // An agent DM is one conversation. Its older posts stay under Posts, which
     // takes no new ones.
     const agentDm = nav.channel.kind === "agent";
@@ -4484,14 +4510,12 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <ChatHeader
-          label={nav.channel.kind === "agent" ? "My agent" : nav.channel.name}
+          label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
           onBack={variant === "panel" ? goBack : undefined}
           icon={
-            nav.channel.kind === "agent" ? (
-              <span aria-hidden className="shrink-0 font-mono text-[12px] text-agent">
-                ◈
-              </span>
+            channelAgent ? (
+              <AgentMark presentation={channelAgent.presentation} />
             ) : (
               <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
             )
@@ -4505,7 +4529,7 @@ export function ChatsView(props: {
             <>
               {nav.channel.kind === "agent" ? (
                 <AgentPresenceHint
-                  activity={agentSummaryActivity}
+                  activity={channelSettingsAgent ? agentActivity(channelSettingsAgent.name) : null}
                   testId="chats-channel-agent-presence"
                 />
               ) : null}
@@ -4549,20 +4573,20 @@ export function ChatsView(props: {
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
-            data-state={agentReady ? "ready" : "needs-setup"}
+            data-state={channelLaunch ? "ready" : "needs-setup"}
             className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
             <Bot size={12} aria-hidden className="shrink-0 text-agent" />
             <span
               data-testid="chats-agent-screen-runner"
               className="min-w-0 flex-1 truncate"
-              title={agentReady ? (props.userSettings ? firstAgentCommand(props.userSettings) : undefined) : undefined}
+              title={channelCommand || undefined}
             >
-              {agentReady
-                ? props.userSettings && firstAgentCommand(props.userSettings)
-                  ? `Runs ${runnerProgram(firstAgentCommand(props.userSettings))}`
+              {channelLaunch
+                ? channelCommand
+                  ? `Runs ${runnerProgram(channelCommand)}`
                   : "Runner on"
-                : props.agentSetup.runnerConfigured
+                : channelSettingsAgent?.launch
                   ? "Chat runner is off in Settings"
                   : props.agentSetup.agentRunActive
                     ? "Agent run active · connect an agent to reply here"
@@ -4716,6 +4740,7 @@ export function ChatsView(props: {
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
             {...(agentDm ? {
+              ...(channelSettingsAgent ? { agentName: channelSettingsAgent.name } : {}),
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,
@@ -4850,7 +4875,6 @@ export function ChatsView(props: {
       : null;
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
-  const agentLabel = props.agentSetup?.agentName ?? "Your agent";
   const beginNewDm = () => {
     // Always start compose from a clean slate — never inherit a
     // recipient/draft left over from a previous compose.
@@ -5090,44 +5114,46 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChannel || props.userSettings || otherAgents.length > 0 ? (
+          {agentChats.length > 0 || props.userSettings || otherAgents.length > 0 ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mb-1 mt-4 px-4">
                 Agents
               </SectionLabel>
-              {agentChannel ? (
-                <NavRow
-                  testId="chats-my-agent"
-                  data={{ "data-channel-id": agentChannel.id }}
-                  active={selectedChannelId === agentChannel.id}
-                  onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar presentation={ownAgentPresentation} name={agentLabel} kind="agent" size="strip" />}
-                  label={agentLabel}
-                  labelTestId="chats-my-agent-name"
-                  trailing={
-                    <>
-                      {agentReady ? null : (
-                        <span
-                          data-testid="chats-my-agent-state"
-                          className="shrink-0 text-[10px] text-subtle"
-                        >
-                          not set up
-                        </span>
-                      )}
-                      <AgentPresenceHint
-                        activity={agentSummaryActivity}
-                        program={
-                          agentReady && props.userSettings
-                            ? runnerProgram(firstAgentCommand(props.userSettings))
-                            : null
-                        }
-                        testId="chats-my-agent-presence"
-                      />
-                      <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
-                    </>
-                  }
-                />
-              ) : null}
+              {agentChats.map((channel) => {
+                const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
+                const { label, presentation } = agentChatIdentity(channel, settingsAgents);
+                const launch = agent?.enabled ? agent.launch : undefined;
+                return (
+                  <NavRow
+                    key={channel.id}
+                    testId="chats-my-agent"
+                    data={{ "data-channel-id": channel.id, ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}) }}
+                    active={selectedChannelId === channel.id}
+                    onClick={() => openConversation({ level: "channel", channel })}
+                    icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
+                    label={label}
+                    labelTestId="chats-my-agent-name"
+                    trailing={
+                      <>
+                        {launch ? null : (
+                          <span
+                            data-testid="chats-my-agent-state"
+                            className="shrink-0 text-[10px] text-subtle"
+                          >
+                            {agent?.launch ? "off" : "not set up"}
+                          </span>
+                        )}
+                        <AgentPresenceHint
+                          activity={agent ? agentActivity(agent.name) : null}
+                          program={launch ? runnerProgram(launchCommand(launch)) : null}
+                          testId="chats-my-agent-presence"
+                        />
+                        <UnreadPill count={channel.unreadCount} testId="chats-my-agent-unread" />
+                      </>
+                    }
+                  />
+                );
+              })}
               {otherAgents.length > 0 ? (
                 <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
                   {otherAgents.map((agent) => (
@@ -5174,7 +5200,7 @@ export function ChatsView(props: {
                   {agentReady ? (
                     <>
                       <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
-                      Manage agent
+                      Manage agents
                     </>
                   ) : (
                     <>

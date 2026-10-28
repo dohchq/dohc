@@ -50,6 +50,8 @@ export function ChatLane(props: {
   // What a picked agent's offer says. Only an agent DM's lane reads its
   // dispatch, to stop the agent's run.
   agentSetup?: AgentSetupSummary | null;
+  // An agent DM's agent, by the name its row shows.
+  agentName?: string;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
@@ -433,8 +435,8 @@ export function ChatLane(props: {
           sending={sending}
           disabled={loading}
           placeholder={props.channel.kind !== "agent" ? `Message #${props.channel.name}`
-            // The name the DM's row shows. The input cuts a long one.
-            : props.agentSetup?.agentName ? `Message ${props.agentSetup.agentName}…` : "Message your agent…"}
+            // The input cuts a long name.
+            : props.agentName ? `Message ${props.agentName}…` : "Message your agent…"}
           sendLabel="Send message"
           candidates={props.mentionCandidates}
           fileCandidates={props.fileCandidates}

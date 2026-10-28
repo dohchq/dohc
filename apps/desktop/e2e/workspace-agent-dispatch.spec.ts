@@ -102,8 +102,8 @@ async function openMyAgent(page: Page): Promise<void> {
 
   await page.getByTestId(activityPin("chats")).click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
-  await page.getByTestId("chats-my-agent").click();
-  await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
+  await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+  await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
 }
 
 test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {
@@ -143,7 +143,7 @@ test("picking the agent in a group's post says it runs when you send, and the of
   }
 });
 
-test("My agent dispatches a fresh successful run for each human message", async () => {
+test("the agent dispatches a fresh successful run for each human message", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-dispatch-report-e2e";

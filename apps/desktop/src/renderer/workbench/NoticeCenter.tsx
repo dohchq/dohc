@@ -423,6 +423,14 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  if (reason === "conflict-parent-withheld") {
+    return {
+      title: "Live editing can't resume",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",

@@ -358,8 +358,9 @@ it("removes only the copies of accounts that left in a look still owed, never th
   let listing=false;
   const f=await fixture({workspaces:rootPath=>{if(!listing)throw new Error("dohc could not read its workspace list.");return [rootPath,earlier];}});
   await f.registry.get(f.input);const {directory:first}=mocks.open.mock.calls[0]![0] as {directory:string};
+  expect(basename(first)).toMatch(/^[0-9a-f]{16}-[0-9a-f]{16}$/);
   // Account A's copies from an earlier run in another workspace: one with its tag, and one from before tags.
-  const copies=join(earlier,".dohc","local","dataset-copies"),tagged=join(copies,`${basename(first).slice(0,16)}-${"1".repeat(64)}`),untagged=join(copies,"2".repeat(64));
+  const copies=join(earlier,".dohc","local","dataset-copies"),tagged=join(copies,`${basename(first).slice(0,16)}-${"1".repeat(16)}`),untagged=join(copies,"2".repeat(64));
   for(const copy of [tagged,untagged]){await mkdir(copy,{recursive:true});await writeFile(join(copy,"replica.sqlite"),"A's data");}
   // A signs out while dohc can't list the workspaces, and B signs in while it still can't, then opens a copy in each.
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("workspace list");
@@ -368,11 +369,14 @@ it("removes only the copies of accounts that left in a look still owed, never th
   await openedLocalState({workspaceId:"e",rootPath:earlier});
   for(const input of [{...f.input,ownerKey:b,lifetime:new AbortController().signal},{...f.input,workspaceId:"e",rootPath:earlier,ownerKey:b,lifetime:new AbortController().signal}])await f.registry.get(input);
   const mine=mocks.open.mock.calls.slice(1).map(([options])=>(options as {directory:string}).directory);
+  // B's copy under the long name a build before #2652 used counts as an account that left.
+  const long=join(copies,`${basename(mine[0]!).slice(0,16)}-${"3".repeat(64)}`);
+  await mkdir(long);await writeFile(join(long,"replica.sqlite"),"B's data");
   // dohc starts again, able to list them, with B still signed in.
   listing=true;
   await restart(f.record,[f.input.rootPath,earlier]).credentialsChanged(null);
   for(const copy of mine)expect(await readdir(copy)).toEqual(["owned.sqlite"]);
-  for(const copy of [first,tagged,untagged])await expect(lstat(copy)).rejects.toThrow("ENOENT");
+  for(const copy of [first,tagged,untagged,long])await expect(lstat(copy)).rejects.toThrow("ENOENT");
   expect(JSON.parse(await readFile(f.record,"utf8"))).toEqual({folders:[],departed:[tag]});
 });
 it.skipIf(process.platform==="win32"||process.getuid?.()===0)("forgets the signed-in account's own folders in a record it reads late, and leaves its open copy",async()=>{
@@ -393,7 +397,7 @@ it("keeps the tags of accounts that left, so a later cleanup removes a copy no e
   const away=await mkdtemp(join(tmpdir(),"dohc-copy-registry-away-"));cleanups.push(()=>rm(away,{recursive:true,force:true}));
   const f=await fixture();await f.registry.get(f.input);const {directory}=mocks.open.mock.calls[0]![0] as {directory:string};
   // A copy of the same account in a workspace that is not in the list when it signs out.
-  const stranded=join(away,".dohc","local","dataset-copies",`${basename(directory).slice(0,16)}-${"1".repeat(64)}`);
+  const stranded=join(away,".dohc","local","dataset-copies",`${basename(directory).slice(0,16)}-${"1".repeat(16)}`);
   await mkdir(stranded,{recursive:true});await writeFile(join(stranded,"replica.sqlite"),"account data");
   await f.registry.credentialsChanged(null);
   expect(await readdir(stranded)).toEqual(["replica.sqlite"]);
