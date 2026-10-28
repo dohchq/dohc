@@ -199,15 +199,14 @@ async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
     let sessions = open.session_ops.lock().await;
     let mut head = original_sha;
     for turn in 0..2 {
-        let key = other.clone();
-        open.actor.run(move |store, cache| {
-            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
-            let update = doc.plaintext_insert(0, &format!("Edit {turn} "));
-            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
-                tx, &key, &update, None, None, 20 + turn))?;
-            cache.remove(&key);
-            Ok(())
-        }).await.unwrap();
+        let update = {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            let doc = dohc_engine_collab::load_persisted(&store, &other).unwrap().unwrap().doc;
+            doc.plaintext_insert(0, &format!("Edit {turn} "))
+        };
+        open.actor.ydoc_record_update(other.clone(), "other.txt".into(), ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly, update, None, None, Some(other_claim.clone()), false,
+            None, None, 20 + turn, Arc::new(NoFaults), CancellationToken::new(), None).await.unwrap();
         let saved = open.actor.ydoc_settle(scratch.path().to_owned(), other.clone(), "other.txt".into(),
             ContentKind::Plaintext, Some(other_claim.clone()), Some(head), "other-owner".into(),
             Arc::new(()), 30 + turn, Arc::new(NoFaults), CancellationToken::new(), None, None).await
