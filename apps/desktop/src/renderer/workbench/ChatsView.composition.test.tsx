@@ -109,6 +109,27 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 
+  it.each([
+    ["names the agent", "Nova the very thorough trip planning assistant", "Message Nova the very thorough trip planning assistant…"],
+    ["falls back without a name", undefined, "Message your agent…"],
+  ])("%s in its DM's composer, as its row does", async (_case, agentName, placeholder) => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        workspaceId: "workspace-a", ...(agentName ? { agentName } : {}),
+        runnerConfigured: true, runnerEnabled: true, agentRunActive: false, agents: [],
+      },
+    });
+    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe(agentName ?? "Your agent");
+    await user.click(screen.getByTestId("chats-my-agent"));
+    expect(((await screen.findByTestId("chats-lane-composer")) as HTMLTextAreaElement).placeholder).toBe(placeholder);
+  });
+
   it("shows a new message in an agent DM's conversation", async () => {
     const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
     const conversation = thread({ id: "conversation", channelId: agentDm.id, title: "" });

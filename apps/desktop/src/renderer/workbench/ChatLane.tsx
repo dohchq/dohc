@@ -373,7 +373,9 @@ export function ChatLane(props: {
           value={composer}
           sending={sending}
           disabled={loading}
-          placeholder={props.channel.kind === "agent" ? "Message your agent…" : `Message #${props.channel.name}`}
+          placeholder={props.channel.kind !== "agent" ? `Message #${props.channel.name}`
+            // The name the DM's row shows. The input cuts a long one.
+            : props.agentSetup?.agentName ? `Message ${props.agentSetup.agentName}…` : "Message your agent…"}
           sendLabel="Send message"
           candidates={props.mentionCandidates}
           fileCandidates={props.fileCandidates}
