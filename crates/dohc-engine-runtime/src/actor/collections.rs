@@ -2237,7 +2237,29 @@ fn complete_collection_boundary(
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
     match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        if owed.kind == dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup {
+            let head = dohc_engine_domain::select_snapshot_by_path_in_tx(
+                tx,
+                &owed.key.workspace_id,
+                &owed.key.version_id,
+                &owed.path,
+            )?;
+            if let Some(snapshot) = head.snapshot {
+                let fields = dohc_engine_domain::collections::markdown_frontmatter_json_with_body(
+                    &snapshot.text,
+                )
+                .map_or_else(|| serde_json::json!({}), |(fields, _)| fields);
+                synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    &owed.key.workspace_id,
+                    &owed.key.version_id,
+                    &owed.key.object_id,
+                    &fields,
+                )?;
+            }
+        }
         dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms)
+            .map_err(RuntimeError::from)
     })? {
         TxnOutcome::Committed(()) => Ok(()),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
