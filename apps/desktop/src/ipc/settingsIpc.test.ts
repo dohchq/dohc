@@ -8,7 +8,7 @@ import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import { WorkspaceUiState } from "./bridgeContract";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type DesktopUserSettingsResult, type ThemeMode } from "../settings/userSettings";
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
@@ -350,6 +350,19 @@ describe("registered settings IPC", () => {
     const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
     await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
+  });
+
+  it("tells every window and the tray when only the agents' order changes", async () => {
+    const h = await harness();
+    const two = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Claude Code" }), codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: two, base: DEFAULT_USER_SETTINGS });
+    h.broadcastUserSettings.mockClear();
+    h.refreshDispatchTray.mockClear();
+    await h.invoke(settingsOperations.orderAgents.channel, { order: ["codex"] });
+    expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
+    const [sent] = h.broadcastUserSettings.mock.lastCall as [DesktopUserSettingsResult];
+    expect(Object.keys(sent.settings.agents)).toEqual(["codex", "default"]);
+    expect(h.refreshDispatchTray).toHaveBeenCalledOnce();
   });
 
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
