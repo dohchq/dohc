@@ -1421,6 +1421,13 @@ impl EngineService {
             state.initial_update = draft.initial_update;
             draft.descriptor
         });
+        let conversion_consent = if let Some(source) = params.allow_lossy_source_sha256 {
+            Some(open.actor.ydoc_conversion_consent(state.key.clone(), params.path.clone(),
+                session_id.clone(), state.lineage_claim_id.clone(), state.restore_generation, source,
+                cancellation.token()).await.map_err(map_runtime)?)
+        } else {
+            None
+        };
         let initial_update = state.initial_update;
         let byte_permit = self
             .blob_egress_budget
@@ -1494,11 +1501,7 @@ impl EngineService {
         lock(&self.sessions).insert(
             session_id.clone(),
             YdocSession {
-                conversion_consent: params.allow_lossy_source_sha256.map(|source| Arc::new(
-                    MarkdownConversionConsent::new(state.key.clone(), session_id,
-                        state.lineage_claim_id.clone(), state.restore_generation, source,
-                        state.head_blob_sha256.clone()),
-                )),
+                conversion_consent,
                 owner_draft,
                 workspace: handle,
                 key: state.key,

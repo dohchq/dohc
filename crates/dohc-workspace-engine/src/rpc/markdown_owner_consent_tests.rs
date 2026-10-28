@@ -369,8 +369,9 @@ async fn markdown_owner_consent_rpc_releases_the_adopted_hold_but_never_uses_a_c
         assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
         assert_eq!(std::fs::metadata(scratch.path().join("note.md")).unwrap().modified().unwrap(), modified);
         assert_eq!(notice.document.as_ref().unwrap().path.as_deref(), Some("note.md"));
-        let opened = service.ydoc_open(&ctx, Some(workspace.clone()),
+        let (opened, egress) = service.ydoc_open(&ctx, Some(workspace.clone()),
             json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}), 100).await.unwrap();
+        drop(egress);
         let session_id = opened["sessionId"].as_str().unwrap().to_owned();
         let mut events = service.events.subscribe();
         let error = service.ydoc_settle(&ctx, Some(workspace.clone()), json!({
@@ -389,10 +390,11 @@ async fn markdown_owner_consent_rpc_releases_the_adopted_hold_but_never_uses_a_c
         if close_owner {
             service.ydoc_close(&ctx, Some(workspace.clone()),
                 json!({"sessionId":session_id,"settle":false})).await.unwrap();
-            let mcp = service.ydoc_open(&ctx, Some(workspace.clone()), json!({
+            let (mcp, egress) = service.ydoc_open(&ctx, Some(workspace.clone()), json!({
                 "versionId":"main","path":"note.md","contentKind":"richdoc",
                 "allowLossySourceSha256":hex_sha256(source.as_bytes()),
             }), 101).await.unwrap();
+            drop(egress);
             let mcp_id = mcp["sessionId"].as_str().unwrap();
             let error = service.live_application_settle(ctx.clone(), request(Some(&session_id))).await.err().unwrap();
             assert_eq!(error.message, "markdown-write-held");
@@ -429,4 +431,33 @@ async fn markdown_owner_consent_rpc_releases_the_adopted_hold_but_never_uses_a_c
         }
         service.workspace_close(Some(workspace)).await.unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_open_and_settle_validate_the_same_source() {
+    let (scratch, service, owner, workspace, _, source) = adopted_rpc_fixture().await;
+    let mut ctx = RequestContext::unbounded();
+    ctx.connection = Some(owner.handle());
+    let wrong_source = dohc_engine_storage::hex_sha256(b"another source");
+    let open_error = service.ydoc_open(&ctx, Some(workspace.clone()), json!({
+        "versionId":"main","path":"note.md","contentKind":"richdoc",
+        "allowLossySourceSha256":wrong_source,
+    }), 100).await.err().expect("open must reject a different witness source");
+    assert!(lock(&service.sessions).is_empty());
+    let (opened, egress) = service.ydoc_open(&ctx, Some(workspace.clone()), json!({
+        "versionId":"main","path":"note.md","contentKind":"richdoc",
+        "allowLossySourceSha256":dohc_engine_storage::hex_sha256(source.as_bytes()),
+    }), 101).await.unwrap();
+    drop(egress);
+    let session_id = opened["sessionId"].as_str().unwrap();
+    let grant = lock(&service.sessions)[session_id].conversion_consent.clone().unwrap();
+    let settle_error = service.ydoc_settle(&ctx, Some(workspace.clone()), json!({
+        "sessionId":session_id,"allowLossySourceSha256":wrong_source,
+    })).await.unwrap_err();
+    assert_eq!(settle_error.code, open_error.code);
+    assert_eq!(settle_error.message, open_error.message);
+    assert!(Arc::ptr_eq(&grant, lock(&service.sessions)[session_id].conversion_consent.as_ref().unwrap()));
+    assert!(!grant.is_consumed());
+    assert_eq!(std::fs::read_to_string(scratch.path().join("note.md")).unwrap(), source);
+    service.workspace_close(Some(workspace)).await.unwrap();
 }
