@@ -61,7 +61,8 @@ type ShotGate = { release(): void };
 // Holds or fails main's handler for the next call on one channel, the way
 // shared-continuity.spec.ts holds editor updates. Electron looks the handler
 // up in ipcMain._invokeHandlers on each invoke, so the swap catches that call
-// and puts the original back for every call after it.
+// and puts the original back for every call after it. A failure is the
+// engine going away, which the renderer words after what failed.
 async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "fail"): Promise<void> {
   await desktop.app.evaluate(({ ipcMain }, input) => {
     const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, InvokeHandler> })._invokeHandlers;
@@ -71,7 +72,7 @@ async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "
     const gate = new Promise<void>((resolve) => { open = resolve; });
     handlers.set(input.channel, async (...args: unknown[]) => {
       handlers.set(input.channel, original);
-      if (input.mode === "fail") throw new Error("dohc could not reach the workspace engine.");
+      if (input.mode === "fail") throw Object.assign(new Error("Rust engine daemon exited."), { name: "EngineDaemonUnavailableError" });
       await gate;
       return await original(...args);
     });

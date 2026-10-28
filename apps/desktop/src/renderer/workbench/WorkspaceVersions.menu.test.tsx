@@ -270,4 +270,46 @@ describe("VersionMenu", () => {
     expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps Try again when Try again cannot read the versions", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new Error("The engine stopped."));
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-merge"));
+    await user.click(screen.getByTestId("version-merge-confirm"));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+
+    const unreadable = new Error("The engine stopped.");
+    bridgeMock.listWorkspaceVersions.mockRejectedValueOnce(unreadable);
+    act(() => props.onError.mock.calls[0]![2]!());
+    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(2));
+    expect(props.onError).toHaveBeenLastCalledWith(expect.any(String), unreadable, expect.any(Function));
+
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
+      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null,
+    });
+    act(() => props.onError.mock.calls[1]![2]!());
+    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main."));
+  });
+
+  it("reports nothing when Try again's read fails after the menu is gone", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new Error("The engine stopped."));
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-merge"));
+    await user.click(screen.getByTestId("version-merge-confirm"));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+
+    let failRead!: (error: Error) => void;
+    bridgeMock.listWorkspaceVersions.mockReturnValueOnce(new Promise((_resolve, reject) => { failRead = reject; }));
+    act(() => props.onError.mock.calls[0]![2]!());
+    cleanup();
+    await act(async () => {
+      failRead(new Error("The engine stopped."));
+      await Promise.resolve();
+    });
+    expect(props.onError).toHaveBeenCalledTimes(1);
+  });
 });

@@ -324,12 +324,15 @@ export function VersionMenu(props: {
   );
 
   // A failed merge is a notice. Its Try again reopens the dialog for the same
-  // version and merges there, unless the version is gone by then.
+  // version and merges there, unless the version is gone by then. A failed
+  // read of the versions is a notice with the same Try again.
   const failMerge = useCallback(
     (version: WorkspaceVersionRecord, error: unknown) => {
       setMergeSource(null);
       void refresh().catch(() => undefined);
-      props.onError(ipcErrorMessage(error, `Could not merge ${version.name} into Main.`), error, () => {
+      const fallback = `Could not merge ${version.name} into Main.`;
+      const retry = () => {
+        const token = snapshotToken.current;
         void refresh().then(
           (current) => {
             if (current === null) return;
@@ -337,9 +340,13 @@ export function VersionMenu(props: {
             if (found) setMergeSource({ version: found, runOnOpen: true });
             else props.onError(`${version.name} no longer exists, so it can't merge into Main.`, null);
           },
-          (readError: unknown) => props.onError(ipcErrorMessage(readError, "Version controls are unavailable right now."), readError),
+          (readError: unknown) => {
+            if (token !== snapshotToken.current) return;
+            props.onError(ipcErrorMessage(readError, fallback), readError, retry);
+          },
         );
-      });
+      };
+      props.onError(ipcErrorMessage(error, fallback), error, retry);
     },
     [props.onError, refresh],
   );
