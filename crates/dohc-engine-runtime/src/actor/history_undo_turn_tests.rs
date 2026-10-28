@@ -1284,7 +1284,7 @@ async fn synced_deletion_refusal_skips_member_without_leaving_undo_pending() {
     assert!(!root.join("guarded.md").exists());
     let (kind, attempts, errors): (String, i64, String) = actor
         .run(|store, _| {
-            let mut files = VersionedTextStore::new(store);
+            let files = VersionedTextStore::new(store);
             assert!(files.read_text(WS, "main", "guarded.md")?.is_none());
             assert_eq!(files.read_text(WS, "main", "safe.md")?.unwrap().text, "safe text");
             store
