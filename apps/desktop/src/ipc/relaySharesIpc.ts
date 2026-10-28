@@ -604,6 +604,7 @@ export function createRelaySharesIpcHandlers<
   const undoRelayShare: Handlers["undoRelayShare"] = async (input, { operation }) => {
     assertOriginalWorkspace(operation.workspace);
     await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
+    operation.assertCurrent();
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
       {

@@ -279,6 +279,17 @@ describe("sync before live hosting", () => {
     await expect(undone).resolves.toEqual({shareId: "share"});
     expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {method: "POST", body: JSON.stringify({undoId: "undo-1"})});
   });
+
+  it("doesn't restore the share when the window changes workspaces while Undo syncs", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const undone = h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    h.retireRenderer();
+    pushed.resolve();
+    await expect(undone).rejects.toThrow(relayShareOperations.undoRelayShare.inactiveMessage);
+    expect(h.accountRequest).not.toHaveBeenCalled();
+  });
 });
 
 describe("owner live document enrollment", () => {
