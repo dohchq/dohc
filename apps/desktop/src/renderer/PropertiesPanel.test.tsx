@@ -1295,7 +1295,7 @@ describe("PropertiesPanel", () => {
     expect(words?.getAttribute("role")).toBe("tooltip");
     expect(words?.hidden).toBe(true);
     expect(words?.textContent).toBe(
-      "['Kyoto, Japan', Osaka]dohc can't edit this list because an item has a comma. Change it in another app, or ask an agent.",
+      "['Kyoto, Japan', Osaka]dohc can't edit this list here because an item has a comma.",
     );
 
     await user.tab();
@@ -1310,10 +1310,23 @@ describe("PropertiesPanel", () => {
     const where = screen.getByLabelText("Property where value") as HTMLInputElement;
     await user.hover(where);
     expect(document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
-      "{lat: 35.5}dohc can't edit a value with named fields. Change it in another app, or ask an agent.",
+      "{lat: 35.5}dohc can't edit a value with named fields here.",
     );
     // Leaving a name saves the rows, which leaves the file as it was.
     for (const [written] of onChange.mock.calls) expect(written).toBe(body);
+  });
+
+  it("points a value the pills can't edit to Source, unless the page is read-only", () => {
+    const body = "---\nwhere: {lat: 35.5}\n---\n\nBody\n";
+    const reason = () => {
+      const where = screen.getByLabelText("Property where value");
+      return document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent;
+    };
+    const { rerender } = render(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here. Edit it in Source.");
+
+    rerender(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} readOnly />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here.");
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {

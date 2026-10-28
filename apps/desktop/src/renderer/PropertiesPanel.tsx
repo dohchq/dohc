@@ -528,7 +528,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   duplicate name
                 </span>
               ) : entry.readOnly !== undefined ? (
-                <ReadOnlyValue label={`Property ${entry.key || index + 1} value`} value={entry.value} reason={entry.readOnly} />
+                <ReadOnlyValue
+                  label={`Property ${entry.key || index + 1} value`}
+                  value={entry.value}
+                  reason={showSource && !refused ? `${entry.readOnly} Edit it in Source.` : entry.readOnly}
+                />
               ) : (
                 <input
                   data-testid="property-value"
