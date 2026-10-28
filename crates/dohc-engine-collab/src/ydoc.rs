@@ -3118,53 +3118,56 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
     outside_markdown_allowlist(markdown).is_some()
 }
 
+// Inline text the desktop reader reads as the engine does: no autolinks, hard breaks or other
+// inline syntax.
+fn allowlisted_inline(text: &str) -> bool {
+    !text.contains("://")
+        && !text
+            .as_bytes()
+            .windows(4)
+            .any(|part| part.eq_ignore_ascii_case(b"www."))
+        && !text.split_inclusive('\n').any(|line| {
+            line.strip_suffix('\n')
+                .is_some_and(|content| content.ends_with("  "))
+        })
+        && text.chars().all(|character| {
+            character.is_alphanumeric()
+                || (character != '\r' && character.is_whitespace())
+                || matches!(
+                    character,
+                    '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '(' | ')' | '-' | '/'
+                )
+        })
+}
+
 // Some(true) denotes an agreed item-block body; flat successors keep their
 // existing permissive proof, except for the desktop's quote depth limit.
 fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
-    fn inline(text: &str) -> bool {
-        !text.contains("://")
-            && !text
-                .as_bytes()
-                .windows(4)
-                .any(|part| part.eq_ignore_ascii_case(b"www."))
-            && !text.split_inclusive('\n').any(|line| {
-                line.strip_suffix('\n')
-                    .is_some_and(|content| content.ends_with("  "))
-            })
-            && text.chars().all(|character| {
-                character.is_alphanumeric()
-                    || (character != '\r' && character.is_whitespace())
-                    || matches!(
-                        character,
-                        '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '(' | ')' | '-' | '/'
-                    )
-            })
-    }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
-            MdBlock::Paragraph(text) => inline(text),
-            MdBlock::Heading { text, .. } => !in_item && inline(text),
+            MdBlock::Paragraph(text) => allowlisted_inline(text),
+            MdBlock::Heading { text, .. } => !in_item && allowlisted_inline(text),
             MdBlock::CodeBlock { language, .. } => language
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "_+.#-".contains(character)),
             MdBlock::BulletList(items) => items.iter().all(|(text, blocks)| {
-                !text.trim().is_empty() && inline(text) && tree(blocks, true)
+                !text.trim().is_empty() && allowlisted_inline(text) && tree(blocks, true)
             }),
             MdBlock::OrderedList { items, .. } => items.iter().all(|item| {
                 !item.paragraph.trim().is_empty()
-                    && inline(&item.paragraph)
+                    && allowlisted_inline(&item.paragraph)
                     && tree(item.blocks(), true)
             }),
             MdBlock::TaskList(items) => items.iter().all(|(_, item)| {
                 !item.paragraph.trim().is_empty()
-                    && inline(&item.paragraph)
+                    && allowlisted_inline(&item.paragraph)
                     && tree(item.blocks(), true)
             }),
             MdBlock::Quote(children) => {
                 !in_item && !refused_fold_item_bodies(children) && tree(children, false)
             }
             MdBlock::Table { rows, .. } => {
-                !in_item && rows.iter().flatten().all(|cell| inline(cell))
+                !in_item && rows.iter().flatten().all(|cell| allowlisted_inline(cell))
             }
             _ => !in_item,
         })
@@ -11760,6 +11763,9 @@ mod projection_tests {
             "See WWW.x.com/[r][bags].",
             "See [==r==][bags].",
             "See ==[r][bags]==.",
+            "See ++[r][bags]++.",
+            "See [++r++][bags].",
+            "Mail a@b.co about [r][bags].",
         ] {
             for source in [
                 format!("{unsupported}\n\nSee [r][bags].\n\n[bags]: https://e.com"),

@@ -95,16 +95,12 @@ impl Ydoc {
         let mut resolved_paragraphs = Vec::new();
         let mut resolved_bytes = 0;
         for (_, text, source, plain) in &paragraphs {
-            // Other inline syntax needs the desktop reader's full parse. A bare URL takes the brackets
-            // after it.
+            // Besides the brackets of full references, only text the engine's Markdown allowlist
+            // accepts. `!` would make an image. Other syntax needs the desktop reader's full parse.
             if !*plain
                 || definition_paragraph(source)
-                || source.contains(['\\', '`', '!', '<', '>', '&', '*', '_', '~', '{', '}', '='])
-                || source.contains("://")
-                || source
-                    .as_bytes()
-                    .windows(4)
-                    .any(|part| part.eq_ignore_ascii_case(b"www."))
+                || source.contains('!')
+                || !allowlisted_inline(&source.replace(['[', ']'], ""))
             {
                 continue;
             }
