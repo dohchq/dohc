@@ -3590,12 +3590,8 @@ describe("unavailable MCP launcher settings", () => {
     expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
       "dohc could not prepare its MCP launcher. Restart dohc to try again.",
     );
-    expect(screen.queryByTestId("mcp-config-snippet")).toBeNull();
-    const configSection = screen.getByRole("heading", { name: "MCP config" }).closest("section");
-    if (!configSection) throw new Error("The MCP config section did not render.");
     expect(
-      (within(configSection).getByRole("button", { name: "Copy" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled,
     ).toBe(true);
   });
 });

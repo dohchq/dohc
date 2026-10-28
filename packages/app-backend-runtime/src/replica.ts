@@ -112,7 +112,7 @@ export async function createDatasetReplica(options: {
   }
   try {
     read();
-    for(const name of await readdir(root))if(/^(work|read)-[A-Za-z0-9]{6}$/.test(name)){
+    for(const name of await readdir(root))if(/^(work|worker|read)-[A-Za-z0-9]{6}$/.test(name)){
       const path=join(root,name),info=await lstat(path);
       if(!info.isDirectory()||info.isSymbolicLink()||resolve(await realpath(path))!==path)throw Error("Collection copy storage changed.");
       await rm(path,{recursive:true,force:true});
@@ -134,10 +134,10 @@ export async function createDatasetReplica(options: {
         try {
           if(saved) {
             if(await digestFile(join(root,saved.snapshot),signal)!==saved.sha256) throw Error("The Collection copy changed. Download it again.");
-            activeDirectory=await mkdtemp(join(scratch,"worker-")); active=await worker(checkpoint,cursor,join(root,saved.snapshot),activeDirectory);
+            activeDirectory=await mkdtemp(join(root,"worker-")); active=await worker(checkpoint,cursor,join(root,saved.snapshot),activeDirectory);
           } else {
             checkpoint=initial;cursor=initial.cursor;
-            const path=await download(source,checkpoint,scratch,signal);activeDirectory=await mkdtemp(join(scratch,"worker-"));
+            const path=await download(source,checkpoint,scratch,signal);activeDirectory=await mkdtemp(join(root,"worker-"));
             active=await worker(checkpoint,cursor,path,activeDirectory);await rm(path,{force:true});saved=await persist(active,checkpoint,cursor,signal);await cleanup();
           }
           while(!equalRecoveryCursor(cursor,through)) {
@@ -148,10 +148,13 @@ export async function createDatasetReplica(options: {
               if(!sameScope(record.cursor,options.scope)||record.cursor.revision!==cursor.revision+1||record.cursor.revision>through.revision) throw Error("The Collection history is out of order.");
               if(record.kind==="checkpoint") {
                 if(!record.previous||!equalRecoveryCursor(record.previous,cursor)||record.byteLength>maximum) throw Error("The server's records do not continue this Collection copy. Download it again.");
-                const path=await download(source,record,scratch,signal),directory=await mkdtemp(join(scratch,"worker-"));
-                const next=await worker(record,record.cursor,path,directory);await rm(path,{force:true});await active.close();
-                const previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
-                if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});
+                const path=await download(source,record,scratch,signal),directory=await mkdtemp(join(root,"worker-"));
+                let next:PersistentAppBackend;
+                try { next=await worker(record,record.cursor,path,directory); }
+                catch(error) { await rm(directory,{recursive:true,force:true}); throw error; }
+                // The new worker is the active one before anything else can fail, so the finally closes it.
+                const previous=active,previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
+                await previous.close();if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});await rm(path,{force:true});
               } else {
                 if(!sameEpoch(record.cursor,cursor)||record.previousDigest!==cursor.digest) throw Error("The Collection moved to another host. Download it again.");
                 const bytes=new Uint8Array(record.byteLength);let offset=0;
@@ -165,7 +168,7 @@ export async function createDatasetReplica(options: {
             saved=await persist(active,checkpoint,cursor,signal);await cleanup();
           }
           await cleanup();return {cursor: saved!.cursor,checkpoint:saved!.checkpoint,savedAtMs:saved!.savedAtMs};
-        } finally {await active?.close();await rm(scratch,{recursive:true,force:true});}
+        } finally {await active?.close();await rm(scratch,{recursive:true,force:true});if(activeDirectory)await rm(activeDirectory,{recursive:true,force:true});}
       });
     },
     read(input:{operationId:string;revision:number;revisionSha256:string;input:JsonValue;signal?:AbortSignal}) {

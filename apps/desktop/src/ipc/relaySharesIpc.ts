@@ -63,12 +63,20 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
-const activeLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
+const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
+function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
+  return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
+}
+const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
+  ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
   status: z.enum(["ready", "preparing", "paused", "unavailable"]),
-})).max(64)});
-const retiredLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
-  status: z.literal("retired"),
-})).max(64), nextCursor: OwnerLiveDocumentsResult.shape.nextCursor});
+  })),
+}));
+const retiredLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments,
+  nextCursor: OwnerLiveDocumentsResult.shape.nextCursor}).transform(page => ({
+  ...page, lastPath: page.documents.at(-1)?.path,
+  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.literal("retired")})),
+}));
 
 interface RelayShareRequest {
   <Result>(credentials: CloudCredentials, path: string, init: RequestInit | undefined, options: {retainRestoreConflict: true}): Promise<Result>;
@@ -325,7 +333,7 @@ export function createRelaySharesIpcHandlers<
       const stopped = retiredLiveDocuments.parse(retired);
       const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
       operation.assertCurrent();
-      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.documents.at(-1)?.path ||
+      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.lastPath ||
         stopped.nextCursor === input.retiredAfter)) {
         throw new Error("The live document list changed. Refresh the list and try again.");
       }
@@ -344,7 +352,7 @@ export function createRelaySharesIpcHandlers<
         // Each row speaks for the server's document, never for another that had or has its path.
         const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted" && row.reason !== "conflict-parent-withheld"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];

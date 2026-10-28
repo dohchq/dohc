@@ -1,4 +1,4 @@
-import type { ChatDispatchNotice, ChatDispatchStoppedRun } from "../ipc/bridgeContract";
+import type { ChatDispatchNotice, ChatDispatchStoppedRun, RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/automation-executor/automation-chat";
@@ -248,7 +248,7 @@ interface SelfTestState {
   poll: ReturnType<typeof setTimeout> | null;
   timeout: ReturnType<typeof setTimeout>;
   killEscalation: ReturnType<typeof setTimeout> | null;
-  resolve(result: { ok: boolean; detail: string }): void;
+  resolve(result: RunnerSelfTestResult): void;
   // Ends the self-test with this answer and stops its runner.
   cancel(detail: string): Promise<void>;
 }
@@ -280,6 +280,8 @@ function replyToolCall(threadId: string, runId: string): string {
 // A Claude Code run loads only the person's own Claude Code settings
 // (agentToolCatalog.ts), and a Codex run doesn't trust the workspace
 // (codexRunConfig.ts). Both leave out the workspace's instruction files.
+// Both tools' profiles refuse anything that needs approval, so the run hears
+// it before a refusal turns its reply into an explanation.
 function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
   const form = replyFormFor(tool);
   const instructionsFile = tool === "claude"
@@ -287,6 +289,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
     : tool === "codex"
       ? "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there. "
       : "";
+  const approvals = tool ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line. " : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -297,7 +300,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${approvals}Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -1601,7 +1604,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function runnerSelfTest(
     workspaceId: string,
-  ): Promise<{ ok: boolean; detail: string }> {
+    agentId: string,
+  ): Promise<RunnerSelfTestResult> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
@@ -1614,8 +1618,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let reservationHeldByProcess = false;
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
-      // The self-test checks the first agent dohc can start.
-      const agent = (await options.readDispatchAgents()).find((candidate) => candidate.launch);
+      const agent = (await options.readDispatchAgents()).find((candidate) => candidate.id === agentId);
       if (!agent?.launch) return { ok: false, detail: "Configure a runner command first." };
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
@@ -1706,8 +1709,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           prompt,
           assertMayStart,
         });
-        return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
-          const complete = async (result: { ok: boolean; detail: string }) => {
+        return await new Promise<RunnerSelfTestResult>((resolveResult) => {
+          const complete = async (result: RunnerSelfTestResult) => {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             test.settled = true;
@@ -1790,7 +1793,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             void complete({
               ok: false,
-              detail: `Runner self-test timed out after 120 seconds. Log: ${logPath}`,
+              detail: "Runner self-test timed out after 120 seconds.",
+              logPath,
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
@@ -1809,7 +1813,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             reportError(error);
             void complete({
               ok: false,
-              detail: `Runner self-test failed to start. Log: ${logPath}`,
+              detail: "Runner self-test failed to start.",
+              logPath,
             });
           });
           child.onExit(() => {
@@ -1819,7 +1824,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               if (current && !current.settled) {
                 await complete({
                   ok: false,
-                  detail: `Runner exited before reporting self-test success. Log: ${logPath}`,
+                  detail: "Runner exited before reporting self-test success.",
+                  logPath,
                 });
               }
             })();
@@ -1837,9 +1843,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
-          detail: `Runner self-test could not start. ${
-            error instanceof Error && error.message ? `${error.message} ` : ""
-          }Log: ${logPath}`,
+          detail: `Runner self-test could not start.${
+            error instanceof Error && error.message ? ` ${error.message}` : ""
+          }`,
+          logPath,
         };
       }
     } finally {

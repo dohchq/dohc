@@ -844,7 +844,7 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 describe("chatDispatchService", () => {
   it("the connection test exposes the missing packaged runtime repair instruction", async () => {
     const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
-    const result = await fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const result = await fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
     expect(result.detail).not.toContain("runner failed to start: runner failed to start:");
@@ -1477,9 +1477,10 @@ describe("chatDispatchService", () => {
       })]);
     });
     expect(fixture.spawnCalls).toEqual([]);
-    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
       ok: false,
-      detail: expect.stringContaining(`Runner self-test could not start. ${reason} Log: `),
+      detail: `Runner self-test could not start. ${reason}`,
+      logPath: expect.any(String),
     });
   });
 
@@ -1884,7 +1885,7 @@ describe("chatDispatchService", () => {
     const scanning = fixture.service.scanWorkspace(WORKSPACE_ID);
     await fixture.claimStarted;
 
-    const selfTest = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const selfTest = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     let selfTestSettled = false;
     void selfTest.then(
       () => { selfTestSettled = true; },
@@ -3381,6 +3382,9 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
+    const approvals = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line.";
+    if (tool) expect(prompt).toContain(approvals);
+    else expect(prompt).not.toContain("approve");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3388,7 +3392,7 @@ describe("chatDispatchService", () => {
     const writing = deferred<void>();
     const thread = deferred<string>();
     fixture.serviceOptions.startSelfTestThread = async () => { writing.resolve(); return thread.promise; };
-    const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const result = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     await writing.promise;
     if (reason === "shutdown") await fixture.service.stop();
     else fixture.serviceOptions.runSlotOccupied = () => true;
@@ -3411,7 +3415,7 @@ describe("chatDispatchService", () => {
       runner: { command: profile ? "" : "claude -p", profile },
     });
 
-    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
     await vi.waitFor(() => {
       expect(fixture.spawnCalls).toHaveLength(1);
@@ -3473,7 +3477,7 @@ describe("chatDispatchService", () => {
       run: null,
     });
 
-    const retryPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const retryPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     await vi.waitFor(() => {
       expect(fixture.spawnCalls).toHaveLength(2);
       expect(fixture.spawnCalls[1]!.process.stdinText).toEqual(expect.any(String));
@@ -3516,7 +3520,7 @@ describe("chatDispatchService", () => {
       ],
     });
 
-    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
       ok: false,
       detail: "dohc could not start Chats for this workspace. Restart dohc to try again.",
     });
@@ -3533,7 +3537,7 @@ describe("chatDispatchService", () => {
       runner: { command: "" },
     });
 
-    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
       ok: false,
       detail: "Configure a runner command first.",
     });
@@ -3541,12 +3545,12 @@ describe("chatDispatchService", () => {
 
     fixture.runner.command = 'claude -p "unterminated';
     await expect(
-      fixture.service.runnerSelfTest(WORKSPACE_ID),
+      fixture.service.runnerSelfTest(WORKSPACE_ID, "default"),
     ).resolves.toMatchObject({ ok: false });
     expect(fixture.runActivity).toEqual({ acquires: 1, releases: 1 });
 
     fixture.runner.command = "claude -p";
-    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
     await vi.waitFor(() => {
       expect(fixture.spawnCalls).toHaveLength(1);
@@ -3567,11 +3571,28 @@ describe("chatDispatchService", () => {
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 2 });
   });
 
+  it("checks the agent it is asked about", async () => {
+    const fixture = await createFixture({
+      runner: { command: "" },
+      agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "claude -p" } }) }],
+    });
+
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
+      ok: false,
+      detail: "Configure a runner command first.",
+    });
+    expect(fixture.spawnCalls).toEqual([]);
+
+    void fixture.service.runnerSelfTest(WORKSPACE_ID, "codex");
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    expect(fixture.attributions.map(({ run }) => run)).toEqual([expect.objectContaining({ agentId: "codex", dispatch: "self-test" })]);
+  });
+
   it("times out a runner self-test and escalates the same spawned group", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();
 
-    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
     await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
     await vi.waitFor(
       () => {
@@ -3677,7 +3698,7 @@ describe("chatDispatchService", () => {
 
     it("answers the runner self-test with how to trust the workspace, and spawns nothing", async () => {
       const fixture = await createFixture({ restricted: true, temporaryRunActivity: true });
-      await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+      await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
         ok: false, detail: SELF_TEST_RESTRICTED_DETAIL,
       });
       expect(fixture.spawnCalls).toEqual([]);
@@ -3761,7 +3782,7 @@ describe("chatDispatchService", () => {
 
     it("stops a self-test whose workspace was restricted after the trust lookup, before it spawns", async () => {
       const fixture = await createFixture({ afterTrustLookup: (trust) => trust.revoke(WORKSPACE_ID) });
-      await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+      await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
         ok: false, detail: SELF_TEST_RESTRICTED_DETAIL,
       });
       expect(fixture.spawnCalls).toEqual([]);
@@ -3846,7 +3867,7 @@ describe("chatDispatchService", () => {
 
     it("stops a running self-test when the workspace is restricted", async () => {
       const fixture = await createFixture();
-      const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+      const result = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
       await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
       const process = fixture.spawnCalls[0]!.process;
 
@@ -3861,7 +3882,7 @@ describe("chatDispatchService", () => {
     it("finds a timed-out self-test's runner until it exits, so a restrict cannot miss it", async () => {
       vi.useFakeTimers();
       const fixture = await createFixture();
-      const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+      const result = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
       await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1), { interval: 0 });
       await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
       await expect(result).resolves.toMatchObject({ ok: false, detail: expect.stringContaining("timed out") });
@@ -4046,7 +4067,7 @@ describe("chatDispatchService", () => {
     it("looks for held requests when a self-test's runner exits after the kill grace", async () => {
       vi.useFakeTimers();
       const fixture = await createFixture();
-      const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+      const result = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
       await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1), { interval: 0 });
       await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
       await expect(result).resolves.toMatchObject({ ok: false });

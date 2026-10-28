@@ -9,7 +9,6 @@ export function AgentToolPicker(props: {
   workspaceId: string;
   profile?: AgentLaunchProfile;
   disabled: boolean;
-  checkLabel: "Check" | "Test runner";
   onChange(profile: AgentLaunchProfile): void;
   onError(message: string, cause?: unknown): void;
 }) {
@@ -67,6 +66,6 @@ export function AgentToolPicker(props: {
       <dt>Prompt</dt><dd className="m-0">Conversation through stdin</dd>
       <dt>MCP</dt><dd className="m-0">dohc adds its own server for replies.</dd>
     </dl> : null}
-    <p className="m-0 text-[11px] text-muted">Detection does not test replies. Use {props.checkLabel} to test a reply through dohc.</p>
+    <p className="m-0 text-[11px] text-muted">Detection does not test replies. Use Check to test a reply through dohc.</p>
   </div>;
 }

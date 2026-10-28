@@ -450,6 +450,8 @@ export function BookmarkAction(props: {
 // transcript re-renders only when the conversation data itself changes.
 export const ThreadMessages = memo(function ThreadMessages(props: {
   nav: Extract<ChatsNav, { level: "thread" }>;
+  // The thread's chat as its header names it: an agent's name, or #group.
+  channelLabel: string;
   messages: ChatMessageRecord[];
   messagesLoading: boolean;
   threadLocked: boolean;
@@ -486,6 +488,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   useEffect(retainChatParser, []);
   const {
     nav,
+    channelLabel,
     messages,
     messagesLoading,
     threadLocked,
@@ -798,9 +801,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           data-testid="chats-thread-eyebrow"
           className="sr-only"
         >
-          {nav.channel.kind === "agent"
-            ? "My agent · thread"
-            : `#${nav.channel.name} · thread`}
+          {`${channelLabel} · thread`}
         </p>
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
@@ -831,7 +832,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               />
             ) : null}
             <span className="truncate text-[11px] tabular-nums text-subtle">
-              {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
+              {channelLabel}
             </span>
             <time
               data-testid="chats-message-time"

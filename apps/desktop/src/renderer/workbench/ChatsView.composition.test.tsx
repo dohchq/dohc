@@ -1,11 +1,11 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { settingsWithAgent } from "../../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import {
   NOW,
@@ -22,7 +22,7 @@ import {
 import { runnerProgram } from "./ChatsView";
 import { formatChatTime, formatClockDigits } from "../time";
 
-describe("ChatsView My agent", () => {
+describe("ChatsView agents' chats", () => {
   it("discovers an opted-in agent after creation while navigator polling is suspended", async () => {
     const listeners = new Set<(event: { workspaceId: string }) => void>();
     bridgeMock.onWorkspaceActivity.mockImplementation((callback: (event: { workspaceId: string }) => void) => {
@@ -67,7 +67,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
   });
 
-  it("renders under Agents, stays out of the group list, and uses the agent placeholder", async () => {
+  it("renders under Agents, stays out of the group list, and calls a chat with no Settings agent Your agent", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -93,7 +93,7 @@ describe("ChatsView My agent", () => {
     ]);
 
     await user.click(screen.getByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("My agent");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Your agent");
     expect(
       (screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).placeholder,
     ).toBe("Message your agent…");
@@ -126,7 +126,7 @@ describe("ChatsView My agent", () => {
         agents: [{ id: "default", name: "Nova", enabled: true }],
       },
       onSetupAgent,
-      userSettings: DEFAULT_USER_SETTINGS,
+      userSettings: settingsWithAgent({ name: "Nova" }),
       onSaveUserSettings: vi.fn(async () => undefined),
       workspacePath: "C:\\people\\ice\\work",
     });
@@ -141,18 +141,110 @@ describe("ChatsView My agent", () => {
     // The agent's screen says what runs it and what it reaches.
     const agentScreen = screen.getByTestId("chats-agent-screen");
     expect(agentScreen.dataset.state).toBe("ready");
-    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner on");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runs node agent.mjs");
     expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
     await user.click(screen.getByTestId("chats-agent-screen-manage"));
     expect(onSetupAgent).toHaveBeenCalledTimes(2);
   });
 
+  it("lists each agent's chat in Settings order with its own name and hue, then removed agents' chats", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({ id: "chat-helper", name: "Helper", slug: "agent-helper", kind: "agent", agentId: "helper", unreadCount: 1 }),
+        channel({ id: "chat-scout", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout", unreadCount: 3 }),
+        channel({ id: "chat-default", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
+      ],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-scout", channelId: "chat-scout", title: "Check links" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ threadId: "thread-scout", body: "Check the links" })] });
+    const settings = settingsWithAgent({ name: "Nova" });
+    renderView(vi.fn(), vi.fn(), {
+      userSettings: { ...settings, agents: { ...settings.agents, scout: testAgent({ name: "Ranger", hue: "teal", enabled: false }) } },
+      onSaveUserSettings: vi.fn(async () => undefined),
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    const rows = screen.getAllByTestId("chats-my-agent");
+    expect(rows.map((row) => row.dataset.agentId)).toEqual(["default", "scout", "helper"]);
+    expect(screen.getAllByTestId("chats-my-agent-name").map((name) => name.textContent)).toEqual(["Nova", "Ranger", "Helper"]);
+    const mark = (row: HTMLElement, name: string) => row.querySelector(`[title="${name}"]`)!.className;
+    expect(mark(rows[0]!, "Nova")).toContain("border-agent");
+    expect(mark(rows[1]!, "Ranger")).toContain("text-hue-teal");
+    expect(mark(rows[2]!, "Helper")).toContain("border-subtle bg-panel text-subtle");
+    // Each row says whether its own agent is off or has no runner, and its own unread count.
+    expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
+    expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
+    expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
+    expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
+
+    await user.click(rows[1]!);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Ranger");
+    expect(screen.getByTestId("chats-channel-agent-mark").className).toContain("text-hue-teal");
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Ranger · thread");
+    expect(screen.getByText("Ranger", { selector: "span.text-subtle" })).toBeTruthy();
+  });
+
+  it("describes the runner of the agent whose chat it is, not the first agent's", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({ id: "chat-default", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
+        channel({ id: "chat-codex", name: "Codex", slug: "agent-codex", kind: "agent", agentId: "codex" }),
+        channel({ id: "chat-scout", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout" }),
+      ],
+      fileThreads: [],
+    });
+    const settings = settingsWithAgent({ name: "Claude Code", launch: { command: "claude -p" } });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        workspaceId: "workspace-a",
+        preferredName: "Sam",
+        agentName: "Claude Code",
+        runnerConfigured: true,
+        runnerEnabled: true,
+        agentRunActive: false,
+        agents: [{ id: "default", name: "Claude Code", enabled: true }, { id: "codex", name: "Codex", enabled: true }],
+      },
+      userSettings: {
+        ...settings,
+        agents: {
+          ...settings.agents,
+          codex: testAgent({ name: "Codex", hue: "teal", launch: { command: "codex exec" } }),
+          scout: testAgent({ name: "Scout", enabled: false }),
+        },
+      },
+      onSaveUserSettings: vi.fn(async () => undefined),
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    await user.click(screen.getAllByTestId("chats-my-agent")[1]!);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Codex");
+    expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("ready");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runs codex");
+    expect(screen.getByTestId("chats-agent-screen-runner").title).toBe("codex exec");
+
+    // An agent that's off says so about itself, even while the first agent is on.
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    const scout = (await screen.findAllByTestId("chats-my-agent"))[2]!;
+    expect(within(scout).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    await user.click(scout);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Scout");
+    expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("needs-setup");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner configured · dispatch is off");
+  });
+
   it("names the program a runner command starts, with the whole command on hover", () => {
     expect(runnerProgram('node "C:\\w\\dohc\\apps\\desktop\\e2e\\fixtures\\fakeChatRunner.mjs" ask')).toBe("node fakeChatRunner.mjs");
     expect(runnerProgram("codex exec --sandbox read-only")).toBe("codex");
-    expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent.exe");
+    expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent");
     expect(runnerProgram("python3 /home/me/bot.py")).toBe("python3 bot.py");
-    expect(runnerProgram('"C:\\Program Files\\nodejs\\node.exe" "C:\\Agent Scripts\\bot.mjs"')).toBe("node.exe bot.mjs");
+    expect(runnerProgram('"C:\\Program Files\\nodejs\\node.exe" "C:\\Agent Scripts\\bot.mjs"')).toBe("node bot.mjs");
     expect(runnerProgram("'/opt/my agent/run.sh' --fast")).toBe("run.sh");
     expect(runnerProgram("")).toBe("");
   });
@@ -245,7 +337,7 @@ describe("ChatsView My agent", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check-result").dataset.state).toBe("ok"),
     );
-    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" });
+    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a", agentId: "default" });
     await user.click(screen.getByTestId("chats-add-agent-submit"));
     await waitFor(() => expect(screen.queryByTestId("chats-add-agent")).toBeNull());
     // The check and the add each wrote the same settings: the name, the

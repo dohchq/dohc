@@ -6,6 +6,8 @@ import { useAboutConversation } from "./aboutConversation";
 import type { ChatPresenceCollaboration } from "./ChatsView";
 import { chatTabPath } from "./workbenchState";
 import { ChatsView, bridgeMock, channel, dm } from "./ChatsView.testHarness";
+import type { DesktopUserSettings } from "../../settings/userSettings";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 
 // What About reads for a conversation tab in one workspace, as JSON:
 // "loading" while nothing is published.
@@ -18,11 +20,11 @@ function AboutProbe(props: { workspaceId: string; tabPath: string }) {
   );
 }
 
-function renderTab(tabPath: string, options: { workspaceId?: string; collaboration?: ChatPresenceCollaboration } = {}) {
+function renderTab(tabPath: string, options: { workspaceId?: string; collaboration?: ChatPresenceCollaboration; userSettings?: DesktopUserSettings } = {}) {
   return render(
     <>
       <ChatsView workspaceId={options.workspaceId ?? "workspace-a"} onOpenFileChat={vi.fn()} onError={vi.fn()}
-        variant="page" editorTabPath={tabPath} collaboration={options.collaboration ?? null} />
+        variant="page" editorTabPath={tabPath} collaboration={options.collaboration ?? null} userSettings={options.userSettings} />
       <AboutProbe workspaceId="workspace-a" tabPath={tabPath} />
       <AboutProbe workspaceId="workspace-b" tabPath={tabPath} />
     </>,
@@ -71,14 +73,21 @@ describe("a conversation tab tells About what it shows", () => {
     }));
   });
 
-  it("publishes the agent's chat under the tab's name", async () => {
+  it("publishes an agent's chat under that agent's name, as its tab shows it", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent", agentId: "default" })],
+      channels: [
+        channel(),
+        channel({ id: "agent-1", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
+        channel({ id: "agent-2", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout" }),
+      ],
       fileThreads: [],
     });
-    renderTab(chatTabPath({ kind: "channel", id: "agent-1" }));
+    const settings = settingsWithAgent({ name: "Nova" });
+    renderTab(chatTabPath({ kind: "channel", id: "agent-2" }), {
+      userSettings: { ...settings, agents: { ...settings.agents, scout: testAgent({ name: "Ranger", hue: "teal" }) } },
+    });
     await waitFor(() => expect(published()).toMatchObject({
-      kind: "agent", name: "My agent", channelWireId: "agent-1", received: false,
+      kind: "agent", name: "Ranger", channelWireId: "agent-2", received: false,
     }));
   });
 
