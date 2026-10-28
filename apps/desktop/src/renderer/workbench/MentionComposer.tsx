@@ -151,8 +151,6 @@ export function MentionComposer(props: {
   authorName?: string;
   authorKind?: "human" | "agent";
   authorPresentation?: ActorPresentation;
-  // Takes focus when it mounts, with the caret after its text.
-  autoFocus?: boolean;
   // A poll drafted in this message; the message is its question. A removed
   // poll stays closed with its choices. Only a surface that shows a posted
   // poll's choices passes onPollChange.
@@ -165,16 +163,6 @@ export function MentionComposer(props: {
   const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // A composer asked for focus at mount takes it once, when it first takes
-  // input: a later render must not pull focus back.
-  const pendingFocus = useRef(props.autoFocus === true);
-  useEffect(() => {
-    const node = textareaRef.current;
-    if (!pendingFocus.current || !node || props.disabled) return;
-    pendingFocus.current = false;
-    node.focus();
-    node.setSelectionRange(node.value.length, node.value.length);
-  }, [props.disabled]);
   const rosterPick = useRef<AgentRosterPick | null>(null);
   const beforeInput = useRef<{ from: number; to: number } | null>(null);
   useEffect(() => {

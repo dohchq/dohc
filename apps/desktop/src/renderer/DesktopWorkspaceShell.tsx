@@ -214,7 +214,6 @@ import {
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
-import { useAskAgent } from "./shell/useAskAgent";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
@@ -2923,19 +2922,7 @@ export function DesktopWorkspaceShell(props: {
     () => void trustWorkspace(),
     (nav) => { openChatsNavInTab(nav); },
   );
-  const askAgent = useAskAgent({
-    workspaceId,
-    agentSetup,
-    chatsAvailable: captureAvailable,
-    openChat: chatEditors.open,
-    onOpenChat: closeSettings,
-    onSetUp: openAgentSettings,
-    reportShellError,
-  });
-  const customizeContext = useMemo(
-    () => ({ customize, ...(askAgent ? { askAgent } : {}) }),
-    [askAgent, customize],
-  );
+  const customizeContext = useMemo(() => ({ customize }), [customize]);
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
@@ -5860,7 +5847,6 @@ export function DesktopWorkspaceShell(props: {
         {wb.sidebarVisible ? (
           <ShellSidePanel
             customize={customize}
-            {...(askAgent ? { askAgent } : {})}
             wb={shownWb}
             mutateWb={mutateWb}
             sidePanelTitle={sidePanelTitle}
@@ -6110,7 +6096,6 @@ export function DesktopWorkspaceShell(props: {
                     onDraftsChange={chatEditors.get(groupTab.path).onDraftsChange}
                     initialNav={chatEditors.get(groupTab.path).nav}
                     initialDrafts={chatEditors.get(groupTab.path).drafts}
-                    focusNewPost={chatEditors.get(groupTab.path).focusNewPost}
                     editorTabPath={groupTab.path}
                     onOpenInTab={openChatsNavInTab}
                     variant="page"
@@ -6858,7 +6843,6 @@ export function DesktopWorkspaceShell(props: {
             }
             initialSection={settingsSection}
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
-            {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             cloud={cloudSettings}
             onOpenSharing={(target) => {

@@ -29,8 +29,7 @@ import { useCollectionHistoryUndo } from "./useCollectionHistoryUndo";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
-import { CollectionCustomizeDialog } from "./collections/CollectionCustomizeDialog";
-import { AUTOMATIONS_FILE } from "./collections/AutomationsPanel";
+import { CollectionCustomizeDialog, automationsFile } from "./collections/CollectionCustomizeDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -370,7 +369,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
-      files={[{ path: `${automations.collectionPath}/${AUTOMATIONS_FILE}`, holds: "automations" }]} onClose={() => setCustomizing(false)} />}
+      files={[automationsFile(automations.collectionPath, automations.fileMade)]} onOpenFile={onOpenFile} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
       addType={editingFields === "date" ? "date" : undefined}
       buttonStates={buttonStates}

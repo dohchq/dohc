@@ -3,6 +3,7 @@ import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
 import { CopyField } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { SecondaryButton } from "../ui/controls";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, X } from "lucide-react";
 import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
@@ -43,7 +44,6 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
 import { ShellErrorReporter } from "../shell/useShellError";
-import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
@@ -140,8 +140,6 @@ export function SettingsDialog(props: {
   // The part a Customize… command opened Settings for: its row is marked and
   // takes focus.
   focus?: CustomizeTarget;
-  // Hands a settings change to the person's agent. Absent while chats are off.
-  askAgent?: AskAgent;
   onClose: () => void;
   /** The shell's server connection for this workspace, for Sync and sharing. */
   cloud?: CloudSettings;
@@ -554,26 +552,7 @@ export function SettingsDialog(props: {
     saveUserSettings({ ...userSettings, appearance: { ...userSettings.appearance, ...patch } });
   const saveEditor = (patch: Partial<DesktopUserSettings["editor"]>) =>
     saveUserSettings({ ...userSettings, editor: { ...userSettings.editor, ...patch } });
-  // Setting up an agent stays in this dialog, and clears a search that
-  // would hide the Agents section.
-  const askAgent = props.askAgent
-    ? {
-        ...props.askAgent,
-        setUp: () => {
-          setQuery("");
-          setActiveSection("agents");
-        },
-      }
-    : undefined;
-  const askAgentAside = (target?: CustomizeTarget) =>
-    askAgent ? (
-      <AskAgentButton
-        askAgent={askAgent}
-        request={target ? { kind: "settings", target } : { kind: "settings" }}
-      />
-    ) : null;
-  const customizeRow = (row: string) =>
-    props.focus?.row === row ? { highlighted: true, aside: askAgentAside(props.focus) } : {};
+  const customizeRow = (row: string) => (props.focus?.row === row ? { highlighted: true } : {});
 
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
@@ -1030,24 +1009,22 @@ export function SettingsDialog(props: {
                 title="Settings file"
                 description="Changes apply when you save the file."
                 testId="settings-row-settings-file"
-                aside={askAgentAside()}
               >
                 {settingsFilePath ? (
-                  <code
-                    title={settingsFilePath}
-                    className="max-w-70 select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
-                  >
-                    {settingsFilePath}
-                  </code>
+                  <div className="min-w-0 max-w-70">
+                    <CopyField label="Copy settings file path" copiedLabel="Path copied"
+                      copyTestId="settings-file-path-copy" getText={() => settingsFilePath}>
+                      <code title={settingsFilePath}>{settingsFilePath}</code>
+                    </CopyField>
+                  </div>
                 ) : null}
-                <button
-                  type="button"
+                <SecondaryButton
                   aria-label="Open settings file"
                   onClick={() => void openSettingsFile()}
-                  className="h-8 shrink-0 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className="shrink-0"
                 >
                   Open
-                </button>
+                </SecondaryButton>
               </SettingRow>
               <SettingRow
                 title="Reset user settings"

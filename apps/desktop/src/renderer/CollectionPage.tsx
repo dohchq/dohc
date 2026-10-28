@@ -618,7 +618,8 @@ export function CollectionPage({
   const customizeDialog = customizing ? (
     <CollectionCustomizeDialog
       name={schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath}
-      files={documentCollectionFiles(collectionPath)}
+      files={documentCollectionFiles(collectionPath, automations.file?.status !== "missing")}
+      onOpenFile={onOpenFile}
       onClose={() => setCustomizing(false)}
     />
   ) : null;

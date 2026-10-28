@@ -22,8 +22,6 @@ import type {
 } from "../ipc/bridgeContract";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
-import { CustomizeContext } from "./settings/customize";
-import { documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { deferred } from "../testing/deferred";
 import {
@@ -305,6 +303,7 @@ function pageWithHost(
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
     onNotice?: CollectionPageProps["onNotice"];
+    onOpenFile?: CollectionPageProps["onOpenFile"];
   },
 ) {
   return (
@@ -322,6 +321,7 @@ function pageWithHost(
         {...SHELL_PROPS}
         onError={view?.onError ?? SHELL_PROPS.onError}
         onNotice={view?.onNotice ?? SHELL_PROPS.onNotice}
+        onOpenFile={view?.onOpenFile ?? SHELL_PROPS.onOpenFile}
       />
       <CollectionFieldWriteHost />
     </>
@@ -554,25 +554,21 @@ describe("CollectionPage", () => {
     expect(onNewRecord.mock.calls).toEqual([["tasks"], ["tasks"]]);
   });
 
-  it("names the Collection's files from Customize… and hands them to the agent", async () => {
+  it("names the Collection's files from Customize… and opens one in a tab", async () => {
     const bridge = makeBridge([]);
-    const ask = vi.fn();
+    const onOpenFile = vi.fn();
     vi.stubGlobal("dohcDesktop", bridge);
-    render(
-      <CustomizeContext.Provider value={{ customize: vi.fn(), askAgent: { ready: true, ask, setUp: vi.fn() } }}>
-        {pageWithHost(() => undefined, () => undefined)}
-      </CustomizeContext.Provider>,
-    );
+    render(pageWithHost(() => undefined, () => undefined, { onOpenFile }));
 
     fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
     const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
     expect(within(dialog).getByText("tasks/collection.yaml")).toBeDefined();
     expect(within(dialog).getByText("tasks/automations.yaml")).toBeDefined();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Ask my agent" }));
-    expect(ask).toHaveBeenCalledExactlyOnceWith({
-      kind: "collection", name: "Tasks", files: documentCollectionFiles("tasks"),
-    });
+    // The bridge has no automations.yaml yet.
+    expect(within(dialog).getByText("Made with the first automation.")).toBeDefined();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Open collection.yaml" }));
+    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("tasks/collection.yaml");
     expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
 
     // Escape returns focus to the menu's button.
