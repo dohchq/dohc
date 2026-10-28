@@ -146,11 +146,11 @@ export function useSentNoticeProps(input: {
     [retriesStoppedRun, workspaceId, workspaces],
   );
   const rows = useMemo(
-    () => (sentNotices?.notices ?? []).filter(notice => notice.kind !== "sync-refusal" || notice.workspaceId !== workspaceId).map(describe),
+    () => (sentNotices?.notices ?? []).filter(notice => !["sync-refusal", "markdown-write-held"].includes(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
   const toast = useMemo(
-    () => (sentNotices?.toast && (sentNotices.toast.kind !== "sync-refusal" || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    () => (sentNotices?.toast && (!["sync-refusal", "markdown-write-held"].includes(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
     [describe, sentNotices?.toast, workspaceId],
   );
 
