@@ -1,8 +1,8 @@
-import type { Dialog } from "electron";
+import type { MessageBoxOptions, MessageBoxReturnValue } from "electron";
 import { installsOnQuit } from "./electronUpdater";
 import type { UpdateFailure } from "./updateAfterFailure";
 
-type MessageDialog = Pick<Dialog, "showMessageBox">;
+type MessageDialog = { showMessageBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> };
 
 // What went wrong, for every failure but a failed startup, which already
 // showed its own error.
