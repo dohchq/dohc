@@ -167,7 +167,7 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 
 ## Controls
 
-A control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat. Give an agent the same action through the CLI or MCP.
+A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
 
 The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
