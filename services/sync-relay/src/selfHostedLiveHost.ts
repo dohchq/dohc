@@ -317,6 +317,8 @@ export async function startSelfHostedLiveHost(options: {
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
+    /** Why the running daemon's hosted pass left this document held. */
+    holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
     diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return diverged.has(storeName(row));},
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */

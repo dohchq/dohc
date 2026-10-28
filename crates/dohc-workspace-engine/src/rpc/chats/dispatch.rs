@@ -29,15 +29,9 @@ pub(crate) const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ChatDispatchRecordEligibleParams {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    verified_user_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchEnqueueParams {
     trigger_message_id: String,
+    agent_id: String,
     thread_id: String,
     now_ms: Option<i64>,
 }
@@ -95,7 +89,26 @@ struct ChatDispatchRecentCountParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchFailPendingParams {
     thread_id: String,
+    agent_id: String,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchLatestRunParams {
+    thread_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRecoveriesParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    thread_id: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +172,7 @@ fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
 struct DispatchWire<'a> {
     workspace_id: &'a str,
     trigger_message_id: &'a str,
+    agent_id: &'a str,
     thread_id: &'a str,
     state: &'a str,
     attempt_count: i64,
@@ -175,6 +189,7 @@ impl<'a> From<&'a DispatchRecord> for DispatchWire<'a> {
         DispatchWire {
             workspace_id: &dispatch.workspace_id,
             trigger_message_id: &dispatch.trigger_message_id,
+            agent_id: &dispatch.agent_id,
             thread_id: &dispatch.thread_id,
             state: &dispatch.state,
             attempt_count: dispatch.attempt_count,
@@ -195,6 +210,7 @@ fn dispatch_json(dispatch: &DispatchRecord) -> Value {
 struct RunWire<'a> {
     workspace_id: &'a str,
     run_id: &'a str,
+    agent_id: &'a str,
     thread_id: &'a str,
     trigger_message_id: &'a str,
     command: &'a str,
@@ -215,6 +231,7 @@ impl<'a> From<&'a AgentRunRecord> for RunWire<'a> {
         RunWire {
             workspace_id: &run.workspace_id,
             run_id: &run.run_id,
+            agent_id: &run.agent_id,
             thread_id: &run.thread_id,
             trigger_message_id: &run.trigger_message_id,
             command: &run.command,
@@ -254,29 +271,6 @@ fn pause_json(pause: &ThreadDispatchPause) -> Value {
 }
 
 impl EngineService {
-    pub(crate) async fn chats_dispatch_record_eligible_triggers(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: ChatDispatchRecordEligibleParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let inserted = Self::read_under_ctx(
-            &cancellation,
-            "chats.dispatch.recordEligibleTriggers",
-            open.actor.chat_dispatch_record_eligible_triggers(
-                open.workspace_id.clone(),
-                params.verified_user_id,
-                now_ms()?,
-                cancellation.token.clone(),
-            ),
-        )
-        .await?;
-        Ok(json!(inserted))
-    }
-
     pub(crate) async fn chats_dispatch_enqueue(
         &self,
         ctx: &RequestContext,
@@ -292,6 +286,7 @@ impl EngineService {
             open.actor.chat_dispatch_enqueue(
                 open.workspace_id.clone(),
                 params.trigger_message_id,
+                params.agent_id,
                 params.thread_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
@@ -342,8 +337,13 @@ impl EngineService {
         let binding = chat_cursor_binding("chats.dispatch.listPending", &workspace_id, &[]);
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor
-            .as_ref()
-            .map(|cursor| (cursor.first, cursor.second.clone()));
+            .map(|cursor| {
+                let agent_id = cursor
+                    .third
+                    .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-cursor"))?;
+                Ok::<_, WireError>((cursor.first, cursor.second, agent_id))
+            })
+            .transpose()?;
         let cancellation = OperationCancellation::new(ctx);
         let rows = Self::read_under_ctx(
             &cancellation,
@@ -358,9 +358,21 @@ impl EngineService {
             .map(dispatch_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(&rows, included, binding, |row| {
-            (row.created_at_ms, row.trigger_message_id.clone())
-        })?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: None,
+                first: last.created_at_ms,
+                second: last.trigger_message_id.clone(),
+                third: Some(last.agent_id.clone()),
+            })?)
+        } else {
+            None
+        };
         Ok(json!({
             "dispatches": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -563,14 +575,17 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatThreadParams = parse(params)?;
+        let params: ChatDispatchLatestRunParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let run = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.latestRunForThread",
-            open.actor
-                .chat_dispatch_latest_run_for_thread(open.workspace_id.clone(), params.thread_id),
+            open.actor.chat_dispatch_latest_run_for_thread(
+                open.workspace_id.clone(),
+                params.thread_id,
+                params.agent_id,
+            ),
         )
         .await?;
         Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))
@@ -673,6 +688,7 @@ impl EngineService {
             open.actor.chat_dispatch_fail_pending_for_thread(
                 open.workspace_id.clone(),
                 params.thread_id,
+                params.agent_id,
                 params.reason,
                 now_ms()?,
                 cancellation.token(),
@@ -782,12 +798,15 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatPageParams = parse(params)?;
+        let params: ChatDispatchRecoveriesParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let binding =
-            chat_cursor_binding("chats.dispatch.listAppQuitRecoveries", &workspace_id, &[]);
+        let binding = chat_cursor_binding(
+            "chats.dispatch.listAppQuitRecoveries",
+            &workspace_id,
+            &[params.thread_id.as_deref().unwrap_or("")],
+        );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor
             .as_ref()
@@ -796,8 +815,12 @@ impl EngineService {
         let rows = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.listAppQuitRecoveries",
-            open.actor
-                .chat_dispatch_list_app_quit_recoveries(workspace_id, after, page_limit + 1),
+            open.actor.chat_dispatch_list_app_quit_recoveries(
+                workspace_id,
+                params.thread_id,
+                after,
+                page_limit + 1,
+            ),
         )
         .await?;
         let values: Vec<Value> = rows
@@ -878,6 +901,7 @@ mod tests {
         AgentRunRecord {
             workspace_id: "workspace".to_owned(),
             run_id: "run".to_owned(),
+            agent_id: "default".to_owned(),
             thread_id: "thread".to_owned(),
             trigger_message_id: "message".to_owned(),
             command: String::new(),
@@ -896,6 +920,7 @@ mod tests {
             dispatch: DispatchRecord {
                 workspace_id: "workspace".to_owned(),
                 trigger_message_id: "message".to_owned(),
+                agent_id: "default".to_owned(),
                 thread_id: "thread".to_owned(),
                 state: "pending".to_owned(),
                 run_id: None,
@@ -913,6 +938,7 @@ mod tests {
                 "dispatch": {
                     "workspaceId": "workspace",
                     "triggerMessageId": "message",
+                    "agentId": "default",
                     "threadId": "thread",
                     "state": "pending",
                     "attemptCount": 0,
@@ -922,6 +948,7 @@ mod tests {
                 "run": {
                     "workspaceId": "workspace",
                     "runId": "run",
+                    "agentId": "default",
                     "threadId": "thread",
                     "triggerMessageId": "message",
                     "command": "",

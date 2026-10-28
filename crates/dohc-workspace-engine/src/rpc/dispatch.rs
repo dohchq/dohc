@@ -880,6 +880,14 @@ impl EngineService {
                 )
                 .await?
             }
+            "chats.agentReadState.listUnreadRequests" => {
+                self.chats_agent_read_state_list_unread_requests(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
             "chats.agentReadState.listUnreadThreads" => {
                 self.chats_agent_read_state_list_unread_threads(
                     &ctx,
@@ -960,14 +968,6 @@ impl EngineService {
             "chats.dispatch.enqueue" => {
                 self.chats_dispatch_enqueue(&ctx, request.workspace, request.params)
                     .await?
-            }
-            "chats.dispatch.recordEligibleTriggers" => {
-                self.chats_dispatch_record_eligible_triggers(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                )
-                .await?
             }
             "chats.dispatch.claimNextPending" => {
                 self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
@@ -1486,10 +1486,9 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
-    /// Every listed method is registered, and the three retired ones
-    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
-    /// not. A new arm added without a row here is not caught; that needs the
-    /// dispatch table as data.
+    /// Every listed method is registered, and the retired ones are not. A new
+    /// arm added without a row here is not caught; that needs the dispatch
+    /// table as data.
     ///
     /// Without a workspace handle a registered method fails on the missing
     /// handle or on its params; an unregistered one fails `MethodNotFound`.
@@ -1525,6 +1524,7 @@ mod tests {
             "capture.renew",
             "capture.setAuthor",
             "capture.clearRecovery",
+            "chats.agentReadState.listUnreadRequests",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
@@ -1562,7 +1562,6 @@ mod tests {
             "chats.dispatch.markFailureHandled",
             "chats.dispatch.openRuns",
             "chats.dispatch.recentCount",
-            "chats.dispatch.recordEligibleTriggers",
             "chats.dispatch.recordRunMessage",
             "chats.dispatch.requeueFailedTrigger",
             "chats.dispatch.runIdForMessage",
@@ -1712,6 +1711,7 @@ mod tests {
             "share.view.push",
             "ydoc.apply",
             "chats.dispatch.reclaimRunning",
+            "chats.dispatch.recordEligibleTriggers",
         ] {
             assert!(
                 !registered(&service, retired).await,

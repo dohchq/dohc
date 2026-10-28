@@ -43,7 +43,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
-    await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
   } finally {
@@ -257,7 +257,7 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
     await page.getByTestId("notice-center-toggle").click();
     // "failed", not "failed to start": the runner started, then exited silently.
     await expect(page.getByTestId("notice-center").getByText(
-      'Your agent\'s run in "audit the projections" failed',
+      'Nova\'s run failed in "audit the projections"',
       { exact: true },
     )).toBeVisible();
     const messages = page.getByTestId("chats-message");
@@ -283,10 +283,10 @@ function hitAtCenter(toast: Locator): Promise<string> {
 }
 
 // Toasts sit above every dialog and its scrim (NoticeCenter), so a failed
-// test says so inside Settings and its reason is reachable in the toast while
+// check says so inside Settings and its reason is reachable in the toast while
 // Settings stays open. Copy and Dismiss leave Settings in place. The row stays
 // in Notices after the toast is gone.
-test("failed runner tests stay readable above Settings and remain in Notices", async () => {
+test("failed agent checks stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -298,12 +298,13 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     await trustOpenWorkspace(desktop);
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("agents")).click();
-    await page.getByTestId("runner-self-test-button").click();
-    await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");
-    await expect(page.getByTestId("runner-self-test-result")).toHaveText("Test failed.");
+    await page.getByTestId("agent-check").click();
+    await expect(page.getByTestId("agent-row")).toContainText("Didn't reply.");
+    // The toast names the agent; Copy details carries why.
+    const message = "Nova didn't reply to the check.";
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");
-    await expect(toast).toContainText(reason);
+    await expect(toast).toContainText(message);
     const settings = page.getByTestId(desktopPins.settingsDialog);
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -331,7 +332,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(settings).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
-    await expect(page.getByTestId("notice-center")).toContainText(reason);
+    await expect(page.getByTestId("notice-center")).toContainText(message);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

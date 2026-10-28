@@ -81,7 +81,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -385,10 +385,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
+                unavailableFor("conflict-parent-withheld") ? "conflict-parent-withheld" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
               const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
-                reason === "session-host-refused" || reason === "live-edit-unadmitted";
+                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);

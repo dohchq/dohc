@@ -77,6 +77,7 @@ import {
   addRowBefore,
   cellAround,
   CellSelection,
+  columnResizingPluginKey,
   deleteColumn,
   deleteRow,
   deleteTable,
@@ -85,6 +86,7 @@ import {
   TableMap,
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
+import { Mapping } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const tableControlsKey = new PluginKey("dohc-table-controls");
@@ -164,6 +166,23 @@ function createTableControlsRuntime(): TableControlsRuntime {
     menuAnchor: null,
     menuSerial: 0,
   };
+}
+
+// Tiptap's table view puts back each column that has a saved width, but a
+// column without one keeps the width the resize preview gave it.
+function clearColumnResizePreview(view: EditorView): void {
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.spec.tableRole !== "table") return !node.isTextblock;
+    const dom = view.nodeDOM(pos) as HTMLElement | null;
+    const columns = dom?.querySelectorAll<HTMLTableColElement>("colgroup > col");
+    let column = 0;
+    node.firstChild?.forEach((cell) => {
+      for (let index = 0; index < cell.attrs.colspan; index++, column++) {
+        if (!cell.attrs.colwidth?.[index]) columns?.[column]?.style.removeProperty("width");
+      }
+    });
+    return false;
+  });
 }
 
 const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
@@ -1293,7 +1312,7 @@ function configureGripDrag(
       dragging: false,
       preview: null,
     };
-    runtime.cancelPointer = () => cancelPointerDrag();
+    runtime.cancelPointer = () => cancelPointerDrag("Table reorder cancelled.");
     try {
       button.setPointerCapture?.(event.pointerId);
     } catch {
@@ -1937,6 +1956,21 @@ export function makeTableControlsPlugin(
 
   return new Plugin({
     key: tableControlsKey,
+    appendTransaction(transactions, oldState, state) {
+      if (!transactions.some((tr) => tr.docChanged)) return null;
+      const resize = columnResizingPluginKey.getState(state);
+      if (!resize?.dragging) return null;
+      // prosemirror-tables moves the handle of a deleted cell onto the next
+      // cell. Deleting or replacing the cell deletes across its first position.
+      const handle = columnResizingPluginKey.getState(oldState)?.activeHandle ?? -1;
+      const mapping = new Mapping();
+      transactions.forEach((tr) => mapping.appendMapping(tr.mapping));
+      const cellGone = handle > -1 && mapping.mapResult(handle + 1, -1).deletedAcross;
+      if (resize.activeHandle === -1 || cellGone) {
+        return state.tr.setMeta(columnResizingPluginKey, { setHandle: -1 });
+      }
+      return null;
+    },
     state: {
       init(_, instance) {
         return buildTableControlDecorations(
@@ -1985,7 +2019,14 @@ export function makeTableControlsPlugin(
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
           const docChanged = !view.state.doc.eq(prevState.doc);
-          if (docChanged && runtime.activeRowResize) runtime.cancelPointer?.();
+          const resize = columnResizingPluginKey.getState(view.state);
+          if (
+            docChanged && resize?.activeHandle === -1 &&
+            columnResizingPluginKey.getState(prevState)?.dragging
+          ) {
+            clearColumnResizePreview(view);
+          }
+          if (docChanged) runtime.cancelPointer?.();
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;

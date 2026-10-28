@@ -8,6 +8,7 @@ import {
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
+import { handleForName, normalizeHandle, scanMentionTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -62,7 +63,9 @@ export type ZoomStep = (typeof ZOOM_STEPS)[number];
 export const DEFAULT_AGENT_ID = "default";
 // Agents are kept by id, so a mistake in one entry turns off only that agent.
 // An id starts with a letter, so the agents keep the order the file lists them in.
-export const AgentId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "An agent's id is up to 64 lowercase letters, digits and dashes, starting with a letter.");
+// Its dashes are single and inside it, so its chat's slug keeps the id as it is.
+export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.")
+  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.");
 
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,
@@ -84,8 +87,9 @@ export const AgentSettings = z.object({
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
-// Names that differ only in case or spaces look the same in a chat.
-const nameKey = (name: string) => name.replace(/\s/gu, "").toLowerCase();
+// Names with one handle name the same agent in a chat. A name with no handle
+// names no agent, so it only has to differ from the other names.
+const nameKey = (name: string) => normalizeHandle(agentHandle(name) || name);
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
@@ -111,6 +115,22 @@ export function firstAgent(settings: Pick<DesktopUserSettings, "agents">): Agent
 }
 
 export type AgentWithLaunch = Agent & { launch: AgentLaunch };
+/** The agents dohc starts: each one that is on and has a way to start. */
+export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch[] {
+  return listAgents(settings).flatMap((agent) =>
+    agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : []);
+}
+
+/**
+ * The agent an automation wakes: the first one dohc can start, on or off.
+ * One that is off is not passed over: dispatch says it is off, so no other
+ * agent takes the work without the person knowing.
+ */
+export function automationAgent(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
+  const agent = listAgents(settings).find((entry) => entry.launch !== undefined);
+  return agent?.launch ? { ...agent, launch: agent.launch } : null;
+}
+
 /** The first agent when dohc can start it, else null. */
 export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
   const agent = firstAgent(settings);
@@ -127,6 +147,42 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
   return agents.find((agent) => agent.name === name)
     ?? agents.find((agent) => agent.id === DEFAULT_AGENT_ID && agent.nameBeforeMigration === name)
     ?? null;
+}
+
+// A message names one of your agents with @ and its name's handle: the name
+// without spaces or the punctuation a handle cannot hold. "" names no agent.
+export function agentHandle(name: string): string {
+  return handleForName(name);
+}
+
+// The @ roster's id for one of your agents.
+export function agentMentionId(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
+// The @ roster's entries for your agents that are on and have a handle.
+export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled">[]): MentionCandidate[] {
+  return agents.flatMap((agent) => {
+    const handle = agentHandle(agent.name);
+    return agent.enabled && handle
+      ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+      : [];
+  });
+}
+
+/**
+ * The agents dohc can start that a message names, in any case, outside
+ * code. A message wakes each one it names, so only your own messages read
+ * your agents' names.
+ */
+export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
+  const named = new Set(scanMentionTokens(body, { ignoreCode: true }).map(({ handle }) => normalizeHandle(handle)));
+  return listAgents(settings)
+    .filter((agent) => {
+      const handle = agentHandle(agent.name);
+      return agent.launch && handle && named.has(normalizeHandle(handle));
+    })
+    .map(({ id }) => id);
 }
 
 /** The command that starts the first agent, or "" when there is none. */
@@ -168,10 +224,81 @@ export function newAgentHue(agents: AgentsSettings, yourHue: IdentityHue | null)
   return AGENT_HUE_ASSIGNMENT_ORDER.reduce((least, hue) => (uses(hue) < uses(least) ? hue : least));
 }
 
-// An agent entry dohc could not use, so Settings can still show it.
+/** A new agent's id: `default` for the first, else `base`, `base-2`, `base-3` and on, past every id in the file. */
+export function newAgentId(taken: readonly string[], base: string): string {
+  if (taken.length === 0) return DEFAULT_AGENT_ID;
+  for (let count = 1; ; count += 1) {
+    const id = count === 1 ? base : `${base}-${count}`;
+    if (!taken.includes(id)) return id;
+  }
+}
+
+/** A new agent's name that no agent has: `base`, `base 2`, `base 3` and on. */
+export function newAgentName(agents: AgentsSettings, base: string): string {
+  for (let count = 1; ; count += 1) {
+    const name = count === 1 ? base : `${base} ${count}`;
+    if (!agentNameTaken(agents, "", name)) return name;
+  }
+}
+
+/** Whether another of your agents has this name, or one a chat cannot tell apart from it. */
+export function agentNameTaken(agents: AgentsSettings, id: string, name: string): boolean {
+  const others = Object.fromEntries(Object.entries(agents).filter(([other]) => other !== id));
+  return agentNameKeys(others).includes(nameKey(name));
+}
+
+const hasKey = (entry: Record<string, unknown>, key: string) => Object.hasOwn(entry, key);
+
+/**
+ * Why dohc could not use an agent entry, as one sentence about its first
+ * problem. A key is in backticks, so Settings can show it in monospace.
+ */
+export function agentProblem(id: string, entry: unknown): string {
+  const badId = AgentId.safeParse(id);
+  if (!badId.success) return badId.error.issues[0]!.message;
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return "This entry must be an object, like the other agents.";
+  }
+  const fields = entry as Record<string, unknown>;
+  const alone = AgentsSettings.safeParse({ [id]: entry });
+  if (alone.success) return "Another agent has this name.";
+  const issue = alone.error.issues[0]!;
+  if (issue.code === "unrecognized_keys") return `dohc doesn't use \`${issue.keys[0]}\`.`;
+  const key = issue.path[1];
+  if (key === undefined && id !== DEFAULT_AGENT_ID && hasKey(fields, "nameBeforeMigration")) {
+    return "Only the `default` agent can have `nameBeforeMigration`.";
+  }
+  switch (key) {
+    case "name": {
+      const name = fields.name;
+      if (name === undefined) return "`name` is missing.";
+      if (typeof name !== "string") return "`name` must be text.";
+      if (!name.trim()) return "`name` is empty.";
+      if (hasPreferredNameControlCharacters(name)) return "`name` can't contain control characters.";
+      return `\`name\` must be ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`;
+    }
+    case "hue":
+      return `\`hue\` must be one of: ${AGENT_HUES.join(", ")}.`;
+    case "enabled":
+    case "changesFiles":
+      // The one rule across keys: an agent dohc cannot start stays off.
+      return issue.code === "custom" ? issue.message : `\`${key}\` must be true or false.`;
+    case "timeoutMinutes":
+      return "`timeoutMinutes` must be a whole number from 1 to 1440.";
+    case "launch":
+      return "dohc can't read `launch`.";
+    default:
+      return "dohc can't read this entry.";
+  }
+}
+
+// An agent entry dohc could not use, so Settings can still show it in its place.
 export const AgentProblem = z.object({
   id: z.string().max(200),
   name: z.string().max(200).optional(),
+  hue: z.enum(AGENT_HUES).optional(),
+  // Where the entry sits among the file's agents.
+  position: z.number().int().nonnegative(),
   problem: z.string().min(1).max(500),
 }).strict();
 export type AgentProblem = z.infer<typeof AgentProblem>;
@@ -317,12 +444,12 @@ export function settingsDeepEqual(left: unknown, right: unknown): boolean {
   }
   if (isRecord(left) || isRecord(right)) {
     if (!isRecord(left) || !isRecord(right)) return false;
+    // Key order counts: dohc uses the agents in the order the file lists them.
     const leftKeys = Object.keys(left);
     const rightKeys = Object.keys(right);
     if (leftKeys.length !== rightKeys.length) return false;
-    return leftKeys.every((key) =>
-      Object.prototype.hasOwnProperty.call(right, key) &&
-      settingsDeepEqual(left[key], right[key]),
+    return leftKeys.every((key, index) =>
+      key === rightKeys[index] && settingsDeepEqual(left[key], right[key]),
     );
   }
   return false;

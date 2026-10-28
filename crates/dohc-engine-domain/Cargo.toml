@@ -56,6 +56,8 @@ serde = { version = "1", features = ["derive"] }
 # feature ON for `cargo test`, arming the version-create / restore fault points.
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-engine-files = { path = "../dohc-engine-files", features = ["fault-injection"] }
+# Builds a store as the build before agent ids left it.
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 # Parse the R08 cross-engine ciphertext fixture (produced by Node) in the
 # secret store's TS-written-secret-decrypts test.
 serde_json = "1"

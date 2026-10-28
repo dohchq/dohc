@@ -100,8 +100,9 @@ export interface SentNotice {
   folder: string | null;
   // Open has somewhere to go, or something to say about why it cannot.
   openable: boolean;
-  // A failed run on the owner's self-hosted server, in this workspace: Try
-  // again runs it there.
+  // Try again has a run to start again: a failed run on the owner's
+  // self-hosted server in this workspace, or an agent run on this computer
+  // that dohc's restart or quit stopped.
   retryable: boolean;
 }
 
@@ -418,6 +419,14 @@ function liveDeliveryCopy(
     return {
       title: "Live editing can't resume",
       body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
+  if (reason === "conflict-parent-withheld") {
+    return {
+      title: "Live editing can't resume",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };

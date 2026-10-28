@@ -25,6 +25,7 @@ import {
   type ChatFeedReadState,
   type ChatFollow,
   type ChatLocalAttachmentParams,
+  type ChatAgentRequest,
   type ChatMention,
   type ChatMessage,
   type ChatProjection,
@@ -139,10 +140,14 @@ export class ChatsLiveAdapter {
 
   async ensureAgentChannel(input: {
     workspaceId: string;
+    agentId: string;
+    name: string;
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.channelEnsureAgent, {
       channelId: this.createId("channel"),
+      agentId: input.agentId,
+      name: input.name,
     });
   }
 
@@ -209,6 +214,8 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     author: ChatWriteActor;
@@ -252,6 +259,10 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
@@ -343,6 +354,8 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    namedAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -384,6 +397,10 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
@@ -492,12 +509,14 @@ export class ChatsLiveAdapter {
 
   async markThreadReadByAgent(input: {
     workspaceId: string;
+    runId?: string;
     threadId: string;
     upTo: { createdAtMs: number; messageId: string };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.agentReadMarkThreadRead, {
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
       threadId: input.threadId,
       upTo: input.upTo,
       ...(input.expectedRevision !== undefined
@@ -506,7 +525,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, runId?: string): Promise<ChatThread[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatThread[] = [];
     let cursor: string | undefined;
@@ -514,11 +533,29 @@ export class ChatsLiveAdapter {
       const page = await this.request(
         CHATS_METHOD.agentReadListUnreadThreads,
         {
+          ...(runId !== undefined ? { runId } : {}),
           pageLimit: 500,
           ...(cursor !== undefined ? { cursor } : {}),
         },
       );
       rows.push(...page.threads);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    return rows;
+  }
+
+  // The messages that asked a running run's agent and that it has not read.
+  async listAgentUnreadRequests(workspaceId: string, runId: string): Promise<ChatAgentRequest[]> {
+    this.assertWorkspace(workspaceId);
+    const rows: ChatAgentRequest[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
+        runId,
+        pageLimit: 500,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      rows.push(...page.requests);
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;
@@ -845,27 +882,17 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async recordEligibleTriggers(input: {
-    workspaceId: string;
-    verifiedUserId?: string;
-  }): Promise<number> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(CHATS_METHOD.dispatchRecordEligibleTriggers, {
-      ...(input.verifiedUserId !== undefined
-        ? { verifiedUserId: input.verifiedUserId }
-        : {}),
-    });
-  }
-
   async recordTrigger(input: {
     workspaceId: string;
     triggerMessageId: string;
+    agentId: string;
     threadId: string;
   }): Promise<boolean> {
     this.assertWorkspace(input.workspaceId);
     return (
       await this.request(CHATS_METHOD.dispatchEnqueue, {
         triggerMessageId: input.triggerMessageId,
+        agentId: input.agentId,
         threadId: input.threadId,
       })
     ).enqueued;
@@ -886,11 +913,13 @@ export class ChatsLiveAdapter {
   async failPendingForThread(input: {
     workspaceId: string;
     threadId: string;
+    agentId: string;
     reason: string;
   }): Promise<number> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.dispatchFailPendingForThread, {
       threadId: input.threadId,
+      agentId: input.agentId,
       reason: input.reason,
     });
   }
@@ -1021,9 +1050,12 @@ export class ChatsLiveAdapter {
     return result;
   }
 
-  async latestRunForThread(workspaceId: string, threadId: string): Promise<ChatRun | null> {
+  async latestRunForThread(workspaceId: string, threadId: string, agentId?: string): Promise<ChatRun | null> {
     this.assertWorkspace(workspaceId);
-    return this.request(CHATS_METHOD.dispatchLatestRunForThread, { threadId });
+    return this.request(CHATS_METHOD.dispatchLatestRunForThread, {
+      threadId,
+      ...(agentId !== undefined ? { agentId } : {}),
+    });
   }
 
   async getRunRecord(runId: string): Promise<ChatRun | null> {
