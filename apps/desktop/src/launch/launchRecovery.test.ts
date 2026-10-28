@@ -11,7 +11,7 @@ const electron = vi.hoisted(() => ({
 }));
 const updater = vi.hoisted(() => {
   const controller = {
-    awaitUpdate: vi.fn(async (): Promise<string | null> => "1.0.1"),
+    awaitUpdate: vi.fn(async (_bounds: unknown, _confirmDownload: (version: string) => Promise<boolean>): Promise<string | null> => "1.0.1"),
     installUpdate: vi.fn(async () => ({ accepted: true })),
     stop: vi.fn(),
   };
@@ -34,7 +34,7 @@ describe("update check before main loads", () => {
   it("restarts into an update the person accepts, waiting less for the feed than after a visible failure", async () => {
     await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(true);
     expect(updater.controller.awaitUpdate).toHaveBeenCalledWith(
-      { verdictMs: 5_000, downloadMs: 300_000 }, expect.any(Function));
+      { verdictMs: 5_000, downloadMs: 300_000 }, expect.any(Function), expect.any(Function));
     expect(updater.controller.installUpdate).toHaveBeenCalledOnce();
     expect(updater.controller.stop).toHaveBeenCalledOnce();
     expect(electron.app.quit).not.toHaveBeenCalled();
@@ -45,6 +45,16 @@ describe("update check before main loads", () => {
     await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(true);
     expect(updater.controller.installUpdate).not.toHaveBeenCalled();
     expect(electron.app.quit).toHaveBeenCalledOnce();
+  });
+
+  it("asks before downloading, and leaves the exit to the entry when the person declines", async () => {
+    electron.dialog.showMessageBox.mockResolvedValue({ response: 1, checkboxChecked: false });
+    updater.controller.awaitUpdate.mockImplementation(async (_bounds: unknown, confirmDownload: (version: string) => Promise<boolean>) =>
+      await confirmDownload("1.0.1") ? "1.0.1" : null);
+    await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(false);
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce();
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ buttons: ["Download", "Not now"] }));
+    expect(electron.app.quit).not.toHaveBeenCalled();
   });
 
   it("leaves the exit to the entry when there is no update or no updater", async () => {

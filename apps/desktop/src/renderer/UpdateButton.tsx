@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { UpdateStateEvent } from "../ipc/bridgeContract";
 import { readError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
-import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
+import { onRestartStopped, requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import type { ErrorDetailField } from "./shell/copyDetails";
 import type { ReportShellFailure, ShellErrorKind } from "./shell/useShellError";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -55,7 +55,7 @@ export function updateStep(state: UpdateStateEvent | null, pending: "check" | "i
 
 export function updateFailureTitle(step: UpdateAction, version: string | undefined): string {
   if (step === "check") return "dohc could not check for updates";
-  return `dohc could not ${step === "download" ? "download" : "restart into"} update ${version ?? ""}`.trimEnd();
+  return `dohc could not ${step === "download" ? "download" : "install"} update ${version ?? ""}`.trimEnd();
 }
 
 // The updater's sentence, or the step that failed when main reports one.
@@ -75,7 +75,7 @@ export function UpdateStepLabel(props: { step: UpdateStep; className?: string })
       {step.percent === undefined ? null : (
         <>
           {" "}
-          <span className="inline-block min-w-[3ch] text-right tabular-nums">{step.percent}</span>%
+          <span className="inline-block w-[4ch] text-left tabular-nums">{step.percent}%</span>
         </>
       )}
     </span>
@@ -103,6 +103,8 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
   useEffect(() => {
     if (failureId !== undefined) setPending(null);
   }, [failureId]);
+  // So does a person going back on a restart a late draft stopped.
+  useEffect(() => onRestartStopped(() => setPending(null)), []);
 
   const run = useCallback(async function run(action: UpdateAction): Promise<void> {
     const failed = (cause: unknown) =>
@@ -153,7 +155,12 @@ type ReportUpdateFailure = (failure: {
   command?: string;
   details: ReadonlyArray<ErrorDetailField>;
   retry: () => void;
+  quiet?: boolean;
 }) => void;
+
+// Failure ids this renderer already toasted. The workspace shell remounts on
+// every switch, so a failure it showed returns as a row without a toast.
+const toastedFailures = new Set<number>();
 
 /** A toast and one Notices row for each failure main reports. A background
  * check that fails as the last one did keeps its id, so it does not toast
@@ -180,9 +187,12 @@ export function useUpdateFailureNotices(
     const key = `${scope}:${failure.id}`;
     if (shown.current === key) return;
     shown.current = key;
+    const quiet = toastedFailures.has(failure.id);
+    toastedFailures.add(failure.id);
     const title = updateFailureTitle(failure.step, state.version);
     report({
       kind: "update",
+      quiet,
       ...(readError(state.message).words ? { title, message: state.message } : { message: `${title}.` }),
       ...(state.installCommand ? { command: state.installCommand } : {}),
       details: [["Cause", state.message]],
@@ -206,15 +216,15 @@ export function TitlebarUpdateButton(props: { update: DesktopUpdate }) {
       title={step.title}
       aria-disabled={action === null ? true : undefined}
       onClick={action === null ? undefined : () => void props.update.run(action)}
-      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold dohc-focus-visible focus-visible:outline-offset-1 @min-[8.5rem]:px-2.5 ${
+      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold dohc-focus-visible focus-visible:outline-offset-1 @min-[9.75rem]:px-2.5 ${
         action === null
           ? "cursor-default border border-line text-muted"
           : "cursor-pointer bg-accent text-bg hover:opacity-90"
       }`}
     >
       <Icon size={12} aria-hidden className="shrink-0" />
-      <UpdateStepLabel step={step} className="hidden @min-[8.5rem]:inline" />
-      <span className="sr-only @min-[8.5rem]:hidden">{step.title}</span>
+      <UpdateStepLabel step={step} className="hidden @min-[9.75rem]:inline" />
+      <span className="sr-only @min-[9.75rem]:hidden">{step.title}</span>
     </button>
   );
 }

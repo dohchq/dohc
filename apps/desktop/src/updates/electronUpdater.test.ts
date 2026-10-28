@@ -250,6 +250,25 @@ describe("electron updater release without this platform's files", () => {
 });
 
 describe("electron updater actions", () => {
+  it("on macOS, offers the download again when Squirrel cannot stage it", async () => {
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater, { platform: "darwin" }))!;
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    const staging = new Error("Code signature at URL did not pass validation");
+    // Squirrel's error, then the same error as the download's rejection.
+    updater.emit("error", staging);
+    updater.emit("error", staging);
+    expect(controller.publicState()).toMatchObject({
+      status: "available",
+      message: expect.stringContaining("Code signature"),
+      failure: { step: "download", id: 1 },
+    });
+    expect(controller.downloadUpdate().accepted).toBe(true);
+  });
+
   it("coalesces repeated checks while one is active", async () => {
     const updater = fakeUpdater();
     const check = deferred<undefined>();
@@ -506,6 +525,7 @@ describe("electron updater actions", () => {
 
   describe("awaitUpdate", () => {
     const bounds = { verdictMs: 15_000, downloadMs: 300_000 };
+    const yes = async () => true;
 
     it("checks now and resolves with the version once it downloads", async () => {
       const updater = fakeUpdater();
@@ -515,8 +535,13 @@ describe("electron updater actions", () => {
       });
       const controller = (await startWith(updater))!;
       const onDownloading = vi.fn();
-      const waiting = controller.awaitUpdate(bounds, onDownloading);
-      // A build that cannot run downloads without asking.
+      const answer = deferred<boolean>();
+      const confirmDownload = vi.fn(() => answer.promise);
+      const waiting = controller.awaitUpdate(bounds, confirmDownload, onDownloading);
+      // Nothing downloads until the person answers.
+      await vi.waitFor(() => expect(confirmDownload).toHaveBeenCalledWith("1.2.4"));
+      expect(updater.downloadUpdate).not.toHaveBeenCalled();
+      answer.resolve(true);
       await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
       expect(updater.downloadUpdate).toHaveBeenCalledOnce();
       expect(onDownloading).toHaveBeenCalledWith("1.2.4");
@@ -541,7 +566,33 @@ describe("electron updater actions", () => {
         answer(updater);
       });
       const controller = (await startWith(updater))!;
-      await expect(controller.awaitUpdate(bounds)).resolves.toBeNull();
+      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBeNull();
+    });
+
+    it("downloads nothing when the person declines", async () => {
+      const updater = fakeUpdater();
+      updater.checkForUpdates.mockImplementationOnce(async () => {
+        updater.emit("checking-for-update");
+        updater.emit("update-available", { version: "1.2.4" });
+      });
+      const controller = (await startWith(updater))!;
+      await expect(controller.awaitUpdate(bounds, async () => false)).resolves.toBeNull();
+      expect(updater.downloadUpdate).not.toHaveBeenCalled();
+      expect(controller.state().status).toBe("available");
+    });
+
+    it("joins a download the person already started without asking again", async () => {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
+      const confirmDownload = vi.fn(yes);
+      const waiting = controller.awaitUpdate(bounds, confirmDownload);
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(waiting).resolves.toBe("1.2.4");
+      expect(confirmDownload).not.toHaveBeenCalled();
+      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
     });
 
     it("resolves at once with an update already downloaded", async () => {
@@ -551,7 +602,7 @@ describe("electron updater actions", () => {
       updater.emit("update-available", { version: "1.2.4" });
       controller.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(controller.awaitUpdate(bounds)).resolves.toBe("1.2.4");
+      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
     });
 
@@ -559,8 +610,9 @@ describe("electron updater actions", () => {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
       updater.emit("checking-for-update");
-      const waiting = controller.awaitUpdate(bounds);
+      const waiting = controller.awaitUpdate(bounds, yes);
       updater.emit("update-available", { version: "1.2.4" });
+      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
       updater.emit("update-downloaded", { version: "1.2.4" });
       await expect(waiting).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
@@ -571,7 +623,7 @@ describe("electron updater actions", () => {
       try {
         const silent = fakeUpdater();
         silent.checkForUpdates.mockImplementationOnce(async () => { silent.emit("checking-for-update"); });
-        const silentWait = (await startWith(silent))!.awaitUpdate(bounds);
+        const silentWait = (await startWith(silent))!.awaitUpdate(bounds, yes);
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         await expect(silentWait).resolves.toBeNull();
 
@@ -581,7 +633,7 @@ describe("electron updater actions", () => {
           stalled.emit("update-available", { version: "1.2.4" });
         });
         let result: string | null | undefined;
-        void (await startWith(stalled))!.awaitUpdate(bounds).then((version) => { result = version; });
+        void (await startWith(stalled))!.awaitUpdate(bounds, yes).then((version) => { result = version; });
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         expect(result).toBeUndefined();
         await vi.advanceTimersByTimeAsync(bounds.downloadMs - bounds.verdictMs);

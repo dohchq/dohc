@@ -2425,7 +2425,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(report).toHaveBeenCalledWith({
-        message: "dohc could not restart into update 1.2.4.",
+        message: "dohc could not install update 1.2.4.",
         cause: undefined,
         retry: expect.any(Function),
       }),
@@ -2458,7 +2458,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
-        `dohc could not restart into update 1.2.4. ${reason}`,
+        `dohc could not install update 1.2.4. ${reason}`,
       ),
     );
     expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);

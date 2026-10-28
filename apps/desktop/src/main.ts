@@ -233,7 +233,7 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
-import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { confirmDownloadDialog, confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
@@ -6257,6 +6257,7 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
 // release can still reach the release that fixes it.
 const updateAfterFailure = createUpdateAfterFailure({
   controller: startUpdates,
+  confirmDownload: (failure, version) => confirmDownloadDialog({ showMessageBox }, failure, version),
   showDownloading: (failure, version, signal) => showDownloadingDialog({ showMessageBox }, failure, version, signal),
   confirmRestart: (failure, version) => confirmRestartDialog({ showMessageBox }, failure, version),
   install: installUpdate,

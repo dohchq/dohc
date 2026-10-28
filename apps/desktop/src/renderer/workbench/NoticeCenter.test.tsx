@@ -971,13 +971,13 @@ describe("notice center", () => {
     const command = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
     renderNotices({
       workspaceErrors: [{
-        id: "deb", title: "dohc could not restart into update 1.2.3",
+        id: "deb", title: "dohc could not install update 1.2.3",
         message: "The update did not install. Run this command in a terminal to install it.",
         command, details: "", atMs: 0, canRetry: true, seen: false,
       }],
     });
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not restart into update 1.2.3");
+    expect(toast.textContent).toContain("dohc could not install update 1.2.3");
     expect(within(toast).getByTestId("workspace-shell-toast-command").textContent).toBe(command);
     expect(within(toast).getByTestId("workspace-shell-toast-command-copy").getAttribute("aria-label")).toBe("Copy command");
     await userEvent.click(screen.getByTestId("notice-center-toggle"));

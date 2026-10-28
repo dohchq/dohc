@@ -10,8 +10,9 @@
 // no fault switch: the fault, the dialog recorder, and dev-app-update.yml
 // exist only in the scratch copy. Windows only.
 //
-// It proves the check runs and the restart is offered. It stops there: the
-// feed's installer is placeholder bytes, and nothing installs or relaunches.
+// It proves the check runs, nothing downloads until the person presses
+// Download, and the restart is offered. It stops there: the feed's installer
+// is placeholder bytes, and nothing installs or relaunches.
 
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -36,8 +37,8 @@ const LAUNCH_BOUND_MS = 2 * PRODUCT_WAIT_MS + 2 * 60_000;
 
 // Loaded first by the scratch entry module. It records every native dialog
 // to the drill log and answers the way a person who reads and waits would:
-// a download notice stays open until the app closes it, and the restart
-// question stays open until the drill ends the process.
+// they press Download, a download notice stays open until the app closes it,
+// and the restart question stays open until the drill ends the process.
 export const DIALOG_RECORDER = `import { appendFileSync } from "node:fs";
 import { dialog } from "electron";
 const record = (entry) => appendFileSync(process.env.DOHC_DRILL_LOG, JSON.stringify({ pid: process.pid, at: Date.now(), ...entry }) + "\\n");
@@ -46,6 +47,10 @@ dialog.showErrorBox = (title, content) => { record({ kind: "error-box", title, c
 dialog.showMessageBox = (...args) => {
   const options = args.length > 1 ? args[1] : args[0];
   const shown = { message: options.message, detail: options.detail, buttons: options.buttons };
+  if (options.buttons?.[0] === "Download") {
+    record({ kind: "question", ...shown });
+    return Promise.resolve({ response: 0, checkboxChecked: false });
+  }
   if (options.buttons?.length === 1) {
     record({ kind: "notice", ...shown });
     return new Promise((resolve) => {
@@ -331,12 +336,20 @@ export async function runDrill({
     const profile = join(scratch, "profile");
     const markerPath = join(profile, "dohc-launch.json");
     const offered = (entries) => entries.find((logged) => logged.kind === "dialog");
+    // The installer is requested only after the person pressed Download.
+    const askedFirst = (entries, message) => {
+      const question = entries.find((logged) => logged.kind === "question");
+      const installer = feed.requests.find((request) => request.published && request.name === INSTALLER);
+      return question?.message === message && question.detail === `Update ${FEED_VERSION} is available. Download it?` &&
+        installer !== undefined && installer.at >= question.at;
+    };
 
     if (scenario === "main-fails-to-load") {
       feed.publish();
       const dialog = await launch(1, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
       check("reports that dohc failed to start", entries.some((logged) => logged.kind === "error-box" && logged.title === "dohc failed to start"));
+      check("asks before it downloads the newer build", askedFirst(entries, "dohc could not start."), { entries, requests: feed.requests });
       check("offers the restart into the newer build", dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
       // DOHC_TEST_HOME is main's state directory in a test run, so the report
@@ -359,6 +372,8 @@ export async function runDrill({
       const dialog = await launch(3, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
       check("launch 3 checks before main loads", entries.filter((logged) => logged.kind === "main-loaded").length === 2);
+      check("launch 3 asks before it downloads the newer build", askedFirst(entries, "dohc closed before it finished starting."),
+        { entries, requests: feed.requests });
       check("launch 3 offers the restart into the newer build", dialog.message === "dohc closed before it finished starting." &&
         dialog.detail?.startsWith(`Update ${FEED_VERSION} is downloaded.`) &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);

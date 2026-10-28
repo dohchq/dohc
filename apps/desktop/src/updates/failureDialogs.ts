@@ -13,6 +13,27 @@ const FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
 };
 
 /**
+ * Asks before anything downloads. Declining a failed startup quits; any other
+ * failure carries on without the update.
+ */
+export async function confirmDownloadDialog(
+  dialog: MessageDialog,
+  failure: UpdateFailure,
+  version: string,
+): Promise<boolean> {
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: failure === "startup" ? "dohc could not start." : FAILURE_MESSAGES[failure],
+    detail: `Update ${version} is available. Download it?`,
+    buttons: ["Download", failure === "startup" ? "Quit" : "Not now"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+  return response === 0;
+}
+
+/**
  * Downloads can take minutes with nothing else on screen, so a native box
  * says one is running. It closes when the signal aborts. Closing it by hand
  * stops the wait.

@@ -78,6 +78,15 @@ describe("useUpdateFailureNotices", () => {
     expect(clear).toHaveBeenCalledOnce();
   });
 
+  it("files a failure it already toasted as a quiet row in the next workspace", () => {
+    const report = vi.fn();
+    const failed = { ...available, message: "socket hang up", failure: { step: "download" as const, id: 41 } };
+    const first = renderHook(() => useUpdateFailureNotices(update(failed), "ws-1", report, () => {}));
+    first.unmount();
+    renderHook(() => useUpdateFailureNotices(update(failed), "ws-2", report, () => {}));
+    expect(report.mock.calls.map(([failure]) => failure.quiet)).toEqual([false, true]);
+  });
+
   it("retries the step that failed", () => {
     const run = vi.fn(async () => {});
     const report = vi.fn();

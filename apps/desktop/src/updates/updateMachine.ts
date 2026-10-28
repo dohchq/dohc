@@ -52,6 +52,8 @@ export type UpdateEvent =
   | { type: "download" }
   | { type: "progress"; percent: number }
   | { type: "downloaded"; version: string }
+  // macOS only: Squirrel could not stage the download, so nothing installs.
+  | { type: "unstaged" }
   | { type: "offline" }
   | { type: "error"; message: string };
 
@@ -102,6 +104,8 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
       return state.status === "downloading"
         ? { status: "ready", version: event.version, message: `Update ${event.version} is ready. Restart dohc to install it.` }
         : state;
+    case "unstaged":
+      return state.status === "ready" ? available(state.version) : state;
     case "offline":
     case "error":
       // A downloaded update still installs: installing it is local. A failed

@@ -524,7 +524,9 @@ Set it only in a launch environment you control, and use a trusted HTTPS endpoin
 
 The app checks for updates but downloads one only when the person selects Update
 at the top right of the window. When the download finishes, the button reads
-Restart to update. On Windows and macOS a downloaded update also installs on quit.
+Restart to update. When dohc cannot start or a window keeps failing, a dialog
+offers the update instead, and the download starts only when the person selects
+Download. On Windows and macOS a downloaded update also installs on quit.
 On Linux an update installs only when the person selects Restart to update: the
 AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
 asks once for an administrator password. If `dpkg` reports missing dependencies,

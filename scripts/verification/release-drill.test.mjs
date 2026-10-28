@@ -92,7 +92,7 @@ test("refuses an entry that loads the app module statically", (t) => {
   }), /dynamic import/);
 });
 
-test("records dialogs, holds the restart question, and closes the notice with its signal", async (t) => {
+test("records dialogs, presses Download, holds the restart question, and closes the notice with its signal", async (t) => {
   const root = scratchDir(t);
   const electron = join(root, "node_modules", "electron");
   mkdirSync(electron, { recursive: true });
@@ -108,6 +108,7 @@ test("records dialogs, holds the restart question, and closes the notice with it
   const { dialog } = await import(pathToFileURL(join(electron, "index.js")).href);
 
   dialog.showErrorBox("dohc failed to start", "boom");
+  assert.equal((await dialog.showMessageBox({ message: "dohc could not start.", buttons: ["Download", "Quit"] })).response, 0);
   const signal = new AbortController();
   let noticeClosed = false;
   const notice = dialog.showMessageBox({ message: "Downloading update 2.0.0.", buttons: ["Quit"], signal: signal.signal })
@@ -120,8 +121,8 @@ test("records dialogs, holds the restart question, and closes the notice with it
   signal.abort();
   await notice;
   assert.equal(answered, false);
-  assert.deepEqual(readDrillLog(log).map((entry) => entry.kind), ["entry", "error-box", "notice", "dialog"]);
-  assert.deepEqual(readDrillLog(log)[3].buttons, ["Restart now", "Quit"]);
+  assert.deepEqual(readDrillLog(log).map((entry) => entry.kind), ["entry", "error-box", "question", "notice", "dialog"]);
+  assert.deepEqual(readDrillLog(log)[4].buttons, ["Restart now", "Quit"]);
 });
 
 test("a failed setup closes the feed and deletes the scratch app, keeping only evidence", async (t) => {

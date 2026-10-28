@@ -52,12 +52,14 @@ export type AutoUpdateController = {
   // Starts downloading the available update. Progress, the result and a
   // failure arrive as state.
   downloadUpdate: () => UpdateActionResult;
-  // Checks now, or joins the check already running, and downloads what the
-  // feed offers. Resolves with the downloaded version, or null when none
-  // downloads within the bounds. onDownloading runs once, when the download
-  // starts.
+  // Checks now, or joins the check already running. When the feed offers an
+  // update, nothing downloads until confirmDownload resolves true; a download
+  // a person already started is joined without asking. Resolves with the
+  // downloaded version, or null when the person declines or none downloads
+  // within the bounds. onDownloading runs once, when the download starts.
   awaitUpdate: (
     bounds: UpdateWaitBounds,
+    confirmDownload: (version: string) => Promise<boolean>,
     onDownloading?: (version: string) => void,
   ) => Promise<string | null>;
   installUpdate: () => Promise<UpdateActionResult>;
@@ -255,6 +257,9 @@ export async function startAutoUpdates(options: {
   let failures = 0;
   // The downloaded .deb on Linux, which a failed install names in its command.
   let debInstaller: string | null = null;
+  // electron-updater reports a failed macOS staging twice: as Squirrel's
+  // error, then as the download's rejection.
+  let stagingError: unknown = null;
   let stopped = false;
   const publicState = (): PublicUpdateState => {
     const base = publicUpdateState(state, {
@@ -331,6 +336,17 @@ export async function startAutoUpdates(options: {
     dispatch({ type: "downloaded", version: info.version });
   });
   autoUpdater.on("error", (error) => {
+    if (error === stagingError) return;
+    if (platform === "darwin" && state.status === "ready") {
+      // electron-updater reports a macOS download before Squirrel stages it.
+      // A failed staging leaves nothing to install, so the update downloads
+      // again, which stages it again.
+      stagingError = error;
+      restartStaged = false;
+      fail("download", { message: causeOf(error) }, true);
+      dispatch({ type: "unstaged" });
+      return;
+    }
     if (restartStaged && state.status === "ready") {
       restartStaged = false;
       fail("install", debInstaller ? debInstallFailure(error, debInstaller) : { message: causeOf(error) }, true);
@@ -430,9 +446,12 @@ export async function startAutoUpdates(options: {
 
   const awaitUpdate = (
     bounds: UpdateWaitBounds,
+    confirmDownload: (version: string) => Promise<boolean>,
     onDownloading?: (version: string) => void,
   ): Promise<string | null> =>
     new Promise((resolve) => {
+      let asked = false;
+      let asking = false;
       let downloading = false;
       let done = false;
       let timer = setTimeout(() => finish(null), bounds.verdictMs);
@@ -443,12 +462,21 @@ export async function startAutoUpdates(options: {
         resolve(version);
       }
       function settle(): void {
-        if (done) return;
+        if (done || asking) return;
         if (state.status === "ready") return finish(state.version);
         if (stopped) return finish(null);
-        // A build that cannot run downloads what the feed offers, under a
-        // notice the person can close to stop the wait.
-        if (state.status === "available" && !downloading) downloadUpdate();
+        if (state.status === "available" && !asked) {
+          // The answer has no bound: the person decides, not the feed.
+          asked = asking = true;
+          clearTimeout(timer);
+          void confirmDownload(state.version).then((accepted) => {
+            asking = false;
+            if (!accepted) return finish(null);
+            downloadUpdate();
+            settle();
+          }, () => finish(null));
+          return;
+        }
         if (state.status === "downloading") {
           // The download gets its own bound.
           if (downloading) return;
