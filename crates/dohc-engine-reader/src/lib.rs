@@ -363,6 +363,8 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
             }
             continue;
         };
+        let started = Instant::now();
+        let mut phase = "startup";
         let result = (|| {
             if worker.is_none() {
                 let deadline = Instant::now() + d.startup;
@@ -376,6 +378,7 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
                         return Err(failure);
                     }
                 }
+                phase = "hello";
                 if let Err(failure) = wait_event(worker.as_ref().unwrap(), &shared, deadline) {
                     if failure == Failure::Unavailable {
                         shared.state.lock().unwrap().closed = true;
@@ -384,10 +387,16 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
                 }
             }
             let w = worker.as_ref().unwrap();
+            phase = "send";
             w.send(p.request)?;
+            phase = "response";
             wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
         })();
-        if result.is_err() {
+        if let Err(failure) = &result {
+            eprintln!(
+                "engine: Markdown reader {phase} failed: {failure:?} after {} ms",
+                started.elapsed().as_millis()
+            );
             drop(worker.take());
         }
         // Release accounting only after failed I/O has stopped retaining the active request.

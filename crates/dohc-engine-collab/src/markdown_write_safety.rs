@@ -120,6 +120,7 @@ pub struct PendingWitnessCheck {
     reader: Arc<Reader>,
     request: CheckMarkdownWitness,
     result: OnceCell<Result<(String, bool), Failure>>,
+    retries: u8,
 }
 
 impl std::fmt::Debug for PendingWitnessCheck {
@@ -180,6 +181,7 @@ impl WitnessChecks {
         }
         let mut entries = self.0.lock().unwrap();
         let identity = reader.checker_identity();
+        let mut retries = 0;
         if let Some(index) = entries.iter().position(|entry| {
             entry.request.source_sha256 == reference.source_sha256
                 && entry.request.projection_sha256 == reference.projection_sha256
@@ -191,7 +193,19 @@ impl WitnessChecks {
                     entries.push_back(entry);
                     return Ok(safe);
                 }
-                Some(Err(_)) => {
+                Some(Err(failure))
+                    if matches!(
+                        failure,
+                        Failure::Crashed
+                            | Failure::TimedOut
+                            | Failure::Overloaded
+                            | Failure::Superseded
+                    ) && entry.retries == 0 =>
+                {
+                    retries = 1;
+                }
+                Some(Err(failure)) => {
+                    eprintln!("engine: Markdown witness check failed: {failure:?}");
                     return Err(CollabError::MarkdownReaderUnavailable);
                 }
                 None => {
@@ -222,6 +236,7 @@ impl WitnessChecks {
                 projection_sha256: reference.projection_sha256,
             },
             result: OnceCell::new(),
+            retries,
         });
         entries.push_back(pending.clone());
         Err(CollabError::MarkdownWitnessCheckPending {
@@ -359,6 +374,67 @@ mod tests {
             check_witness(&doc, &key, "note.md", Some(&resolver)),
             Err(CollabError::MarkdownReaderUnavailable)
         ));
+    }
+
+    #[test]
+    fn transient_witness_failures_retry_once_without_granting_safety() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(crate::ContentKind::Richdoc, "plain")
+            .unwrap();
+        let key = DocKey::new("w", "main", "object").unwrap();
+        let reader = Arc::new(Reader::new(None));
+        for failure in [
+            Failure::Crashed,
+            Failure::TimedOut,
+            Failure::Overloaded,
+            Failure::Superseded,
+        ] {
+            let checks = WitnessChecks::default();
+            let preparation = || match checks.check(&reader, &doc, &key, "note.md") {
+                Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) => pending,
+                _ => panic!("expected a fresh witness check"),
+            };
+            let first = preparation();
+            let source = first.request.source.clone();
+            let source_sha = first.request.source_sha256.clone();
+            let projection_sha = first.request.projection_sha256.clone();
+            first.result.set(Err(failure)).unwrap();
+            drop(first);
+            let second = preparation();
+            assert_eq!(second.retries, 1);
+            assert_eq!(second.request.source, source);
+            assert_eq!(second.request.source_sha256, source_sha);
+            assert_eq!(second.request.projection_sha256, projection_sha);
+            second.result.set(Err(failure)).unwrap();
+            drop(second);
+            assert!(matches!(
+                checks.check(&reader, &doc, &key, "note.md"),
+                Err(CollabError::MarkdownReaderUnavailable)
+            ));
+            assert_eq!(preparation().retries, 0);
+        }
+    }
+
+    #[test]
+    fn permanent_witness_failures_do_not_retry_within_the_action() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(crate::ContentKind::Richdoc, "plain")
+            .unwrap();
+        let key = DocKey::new("w", "main", "object").unwrap();
+        let reader = Arc::new(Reader::new(None));
+        for failure in [Failure::Unavailable, Failure::TooLarge] {
+            let checks = WitnessChecks::default();
+            let Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) =
+                checks.check(&reader, &doc, &key, "note.md")
+            else {
+                panic!("expected preparation");
+            };
+            pending.result.set(Err(failure)).unwrap();
+            assert!(matches!(
+                checks.check(&reader, &doc, &key, "note.md"),
+                Err(CollabError::MarkdownReaderUnavailable)
+            ));
+        }
     }
 
     #[tokio::test]
