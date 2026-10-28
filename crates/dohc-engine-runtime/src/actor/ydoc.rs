@@ -3300,7 +3300,7 @@ fn ydoc_settle_attempt_on_store(
             }.into());
         }
         let reference = write_doc.markdown_source_reference();
-        let current_witness_sha = reference.as_ref().filter(|reference| write_doc.markdown_source(reference).is_some())
+        let current_witness_sha = reference.as_ref()
             .map(|reference| reference.source_sha256.as_str());
         if current_witness_sha != witness_source_sha256.as_deref() {
             return Err(CollabError::MarkdownReaderUnavailable.into());

@@ -214,6 +214,43 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
 }
 
 #[tokio::test]
+async fn markdown_hold_missing_or_mismatched_source_bytes_keep_the_existing_head() {
+    for missing in [false, true] {
+        let f = Fixture::new().await;
+        let key = f.key.clone();
+        let source_sha = hex_sha256(f.source.as_bytes());
+        f.actor.run(move |store, cache| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            let wire = yrs::Doc::new();
+            wire.transact_mut().apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap()).unwrap();
+            let before = wire.transact().state_vector();
+            let meta = wire.get_or_insert_map("meta");
+            if missing {
+                meta.remove(&mut wire.transact_mut(), "dohcMarkdownSource");
+            } else {
+                meta.insert(&mut wire.transact_mut(), "dohcMarkdownSource", "Bytes with a different digest");
+            }
+            let update = wire.transact().encode_state_as_update_v1(&before);
+            doc.apply(&update)?;
+            let reference = doc.markdown_source_reference().unwrap();
+            assert_eq!(reference.source_sha256, source_sha);
+            assert!(doc.markdown_source(&reference).is_none());
+            let projection = doc.project(ContentKind::Richdoc)?;
+            assert_eq!(projection.witness_source_sha256.as_deref(), Some(source_sha.as_str()));
+            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                tx, &key, &update, None, None, 6))?;
+            cache.remove(&key);
+            Ok(())
+        }).await.unwrap();
+        for queued in [false, true] {
+            assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+            f.unchanged().await;
+        }
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn markdown_hold_consent_rollback_retries_after_witness_and_journal_preparation() {
     for queued in [false, true] {
     let f = Fixture::new().await;

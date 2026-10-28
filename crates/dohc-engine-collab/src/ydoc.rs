@@ -1003,7 +1003,6 @@ impl Ydoc {
                 MarkdownWriteSafety::SafeWitness
             },
             witness_source_sha256: self.markdown_source_reference()
-                .filter(|reference| self.markdown_source(reference).is_some())
                 .map(|reference| reference.source_sha256),
         })
     }
