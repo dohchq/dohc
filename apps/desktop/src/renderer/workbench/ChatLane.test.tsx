@@ -540,12 +540,15 @@ describe("ChatLane", () => {
     expect((screen.getByRole("button", { name: "Stop agent run" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows the conversation without Stop when its run state can't be read", async () => {
+  it("shows the conversation without Stop when its run state can't be read, and Stop on the next read", async () => {
     bridgeMock.chatDispatchStateForThread.mockRejectedValue(new Error("Dispatch unavailable"));
     render(lane("agent-dm", "workspace-a", "agent"));
     await screen.findByText("Old message");
     expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
     expect(onError).not.toHaveBeenCalled();
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(await screen.findByTestId("chats-lane-stop-agent-run")).toBeTruthy();
   });
 
   it("reads no run state for a group's chat", async () => {
