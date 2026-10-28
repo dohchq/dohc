@@ -3228,13 +3228,7 @@ fn ydoc_settle_attempt_on_store(
         }
         projection.markdown_write_safety = MarkdownWriteSafety::SourcePreserving;
     }
-    if markdown_write_safety::holds(&projection.markdown_write_safety,
-        projection.witness_source_sha256.as_deref(), probe_sha.as_deref())
-        && markdown_write_safety::check_witness(doc, key, path, witness_resolver.as_deref())? {
-        projection.markdown_write_safety = MarkdownWriteSafety::SafeWitness;
-    }
     let checkpoint_sha256 = hex_sha256(&doc.encode_full_state());
-    let witness_reference = doc.markdown_source_reference();
     let Projection {
         content: ydoc_projected_text,
         content_kind: projected_content_kind,
@@ -3285,28 +3279,20 @@ fn ydoc_settle_attempt_on_store(
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
-        let current_doc = if live_audit.is_some() { None } else {
-            Some(dohc_engine_collab::load_doc_in(tx, key)?)
-        };
-        let write_doc = current_doc.as_ref().unwrap_or(doc);
-        if hex_sha256(&write_doc.encode_full_state()) != checkpoint_sha256
-            || write_doc.markdown_source_reference() != witness_reference {
-            return Err(CollabError::MarkdownReaderUnavailable.into());
-        }
         let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
         if current_marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
             return Err(CollabError::LineageWriteStale {
                 expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: current_marker.lineage_claim_id,
             }.into());
         }
-        let reference = write_doc.markdown_source_reference();
+        let reference = doc.markdown_source_reference();
         let current_witness_sha = reference.as_ref()
             .map(|reference| reference.source_sha256.as_str());
         if current_witness_sha != witness_source_sha256.as_deref() {
             return Err(CollabError::MarkdownReaderUnavailable.into());
         }
         let holds = markdown_write_safety::holds(&markdown_write_safety, current_witness_sha, current_sha.as_deref())
-            && !markdown_write_safety::check_witness(write_doc, key, path, witness_resolver.as_deref())?;
+            && !markdown_write_safety::check_witness(doc, key, path, witness_resolver.as_deref())?;
         let adopted_owner = dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)?;
         let uses_consent = holds && conversion_consent.is_some_and(|consent| {
             if let Some(audit) = live_audit {
