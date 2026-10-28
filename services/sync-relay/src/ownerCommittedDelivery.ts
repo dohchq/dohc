@@ -112,6 +112,9 @@ export class OwnerCommittedDelivery {
         this.#registrations.remember(saved.binding, saved.registrationId);
       }
       const adopted = saved, {registrationId} = adopted;
+      // A pass the owner wants drops the reused settlement before it waits on
+      // anything, so if it fails, the next ordinary settle asks the host again.
+      if (wanted) adopted.settled = undefined;
       const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
       if (!isDeepStrictEqual(adopted.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
       let latest = current;

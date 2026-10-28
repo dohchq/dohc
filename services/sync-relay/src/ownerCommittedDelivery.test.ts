@@ -238,6 +238,19 @@ it.each(["held", "unmaterialized"] as const)("asks the host again once a settlem
   expect(settled).toHaveLength(outcome === "held" ? 2 : 3);
 });
 
+// Proves: a settle its owner wants that fails also ends the reuse, so the
+// next ordinary settle asks the host again instead of returning the old settlement.
+it("asks the host again after a settle its owner wanted fails", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  const failure = new Error("queue full");
+  f.client.sendRequest.mockRejectedValueOnce(failure);
+  await expect(f.consumer.settleWanted(document)).rejects.toBe(failure);
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
 it("leaves an earlier unresolved file write to backoff without settling", async () => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
   const overloaded = new DaemonRefusalError({code: "OVERLOADED",message: "settlement-materialization-pending",retry: "afterBackoff"}, undefined);
