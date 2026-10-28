@@ -4969,6 +4969,7 @@ export function DesktopWorkspaceShell(props: {
     openFile,
     openAutomation: openNoticeAutomation,
     openAutomationControls,
+    openChat: openChatsNavInTab,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,

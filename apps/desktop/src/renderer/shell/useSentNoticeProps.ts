@@ -7,6 +7,7 @@ import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { useRequestSequence } from "../useRequestSequence";
 import { workspaceName } from "../Titlebar";
 import { AUTOMATION_NOTICE_KINDS, type SentNotice } from "../workbench/NoticeCenter";
+import type { ChatsNav } from "../workbench/ChatsView";
 import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice } from "./sentNoticePlace";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 
@@ -19,6 +20,9 @@ export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
 export const AUTOMATION_NOT_HERE_NOTE = "dohc cannot find this automation's Collection on this computer.";
 // Open beside it is the way to try again.
 const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
+export const RUN_THREAD_NOT_HERE_NOTE = "dohc cannot find this run's thread.";
+// Open beside it is the way to try again.
+const RUN_THREAD_LOOKUP_FAILED_NOTE = "dohc could not open this run's thread.";
 
 /**
  * What a notice's Open asks the workspace it switches to to open once it is
@@ -64,13 +68,39 @@ export function useSentNoticeProps(input: {
    * once `signal` aborts.
    */
   openAutomationControls: (automationId: string, options: { sharedFile?: string; signal: AbortSignal }) => Promise<string | null>;
+  /** Opens a conversation in a chat tab. */
+  openChat: (nav: ChatsNav) => void;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: OpenOnSwitch) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 }) {
   const {
-    sentNotices, workspaceId, workspaces, openFile, openAutomation, openAutomationControls, onSwitchWorkspace, onOpenShare, reportShellError,
+    sentNotices, workspaceId, workspaces, openFile, openAutomation, openAutomationControls, openChat, onSwitchWorkspace, onOpenShare, reportShellError,
   } = input;
+
+  // A run's thread is in an agent's chat, whichever agent ran it, or in a
+  // group's posts where a message named the agent.
+  const openRunThread = useCallback(
+    async (threadId: string, signal: AbortSignal): Promise<string | null> => {
+      let nav: ChatsNav | null = null;
+      try {
+        const { channels } = await bridge().listChatChannels({ workspaceId });
+        const places = await Promise.all(channels.filter((channel) => channel.kind !== "dm").map(async (channel) =>
+          ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
+        for (const { channel, threads } of places) {
+          const thread = threads.find((candidate) => candidate.id === threadId);
+          if (thread) nav = { level: "thread", channel, thread };
+        }
+      } catch {
+        return signal.aborted ? null : RUN_THREAD_LOOKUP_FAILED_NOTE;
+      }
+      if (signal.aborted) return null;
+      if (!nav) return RUN_THREAD_NOT_HERE_NOTE;
+      openChat(nav);
+      return null;
+    },
+    [openChat, workspaceId],
+  );
 
   const describe = useCallback(
     (notice: NoticeRow): SentNotice => {
@@ -173,6 +203,8 @@ export function useSentNoticeProps(input: {
             onSwitchWorkspace(place.workspace, toSwitch !== null
               ? { automationControls: toSwitch, ...(sharedFile === undefined ? {} : { sharedFile }) }
               : place.path ?? undefined);
+          } else if (notice.kind === "agent-run" && notice.target?.thread !== undefined) {
+            return await openRunThread(notice.target.thread, signal);
           } else if (toSwitch !== null) {
             return await noteOf(openAutomationControls(toSwitch, { sharedFile, signal }));
           } else if (automation !== undefined && place.mount === null && !controls) {
@@ -203,7 +235,7 @@ export function useSentNoticeProps(input: {
         }
       }
     },
-    [onOpenShare, onSwitchWorkspace, openAutomation, openAutomationControls, openFile, workspaceId, workspaces],
+    [onOpenShare, onSwitchWorkspace, openAutomation, openAutomationControls, openFile, openRunThread, workspaceId, workspaces],
   );
 
   // Resolves to null once the notice opened, or to a sentence for its row.
