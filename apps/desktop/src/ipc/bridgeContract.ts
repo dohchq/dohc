@@ -3038,55 +3038,6 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
   typeof ResolveWorkspaceVersionConflictResult
 >;
 
-// "Try it in a version" (PR 0N-2): one gesture — fork a version named after
-// the task, switch into it, start a dohc-tracked agent run. Gated in main on
-// the workspace's engine capture like every version operation.
-const TRY_IN_VERSION_TASK_MAX = 2000;
-
-export const TryInWorkspaceVersionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  task: z
-    .string()
-    .min(1)
-    .max(TRY_IN_VERSION_TASK_MAX)
-    .refine((value) => value.trim().length > 0, {
-      message: "task must not be blank",
-    }),
-});
-export type TryInWorkspaceVersionPayload = z.infer<
-  typeof TryInWorkspaceVersionPayload
->;
-
-export const TryInWorkspaceVersionResult = z.object({
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-});
-export type TryInWorkspaceVersionResult = z.infer<
-  typeof TryInWorkspaceVersionResult
->;
-
-export const TryInVersionRunState = z.object({
-  status: z.enum(["running", "review"]),
-  task: z.string().min(1).max(TRY_IN_VERSION_TASK_MAX),
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-  startedAtMs: z.number(),
-  endedAtMs: z.number().optional(),
-  runOutcome: z.enum(["complete", "failed"]).optional(),
-  // Review only. null = the count could not be computed; the card says so
-  // rather than guessing.
-  changedFileCount: z.number().int().min(0).nullable().optional(),
-  mergeAvailable: z.boolean(),
-});
-export type TryInVersionRunState = z.infer<typeof TryInVersionRunState>;
-
-export const TryInVersionStateResult = z.object({
-  state: TryInVersionRunState.nullable(),
-});
-export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
-
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits in the engine's staging directory until
 // saveKeptCopy moves it to a visible copy. That answer is `saved` with the
@@ -3220,21 +3171,6 @@ export const workspaceVersionOperations = {
     capabilityId: "file.retained.delete",
     channel: "desktop:delete-retained-copies",
     payload: DeleteRetainedCopiesPayload, result: DeleteRetainedCopiesResult, ...retainedCopiesGuard,
-  },
-  tryInWorkspaceVersion: {
-    capabilityId: "version.try",
-    channel: "desktop:try-in-workspace-version",
-    payload: TryInWorkspaceVersionPayload, result: TryInWorkspaceVersionResult, ...versionGuard,
-  },
-  getTryInVersionState: {
-    capabilityId: "version.try.read",
-    channel: "desktop:get-try-in-version-state",
-    payload: WorkspaceIdPayload, result: TryInVersionStateResult, ...versionGuard,
-  },
-  dismissTryInVersionReview: {
-    capabilityId: "version.try.dismiss",
-    channel: "desktop:dismiss-try-in-version-review",
-    payload: WorkspaceIdPayload, ...versionGuard,
   },
 } satisfies OperationTable;
 

@@ -2,7 +2,7 @@ import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
-import { Bot, ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -24,7 +24,6 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
-import { isSendKey } from "../ui/keys";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -80,9 +79,8 @@ export function VersionMenu(props: {
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onError: (message: string, cause: unknown) => void;
-  // Bumped by the shell when another surface switched versions (PR 0N-2's
-  // review card switches back to Main) so the selector re-reads the active
-  // version instead of showing a stale name.
+  // Bumped by the shell when version state changed outside this menu, so the
+  // selector re-reads the active version instead of showing a stale name.
   refreshKey?: number;
   // "Share this version…": present only when the shell can open the
   // share dialog (synced, non-shared-view workspaces).
@@ -97,8 +95,6 @@ export function VersionMenu(props: {
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
   const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
-  // "Try it in a version" (PR 0N-2): the task prompt dialog.
-  const [tryOpen, setTryOpen] = useState(false);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -326,16 +322,6 @@ export function VersionMenu(props: {
       onSelect: () => requestSwitch(version.id),
     })),
     MENU_SEPARATOR,
-    {
-      id: "try",
-      label: "Try in a version…",
-      icon: <Bot size={14} aria-hidden />,
-      testId: "version-try",
-      onSelect: () => {
-        setMenu(false);
-        setTryOpen(true);
-      },
-    },
   ];
   if (props.onShareVersion) {
     const share = props.onShareVersion;
@@ -523,155 +509,7 @@ export function VersionMenu(props: {
         />
       ) : null}
 
-      {tryOpen ? (
-        <TryTaskDialog
-          workspaceId={workspaceId}
-          activeTabDirty={props.activeTabDirty}
-          beginLineageOperation={props.beginLineageOperation}
-          onStarted={(activeVersionId) => {
-            setTryOpen(false);
-            // The gesture switched into the new version; refresh the selector
-            // and let the shell reload files/history (the running banner
-            // arrives through the same refresh). The new version comes back
-            // from the gesture itself, so the shell needs no lookup.
-            void refresh().catch(() => undefined);
-            props.onWorkspaceStateChanged(activeVersionId);
-          }}
-          onClose={() => setTryOpen(false)}
-        />
-      ) : null}
     </div>
-  );
-}
-
-// The "Try it in a version" task prompt (PR 0N-2). One short question; on
-// start, main creates the version, switches into it, and starts the run in a
-// single serialized gesture. The run tracks the user's own agent tool.
-// Exported for component tests; the product opens it from the version menu.
-export function TryTaskDialog(props: {
-  workspaceId: string;
-  activeTabDirty: boolean;
-  // VersionMenu's contract: drain writes, hold the release across the IPC.
-  beginLineageOperation: () => Promise<() => void>;
-  /** The version the gesture created and switched into. */
-  onStarted: (activeVersionId: string) => void;
-  onClose: () => void;
-}) {
-  const { workspaceId } = props;
-  const [task, setTask] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const liveToken = useRequestSequence();
-
-  const start = useCallback(async () => {
-    const trimmed = task.trim();
-    if (trimmed.length === 0) {
-      setError("Describe what the agent should try first.");
-      return;
-    }
-    if (busy) return;
-    const token = liveToken.next();
-    setBusy(true);
-    setError(null);
-    let releaseOperation: (() => void) | null = null;
-    try {
-      releaseOperation = await props.beginLineageOperation();
-      if (!liveToken.isCurrent(token)) return;
-      const started = await bridge().tryInWorkspaceVersion({
-        workspaceId,
-        task: trimmed,
-      });
-      if (!liveToken.isCurrent(token)) return;
-      props.onStarted(started.versionId);
-    } catch (caught) {
-      if (!liveToken.isCurrent(token)) return;
-      setError(ipcErrorMessage(caught, "Could not start trying this."));
-      setBusy(false);
-    } finally {
-      releaseOperation?.();
-    }
-  }, [busy, props.beginLineageOperation, props.onStarted, task, workspaceId]);
-
-  return (
-    <Overlay onClose={() => (busy ? undefined : props.onClose())}>
-      <div
-        data-testid="try-task-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="try-task-title"
-        className="dohc-elevated w-[min(460px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
-      >
-        <h3 id="try-task-title" className="m-0 text-sm font-semibold text-ink">
-          Try it in a version
-        </h3>
-        <p className="mb-0 mt-1.5 text-xs leading-5 text-muted">
-          dohc creates a fresh version of this workspace and an agent works on
-          your task there. Main stays as it is — review and merge when it's
-          done.
-          {props.activeTabDirty ? " Your unsaved changes are saved first." : ""}
-        </p>
-        <label
-          className="mt-3 block text-[11px] font-medium text-muted"
-          htmlFor="try-task-input"
-        >
-          What should the agent try?
-        </label>
-        <textarea
-          id="try-task-input"
-          data-testid="try-task-input"
-          autoFocus
-          rows={3}
-          maxLength={2000}
-          value={task}
-          disabled={busy}
-          placeholder="Tidy the meeting notes into one summary"
-          onChange={(event) => setTask(event.target.value)}
-          onKeyDown={(event) => {
-            if (isSendKey(event)) {
-              event.preventDefault();
-              void start();
-            }
-          }}
-          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle dohc-focus-input"
-        />
-        <p
-          data-testid="try-task-helper"
-          className="mb-0 mt-1 text-[11px] leading-4 text-subtle"
-        >
-          Start your own agent in this folder and dohc will follow what it
-          changes.
-        </p>
-        {error ? (
-          <p
-            data-testid="try-task-error"
-            role="alert"
-            className="mb-0 mt-1 text-[11px] leading-4 text-danger"
-          >
-            {error}
-          </p>
-        ) : null}
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            data-testid="try-task-cancel"
-            disabled={busy}
-            onClick={props.onClose}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="try-task-start"
-            disabled={busy || task.trim().length === 0}
-            onClick={() => void start()}
-            className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
-          >
-            {busy ? "Starting…" : "Start"}
-          </button>
-        </div>
-      </div>
-    </Overlay>
   );
 }
 
@@ -690,8 +528,6 @@ type MergeStage =
   | { stage: "resolved-all" }
   | { stage: "error"; message: string };
 
-// Exported for the try-in-version review card (PR 0N-2), which reuses this
-// dialog for its "Merge into Main" action — one merge flow everywhere.
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
@@ -705,10 +541,6 @@ export function VersionMergeDialog(props: {
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
   onClose: () => void;
-  // Optional (PR 0N-2): how the dialog was left when it closed — "merged"
-  // (clean or all conflicts resolved), "conflicts-open" (Finish later), or
-  // "cancelled". Fired just before onClose.
-  onOutcome?: (outcome: "merged" | "conflicts-open" | "cancelled") => void;
 }) {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
@@ -812,17 +644,7 @@ export function VersionMergeDialog(props: {
   const canCloseByEscape =
     stage.stage !== "running" && stage.stage !== "conflicts";
 
-  // Every close path reports its outcome (when a listener asked) then closes.
-  const finish = useCallback(() => {
-    const outcome =
-      stage.stage === "clean" || stage.stage === "resolved-all"
-        ? ("merged" as const)
-        : stage.stage === "conflicts"
-          ? ("conflicts-open" as const)
-          : ("cancelled" as const);
-    props.onOutcome?.(outcome);
-    props.onClose();
-  }, [props.onClose, props.onOutcome, stage.stage]);
+  const finish = props.onClose;
 
   return (
     <Overlay onClose={() => (canCloseByEscape ? finish() : undefined)}>

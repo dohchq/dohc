@@ -28,10 +28,9 @@ const conflict: VersionedTextConflictRecord = {
   incoming: { exists: true, path: "notes.md", contentKind: "binary", sha256: "b".repeat(64), byteLength: 4 },
 };
 const conflictPage = { conflicts: [conflict], nextAfterConflictId: "next-conflict" };
-const tryResult = { versionId, versionName: "Draft", runId: "run" };
 const keptCopy = { id: 7, path: "notes.md", keptAtMs: 5 };
 
-const captureRequests = [
+const requests = [
   [ops.listWorkspaceVersions.channel, { workspaceId }],
   [ops.createWorkspaceVersion.channel, { workspaceId, name: "Draft" }],
   [ops.switchWorkspaceVersion.channel, { workspaceId, versionId }],
@@ -39,18 +38,11 @@ const captureRequests = [
   [ops.mergeWorkspaceVersion.channel, { workspaceId, versionId }],
   [ops.listWorkspaceVersionConflicts.channel, { workspaceId }],
   [ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } }],
-  [ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" }],
   [ops.listKeptCopies.channel, { workspaceId }],
   [ops.saveKeptCopy.channel, { workspaceId, id: 7 }],
   [ops.listRetainedCopies.channel, { workspaceId }],
   [ops.deleteRetainedCopies.channel, { workspaceId, copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
 ] as const;
-const allRequests = [
-  ...captureRequests,
-  [ops.getTryInVersionState.channel, { workspaceId }],
-  [ops.dismissTryInVersionReview.channel, { workspaceId }],
-] as const;
-
 function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   const steps: string[] = [];
@@ -73,15 +65,6 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   });
   const notifyRenderer = vi.fn<Dependencies["notifyRenderer"]>(() => { steps.push("notify"); });
   const queueCloudSync = vi.fn(() => { steps.push("sync"); });
-  const sessions = {
-    start: vi.fn<Dependencies["tryInVersionSessions"]["start"]>(async () => { steps.push("start"); return tryResult; }),
-    snapshot: vi.fn<Dependencies["tryInVersionSessions"]["snapshot"]>(() => null),
-    dismiss: vi.fn<Dependencies["tryInVersionSessions"]["dismiss"]>(() => { steps.push("dismiss"); return true; }),
-  };
-  const desktopMarks = {
-    mark: vi.fn(() => { steps.push("mark"); }),
-    measureSince: vi.fn(() => { steps.push("measure"); }),
-  };
   registerOperations<typeof ops, Event, unknown>(
     {
       handle: (channel, handler) => { handlers.set(channel, handler); },
@@ -95,7 +78,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     workspaceVersionHandlers({
       requireEngineCapture, notifyRenderer,
       onRefusalsChanged,
-      activity: { queueCloudSync }, tryInVersionSessions: sessions, desktopMarks,
+      activity: { queueCloudSync },
     }),
   );
   const invoke = async (channel: string, payload: unknown, openWorkspaceId = workspaceId) => {
@@ -103,11 +86,11 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ openWorkspaceId }, payload);
   };
-  return { steps, operations, requireEngineCapture, notifyRenderer, queueCloudSync, sessions, desktopMarks, invoke };
+  return { steps, operations, requireEngineCapture, notifyRenderer, queueCloudSync, invoke };
 }
 
 describe("registered workspace version handlers", () => {
-  it.each(allRequests)("refuses %s from a window showing another workspace", async (channel, payload) => {
+  it.each(requests)("refuses %s from a window showing another workspace", async (channel, payload) => {
     const h = harness();
     await expect(h.invoke(channel, payload, "other-workspace")).rejects.toThrow(
       Object.values(ops).find(op => op.channel === channel)!.inactiveMessage,
@@ -115,7 +98,7 @@ describe("registered workspace version handlers", () => {
     expect(h.steps).toEqual([]);
   });
 
-  it.each(captureRequests)("propagates the capture refusal without downstream work for %s", async (channel, payload) => {
+  it.each(requests)("propagates the capture refusal without downstream work for %s", async (channel, payload) => {
     const h = harness();
     const refusal = new Error("Versions are unavailable for this workspace");
     h.requireEngineCapture.mockRejectedValue(refusal);
@@ -123,7 +106,6 @@ describe("registered workspace version handlers", () => {
     expect(h.requireEngineCapture).toHaveBeenCalledExactlyOnceWith(workspaceId, "Versions");
     expect(h.steps).toEqual([]);
     for (const operation of Object.values(h.operations)) expect(operation).not.toHaveBeenCalled();
-    expect(h.sessions.start).not.toHaveBeenCalled();
   });
 
   it("maps merge eligibility from the named version's Main fork", async () => {
@@ -272,33 +254,5 @@ describe("registered workspace version handlers", () => {
     h.operations.switchVersion.mockResolvedValue({ activeVersionId: versionId, changedFileCount: -1 });
     await expect(h.invoke(ops.switchWorkspaceVersion.channel, { workspaceId, versionId })).rejects.toThrow();
     expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId });
-  });
-});
-
-describe("registered try-in-version handlers", () => {
-  it("passes the task through the existing manager", async () => {
-    const h = harness();
-    await expect(h.invoke(ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" })).resolves.toEqual(tryResult);
-    expect(h.sessions.start).toHaveBeenCalledExactlyOnceWith(workspaceId, "Try this");
-    expect(h.steps).toEqual(["capture", "mark", "start", "measure"]);
-    expect(h.desktopMarks.mark).toHaveBeenCalledWith("try-in-version-start");
-    expect(h.desktopMarks.measureSince).toHaveBeenCalledWith("try-in-version-gesture", "try-in-version-start");
-  });
-
-  it("does not record completed gesture latency when the manager refuses", async () => {
-    const h = harness();
-    h.sessions.start.mockRejectedValue(new Error("run already active"));
-    await expect(h.invoke(ops.tryInWorkspaceVersion.channel, { workspaceId, task: "Try this" })).rejects.toThrow("run already active");
-    expect(h.desktopMarks.measureSince).not.toHaveBeenCalled();
-  });
-
-  it("reads and dismisses review state without acquiring engine capture", async () => {
-    const h = harness();
-    await expect(h.invoke(ops.getTryInVersionState.channel, { workspaceId })).resolves.toEqual({ state: null });
-    h.sessions.snapshot.mockReturnValue({ ...tryResult, status: "review", task: "Try this", startedAtMs: 1, endedAtMs: 2, runOutcome: "complete", changedFileCount: null, mergeAvailable: true });
-    await expect(h.invoke(ops.getTryInVersionState.channel, { workspaceId })).resolves.toMatchObject({ state: { status: "review", changedFileCount: null } });
-    await expect(h.invoke(ops.dismissTryInVersionReview.channel, { workspaceId })).resolves.toBeUndefined();
-    expect(h.sessions.dismiss).toHaveBeenCalledExactlyOnceWith(workspaceId);
-    expect(h.requireEngineCapture).not.toHaveBeenCalled();
   });
 });

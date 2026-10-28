@@ -79,7 +79,6 @@ import type {
   SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -857,11 +856,7 @@ export function makeBridge(
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
-    // drive a real review card and a real version switch through them.
-    getTryInVersionState: vi.fn(
-      async (): Promise<TryInVersionStateResult> => ({ state: null }),
-    ),
-    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
+    // drive a real version switch through it.
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
         activeVersionId: "main", ...historyPageFields,
