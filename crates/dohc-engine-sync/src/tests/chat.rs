@@ -5664,7 +5664,8 @@ fn reserved_agent_channel_shapes_rejected() {
 fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    dohc_engine_storage::recovery::create_store_before_migration_for_test(&db, "v2-agent-ids")
+        .expect("earlier store");
     let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
     // The suffixes of these wire ids are not agent ids.
     let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";

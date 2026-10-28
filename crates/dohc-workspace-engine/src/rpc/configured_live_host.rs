@@ -2736,7 +2736,7 @@ mod tests {
         // The migration this build adds then fails on the copy.
         rusqlite::Connection::open(database(store.path()))
             .unwrap()
-            .execute_batch("CREATE TABLE chat_dispatch_ledger_next (planted INTEGER)")
+            .execute_batch("CREATE TABLE replication_log_conflict_resolution (planted INTEGER)")
             .unwrap();
         let before = store_files(store.path());
         let handle = open_prepared(

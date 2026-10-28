@@ -998,7 +998,8 @@ fn latest_run_for_an_agent_skips_other_agents_runs_in_the_thread() {
 fn try_again_runs_a_request_from_before_agent_ids_once() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    dohc_engine_storage::recovery::create_store_before_migration_for_test(&db, "v2-agent-ids")
+        .expect("earlier store");
     let conn = rusqlite::Connection::open(&db).expect("open earlier store");
     conn.execute_batch(
         "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
