@@ -183,7 +183,7 @@
   "desktop:list-relay-shares": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-relay-received-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:revoke-relay-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:undo-relay-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:undo-relay-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:poll-relay-share-discussion-activity": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:cancel-relay-share-discussion-activity": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

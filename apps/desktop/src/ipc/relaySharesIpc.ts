@@ -600,9 +600,10 @@ export function createRelaySharesIpcHandlers<
   // Restores what a removal ended, from the receipt the removal returned.
   // The same account transport as the removal, so the Undo on a notice works
   // after the dialog that removed it has closed. Undo can restore Edit access,
-  // so it first sends what sync recorded for the removal's workspace.
-  const undoRelayShare: Handlers["undoRelayShare"] = async (input) => {
-    await pushRecordedFirst(() => dependencies.pushRecorded(input.workspaceId));
+  // so it first sends what sync recorded for this window's workspace.
+  const undoRelayShare: Handlers["undoRelayShare"] = async (input, { operation }) => {
+    assertOriginalWorkspace(operation.workspace);
+    await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
       {

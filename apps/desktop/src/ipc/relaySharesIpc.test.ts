@@ -268,7 +268,7 @@ describe("sync before live hosting", () => {
     expect(h.pushRecorded.mock.invocationCallOrder[0]).toBeLessThan(h.request.mock.invocationCallOrder.at(-1)!);
   });
 
-  it("syncs the removal's workspace before Undo restores the share", async () => {
+  it("syncs the window's workspace before Undo restores the share", async () => {
     const h = harness(), pushed = deferred<void>();
     h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
     h.pushRecorded.mockReturnValue(pushed.promise);
@@ -1327,7 +1327,6 @@ describe("registered account share handlers", () => {
 
   it("restores a removal through the account transport with the receipt's id", async () => {
     const h = harness();
-    h.retirePhysical();
     h.accountRequest.mockResolvedValue({ ok: true, shareId: "share" });
     await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { workspaceId, shareId: "share", undoId: "undo-1" }))
       .resolves.toEqual({ shareId: "share" });
@@ -1504,7 +1503,6 @@ describe("owner operation admission", () => {
     h.retireRenderer();
     if (name === "getRelayReceivedShare") h.request.mockResolvedValue({kind: "missing", removed: false});
     if (name === "revokeRelayShare") h.accountRequest.mockResolvedValue({ok: true});
-    if (name === "undoRelayShare") h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
     await h.invoke(row.channel, input);
     expect(h.workspaceOperations).not.toHaveBeenCalled();
     expect(h.remote).not.toHaveBeenCalled();
