@@ -56,6 +56,20 @@ impl ActorHandle {
                         ..owed.clone()
                     };
                     obligations::record_in(tx, &settle, now_ms)?;
+                    tx.execute(
+                        "INSERT INTO markdown_write_obligation_notice_dismissals \
+                         (obligation_order,checkpoint_sha256,head_sha256) \
+                         SELECT replacement.obligation_order,d.checkpoint_sha256,d.head_sha256 \
+                         FROM markdown_write_obligations replacement \
+                         JOIN markdown_write_obligation_notice_dismissals d ON d.obligation_order=?1 \
+                         WHERE replacement.workspace_id=?2 AND replacement.version_id=?3 \
+                         AND replacement.object_id=?4 AND replacement.lineage_claim_id=?5 \
+                         AND replacement.operation_id=?6 AND replacement.kind='session' \
+                         ON CONFLICT(obligation_order) DO UPDATE SET \
+                         checkpoint_sha256=excluded.checkpoint_sha256,head_sha256=excluded.head_sha256",
+                        params![owed.order, settle.key.workspace_id, settle.key.version_id,
+                            settle.key.object_id, settle.lineage_claim_id, settle.operation_id],
+                    ).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 }
                 obligations::complete_in(tx, &owed, now_ms)?;
                 Ok(())
