@@ -43,7 +43,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
-    await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
   } finally {

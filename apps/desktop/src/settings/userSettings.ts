@@ -8,6 +8,7 @@ import {
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
+import { handleForName, normalizeHandle, scanMentionTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -62,7 +63,9 @@ export type ZoomStep = (typeof ZOOM_STEPS)[number];
 export const DEFAULT_AGENT_ID = "default";
 // Agents are kept by id, so a mistake in one entry turns off only that agent.
 // An id starts with a letter, so the agents keep the order the file lists them in.
-export const AgentId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "An agent's id is up to 64 lowercase letters, digits and dashes, starting with a letter.");
+// Its dashes are single and inside it, so its chat's slug keeps the id as it is.
+export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.")
+  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.");
 
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,
@@ -84,8 +87,9 @@ export const AgentSettings = z.object({
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
-// Names that differ only in case or spaces look the same in a chat.
-const nameKey = (name: string) => name.replace(/\s/gu, "").toLowerCase();
+// Names with one handle name the same agent in a chat. A name with no handle
+// names no agent, so it only has to differ from the other names.
+const nameKey = (name: string) => normalizeHandle(agentHandle(name) || name);
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
@@ -111,6 +115,12 @@ export function firstAgent(settings: Pick<DesktopUserSettings, "agents">): Agent
 }
 
 export type AgentWithLaunch = Agent & { launch: AgentLaunch };
+/** The agents dohc starts: each one that is on and has a way to start. */
+export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch[] {
+  return listAgents(settings).flatMap((agent) =>
+    agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : []);
+}
+
 /** The first agent when dohc can start it, else null. */
 export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
   const agent = firstAgent(settings);
@@ -127,6 +137,42 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
   return agents.find((agent) => agent.name === name)
     ?? agents.find((agent) => agent.id === DEFAULT_AGENT_ID && agent.nameBeforeMigration === name)
     ?? null;
+}
+
+// A message names one of your agents with @ and its name's handle: the name
+// without spaces or the punctuation a handle cannot hold. "" names no agent.
+export function agentHandle(name: string): string {
+  return handleForName(name);
+}
+
+// The @ roster's id for one of your agents.
+export function agentMentionId(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
+// The @ roster's entries for your agents that are on and have a handle.
+export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled">[]): MentionCandidate[] {
+  return agents.flatMap((agent) => {
+    const handle = agentHandle(agent.name);
+    return agent.enabled && handle
+      ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+      : [];
+  });
+}
+
+/**
+ * The agents dohc can start that a message names, in any case, outside
+ * code. A message wakes each one it names, so only your own messages read
+ * your agents' names.
+ */
+export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
+  const named = new Set(scanMentionTokens(body, { ignoreCode: true }).map(({ handle }) => normalizeHandle(handle)));
+  return listAgents(settings)
+    .filter((agent) => {
+      const handle = agentHandle(agent.name);
+      return agent.launch && handle && named.has(normalizeHandle(handle));
+    })
+    .map(({ id }) => id);
 }
 
 /** The command that starts the first agent, or "" when there is none. */

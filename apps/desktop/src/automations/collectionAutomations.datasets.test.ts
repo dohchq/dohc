@@ -2925,7 +2925,7 @@ describe("dataset agent wakes", () => {
 
   it("fails the dataset run without posting when no agent runner is configured", async () => {
     const unexpected = async () => { throw new Error("An unavailable runner must not post or dispatch."); };
-    const f = await world({ onMessage: (message) => wakeAgent({ runnerReady: async () => false, agentChannelId: unexpected,
+    const f = await world({ onMessage: (message) => wakeAgent({ readyAgent: async () => null, agentChannelId: unexpected,
       threadExists: unexpected, start: unexpected, send: unexpected, recordTrigger: unexpected, scan: () => { throw new Error("Unexpected dispatch"); } }, message) });
     await f.writeAutomations(ask("record-added: null"));
     await f.executor.open();
@@ -2949,7 +2949,7 @@ describe("dataset agent wakes", () => {
         lastChangedBy: async () => null, onError: (_context, error) => { throw error; } }, "workspace", report),
       onMessage: async (message) => {
         if (message.target.kind === "group") { deliverGroup!(message); return; }
-        await wakeAgent({ runnerReady: async () => true, agentChannelId: async () => "agent",
+        await wakeAgent({ readyAgent: async () => ({ id: "default", name: "Nova" }), agentChannelId: async () => "agent",
           threadExists: async () => agentMessages.length > 0, start: posted, send: posted,
           recordTrigger: async ({ triggerMessageId }) => {
             const trigger = agentMessages.find((entry) => entry.messageId === triggerMessageId)!;

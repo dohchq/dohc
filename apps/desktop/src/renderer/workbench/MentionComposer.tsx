@@ -108,7 +108,7 @@ function menuQueryAt(value: string, caret: number): boolean {
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
 // an @-mention menu is open Enter/Tab accept the highlighted candidate instead
-// of sending — so directing a message at "@agent" is one obvious gesture.
+// of sending — so directing a message at an agent is one obvious gesture.
 //
 // The mention roster is the agents in the workspace plus the user; picking one
 // inserts "@handle " and the parent parses the sent body to decide who to

@@ -18,6 +18,7 @@ describe("chats result decoder rejection", () => {
       runId: "run-prototype-key",
       threadId: "thread",
       triggerMessageId: "trigger",
+      agentId: "default",
       command: "agent",
       startedAtMs: 1,
       failureHandled: false,

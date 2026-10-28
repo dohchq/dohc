@@ -9,6 +9,7 @@ import {
   type AgentRosterPick,
 } from "../offers/agentAddressed";
 import { ownAgentPresentation } from "./actorPresentation";
+import { agentMentionId } from "../../settings/userSettings";
 import { ChatAvatar } from "./ChatAvatar";
 import type { AgentSetupSummary } from "./ChatsView";
 
@@ -58,16 +59,20 @@ export function useAgentOffer(input: {
     return current?.scope === scope && current.agent === next.candidate ? current : { scope, agent: next.candidate };
   }), [scope]);
   const agent = pick?.scope === scope ? pick.agent : null;
-  const offer = useMemo(() => detectAgentAddressed(workspaceId, agent, {
-    workspaceId: setup ? setup.workspaceId : workspaceId,
-    agentId: "agent:default",
-    presentation: ownAgentPresentation,
-    runner: setup ? { command: setup.runnerConfigured, enabled: setup.runnerEnabled } : null,
-    runActive: setup ? setup.agentRunActive : null,
-    paused: dispatch ? dispatch.paused : null,
-    liveRun: dispatch ? dispatch.liveRunId !== null : null,
-    reach: reach ?? null,
-  }), [agent, dispatch, reach, setup, workspaceId]);
+  const offer = useMemo(() => {
+    if (!agent) return null;
+    const picked = setup?.agents.find(({ id }) => agentMentionId(id) === agent.id);
+    return detectAgentAddressed(workspaceId, agent, {
+      workspaceId: setup ? setup.workspaceId : workspaceId,
+      agentId: agent.id,
+      presentation: ownAgentPresentation,
+      runner: setup ? { command: picked !== undefined, enabled: picked?.enabled === true } : null,
+      runActive: setup ? setup.agentRunActive : null,
+      paused: dispatch ? dispatch.paused : null,
+      liveRun: dispatch ? dispatch.liveRunId !== null : null,
+      reach: reach ?? null,
+    });
+  }, [agent, dispatch, reach, setup, workspaceId]);
   return { offer, onRosterPick, scope };
 }
 
