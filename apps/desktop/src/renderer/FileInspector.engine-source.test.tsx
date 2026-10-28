@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { StrictMode, Suspense } from "react";
 import { createHash } from "node:crypto";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -61,7 +62,6 @@ vi.mock("./editor/artifactSource", () => ({
   },
 }));
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
-import { rememberLossyNoteVerdictForTests } from "./editor/lossyNote";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // These tests need a note past the WYSIWYG limit, not the limit itself. A
@@ -160,6 +160,7 @@ describe("engine markdown source view", () => {
           available: boolean;
           initialUpdate?: Uint8Array;
           lineageGeneration?: number;
+          headSha256?: string;
         }> => {
           sessionId = payload.sessionId;
           return {
@@ -287,7 +288,8 @@ describe("engine markdown source view", () => {
     doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const {bridgeMock} = makeEngineBridge(source);
-    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    bridgeMock.readWorkspaceText.mockResolvedValue({ text: source, truncated: false, contentHash: sha(source) });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(source)});
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
@@ -303,7 +305,8 @@ describe("engine markdown source view", () => {
     doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const {bridgeMock} = makeEngineBridge(source);
-    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    bridgeMock.readWorkspaceText.mockResolvedValue({ text: source, truncated: false, contentHash: sha(source) });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(source)});
     vi.stubGlobal("dohcDesktop", bridgeMock);
     artifactWorker.fails = true;
     try {
@@ -323,16 +326,23 @@ describe("engine markdown source view", () => {
     doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const {bridgeMock} = makeEngineBridge(source);
-    // Most of these are lossy notes, which reach an engine session only when
-    // the person chooses to edit them anyway. The read returns the bytes the
-    // session holds, so the session needs no check of its own.
+    // Lossy notes need explicit consent for the source and session head.
     bridgeMock.readWorkspaceText.mockResolvedValue({ text: source, truncated: false, contentHash: sha(source) });
-    rememberLossyNoteVerdictForTests(sha(source), false);
-    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(source)});
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    if (isLossyMarkdown(source)) {
+      fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
+      fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+      await waitFor(() => expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledWith(
+        expect.objectContaining({ allowLossySourceSha256: sha(source) }),
+      ));
+    }
     fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
-    await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(yDocToMarkdown(doc)));
+    const sourceView = await screen.findByTestId("view-markdown-source");
+    await waitFor(() => expect(codeEditorText(sourceView)).toBe(yDocToMarkdown(doc)));
+    expect(sourceView.querySelector(".cm-content")?.getAttribute("contenteditable")).toBe("false");
+    expect(sourceView.querySelector("script, iframe, img")).toBeNull();
     doc.destroy();
   });
 

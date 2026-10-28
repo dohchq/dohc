@@ -307,13 +307,15 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(isLossyMarkdown(versionB)).toBe(lossy);
     expect(versionB).not.toBe(`${yDocToMarkdown(markdownToYDoc(versionB))}\n`);
     expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
-    let disk = { text: versionA, contentHash: "a".repeat(64) };
+    const hashA = createHash("sha256").update(versionA).digest("hex");
+    const hashB = createHash("sha256").update(versionB).digest("hex");
+    let disk = { text: versionA, contentHash: hashA };
     const bridge = makeBridge();
     vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));
     vi.stubGlobal("dohcDesktop", bridge);
     engine.closedWhenDisabled = true;
     engine.sharedLease = true;
-    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null, "a".repeat(64));
+    engine.state = engineState(seededFrom(versionA, hashA), null, hashA);
     render(
       <>
         <div data-testid="pane-1"><FileInspector workspaceId="ws-1" path="a.md" /></div>
@@ -330,10 +332,10 @@ describe("FileInspector when an open note changed outside dohc", () => {
 
     // Another app writes version B over unsaved text, and pane 1 reloads it
     // into the session both panes share.
-    disk = { text: versionB, contentHash: "b".repeat(64) };
-    setEngine(engineState(seededFrom(versionA, "a".repeat(64)), "unsaved", "a".repeat(64)));
+    disk = { text: versionB, contentHash: hashB };
+    setEngine(engineState(seededFrom(versionA, hashA), "unsaved", hashA));
     fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
-    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null, "b".repeat(64)));
+    setEngine(engineState(seededFrom(versionB, hashB), null, hashB));
 
     await waitFor(() => expect(pane2.getByTestId("view-markdown").textContent).toContain("Version B, from another app."));
     if (lossy) {
