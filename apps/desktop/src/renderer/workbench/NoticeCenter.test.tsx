@@ -2097,6 +2097,31 @@ describe("failed run notices", () => {
   });
 });
 
+describe("a held change from another workspace", () => {
+  it("shows as a warning whose Next is Open note, on the toast and the row", async () => {
+    const held = sentRow("h", {
+      kind: "markdown-write-held",
+      senderKind: null,
+      title: "Held a change to packing.md",
+      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.",
+      target: { path: "Trip/packing.md" },
+    });
+    renderNotices({ sentNotices: [held], sentNoticeToast: held, onOpenSentNotice: vi.fn(async () => null) });
+    const toast = screen.getByTestId("sent-notice-toast");
+    expect(toast.getAttribute("role")).toBe("status");
+    expect(toast.querySelector(".text-warning")).toBeTruthy();
+    expect(toast.querySelector("[data-sender-shape]")).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(screen.getByTestId("sent-notice-toast-open").textContent).toBe("Open note");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("sent-notice-h");
+    expect(row.querySelector(".text-warning")).toBeTruthy();
+    expect(row.querySelector("[data-sender-shape]")).toBeNull();
+    expect(within(row).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(screen.getByTestId("sent-notice-h-open").textContent).toBe("Open note");
+  });
+});
+
 describe("failed runs of the owner's server", () => {
   it("offers Try again on the row and the toast of a run the server can run again", async () => {
     const failed = { ...sentRow("f", { kind: "automation-failed", senderKind: "automation", title: 'Automation "Stamp" failed' }), retryable: true };

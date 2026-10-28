@@ -58,7 +58,7 @@ function lossySession() {
   doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
   doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
   doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-  return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
+  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
 }
 
 function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
@@ -290,7 +290,7 @@ describe("a lossy note", () => {
     ]);
     bridge.openEngineYDocSession
       .mockResolvedValueOnce(lossySession())
-      .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(fixed)), lineageGeneration: 1 });
+      .mockResolvedValue({ available: true as const, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(fixed)), lineageGeneration: 1 });
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
     await screen.findByTestId("lossy-note-notice");
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());

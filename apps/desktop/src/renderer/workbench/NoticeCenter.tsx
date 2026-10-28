@@ -121,6 +121,10 @@ const retriesRun = (notice: NoticeRow): boolean =>
 const isFailure = (notice: NoticeRow): boolean =>
   notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
 
+// A held change to a lossy note, from another workspace. dohc held it on
+// purpose, so it shows as a warning, not a failure.
+const isHeld = (notice: NoticeRow): boolean => notice.kind === "markdown-write-held";
+
 // What Copy puts on the clipboard for a failed run's notice. The notice store
 // already bounds the body, so Copy keeps all of the text the person sees.
 const failureDetails = (notice: NoticeRow): string =>
@@ -1739,10 +1743,12 @@ export function NoticeCenter(props: {
           {sentToast ? (
             <div
               data-testid="sent-notice-toast"
-              role={sentToastFades ? "status" : "alert"}
+              role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <SenderMark kind={sentToast.notice.senderKind} />
+              {isHeld(sentToast.notice)
+                ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                : <SenderMark kind={sentToast.notice.senderKind} />}
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
                 {/* About four lines, then it scrolls, so a long reason never
@@ -1774,7 +1780,7 @@ export function NoticeCenter(props: {
                   key={sentToastKey}
                   iconOnly
                   pinName
-                  label="Copy error details"
+                  label={isHeld(sentToast.notice) ? "Copy notice details" : "Copy error details"}
                   testId="sent-notice-toast-copy"
                   getText={() => failureDetails(sentToast.notice)}
                 />
@@ -1789,7 +1795,7 @@ export function NoticeCenter(props: {
                   }}
                   className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
-                  Open
+                  {isHeld(sentToast.notice) ? "Open note" : "Open"}
                 </button>
               ) : null}
               {onHideSentNoticeToast ? (
@@ -2170,7 +2176,9 @@ export function NoticeCenter(props: {
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
                           <span className="flex h-6 w-4 shrink-0 items-center justify-center">
-                            <SenderMark kind={notice.senderKind} className="shrink-0" />
+                            {isHeld(notice)
+                              ? <AlertTriangle size={14} aria-hidden className="shrink-0 text-warning" />
+                              : <SenderMark kind={notice.senderKind} className="shrink-0" />}
                           </span>
                           <NoticeText
                             title={notice.title}
@@ -2187,7 +2195,7 @@ export function NoticeCenter(props: {
                                       <CopyButton
                                         iconOnly
                                         pinName
-                                        label="Copy error details"
+                                        label={isHeld(notice) ? "Copy notice details" : "Copy error details"}
                                         testId={`sent-notice-${notice.noticeId}-copy`}
                                         getText={() => failureDetails(notice)}
                                       />
@@ -2241,7 +2249,7 @@ export function NoticeCenter(props: {
                                         onClick={openNotice}
                                         className={ROW_ACTION_CLASS}
                                       >
-                                        {busy ? "Opening…" : notice.kind === "markdown-write-held" ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                        {busy ? "Opening…" : isHeld(notice) ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
                                       </button>
                                     ) : null}
                                   </div>
