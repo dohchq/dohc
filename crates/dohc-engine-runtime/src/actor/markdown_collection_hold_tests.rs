@@ -161,6 +161,63 @@ async fn markdown_hold_relation_cleanup_retains_the_file_index_across_no_change_
 }
 
 #[tokio::test]
+async fn markdown_hold_relation_cleanup_owes_settlement_after_append_crash_and_restart() {
+    for unsafe_witness in [false, true] {
+        let mut f = Fixture::new(true).await;
+        if !unsafe_witness {
+            let clear = f.doc().clear_markdown_source_witness();
+            f.append(&clear);
+        }
+        let before = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+        let crash = dohc_engine_testkit::ScriptedFaults::crash_at(
+            dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck);
+        let result = cleanup_collection_relation_on_store(&mut f.store, &mut f.cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: RECORD.into(), source_file_path: PATH.into(),
+                source_object_id: f.key.object_id.clone(), field_name: "related".into(),
+                target_record_id: TARGET.into(), many: false,
+            }, "w", "main", f.scratch.path(), &LeaseRegistry::new(), &(), 10,
+            crash.as_ref(), &CancellationToken::new(), None);
+        assert!(crash.fired());
+        assert!(matches!(result, Err(RuntimeError::OperationCrashed)));
+        let db = engine_db_path(&f.scratch).unwrap();
+        drop(f.store);
+        f.store = EngineStore::open(&db, 11).unwrap();
+        f.cache = WriterDocCache::new();
+        let owed = f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].kind, Kind::RelationCleanup);
+        assert_eq!(owed[0].held_head_sha256.as_deref(), Some(hex_sha256(f.source.as_bytes()).as_str()));
+        assert!(f.doc().frontmatter_json().get("related").is_none());
+        let appended = dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq;
+        assert_eq!(appended, before + 1);
+        f.assert_held();
+        if unsafe_witness {
+            f.prepare_unsafe().await;
+            for _ in 0..2 {
+                assert!(matches!(f.cleanup(), CollectionRelationCleanupExecution::Held(RuntimeError::MarkdownWriteHeld { .. })));
+                f.assert_held();
+                let pending = f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap();
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].order, owed[0].order);
+                assert_eq!(dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().head_update_seq, appended);
+            }
+            let clear = f.doc().clear_markdown_source_witness();
+            f.append(&clear);
+        }
+        assert!(matches!(f.cleanup(), CollectionRelationCleanupExecution::Applied(_)));
+        assert!(f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap().is_empty());
+        let indexed: i64 = f.store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM collection_record_fields WHERE record_id=?1 AND field_name='related'",
+            [RECORD], |row| row.get(0))).unwrap();
+        assert_eq!(indexed, 0);
+        let saved = std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap();
+        assert!(!saved.contains("related:"));
+        assert!(saved.contains("Accepted text remains in the document"));
+    }
+}
+
+#[tokio::test]
 async fn markdown_hold_link_baseline_reports_unusable_without_splicing_the_older_file() {
     let mut f = Fixture::new(false).await;
     for _ in 0..2 {

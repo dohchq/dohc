@@ -2060,6 +2060,9 @@ fn cleanup_collection_relation_on_store(
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
     };
+    let owed = record_collection_boundary(store, &state.key, &candidate.source_file_path,
+        &operation, dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup,
+        state.head_blob_sha256.as_deref(), now_ms)?;
     if let Some(update) = update {
         lineage_claim_id = ydoc_record_update_on_store(
         store,
@@ -2082,9 +2085,6 @@ fn cleanup_collection_relation_on_store(
         None,
         )?.lineage_claim_id;
     }
-    let owed = record_collection_boundary(store, &state.key, &candidate.source_file_path,
-        &operation, dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup,
-        state.head_blob_sha256.as_deref(), now_ms)?;
     let expected_head = collection_boundary_head(store, &owed, state.head_blob_sha256)?;
     validate_workspace_root(root_dir, root_guard)?;
     let settlement = ydoc_settle_on_store(
