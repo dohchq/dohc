@@ -382,6 +382,81 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn markdown_hold_no_reader_session_and_queue_keep_durable_edits_until_consent() {
+    for queued in [false, true] {
+        let mut f = Fixture::new().await;
+        f.supervisor.close(&f.db).unwrap();
+        f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+        for _ in 0..2 {
+            assert!(matches!(
+                f.settle(queued, None).await,
+                Err(RuntimeError::MarkdownWriteHeld { .. })
+            ));
+            f.unchanged().await;
+        }
+        f.supervisor.close(&f.db).unwrap();
+        let store = EngineStore::open(&f.db, 20).unwrap();
+        let owed = store
+            .read_with(|conn| write_obligations::pending_in(conn, "w"))
+            .unwrap();
+        assert_eq!(owed.len(), 1);
+        assert!(owed[0].held_checkpoint_sha256.is_some());
+        assert_eq!(
+            dohc_engine_sync::list_refusal_notices(&store, "w")
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+        f.actor = f.supervisor.open(&f.db, 21).unwrap().actor;
+        let grant = f.consent();
+        assert!(
+            f.settle(queued, Some(grant.clone()))
+                .await
+                .unwrap()
+                .settled()
+                .unwrap()
+                .materialized
+        );
+        assert!(grant.is_consumed());
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn markdown_hold_no_reader_audited_settlement_records_a_notice_across_restart() {
+    let mut f = Fixture::with_reader_source(true).await;
+    f.adopt().await;
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+    let (_owner, host) = f.audited_host().await;
+    for _ in 0..2 {
+        assert!(matches!(
+            f.audited_settle(&host, None).await,
+            Err(RuntimeError::MarkdownWriteHeld { .. })
+        ));
+        f.unchanged().await;
+    }
+    f.supervisor.close(&f.db).unwrap();
+    let store = EngineStore::open(&f.db, 20).unwrap();
+    let owed = store
+        .read_with(|conn| write_obligations::pending_in(conn, "w"))
+        .unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].kind, WriteObligationKind::AuditedSettle);
+    assert!(owed[0].held_checkpoint_sha256.is_some());
+    assert_eq!(
+        dohc_engine_sync::list_refusal_notices(&store, "w")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
+    assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+}
+
+#[tokio::test]
 async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
     for queued in [false, true] {
         let f = Fixture::new().await;

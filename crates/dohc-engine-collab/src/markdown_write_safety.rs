@@ -263,9 +263,10 @@ pub fn check_witness(
     {
         return Ok(false);
     }
-    resolver
-        .ok_or(CollabError::MarkdownReaderUnavailable)?
-        .check_witness(doc, key, path)
+    match resolver {
+        Some(resolver) => resolver.check_witness(doc, key, path),
+        None => Ok(false),
+    }
 }
 
 pub fn holds(
@@ -374,6 +375,18 @@ mod tests {
             check_witness(&doc, &key, "note.md", Some(&resolver)),
             Err(CollabError::MarkdownReaderUnavailable)
         ));
+    }
+
+    #[test]
+    fn absent_checker_keeps_a_complete_witness_unsafe() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(crate::ContentKind::Richdoc, "plain")
+            .unwrap();
+        doc.richdoc_append_paragraph("An edit that needs a safety check");
+        let reference = doc.markdown_source_reference().unwrap();
+        assert!(doc.markdown_source(&reference).is_some());
+        let key = DocKey::new("w", "main", "object").unwrap();
+        assert!(!check_witness(&doc, &key, "note.md", None).unwrap());
     }
 
     #[test]
