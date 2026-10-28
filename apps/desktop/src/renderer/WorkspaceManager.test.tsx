@@ -607,8 +607,10 @@ describe("workspace manager", () => {
       render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
       await locationReads("/home/sam/dohc/Personal");
 
+      // A new id per run: a failure this renderer already toasted stays quiet.
       bridge.checkForUpdates.mockResolvedValueOnce({
-        checked: true, state: { status: "error", message: "feed returned 500", canCheck: true, failure: { step: "check", id: 1 } },
+        checked: true,
+        state: { status: "error", message: "feed returned 500", canCheck: true, failure: { step: "check", id: platform === "linux" ? 1 : 2 } },
       });
       sendMenuCommand("check-updates");
       const toast = await screen.findByTestId("workspace-shell-error");

@@ -13,14 +13,14 @@ import { applyLookSettings, differsOnlyInLook } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
-import { workspaceName } from "./Titlebar";
+import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { ShellErrorReporter } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
-import { useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
+import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -28,7 +28,6 @@ import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
-import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
@@ -38,8 +37,8 @@ const LazyStatesPage = lazy(() =>
 const NOOP = () => undefined;
 
 // The registry error has no workspace shell; it answers menu commands
-// itself and reports into its own notices.
-function RegistryErrorMenuCommands() {
+// itself, reports into its own notices, and offers updates in its title bar.
+function RegistryErrorTitlebar() {
   const reportFailure = useContext(ShellErrorReporter);
   const update = useDesktopUpdate(reportFailure);
   useUpdateFailureNotices(update, "", useCallback(
@@ -53,7 +52,11 @@ function RegistryErrorMenuCommands() {
     (message: string, cause: unknown) => reportFailure?.({ message, cause }),
     [reportFailure],
   ), update.run);
-  return null;
+  return (
+    <div className="app-chrome absolute inset-x-0 top-0">
+      <Titlebar update={<TitlebarUpdateButton update={update} />} />
+    </div>
+  );
 }
 
 export function DesktopRoot() {
@@ -283,10 +286,8 @@ export function DesktopRoot() {
     ]);
     return (
       <StandaloneNotices>
-      <RegistryErrorMenuCommands />
       <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
-        {/* No title bar here, so this strip moves the window. */}
-        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
+        <RegistryErrorTitlebar />
         <span className="text-sm font-semibold text-ink">
           dohc couldn't read its workspace registry
         </span>
