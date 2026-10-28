@@ -157,8 +157,8 @@ async function writeCaptured(page: Page, rootPath: string, version: string, path
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
 }
 
-function notice(page: Page, text: string): Locator {
-  return page.getByTestId("workspace-shell-notice").filter({ hasText: text });
+function errorToast(page: Page, text: string): Locator {
+  return page.getByTestId("workspace-shell-error").filter({ hasText: text });
 }
 
 test("@ui-audit the versions menu and what it opens", async () => {
@@ -209,7 +209,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
     // its row in Notices. The field keeps the name.
     await interceptNext(desktop, "desktop:create-workspace-version", "fail");
     await page.getByTestId("version-new-input").press("Enter");
-    const createFailed = notice(page, "Ideas");
+    const createFailed = errorToast(page, "Ideas");
     await expect(createFailed).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("version-new-input")).toHaveValue("Ideas");
     await shootWindow(page, "create-failure-toast");
@@ -219,6 +219,9 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(page.locator("[data-notice-row]").filter({ hasText: "Ideas" })).toBeVisible();
     await shootWindow(page, "create-failure-notices");
     await page.getByTestId("notice-center-toggle").click();
+    // An error toast stays until dismissed; keep it out of the later shots.
+    await createFailed.getByRole("button", { name: "Dismiss workspace error" }).click();
+    await expect(createFailed).toHaveCount(0);
 
     // Both sides change notes.md, so the merge has a conflict to decide.
     await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's notes.\n");
@@ -234,7 +237,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-confirm");
     await interceptNext(desktop, "desktop:merge-workspace-version", "fail");
     await page.getByTestId("version-merge-confirm").click();
-    const mergeFailed = notice(page, "merge");
+    const mergeFailed = errorToast(page, "merge");
     await expect(mergeFailed).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
     await shootWindow(page, "merge-failure-toast");
