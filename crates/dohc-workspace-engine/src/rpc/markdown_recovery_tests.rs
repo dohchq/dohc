@@ -168,7 +168,7 @@ async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligati
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
+async fn markdown_recovery_completed_blocker_retries_skipped_work_without_a_document_change() {
     let scratch = ScratchDir::new().unwrap();
     let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
@@ -224,6 +224,28 @@ async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
         "collection-relation-cleanup:held:related:target".into(),
         Arc::new(()), 11, Arc::new(NoFaults), CancellationToken::new(), None, None).await,
         Err(RuntimeError::MarkdownWriteHeld { .. })));
+    let mut audit = {
+        use dohc_engine_collab::markdown_write_obligations::{self as obligations, AuditedRetry};
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let owed = obligations::pending_in(&conn, "w").unwrap().into_iter()
+            .find(|owed| owed.kind == Kind::Session).unwrap();
+        let retry = AuditedRetry {
+            namespace: "relay".into(),
+            binding: dohc_engine_collab::live_object_binding::LiveObjectBinding {
+                workspace_id: "w".into(), main_version_id: "main".into(), object_id: "held".into(),
+                lineage_claim_id: owed.lineage_claim_id.clone(), current_path: "held.md".into(),
+                selector_paths: vec!["held.md".into()], restore_fence_generation: 0,
+            },
+            terminal_cursor: 1,
+            head_update_seq: owed.retry_inputs["headUpdateSeq"].as_i64().unwrap(),
+        };
+        obligations::record_audited_in(&conn, &Obligation {
+            kind: Kind::AuditedSettle, operation_id: retry.operation_id(),
+            retry_inputs: serde_json::to_value(&retry).unwrap(), ..owed.clone()
+        }, 12).unwrap();
+        obligations::complete_in(&conn, &owed, 12).unwrap();
+        retry
+    };
     let cancel = CancellationToken::new();
     let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(run(Arc::downgrade(&open), handle.clone(), service.sessions.clone(),
@@ -254,13 +276,42 @@ async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
             .expect("an unchanged hold scan does not wait for either gate").unwrap();
         assert!(attempts.is_empty());
     }
-    cancel.cancel();
-    task.await.unwrap();
     while let Ok(attempts) = passes.try_recv() { assert!(attempts.is_empty()); }
+    let before = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    {
+        use dohc_engine_collab::markdown_write_obligations as obligations;
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        audit.terminal_cursor = 2;
+        let owed = before.iter().find(|row| row.obligation.kind == Kind::AuditedSettle).unwrap().obligation.clone();
+        obligations::record_audited_in(&conn, &Obligation {
+            retry_inputs: serde_json::to_value(&audit).unwrap(), ..owed
+        }, 40).unwrap();
+        conn.execute("INSERT INTO live_device_settlements VALUES \
+            ('covered','relay','w','main','held',?1,0,2,0,?2,0,?3,'held',?3,?3,?4,'{}',40,'ordinary',NULL)",
+            rusqlite::params![audit.binding.lineage_claim_id, audit.head_update_seq,
+                hex_sha256(b"Original source\n"), serde_json::to_string(&audit.binding).unwrap()]).unwrap();
+    }
+    let after = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_ne!(before[0].fingerprint, after[0].fingerprint);
+    assert_eq!(before[1].fingerprint, after[1].fingerprint);
     drop(sessions);
     drop(capture);
+    wake.notify_one();
+    let retried = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let attempts = passes.recv().await.unwrap();
+            if !attempts.is_empty() { break attempts; }
+        }
+    }).await.unwrap();
+    assert_eq!(retried, vec![held.clone(), held.clone()]);
+    cancel.cancel();
+    task.await.unwrap();
     assert_eq!(std::fs::read_to_string(scratch.path().join("held.md")).unwrap(), "Original source\n");
-    assert_eq!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().len(), 2);
+    let pending = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].obligation.kind, Kind::Session);
+    let store = EngineStore::open_read_only(&db).unwrap();
+    assert_eq!(dohc_engine_collab::read_marker(&store, &held).unwrap().unwrap().head_update_seq, audit.head_update_seq);
     service.workspace_close(Some(handle)).await.unwrap();
 }
 

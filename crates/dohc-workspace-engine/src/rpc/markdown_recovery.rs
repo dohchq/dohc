@@ -74,10 +74,10 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
         #[cfg(test)]
         let mut pass_attempts = Vec::new();
         let mut blocked = HashSet::new();
-        for candidate in candidates {
+        for candidate in &candidates {
             if cancel.is_cancelled() { return; }
-            let fingerprint = candidate_fingerprint(&candidate, &sessions, &handle, open.actor.markdown_recovery_epoch());
-            let owed = candidate.obligation;
+            let fingerprint = candidate_fingerprint(candidate, &sessions, &handle, open.actor.markdown_recovery_epoch());
+            let owed = candidate.obligation.clone();
             let document = (owed.key.version_id.clone(), owed.key.object_id.clone());
             if blocked.contains(&document) {
                 attempted.insert(owed.order, fingerprint);
@@ -140,7 +140,9 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
             };
             match outcome {
                 Ok(true) => {
-                    attempted.remove(&owed.order);
+                    for other in &candidates {
+                        if other.obligation.key == owed.key { attempted.remove(&other.obligation.order); }
+                    }
                     notify_sessions(&sessions, &handle, &owed, &events, false);
                     if let Err(error) = open.actor.materialize_replay_pending_for_fence(open.root.clone(),
                         open.workspace_id.clone(), Arc::new(writes.clone()), now).await {
