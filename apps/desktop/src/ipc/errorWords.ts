@@ -494,6 +494,13 @@ export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
 }
 
+/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
+export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
+  const { name, code } = parse(error);
+  if (name !== "VersionedTextStoreError") return null;
+  return code === "version-name-conflict" ? "taken" : code === "invalid-version-name" ? "invalid" : null;
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);

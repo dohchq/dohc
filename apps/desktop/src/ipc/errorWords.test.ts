@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
@@ -34,6 +35,7 @@ import {
   readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
+  versionNameRefusal,
   VOLUME_SHARES_NEW_FILES_WORDS,
   withErrorWords,
 } from "./errorWords";
@@ -185,6 +187,15 @@ describe("error words", () => {
     [refusal("FORBIDDEN", "The request was rejected."), false],
   ] as const)("reads %s as a share's write refusal across IPC: %s", (error, refused) => {
     expect(isShareReadOnlyRefusal(acrossIpc(error, "desktop:write-workspace-text"))).toBe(refused);
+  });
+
+  it.each([
+    [new VersionedTextStoreError("version-name-conflict", "version-name-conflict"), "taken"],
+    [new VersionedTextStoreError("invalid-version-name", "invalid-version-name"), "invalid"],
+    [new VersionedTextStoreError("version-not-found", "version-not-found"), null],
+    [refusal("INVALID_PARAMS", "version-name-conflict"), null],
+  ] as const)("reads %s as a refusal of a version's name across IPC: %s", (error, refused) => {
+    expect(versionNameRefusal(acrossIpc(error, "desktop:create-workspace-version"))).toBe(refused);
   });
 
   it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {

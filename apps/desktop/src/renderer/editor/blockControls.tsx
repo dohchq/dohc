@@ -1,5 +1,5 @@
 import { mapWidgetOwners } from "./widgetOwnership";
-import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
+import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -113,6 +113,27 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
   slot.current = null;
 }
 
+/** What a top-level block hangs left of its text, into the gutter its
+ * controls sit in. styles.css keeps the controls clear of it. */
+function gutterHang(node: ProseMirrorNode): string | null {
+  switch (node.type.name) {
+    case "bulletList":
+      return "bullet";
+    case "orderedList":
+      return "number";
+    case "taskList":
+      return "checkbox";
+    case "blockquote":
+      return "bar";
+    case "callout":
+      return "frame";
+    case "table":
+      return "table";
+    default:
+      return isCodeBlockNode(node) ? "frame" : null;
+  }
+}
+
 function buildBlockControlDecorations(
   doc: ProseMirrorNode,
   onInsertRef: RefObject<(pos: number) => void>,
@@ -126,8 +147,11 @@ function buildBlockControlDecorations(
   // Only widgets: ProseMirror checks each node decoration against the
   // document with a scan from its first block, so one per block makes every
   // keystroke quadratic in the document's length.
-  doc.forEach((_node, pos) => {
+  doc.forEach((node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
+    const hang = gutterHang(node);
+    // A numbered list hangs as many digits as its first number has.
+    const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
     decorations.push(
       Decoration.widget(
         pos,
@@ -135,6 +159,8 @@ function buildBlockControlDecorations(
           const wrap = document.createElement("span");
           wrap.className = "dohc-block-affordance";
           wrap.setAttribute("contenteditable", "false");
+          if (hang) wrap.dataset.hang = hang;
+          if (digits) wrap.style.setProperty("--dohc-block-digits", String(digits));
 
           const plus = document.createElement("button");
           plus.type = "button";
@@ -209,7 +235,8 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${ownerKey}`, ownerKey },
+        // A block that changes kind or digits gets new controls, with its hang.
+        { side: -1, key: `dohc-block-controls-${ownerKey}-${hang}-${digits}`, ownerKey },
       ),
     );
   });

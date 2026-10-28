@@ -53,6 +53,7 @@
   "dismissAutomationStops",
   "dismissShareHandoff",
   "dismissShareSkips",
+  "downloadUpdate",
   "endAgentRun",
   "engineYDocAcknowledgeLineageReplacement",
   "engineYDocApplyUpdate",

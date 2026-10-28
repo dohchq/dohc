@@ -14,6 +14,8 @@ import {
   type ChatPresenceCollaboration,
 } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
+import type { DesktopUserSettings } from "../../settings/userSettings";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import type {
   PresencePeer,
   PresenceSnapshot,
@@ -243,7 +245,7 @@ function collabWith(transport: PresenceTransport): ChatPresenceCollaboration {
   return { transportForScope: () => transport, clientId: "me", displayName: "Me" };
 }
 
-function renderView(collaboration: ChatPresenceCollaboration | null) {
+function renderView(collaboration: ChatPresenceCollaboration | null, userSettings?: DesktopUserSettings) {
   render(
     <ChatsView
       workspaceId="workspace-a"
@@ -251,6 +253,7 @@ function renderView(collaboration: ChatPresenceCollaboration | null) {
       onOpenFileChat={vi.fn()}
       onError={vi.fn()}
       collaboration={collaboration}
+      userSettings={userSettings}
     />,
   );
 }
@@ -344,7 +347,7 @@ describe("ChatsView presence (MU-C1)", () => {
     );
   });
 
-  it("shows validated agent working/idle hints on My agent and its thread header", async () => {
+  it("shows validated agent working/idle hints on the agent's chat and its thread header", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [agentChannelRecord],
       fileThreads: [],
@@ -352,7 +355,7 @@ describe("ChatsView presence (MU-C1)", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [agentThreadRecord] });
     const t = topicAwareTransport();
     const user = userEvent.setup();
-    renderView(collabWith(t.transport));
+    renderView(collabWith(t.transport), settingsWithAgent({ name: "Me" }));
 
     // The overview row listens on the stable workspace agent-summary topic,
     // but is completely quiet until the reserved agent client appears.
@@ -376,6 +379,23 @@ describe("ChatsView presence (MU-C1)", () => {
     });
     expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
 
+    // The workspace's runner working for another agent says nothing here.
+    act(() => {
+      t.set("chat:agent", [
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          faceToken: "me",
+          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
+          state: { displayName: "Scout", agent: true, activity: "working" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
+
     act(() => {
       t.set("chat:agent", [
         { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
@@ -388,7 +408,7 @@ describe("ChatsView presence (MU-C1)", () => {
       ]);
     });
     expect(await screen.findByLabelText("Agent is working")).toBeTruthy();
-    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("working");
+    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("Running node agent.mjs");
 
     act(() => {
       t.set("chat:agent", [

@@ -6011,7 +6011,7 @@ describe("markdown editor unmount flush", () => {
 
     // Source mode edits the raw markdown (frontmatter included), so the inline
     // property rows step aside.
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.click(await findEnabledMarkdownEditToggle());
     await waitFor(() => {
       expect(screen.queryByTestId("properties-panel")).toBeNull();
     });

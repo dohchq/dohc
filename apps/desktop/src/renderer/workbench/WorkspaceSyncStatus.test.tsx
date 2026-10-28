@@ -232,11 +232,20 @@ describe("sync status surface", () => {
       reason: "live-edit-unadmitted" as const,
       label: "Live editing can't resume",
     },
+    {
+      delivery: "retrying" as const,
+      reason: "conflict-parent-withheld" as const,
+      label: "Live editing can't resume",
+    },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
     const live = screen.getByTestId("owner-live-delivery-status");
     expect(live.textContent).toBe(label);
     expect(live.getAttribute("data-state")).toBe(delivery);
+    if (reason === "conflict-parent-withheld") {
+      expect(live.querySelector(".bg-warning")).not.toBeNull();
+      expect(live.querySelector(".animate-spin")).toBeNull();
+    }
     // Local saving keeps its own line, and active delivery never claims it.
     const status = screen.getByTestId("sync-status");
     expect(status.textContent).toContain("Local · saved");

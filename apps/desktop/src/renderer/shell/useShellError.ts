@@ -64,6 +64,7 @@ export type ShellErrorKind =
   | "record-history-run"
   | "reports"
   | "schedule-host"
+  | "update"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -88,6 +89,8 @@ export interface ShellError {
   // A line after the message that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // A terminal command the message asks the person to run, shown with its copy.
+  command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
@@ -364,6 +367,7 @@ export function useShellError(workspaceId: string) {
       quiet?: boolean;
       message: string;
       cause?: unknown;
+      command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: ShellError["retry"];
       onDismiss?: () => void;
@@ -384,6 +388,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.tone ? { tone: failure.tone } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
+        ...(failure.command ? { command: failure.command } : {}),
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),

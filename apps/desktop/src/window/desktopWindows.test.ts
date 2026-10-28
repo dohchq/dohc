@@ -617,9 +617,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -661,7 +661,7 @@ describe("desktop native menus", () => {
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -674,7 +674,7 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
     click(submenu(item(f, "File", "Open recent"))[0]!, target.native);

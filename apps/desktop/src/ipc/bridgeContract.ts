@@ -465,7 +465,7 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
@@ -1423,7 +1423,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
@@ -3038,55 +3038,6 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
   typeof ResolveWorkspaceVersionConflictResult
 >;
 
-// "Try it in a version" (PR 0N-2): one gesture — fork a version named after
-// the task, switch into it, start a dohc-tracked agent run. Gated in main on
-// the workspace's engine capture like every version operation.
-const TRY_IN_VERSION_TASK_MAX = 2000;
-
-export const TryInWorkspaceVersionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  task: z
-    .string()
-    .min(1)
-    .max(TRY_IN_VERSION_TASK_MAX)
-    .refine((value) => value.trim().length > 0, {
-      message: "task must not be blank",
-    }),
-});
-export type TryInWorkspaceVersionPayload = z.infer<
-  typeof TryInWorkspaceVersionPayload
->;
-
-export const TryInWorkspaceVersionResult = z.object({
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-});
-export type TryInWorkspaceVersionResult = z.infer<
-  typeof TryInWorkspaceVersionResult
->;
-
-export const TryInVersionRunState = z.object({
-  status: z.enum(["running", "review"]),
-  task: z.string().min(1).max(TRY_IN_VERSION_TASK_MAX),
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-  startedAtMs: z.number(),
-  endedAtMs: z.number().optional(),
-  runOutcome: z.enum(["complete", "failed"]).optional(),
-  // Review only. null = the count could not be computed; the card says so
-  // rather than guessing.
-  changedFileCount: z.number().int().min(0).nullable().optional(),
-  mergeAvailable: z.boolean(),
-});
-export type TryInVersionRunState = z.infer<typeof TryInVersionRunState>;
-
-export const TryInVersionStateResult = z.object({
-  state: TryInVersionRunState.nullable(),
-});
-export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
-
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits in the engine's staging directory until
 // saveKeptCopy moves it to a visible copy. That answer is `saved` with the
@@ -3220,21 +3171,6 @@ export const workspaceVersionOperations = {
     capabilityId: "file.retained.delete",
     channel: "desktop:delete-retained-copies",
     payload: DeleteRetainedCopiesPayload, result: DeleteRetainedCopiesResult, ...retainedCopiesGuard,
-  },
-  tryInWorkspaceVersion: {
-    capabilityId: "version.try",
-    channel: "desktop:try-in-workspace-version",
-    payload: TryInWorkspaceVersionPayload, result: TryInWorkspaceVersionResult, ...versionGuard,
-  },
-  getTryInVersionState: {
-    capabilityId: "version.try.read",
-    channel: "desktop:get-try-in-version-state",
-    payload: WorkspaceIdPayload, result: TryInVersionStateResult, ...versionGuard,
-  },
-  dismissTryInVersionReview: {
-    capabilityId: "version.try.dismiss",
-    channel: "desktop:dismiss-try-in-version-review",
-    payload: WorkspaceIdPayload, ...versionGuard,
   },
 } satisfies OperationTable;
 
@@ -5963,6 +5899,12 @@ export const UpdateStateEvent = z.object({
   // A Linux .deb that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
+  // The step that failed, while its state stands; `message` says why. A new
+  // id is a new failure to report.
+  failure: z.object({
+    step: z.enum(["check", "download", "install"]),
+    id: z.number().int().positive(),
+  }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -6001,6 +5943,19 @@ export const UpdateCheckResult = z.object({
   state: UpdateStateEvent,
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
+
+// Starts the download a person chose. Progress and the result arrive as
+// update state.
+export const updateDownloadOperations = {
+  downloadUpdate: {
+    capabilityId: "device.update.download",
+    scope: "device",
+    channel: "desktop:download-update",
+    payload: z.object({}),
+    result: UpdateActionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
 
 // Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
@@ -7257,6 +7212,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,

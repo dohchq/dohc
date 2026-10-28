@@ -261,5 +261,6 @@
   "share.live.document.recovery.save",
   "workspace.name.suggest",
   "agent.run.retry",
-  "settings.agents.order"
+  "settings.agents.order",
+  "device.update.download"
 ]
