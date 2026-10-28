@@ -32,6 +32,7 @@ import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
 import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDaemonWorkspaceSessions";
 import { ChatsLiveAdapter, DaemonRefusalError, isEngineStoreBusyRefusal, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {SHARED_BUTTON_HELD} from "@dohc/automation-executor/button-presser";
@@ -97,7 +98,7 @@ async function computer(input: {
     console.error(`[automation engine] ${JSON.stringify({root: input.root, command: engine.path, exitStatus: exitStatus ?? null})}\n${stderrTail || "(no engine stderr)"}`);
   });
   const client = await createEngineClient({
-    env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath}, privateLiveApplication: profile.nativeClient,
+    env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig()}, privateLiveApplication: profile.nativeClient,
     command: engine.require(), authToken: randomBytes(32).toString("base64url"),
     protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
     onStderr: text => {stderrTail = (stderrTail + text).slice(-64 * 1024);},
@@ -151,6 +152,36 @@ async function computer(input: {
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
   };
 }
+
+it.skipIf(engine.missing)("settles safe imported Markdown after body and field edits expire its witness", async () => {
+  const root = await tempRoot("automation-witness-checker");
+  const server = await computer({root, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: {kind: "claim"}});
+  const original = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.\n`;
+  await server.request("versionedText.write", {versionId: "main", path: "Tasks/collection.yaml",
+    text: "fields: {Status: {type: text}}\n", origin: "api", publish: true}, server.workspace);
+  await server.request("versionedText.write", {versionId: "main", path: "Tasks/one.md", text: original,
+    origin: "api", publish: true}, server.workspace);
+  const native = replicaRecordEngine({...server, workspaceId: WORKSPACE});
+  const session = await native.openSession({versionId: "main", path: "Tasks/one.md"});
+  cleanup.push(() => session.close({settle: false}));
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, session.initialUpdate);
+    expect(doc.getMap("meta").get("dohcMarkdownSource")).toBe(original);
+    const before = Y.encodeStateVector(doc);
+    doc.getMap("frontmatter").set("Status", "Done");
+    const paragraph = doc.getXmlFragment("body").get(0) as Y.XmlElement;
+    const text = paragraph.get(0) as Y.XmlText;
+    text.insert(text.length, " Ready to leave.");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(doc, before), {actorOriginId: "owner",
+      attribution: {actorKind: "human"}, armSettle: false});
+    await session.settleNow();
+    const saved = await readFile(join(root, "Tasks/one.md"), "utf8");
+    expect(saved).toContain("Status: Done");
+    expect(saved).toContain("Pack the car. Ready to leave.");
+    expect((await server.record(ONE)).record.values).toContainEqual(expect.objectContaining({field: "Status", value: "Done"}));
+  } finally {doc.destroy();}
+});
 
 it.skipIf(engine.missing)("writes an automation's records and posts on the server's replica, and the owner's computer receives them", async () => {
   const root = await tempRoot("automation-record-e2e");
