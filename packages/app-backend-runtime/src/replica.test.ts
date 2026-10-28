@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { privateFolder } from "./private-folder.test-helper";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -14,6 +14,11 @@ import { createDatasetReplica, type DatasetReplica, type DatasetReplicaSource } 
 import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { AppRuntimeLauncher } from "./protocol.js";
 
+vi.mock("node:fs/promises", async importOriginal => {
+ const actual = await importOriginal<typeof import("node:fs/promises")>();
+ return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), rm: vi.fn(actual.rm) };
+});
+
 const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const scope={workspaceId:"workspace",datasetId:id(1)};
@@ -22,6 +27,11 @@ const source="globalThis.operations={read(ctx){globalThis.readCount=(globalThis.
 const definition:DatasetDefinition={formatVersion:1,datasetId:id(1),name:"Items",schemaPath:"schema.sql",operationsPath:"operations.js",
  tables:[{tableId:id(2),name:"Items",sqlName:"items",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true},{fieldId:id(4),name:"Value",sqlColumn:"value",type:"text",required:true,unique:false},{fieldId:id(7),name:"Secret",sqlColumn:"secret",type:"text",required:true,unique:false}]}],
  operations:[{operationId:id(5),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3),id(4)]},{operationId:id(6),name:"add",label:"Add",tableId:id(2),kind:"create",access:"owner",readOnly:false,fieldIds:[id(4)]}]};
+const spawnWorker:AppRuntimeLauncher=options=>{
+ const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning",options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+ child.on("message",options.onMessage);child.on("error",options.onError);child.on("close",options.onExit);
+ return {postMessage(message){child.send(message as object,error=>{if(error)options.onError(error);});},kill(){child.kill("SIGKILL");}};
+};
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanups.splice(0).reverse())await close();});
 async function fixture(){
@@ -77,13 +87,48 @@ it("locks one owner copy and prunes snapshots while committing bounded pages",as
  await replica.catchUp(f.remote);expect(replica.state()?.cursor.revision).toBe(65);
  expect((await readdir(join(f.directory,"copy"))).filter(name=>/^[a-f0-9-]{36}\.sqlite$/.test(name))).toHaveLength(1);
 });
+// Windows can't make a folder whose path reaches 248 characters, and SQLite
+// can't open a file whose path passes 259 (#2652). Every folder the copy
+// makes sits in the copy folder, so a worker's files are one short name deeper.
+it("makes every folder directly in the copy folder and removes them after a catch-up",async()=>{
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ await mkdir(join(copy,"worker-AbC123"),{recursive:true});
+ const replica=await f.open();expect(await readdir(copy)).not.toContain("worker-AbC123");
+ vi.mocked(mkdtemp).mockClear();
+ await replica.catchUp(f.remote);await f.transition();f.add("second");await replica.catchUp(f.remote);await replica.read(f.read);
+ const made=(await Promise.all(vi.mocked(mkdtemp).mock.results.map(result=>result.value as Promise<string>))).map(path=>relative(copy,path));
+ for(const name of made)expect(name).toMatch(/^(work|worker|read)-[A-Za-z0-9]{6}$/);
+ expect(made.filter(name=>name.startsWith("worker-"))).toHaveLength(3);
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
+});
+it("removes the folder of a worker that fails to start at a writer checkpoint",async()=>{
+ // The third worker is the one the checkpoint switch starts.
+ let launches=0;
+ const launch:AppRuntimeLauncher=options=>{if(++launches===3)throw Error("The worker did not start.");return spawnWorker(options);};
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ const replica=await f.open({launch});await replica.catchUp(f.remote);await f.transition();f.add("second");
+ await expect(replica.catchUp(f.remote)).rejects.toThrow("The worker did not start.");
+ expect(launches).toBe(3);
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
+});
+it("closes the new worker and removes its folder when a checkpoint switch fails after it starts",async()=>{
+ const actual=await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+ // The second download a catch-up removes is the checkpoint switch's.
+ let downloads=0;
+ vi.mocked(rm).mockImplementation(async(path,options)=>{
+  const name=String(path);
+  if(/^work-/.test(basename(dirname(name)))&&/^[a-f0-9-]{36}\.sqlite$/.test(basename(name))&&++downloads===2)throw Error("The download is busy.");
+  return actual.rm(path,options);
+ });
+ cleanups.push(async()=>{vi.mocked(rm).mockImplementation(actual.rm);});
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ const replica=await f.open();await replica.catchUp(f.remote);await f.transition();f.add("second");
+ await expect(replica.catchUp(f.remote)).rejects.toThrow("The download is busy.");
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
+});
 
 it("reuses one read worker and fresh guest contexts, replaces it after catch-up, and clears it on revoke",async()=>{
- const launch=vi.fn<AppRuntimeLauncher>(options=>{
-  const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning",options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-  child.on("message",options.onMessage);child.on("error",options.onError);child.on("close",options.onExit);
-  return {postMessage(message){child.send(message as object,error=>{if(error)options.onError(error);});},kill(){child.kill("SIGKILL");}};
- });
+ const launch=vi.fn<AppRuntimeLauncher>(spawnWorker);
  const f=await fixture();f.add("first");const replica=await f.open({launch});await replica.catchUp(f.remote);launch.mockClear();
  expect((await replica.read(f.read)).result).toEqual([{id:1,value:"first"}]);
  expect((await replica.read(f.read)).result).toEqual([{id:1,value:"first"}]);

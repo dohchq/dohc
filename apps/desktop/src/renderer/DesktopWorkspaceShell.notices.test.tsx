@@ -758,9 +758,8 @@ describe("engine store recovery", () => {
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
-  // Restarting closes the app, so every Restart asks once first. The stop
-  // state's button opens the same prompt the update notice uses.
-  it("asks before restarting into a ready update from the stop state", async () => {
+  // The button names the restart, so pressing it restarts at once.
+  it("restarts into a ready update from the stop state without asking again", async () => {
     const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => status);
@@ -773,22 +772,8 @@ describe("engine store recovery", () => {
     await user.click(
       await within(blocked).findByRole("button", { name: "Restart to update" }),
     );
-    const dialog = await screen.findByTestId("restart-to-update-dialog");
-    expect(dialog.textContent).toContain("Restart dohc to apply the update?");
-    expect(dialog.textContent).toContain("Update 1.2.4 is downloaded.");
-    expect(bridge.installUpdate).not.toHaveBeenCalled();
-
-    await user.click(within(dialog).getByRole("button", { name: "Not now" }));
-    expect(screen.queryByTestId("restart-to-update-dialog")).toBeNull();
-    expect(bridge.installUpdate).not.toHaveBeenCalled();
-
-    await user.click(within(blocked).getByRole("button", { name: "Restart to update" }));
-    await user.click(
-      within(await screen.findByTestId("restart-to-update-dialog")).getByRole("button", {
-        name: "Restart now",
-      }),
-    );
     await waitFor(() => expect(bridge.installUpdate).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it(
@@ -3568,12 +3553,8 @@ describe("unavailable MCP launcher settings", () => {
     expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
       "dohc could not prepare its MCP launcher. Restart dohc to try again.",
     );
-    expect(screen.queryByTestId("mcp-config-snippet")).toBeNull();
-    const configSection = screen.getByRole("heading", { name: "MCP config" }).closest("section");
-    if (!configSection) throw new Error("The MCP config section did not render.");
     expect(
-      (within(configSection).getByRole("button", { name: "Copy" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled,
     ).toBe(true);
   });
 });

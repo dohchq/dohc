@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -844,6 +844,7 @@ function ChatThreadSpecimen() {
     <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
+        channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={CHAT_THREAD_MESSAGES}
         messagesLoading={false}
         threadLocked={false}
@@ -885,6 +886,7 @@ function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"
     <div className="w-[560px]">
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
+        channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
         messagesLoading={false}
         threadLocked={false}
@@ -1264,20 +1266,25 @@ function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width
   );
 }
 
-const versionRows: MenuEntry[] = [
-  { id: "main", label: "Main", checked: true, onSelect: noop },
-  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
-  MENU_SEPARATOR,
-];
+// The versions menu on a version made from another version, and on Main.
 const radioMenuItems: MenuEntry[] = [
-  ...versionRows,
-  { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
+  { id: "main", label: "Main", checked: false, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: true, onSelect: noop },
   { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
-  { id: "merge", label: "Merge into Main…", icon: <Merge size={14} aria-hidden />, disabled: true, onSelect: noop },
+  {
+    id: "merge",
+    label: "Merge into Main…",
+    icon: <Merge size={14} aria-hidden />,
+    disabled: true,
+    description: "Only versions made from Main can merge into Main.",
+    onSelect: noop,
+  },
 ];
 const fieldMenuItems: MenuEntry[] = [
-  ...versionRows,
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
   {
     id: "new",
     field: {
@@ -1286,6 +1293,7 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
+      hint: "Starts as a copy of Main",
     },
   },
 ];
@@ -1798,23 +1806,23 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
-        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled with its reason">
           <div
-            className="flex h-64 w-64 items-start justify-end"
+            className="flex h-72 w-72 items-start justify-end"
             data-force-state="focus focus-visible"
-            data-force-target="[role=menuitemradio]:nth-child(1)"
+            data-force-target="[role=menuitemradio]:nth-child(2)"
           >
-            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
-              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(1)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={256} testId={`states-menu-radio-${theme}`} />
             </div>
           </div>
         </Specimen>
       </Section>
 
       <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, Enter at its end">
+        <Specimen label="field: focus, Enter at its end, hint">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
-            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
       </Section>
@@ -3394,7 +3402,7 @@ const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
   rows: [
     usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
     usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
-    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("version.merge", "Merge a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
     usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
     usageRow("chat.export", "Export a chat", {}),
   ],

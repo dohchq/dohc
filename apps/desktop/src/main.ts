@@ -233,7 +233,7 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
-import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { confirmDownloadDialog, confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
@@ -244,6 +244,7 @@ import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
 import { linuxTrayShown } from "./window/linuxTrayShown";
 import { createDesktopWindows } from "./window/desktopWindows";
+import { showMessageBox } from "./window/messageBox";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowLoopbackFrameOrigin,
@@ -339,8 +340,8 @@ import { automationFailedNoticeId } from "@dohc/automation-executor/automation-f
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { localAutomationStoreFolder } from "./automations/localAutomationStore";
-import { hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
-import { wakeAgent } from "./automations/automationAgentWake";
+import { findChatMessage, hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
+import { wakeAgent, wokenAgent, type WokenAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -486,7 +487,6 @@ import {
   createAgentIntegration,
   type AgentRunRecord,
 } from "./agents/AgentIntegration";
-import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
   type ChatDispatchPresenceInput,
@@ -541,7 +541,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, firstAgent, firstAgentWithLaunch, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, automationAgent, firstAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -1752,7 +1752,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
-  tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
   operationLanes: Map<string, Promise<void>>;
@@ -1804,7 +1803,6 @@ function createDesktopWorkspaceAuthorityState(
         target.send(CHANNELS.sitePreviewReplaced, parsed.data);
       },
     }),
-    tryInVersionSessions: createTryInVersionSessionsFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
     shareViewFiles: new ShareViewFilesState(),
     operationLanes: new Map(),
@@ -1891,7 +1889,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
         agentIntegration.disposeState(state.agentIntegration),
       ),
       state.sitePreviews.stopWorkspace(binding.workspaceId),
-      state.tryInVersionSessions.settled(),
       ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
@@ -2062,7 +2059,7 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   confirmDraftRemoval: async workspaceId => {
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
-    const answer = await dialog.showMessageBox({type: "warning", title: "Forget this workspace?",
+    const answer = await showMessageBox({type: "warning", title: "Forget this workspace?",
       message: "This workspace has typing waiting to recover.", detail: "Forget deletes its kept copies from dohc. The folder is not deleted. This cannot be undone.",
       buttons: ["Go back", "Forget"], defaultId: 0, cancelId: 0});
     return answer.response === 1;
@@ -2408,7 +2405,7 @@ const typingQuitRecovery=createTypingQuitRecovery({
  hasWindows:()=>desktopWindows.workspaceWindows.allLive().length > 0,
  unresolved:hasUnresolvedTypingCheckpoints,flush:flushTypingCheckpoints,quit:()=>app.quit(),beforeQuit:event=>quitGuard.beforeQuit(event),
  confirmLoss:async()=>{const drawing=[...typingRecoveryFailures.values()].some(rows=>[...rows.values()].some(f=>f.reason === "drawing-unavailable"));
- const answer=await dialog.showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
+ const answer=await showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
 });
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
@@ -2839,99 +2836,12 @@ const agentIntegration = createAgentIntegration({
       release: () => lease.release(),
     };
   },
-  // Every terminal run path funnels through endAgentRun (a Settings stop or
-  // the endAgentRun IPC) — the try-in-version review card listens on that
-  // single seam.
-  // tryInVersionSessions is initialized just below, before any run can end.
-  onRunEnded: ({ attachmentId, workspaceId, runId, status }) => {
-    tryInVersionSessions.handleRunEnded(
-      { workspaceId, attachmentId },
-      runId,
-      status,
-    );
+  onRunEnded: ({ attachmentId, workspaceId }) => {
     void chatDispatchService.scanWorkspace(workspaceId, attachmentId).catch((error) => {
       console.error("[desktop] post-panel-run dispatch scan:", error);
     });
   },
 });
-// "Try it in a version" (PR 0N-2): one gesture composing existing operations
-// — fork-and-switch on the engine capture chain, then a dohc-tracked run —
-// and a review state when the run ends. Resolution of the capture mirrors
-// requireEngineCapture (workspace identity from the registry, engine flag
-// gate); a workspace without a capture rejects with the same product message.
-function createTryInVersionSessionsFor(
-  binding: WorkspaceAuthorityBinding<RegistryEntry>,
-) {
-  return createTryInVersionSessions({
-  operationsFor: async () => {
-    return workspaceAuthorities.withBinding(binding, async (lease) => {
-      desktopMarks.mark("try-in-version-ops-start");
-      const workspace = canonicalWorkspaceFor(lease);
-      await openWorkspaceActivity(workspace);
-      lease.assertCurrent();
-      const capture = workspaceActivity.engineCaptureFor(lease.state.activity);
-      if (!capture) {
-        throw new Error(captureRefusal("Versions"));
-      }
-      desktopMarks.measureSince(
-        "try-in-version-ops",
-        "try-in-version-ops-start",
-      );
-      return capture;
-    });
-  },
-  startRun: async (workspaceId) => {
-    return workspaceAuthorities.withBinding(binding, async (lease) => {
-      assertChatRunnerIdle(workspaceId);
-      desktopMarks.mark("try-in-version-run-start-begin");
-      const run = await startAgentRunWithWorkspaceActivity(
-        canonicalWorkspaceFor(lease),
-      );
-      desktopMarks.measureSince(
-        "try-in-version-run-start",
-        "try-in-version-run-start-begin",
-      );
-      return run;
-    });
-  },
-  onStateChanged: (workspaceId) =>
-    withWorkspaceAttachment(
-      { workspaceId, attachmentId: binding.attachmentId },
-      () => notifyRenderer({ workspaceId }),
-    ),
-  });
-}
-
-const tryInVersionSessions = {
-  start(workspaceId: string, task: string) {
-    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.tryInVersionSessions.start(workspaceId, task),
-    );
-  },
-  handleRunEnded(
-    workspace: { workspaceId: string; attachmentId: symbol },
-    runId: string,
-    status: "complete" | "failed",
-  ): void {
-    withWorkspaceAttachment(workspace, (lease) =>
-      lease.state.tryInVersionSessions.handleRunEnded(
-        workspace.workspaceId,
-        runId,
-        status,
-      ),
-    );
-  },
-  snapshot(workspaceId: string) {
-    return withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.tryInVersionSessions.snapshot(workspaceId),
-    ) ?? null;
-  },
-  dismiss(workspaceId: string): boolean {
-    return withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.tryInVersionSessions.dismiss(workspaceId),
-    ) ?? false;
-  },
-};
 // Linked chats and dispatch use the same physical authority as every other
 // workspace-owned resource. Each call into either store reacquires that exact
 // binding, so a detached and reattached workspace cannot reuse the old store.
@@ -3877,14 +3787,14 @@ const automationScheduler = new AutomationScheduler({
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
-// The agent an automation wakes: the first agent, when dohc can start it.
-async function readyAgent(): Promise<{ id: string; name: string } | null> {
-  const agent = firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings);
-  return agent?.enabled ? { id: agent.id, name: agent.name } : null;
+// The agent an automation wakes, on or off: dispatch says when it is off.
+async function readyAgent(): Promise<WokenAgent | null> {
+  return wokenAgent((await readCachedUserSettingsFile(stateDir())).settings);
 }
 
+// A wake that needs a runner waits while the automation agent is off.
 async function agentRunnerReady(): Promise<boolean> {
-  return (await readyAgent()) !== null;
+  return automationAgent((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
 }
 
 async function wakeAutomationAgent(
@@ -3903,6 +3813,16 @@ async function wakeAutomationAgent(
       resolveAttachments: async () => [],
     };
     await wakeAgent({
+      posted: async (messageId) => {
+        signal.throwIfAborted();
+        const posted = await findChatMessage(place.store, workspaceId, messageId);
+        if (posted === null) return null;
+        const channelId = await place.store.findThreadChannelId({ workspaceId, threadId: posted.threadId });
+        const agentId = channelId === null ? undefined
+          : (await place.store.listChannels({ workspaceId })).find((channel) => channel.id === channelId)?.agentId;
+        if (agentId === undefined) throw new Error("dohc could not find the agent chat this automation's message is in.");
+        return { threadId: posted.threadId, agentId };
+      },
       readyAgent,
       agentChannelId: async (agent) => {
         signal.throwIfAborted();
@@ -4746,7 +4666,7 @@ function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
 async function confirmKeepCollections(window: BrowserWindow | null, question: KeepQuestion): Promise<boolean> {
   const { message, detail } = keepQuestionWords(question);
   const options = { type: "warning" as const, message, detail, buttons: [USE_THIS_COMPUTER, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
-  const { response } = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  const { response } = await showMessageBox(options, window);
   return response === 0;
 }
 // An open host serves new work only while this installation still keeps its
@@ -5813,8 +5733,7 @@ function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
       }
     },
     installedVersion: installedDohcVersion,
-    showMessageBox: (options) =>
-      window.isDestroyed() ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options),
+    showMessageBox: (options) => showMessageBox(options, window),
     move: moveDohcToApplications,
     // A toast and a Notices row in the window, with Try again.
     reportMoveFailure: (error) => {
@@ -6072,7 +5991,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
   confirm: (folder, window) => {
     const parent = window ?? liveWorkspaceWindow();
     return confirmOpenPathWorkspace({
-      showMessageBox: (options) => parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options),
+      showMessageBox: (options) => showMessageBox(options, parent),
     }, folder);
   },
   register: async (rootPath) => {
@@ -6199,7 +6118,7 @@ const exitRounds = createExitRounds<BrowserWindow>({
   },
   confirmProceed: async (kind: ExitKind) => {
     const verb = kind === "quit" ? "Quitting" : "Installing";
-    const { response } = await dialog.showMessageBox({
+    const { response } = await showMessageBox({
       type: "warning",
       message: "dohc isn't responding.",
       detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
@@ -6247,8 +6166,9 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
 // release can still reach the release that fixes it.
 const updateAfterFailure = createUpdateAfterFailure({
   controller: startUpdates,
-  showDownloading: (failure, version, signal) => showDownloadingDialog(dialog, failure, version, signal),
-  confirmRestart: (failure, version) => confirmRestartDialog(dialog, failure, version),
+  confirmDownload: (failure, version) => confirmDownloadDialog({ showMessageBox }, failure, version),
+  showDownloading: (failure, version, signal) => showDownloadingDialog({ showMessageBox }, failure, version, signal),
+  confirmRestart: (failure, version) => confirmRestartDialog({ showMessageBox }, failure, version),
   install: installUpdate,
 });
 
@@ -7329,7 +7249,7 @@ function registerIpcHandlers(): void {
     confirm: (event, workspace) => {
       const window = BrowserWindow.fromWebContents(event.sender);
       return confirmWorkspaceTrust({
-        showMessageBox: (options) => window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options),
+        showMessageBox: (options) => showMessageBox(options, window),
       }, workspace);
     },
     stopAppCommands: (operation) =>
@@ -7372,7 +7292,7 @@ function registerIpcHandlers(): void {
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
-    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+    requireEngineCapture, notifyRenderer, activity,
     onRefusalsChanged: notifyNoticesChanged,
   }), rendererUsage.version);
 
@@ -7446,10 +7366,7 @@ function registerIpcHandlers(): void {
       sent: await crashReports.send(async (request) => {
         try {
           return await confirmCrashReportSend({
-            showMessageBox: async (options) => {
-              const window = BrowserWindow.fromWebContents(event.sender);
-              return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
-            },
+            showMessageBox: (options) => showMessageBox(options, BrowserWindow.fromWebContents(event.sender)),
             openText: async (text) => await crashReportPreview.show(text),
           }, request);
         } finally {
@@ -7550,8 +7467,9 @@ function registerIpcHandlers(): void {
 
   workspaceEngineIpc.registerYDoc();
 
-  registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
+  registerUpdatesIpcHandlers({
     registerHandler: handleIpc,
+    boundary: operationBoundary,
     assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });

@@ -95,7 +95,7 @@ describe("shortcut menu contract", () => {
       "command-palette": "Command palette", "quick-open": "Go to", "new-editor-group-right": "New editor group right",
       "toggle-sidebar": "Toggle sidebar", "toggle-about": "Toggle About", "show-chats": "Chats",
       "toggle-theme": "Toggle light/dark theme", "zoom-reset": "Reset zoom", "zoom-in": "Zoom in", "zoom-out": "Zoom out",
-      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Update and restart",
+      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Restart to update",
     });
   });
 

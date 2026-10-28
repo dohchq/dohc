@@ -19,7 +19,7 @@ const IDLE_UPDATE: UpdateStateEvent = {
 
 const READY_UPDATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to install it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,

@@ -41,7 +41,6 @@ import type {
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
-  TryInVersionRunState,
   WorkbenchMenuCommand,
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
@@ -90,6 +89,7 @@ import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   agentMentionCandidates,
+  listAgents,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -127,7 +127,7 @@ import { importSkipLines } from "./shell/importSkips";
 import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
-import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
+import { TitlebarUpdateButton, UpdateStepLabel, updateStatusLine, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import { readNewestMomentOrder, useHistoryPage } from "./shell/useHistoryPage";
@@ -191,7 +191,6 @@ import {
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
-import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
   IconButton,
   PrimaryButton,
@@ -240,10 +239,6 @@ import {
   ProposalReviewDialog,
   proposerName,
 } from "./workbench/ProposalReviewDialog";
-import {
-  TryInVersionBanner,
-  TryInVersionReviewCard,
-} from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
   ChatsNav,
@@ -919,6 +914,12 @@ export function DesktopWorkspaceShell(props: {
   const clearCollectionCopiesLeft = useCallback(() => clearKind("collection-copies-left"), [clearKind]);
   const collectionCopiesLeftNotice = useCollectionCopiesLeftNotice({ report: reportCollectionCopiesLeft, clear: clearCollectionCopiesLeft });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
+  // The updater's state, for the title bar, the stopped workspace, the
+  // palette, and the menus.
+  const desktopUpdate = useDesktopUpdate(reportShellFailure);
+  const clearUpdateFailure = useCallback(() => clearKind("update"), [clearKind]);
+  useUpdateFailureNotices(desktopUpdate, workspaceId, reportShellFailure, clearUpdateFailure);
+  const runDesktopUpdate = desktopUpdate.run;
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
   const clearSharingFocus = useCallback(() => setSharingFocus(null), []);
@@ -937,7 +938,8 @@ export function DesktopWorkspaceShell(props: {
   // polls and subscriptions off onError, so a fresh arrow per shell render
   // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string, cause?: unknown, retry?: () => void) => reportShellFailure({ message, cause, ...(retry ? { retry } : {}) }),
+    (message: string, cause?: unknown, retry?: () => void, identity?: string) =>
+      reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
@@ -1816,12 +1818,9 @@ export function DesktopWorkspaceShell(props: {
   // Each loaded change's older and newer change to the same file, for the
   // diff page's steps. One pass per History answer.
   const momentSteps = useMemo(() => fileMomentSteps(engineHistory?.entries ?? []), [engineHistory]);
-  // The sync and try snapshots ride the refresh response but are not the
-  // timeline: no pagination competes for them, so they apply as soon as they
-  // arrive. Each is its own lane with its own watermark, because a local
-  // write only ever knows about the lane it wrote — dismissing a review says
-  // nothing about sync state, and rejecting both would strand a status bar
-  // that has no other source (the dismiss emits no activity event).
+  // The sync snapshot rides the refresh response but is not the timeline: no
+  // pagination competes for it, so it applies as soon as it arrives, in its
+  // own lane with its own watermark.
   //
   // Each lane owns its state, so a write that names no request cannot be
   // written at all. The history page is not one of these: it carries
@@ -2030,13 +2029,6 @@ export function DesktopWorkspaceShell(props: {
   const [latestMomentOrder, latestMomentLane] = useSnapshotLane(engineHistoryToken, -1);
   // The refresh whose read of that moment may still retry.
   const latestMomentRequest = useRef(0);
-  // "Try it in a version" (PR 0N-2): the workspace's live try session —
-  // running banner or the run's review card. Refreshed with history (the
-  // manager pings the same workspace-activity channel on every transition).
-  const [tryState, tryStateLane] = useSnapshotLane<TryInVersionRunState | null>(
-    engineHistoryToken,
-    null,
-  );
   // A file's chat waiting in About, named for the tab it belongs to. It ends
   // when focus leaves that tab, whether or not About is open to show it.
   const [searchChatTarget, setSearchChatTarget] = useState<AboutSearchHit | null>(null);
@@ -2053,21 +2045,22 @@ export function DesktopWorkspaceShell(props: {
   const onSearchHitClosed = useCallback(() => {
     setSearchChatTarget((target) => (target?.read ? null : target));
   }, []);
-  // The local writer on the try lane. Dismissing the review card clears it
-  // here, and that IS the user acting: it supersedes whatever a request issued
-  // earlier will eventually say.
-  const onTryReviewDismissed = useCallback(() => {
-    tryStateLane.set(null);
-  }, [tryStateLane]);
   const reportSettingsFailure = useCallback(
-    (message: string, cause?: unknown, retry?: () => Promise<void>) => {
+    (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
-      reportShellFailure({ message, cause, retry: retry ? () => {
+      reportShellFailure({ message, cause, ...(details ? { details } : {}), ...(identity !== undefined ? { identity } : {}), retry: retry ? () => {
         if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
         void retry();
       } : null });
     },
     [workspaceAdmission, workspaceId, reportShellFailure],
+  );
+  const showSettingsNotice = useCallback(
+    (message: string, undo?: () => void) => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+      showSuccessNotice(message, undo);
+    },
+    [workspaceAdmission, workspaceId, showSuccessNotice],
   );
   useUsageRecordStops(reportSettingsFailure);
 
@@ -2087,9 +2080,9 @@ export function DesktopWorkspaceShell(props: {
     // says engine-on, and every History read would error.
     const token = ++engineHistoryToken.current;
     if (historyReadable(syncStatusLane.latest())) {
-      // Four reads ride one refresh, and they answer four different
+      // Three reads ride one refresh, and they answer three different
       // questions. One batch made every answer hostage to the worst of them:
-      // a try-state failure discarded a history page the engine had already
+      // a sibling's failure discarded a history page the engine had already
       // served, and the timeline then said it could not load. An
       // aggregate await is hostage to the slowest of them the same way — a
       // sibling that never settles would hold a failed history read in
@@ -2099,12 +2092,10 @@ export function DesktopWorkspaceShell(props: {
       // out first, and only its own failure is this refresh's failure.
       //
       // The snapshots need no ordering against the page: nothing can block
-      // them, and holding them for a later commit would republish a world the
-      // user has already acted on — a dismissed review card, most visibly.
-      // Each is handed whole to the lane rule, which judges both ways it can
-      // settle.
+      // them. Each is handed whole to the lane rule, which judges both ways it
+      // can settle.
       const pageRead = refreshHistoryPage(token);
-      // Asking again IS this refresh: it re-reads all four, so the lane that
+      // Asking again IS this refresh: it re-reads all three, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
       const askAgain = () => {
@@ -2132,18 +2123,6 @@ export function DesktopWorkspaceShell(props: {
         (status) => status,
         (error) =>
           reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
-      );
-      // A shared view has no versions, so it has no try run to read.
-      if (!shareView) tryStateLane.settle(
-        token,
-        bridge().getTryInVersionState({ workspaceId }),
-        (trySession) => trySession.state,
-        (error) =>
-          reportLaneFailure(
-            "dohc could not refresh this workspace's try run.",
-            error,
-            askAgain,
-          ),
       );
       return pageRead;
     }
@@ -2176,7 +2155,6 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     supersedeHistoryPage,
     syncStatusLane,
-    tryStateLane,
     workspaceAdmission,
     workspaceId,
   ]);
@@ -2201,9 +2179,9 @@ export function DesktopWorkspaceShell(props: {
   //
   // The capture capability. Everything that calls through
   // `requireEngineCapture` reads this one value — the version selector, the
-  // Try-in-version banner and review card, the shell's version fetch, the
-  // persisted compare and moment-diff tabs, the Chats view, About and tab, the
-  // graph's chat mentions and the linked-mentions panel — so the fact is
+  // shell's version fetch, the persisted compare and moment-diff tabs, the
+  // Chats view, About and tab, the graph's chat mentions and the
+  // linked-mentions panel — so the fact is
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
   //
@@ -2239,8 +2217,8 @@ export function DesktopWorkspaceShell(props: {
       //
       // So the operation says which version it left the workspace on. Every
       // caller that moved the workspace knows: a switch names its target, a
-      // create and a try name the version they forked into, and going back to
-      // Main names Main. Nobody has to ask, and there is no window.
+      // create names the version it forked into, and going back to Main names
+      // Main. Nobody has to ask, and there is no window.
       //
       // Nothing is discarded here. This callback also runs for merges and
       // conflict resolutions that never changed the version at all, so a
@@ -2876,12 +2854,13 @@ export function DesktopWorkspaceShell(props: {
   }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
+  const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings.settings) : [], [props.userSettings]);
   const chatEditors = useChatEditorTabs({
     workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => group.activeTab ? [group.activeTab] : []),
     enabled: captureAvailable,
-    agentName: agentSetup?.agentName,
+    agents: settingsAgents,
   });
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
@@ -3886,14 +3865,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const checkForDesktopUpdates = useCallback(
-    () => runUpdateCheck(reportShellError),
-    [reportShellError],
-  );
-  const installDesktopUpdate = useCallback(
-    () => runUpdateInstall(reportShellError),
-    [reportShellError],
-  );
 
   const moveTabIntoNewGroup = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {
@@ -4069,9 +4040,9 @@ export function DesktopWorkspaceShell(props: {
       } else if (command === "settings") {
         openSettings();
       } else if (command === "check-updates") {
-        void checkForDesktopUpdates();
+        void runDesktopUpdate("check");
       } else if (command === "install-update") {
-        void installDesktopUpdate();
+        void runDesktopUpdate("install");
       } else if (command === "toggle-theme") {
         toggleTheme();
       }
@@ -4080,8 +4051,7 @@ export function DesktopWorkspaceShell(props: {
       closeGroupAfterFlush,
       closeFileTab,
       closeOtherTabs,
-      checkForDesktopUpdates,
-      installDesktopUpdate,
+      runDesktopUpdate,
       openCloud,
       openHistoryView,
       openSettings,
@@ -4392,8 +4362,9 @@ export function DesktopWorkspaceShell(props: {
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
       activeDocumentShareable: activeSharePath !== null,
       pinnedApps,
+      updateStatus: desktopUpdate.state?.status ?? null,
     }),
-    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps, desktopUpdate.state?.status],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
@@ -4429,8 +4400,9 @@ export function DesktopWorkspaceShell(props: {
       "settings": () => openSettings(),
       "settings-appearance": () => openSettings("appearance"),
       "settings-agents": () => openSettings("agents"),
-      "check-updates": () => void checkForDesktopUpdates(),
-      "install-update": () => void installDesktopUpdate(),
+      "check-updates": () => void runDesktopUpdate("check"),
+      "download-update": () => void runDesktopUpdate("download"),
+      "install-update": () => void runDesktopUpdate("install"),
       "toggle-theme": toggleTheme,
       "zoom-in": () =>
         void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
@@ -4462,8 +4434,7 @@ export function DesktopWorkspaceShell(props: {
       mutateWb,
       openNewPage,
       requestExplorerFolder,
-      checkForDesktopUpdates,
-      installDesktopUpdate,
+      runDesktopUpdate,
       openCloud,
       openEditorGroupRight,
       openSettings,
@@ -4967,6 +4938,7 @@ export function DesktopWorkspaceShell(props: {
     openFile,
     openAutomation: openNoticeAutomation,
     openAutomationControls,
+    openChat: openChatsNavInTab,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -5250,20 +5222,7 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
-  // The updater's state, shown under Check for updates and followed live,
-  // so a download reaches "ready" without another click. The shell banner
-  // sits under this overlay, so an answer reported there would never be
-  // seen; a line that is always there also means the check moves nothing.
-  const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
-    useDesktopUpdateStateFeed();
-  const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
-  // One request at a time: the feed says "checking" only after main answers,
-  // so a second click before that would send the request twice.
-  const [storeUpdateCheckPending, setStoreUpdateCheckPending] = useState(false);
-  // One confirmation for every Restart: the stop state, the update notice,
-  // and the update toast. Restarting closes the app, so it is asked once.
-  const [restartPrompt, setRestartPrompt] = useState<"closed" | "open" | "restarting">("closed");
-  const openRestartPrompt = useCallback(() => setRestartPrompt("open"), []);
+  const storeUpdateState = desktopUpdate.state;
   const appVersion = storeUpdateState?.currentVersion
     ? storeUpdateState.channel
       ? `${storeUpdateState.currentVersion} (${storeUpdateState.channel})`
@@ -5292,6 +5251,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.command ? { command: error.command } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
@@ -5310,9 +5270,8 @@ export function DesktopWorkspaceShell(props: {
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
   const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
-  // A switch leaves the other workspace's answer and disclosure behind.
+  // A switch leaves the other workspace's disclosure behind.
   useEffect(() => {
-    setStoreUpdateCheckError(null);
     setStoreDetailsOpen(false);
   }, [workspaceId]);
   // A store this build could not migrate, or one a newer build migrated, is
@@ -5354,24 +5313,6 @@ export function DesktopWorkspaceShell(props: {
     setOpenShare(null);
     setLiveDocumentsWorkspaceId(null);
   }, [storeUpdateRequired]);
-  const checkForStoreUpdate = useCallback(async () => {
-    // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
-    // never repaint workspace B. The updater feed itself is app-wide; only
-    // this window's failure line is per workspace.
-    const askedFor = workspaceId;
-    setStoreUpdateCheckError(null);
-    setStoreUpdateCheckPending(true);
-    try {
-      const result = await bridge().checkForUpdates();
-      if (workspaceIdRef.current !== askedFor) return;
-      acceptStoreUpdateResult(result.state);
-    } catch {
-      if (workspaceIdRef.current !== askedFor) return;
-      setStoreUpdateCheckError("Could not check for updates.");
-    } finally {
-      setStoreUpdateCheckPending(false);
-    }
-  }, [acceptStoreUpdateResult, workspaceId]);
   // The live-delivery retry is main's own command, not a repaint: nothing
   // here decides that delivery recovered. Main reports that by pushing a new
   // status, so an accepted command needs no follow-up read. A refusal becomes
@@ -5572,6 +5513,7 @@ export function DesktopWorkspaceShell(props: {
       className="app-chrome relative flex h-screen flex-col bg-bg text-ink"
     >
       <ShellTitlebar
+        update={<TitlebarUpdateButton update={desktopUpdate} />}
         workspace={props.workspace}
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
@@ -5601,6 +5543,7 @@ export function DesktopWorkspaceShell(props: {
             onOpenCompare={openVersionCompareTab}
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
+            clearError={clearIdentity}
             {...(shareView
               ? {}
               : {
@@ -5611,9 +5554,8 @@ export function DesktopWorkspaceShell(props: {
                       versionName: version.name,
                     }),
                 })}
-            // versionEpoch bumps whenever any surface changed version
-            // state (the 0N-2 review card switches back to Main outside
-            // this menu) — the selector re-reads instead of going stale.
+            // versionEpoch bumps whenever version state changed outside
+            // this menu, so the selector re-reads instead of going stale.
             refreshKey={versionEpoch}
           />
         ) : undefined}
@@ -5836,7 +5778,6 @@ export function DesktopWorkspaceShell(props: {
                 engineRebuildReturnFocusRef.current = returnFocus;
                 setEngineRebuild({ phase: "confirm", refusal });
               }}
-              onRestartToUpdate={openRestartPrompt}
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
@@ -5929,23 +5870,6 @@ export function DesktopWorkspaceShell(props: {
             host any tab surface, and its tab row carries the open
             document's actions. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          {/* "Try it in a version" (PR 0N-2): honest run status while the
-              agent works, then the review card when the run ends. Never a
-              shared view (tryState never exists there). */}
-          {captureAvailable && tryState?.status === "running" ? (
-            <TryInVersionBanner task={tryState.task} versionName={tryState.versionName} />
-          ) : null}
-          {captureAvailable && tryState?.status === "review" ? (
-            <TryInVersionReviewCard
-              workspaceId={workspaceId}
-              state={tryState}
-              activeTabDirty={anyTabDirty}
-              beginLineageOperation={beginLineageOperation}
-              onOpenCompare={openVersionCompareTab}
-              onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-              onDismissed={onTryReviewDismissed}
-            />
-          ) : null}
           <EditorGroupLayout
             groups={wb.editorGroups.map((editorGroup, groupIndex) => {
               const tabPath = editorGroup.activeTab;
@@ -6459,24 +6383,21 @@ export function DesktopWorkspaceShell(props: {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <PrimaryButton
-              autoFocus
-              disabled={
-                storeUpdateCheckPending ||
-                storeUpdateState?.status === "checking" ||
-                storeUpdateState?.canCheck === false
-              }
-              onClick={() => void checkForStoreUpdate()}
-            >
-              {storeUpdateCheckPending || storeUpdateState?.status === "checking"
-                ? "Checking"
-                : "Check for updates"}
-            </PrimaryButton>
-            {storeUpdateState?.canInstall ? (
-              <SecondaryButton onClick={openRestartPrompt}>
-                <RefreshCw size={12} aria-hidden />
-                Restart to update
-              </SecondaryButton>
+            {/* One button for every step: Check, Update, then Restart to update. */}
+            {desktopUpdate.step ? (
+              <PrimaryButton
+                autoFocus
+                data-testid="workspace-update-step"
+                disabled={desktopUpdate.step.action === null}
+                onClick={() => {
+                  const action = desktopUpdate.step?.action;
+                  if (action) void runDesktopUpdate(action);
+                }}
+                className="inline-flex items-center gap-1.5"
+              >
+                {desktopUpdate.step.Icon ? <desktopUpdate.step.Icon size={14} aria-hidden /> : null}
+                <UpdateStepLabel step={desktopUpdate.step} />
+              </PrimaryButton>
             ) : null}
             {props.onManageWorkspaces ? (
               <SecondaryButton onClick={manageWorkspaces}>
@@ -6489,7 +6410,7 @@ export function DesktopWorkspaceShell(props: {
             role="status"
             className="m-0 -mt-2 min-h-4 max-w-sm select-text cursor-text text-[12px] text-subtle"
           >
-            {storeUpdateCheckError ?? storeUpdateState?.message}
+            {storeUpdateState ? updateStatusLine(storeUpdateState) : null}
           </p>
           <button
             type="button"
@@ -6591,56 +6512,6 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
 
       {typingRecoveryConfirmation}
-      {restartPrompt !== "closed" ? (
-        <Overlay
-          onClose={() => {
-            if (restartPrompt === "open") setRestartPrompt("closed");
-          }}
-          panelProps={{
-            "data-testid": "restart-to-update-dialog",
-            role: "dialog",
-            "aria-modal": true,
-            "aria-labelledby": "restart-to-update-title",
-          }}
-        >
-          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
-            <div className="p-4">
-              <p id="restart-to-update-title" className="m-0 text-sm text-ink">
-                Restart dohc to apply the update?
-              </p>
-              <p className="mb-0 mt-2 text-xs text-muted">
-                {storeUpdateState?.version
-                  ? `Update ${storeUpdateState.version} is downloaded. `
-                  : ""}
-                dohc closes and opens again on the new version. Your files are
-                saved.
-              </p>
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <SecondaryButton
-                autoFocus
-                disabled={restartPrompt === "restarting"}
-                onClick={() => setRestartPrompt("closed")}
-              >
-                Not now
-              </SecondaryButton>
-              <PrimaryButton
-                data-testid="restart-to-update-confirm"
-                disabled={restartPrompt === "restarting"}
-                onClick={() => {
-                  setRestartPrompt("restarting");
-                  void installDesktopUpdate().finally(() =>
-                    setRestartPrompt("closed"),
-                  );
-                }}
-              >
-                {restartPrompt === "restarting" ? "Restarting" : "Restart now"}
-              </PrimaryButton>
-            </div>
-          </div>
-        </Overlay>
-      ) : null}
-
       {sentNoticeRetryDialog}
 
       {engineRebuild ? (
@@ -6918,11 +6789,15 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {settingsSection ? (
-        <Overlay onClose={closeSettings}>
+        // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
+        // places itself against the window. `!` outranks the unlayered class.
+        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
+            onClearError={clearIdentity}
+            onNotice={showSettingsNotice}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

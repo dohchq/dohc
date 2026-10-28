@@ -6,6 +6,8 @@ import { chosenHue, subscribeChosenColors } from "./chosenColors";
 export const neutralPresentation: ActorPresentation = { group: "", hue: null, self: false };
 export const ownPresentation: ActorPresentation = { group: "own", hue: null, self: true };
 export const ownAgentPresentation: ActorPresentation = { group: "own-agent", hue: null, self: true };
+// An agent no longer in Settings: no hue at all, so it can't pass for one left at the default olive.
+export const goneAgentPresentation: ActorPresentation = { group: "gone-agent", hue: null, self: false };
 const listeners = new Set<() => void>();
 const agentOverrides = new Map<string, { workspaceId: string; hue: IdentityHue | null }>();
 export function clearAgentColorOverrides(workspaceId?: string): void {
@@ -58,7 +60,7 @@ export function agentChoice(token: ActorPresentation): IdentityHue | null {
   return agentOverrides.has(token.group) ? agentOverrides.get(token.group)?.hue ?? null : token.hue;
 }
 // The renderer's own tokens and an unknown author's group name no agent main can color.
-const UNCHOOSABLE_GROUPS = new Set([neutralPresentation.group, ownPresentation.group, ownAgentPresentation.group]);
+const UNCHOOSABLE_GROUPS = new Set([neutralPresentation.group, ownPresentation.group, ownAgentPresentation.group, goneAgentPresentation.group]);
 /** Whether main issued this agent's group, so a color can be chosen for it. */
 export function canChooseAgentColor(token: ActorPresentation): boolean {
   return !UNCHOOSABLE_GROUPS.has(token.group) && !token.group.startsWith("unknown:");
@@ -73,10 +75,12 @@ const AGENT_TEXT: Record<IdentityHue, string> = {
 };
 /** An agent's name and mark in its avatar's hue, olive by default. */
 export function agentTextClass(token: ActorPresentation): string {
+  if (token.group === goneAgentPresentation.group) return "text-subtle";
   const hue = hueFor(token, "agent");
   return hue ? AGENT_TEXT[hue] : "text-agent";
 }
 export function presentationClasses(token: ActorPresentation, kind: "human" | "agent" = "human"): string {
+  if (kind === "agent" && token.group === goneAgentPresentation.group) return "border-subtle bg-panel text-subtle";
   const hue = hueFor(token, kind);
   return kind === "agent" ? hue ? AGENT_CLASSES[hue] : "border-agent bg-bg text-agent"
     : hue ? HUE_CLASSES[hue] : "bg-panel-2 text-muted";
