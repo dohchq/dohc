@@ -952,6 +952,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           this.normalizedOrigin(params),
           optionalBoolean(params, "needsDecision") ?? false,
           this.attachmentFingerprint(params),
+          ...this.agentsFingerprint(params),
         ]);
       case CHATS_METHOD.threadCreate: {
         optionalSafeInteger(params, "nowMs");
@@ -989,6 +990,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           this.normalizedOrigin(params),
           optionalBoolean(params, "needsDecision") ?? false,
           this.attachmentFingerprint(params),
+          ...this.agentsFingerprint(params),
         ]);
       case CHATS_METHOD.decisionResolve:
         optionalSafeInteger(params, "nowMs");
@@ -1054,6 +1056,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): string {
     const value = optionalString(params, key);
     return value === undefined ? "" : normalizeTrimmed(value, code);
+  }
+
+  // Mirrors the daemon's message hash: the author's agent, then each named
+  // agent once, in first-named order. The handler validates both.
+  private agentsFingerprint(params: ChatsJsonObject): [string, string] {
+    const named = Array.isArray(params.namedAgentIds)
+      ? params.namedAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
+      : [];
+    return [optionalString(params, "authorAgentId") ?? "", [...new Set(named)].join(",")];
   }
 
   private normalizedOrigin(params: ChatsJsonObject): string {

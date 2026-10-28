@@ -1435,6 +1435,27 @@ describe("automation authors", () => {
   });
 });
 
+describe("loopback idempotency", () => {
+  it("refuses a reused key whose message names other agents or another author agent", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const human = { kind: "human" as const, displayName: "Sam" };
+    const agent = { kind: "agent" as const, displayName: "Nova" };
+    const start = { authorActorKey: null, workspaceId: "workspace", channelId: "channel", threadId: "thread", messageId: "first", idempotencyKey: "start", author: human, body: "Hello" };
+    await adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova", "codex"] });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova"] })).resolves.toMatchObject({ message: { id: "first" } });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["nova"] })).rejects.toThrow("idempotency-key-reuse-mismatch");
+
+    const send = { authorActorKey: null, workspaceId: "workspace", threadId: "thread", body: "Done" };
+    await adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["nova"] });
+    await expect(adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["codex"] }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+    await adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "nova" });
+    await expect(adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "codex" }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+  });
+});
+
 describe("link authors", () => {
   it("cannot be written through either local write method", async () => {
     const { adapter, loopback } = loopbackAdapter();
