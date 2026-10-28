@@ -179,8 +179,13 @@ async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
     open.shutdown_capture().await;
     let original_sha = hex_sha256(b"Original source\n");
     assert!(matches!(open.actor.ydoc_settle(scratch.path().to_owned(), held.clone(), "held.md".into(),
-        ContentKind::Richdoc, Some(held_claim), Some(original_sha.clone()), "held-owner".into(),
+        ContentKind::Richdoc, Some(held_claim.clone()), Some(original_sha.clone()), "held-owner".into(),
         Arc::new(()), 10, Arc::new(NoFaults), CancellationToken::new(), None, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })));
+    assert!(matches!(open.actor.ydoc_settle(scratch.path().to_owned(), held.clone(), "held.md".into(),
+        ContentKind::Richdoc, Some(held_claim), Some(original_sha.clone()),
+        "collection-relation-cleanup:held:related:target".into(),
+        Arc::new(()), 11, Arc::new(NoFaults), CancellationToken::new(), None, None).await,
         Err(RuntimeError::MarkdownWriteHeld { .. })));
     let cancel = CancellationToken::new();
     let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
@@ -219,7 +224,7 @@ async fn markdown_recovery_other_note_settles_skip_unchanged_holds_and_gates() {
     drop(sessions);
     drop(capture);
     assert_eq!(std::fs::read_to_string(scratch.path().join("held.md")).unwrap(), "Original source\n");
-    assert_eq!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().len(), 1);
+    assert_eq!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().len(), 2);
     service.workspace_close(Some(handle)).await.unwrap();
 }
 

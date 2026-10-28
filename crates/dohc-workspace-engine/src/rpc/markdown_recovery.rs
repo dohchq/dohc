@@ -79,7 +79,10 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
             let fingerprint = candidate_fingerprint(&candidate, &sessions, &handle, open.actor.markdown_recovery_epoch());
             let owed = candidate.obligation;
             let document = (owed.key.version_id.clone(), owed.key.object_id.clone());
-            if blocked.contains(&document) { continue; }
+            if blocked.contains(&document) {
+                attempted.insert(owed.order, fingerprint);
+                continue;
+            }
             let active = lock(&sessions).iter().find(|(_, session)|
                 session.workspace == handle && session.key == owed.key
                 && session.lineage_claim_id.as_deref().unwrap_or("") == owed.lineage_claim_id)
