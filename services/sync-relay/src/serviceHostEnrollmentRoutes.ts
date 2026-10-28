@@ -188,7 +188,7 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged" | "keptEdits">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history), reads = readTurns(MAX_KEPT_EDITS_READS);
@@ -210,6 +210,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     const block = host.blocked(row);
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
+    if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
@@ -244,7 +245,8 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
         return response({ok: true, documents: page.documents.map(row => ({path: row.path, objectId: row.objectId, status: "retired",
-          ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
+          ...(diverged(row) ? {reason: "session-host-diverged"} : !changed(row) && storage.hasServiceHostConflictEffect(row)
+            ? {reason: "conflict-parent-withheld"} : {})})), nextCursor: page.nextCursor});
       }
       // Later pages of the edits the server kept, after the first page's `keptEditsCursor`.
       if (keptPage) {

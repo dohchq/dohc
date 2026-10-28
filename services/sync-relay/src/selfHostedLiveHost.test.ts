@@ -10,6 +10,7 @@ import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion
 import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
@@ -75,6 +76,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const pending = new Set<string>(options.pending), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [], events: string[] = [];
   // Documents the running host cannot continue until their owner tries again, with why.
   const blocked = new Map<string, ServiceActivationBlock>();
+  const holdReasons = new Map<string, ServiceHostedHold["reason"]>();
   const refusal = new Error("Workspace attach refused.");
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
   let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
@@ -131,6 +133,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     const readKeptEditsPage = async (kept: ServiceKeptEdits, _cursor: unknown, store: string) => {keptReads.push({outboxId: kept.outboxId, store}); return {kind: "page"};};
     return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined,
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
+      holdReason: (document: Document) => holds(document) ? holdReasons.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
@@ -183,6 +186,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     holds: (objectId: string, workspaceId = scope.workspaceId) => running?.holds({workspaceId, objectId}) ?? false,
     diverge: (workspaceId = scope.workspaceId, detached = true) => running!.diverge(workspaceId, detached),
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}, unblock(objectId: string) {blocked.delete(objectId);},
+    hold(objectId: string, reason: ServiceHostedHold["reason"] | undefined) {if (reason) holdReasons.set(objectId, reason); else holdReasons.delete(objectId);},
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -572,6 +576,17 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), `${storeName(scope.workspaceId)}.diverged`, storeName(workspaceId, "epoch-2", "stream-2")].sort());
   expect(await readdir(store)).toEqual(["replica.sqlite"]);
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
+});
+
+it("reports a held document without treating it as blocked or stopped", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  f.hold(binding.objectId, "hosted-conflict-parent-withheld");
+  expect(f.host.holdReason(binding)).toBe("hosted-conflict-parent-withheld");
+  expect(f.host.holdReason({...binding, objectId: "other"})).toBeUndefined();
+  expect(f.host.blocked(binding)).toBeUndefined();
+  expect(f.host.stopped(binding)).toBe(false);
+  f.hold(binding.objectId, undefined);
+  expect(f.host.holdReason(binding)).toBeUndefined();
 });
 
 // Proves: the operator learns where a blocked document's store is kept, once

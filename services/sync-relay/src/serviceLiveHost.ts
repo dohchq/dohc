@@ -1182,6 +1182,11 @@ export async function startServiceLiveHost(options: {
         const key = hostedKey(document);
         return key === undefined ? undefined : activation!.blocked(hosted.get(key)!.target);
       },
+      /** Why the hosted pass left this document held, until a capture succeeds. */
+      holdReason(document: {workspaceId: string; objectId: string}) {
+        const key = hostedKey(document);
+        return key === undefined ? undefined : activation!.holdReason(hosted.get(key)!.target);
+      },
       /**
        * Lets a blocked hosted document try one more capture on the next pass,
        * as when its owner tries again. Returns whether it was blocked.
