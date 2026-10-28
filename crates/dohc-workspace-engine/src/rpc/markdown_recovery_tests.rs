@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn markdown_recovery_undone_relation_delete_completes_once_and_skips_later_gates() {
+async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligation() {
     use dohc_engine_domain::{DeleteTextFile, reconcile_collections_in_tx, set_collection_adoption_state_in_tx};
     const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -90,17 +90,33 @@ async fn markdown_recovery_undone_relation_delete_completes_once_and_skips_later
     let pending = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].obligation.kind, Kind::RelationCleanup);
-    open.actor.history_undo_in_turns("w".into(), "dohc-operation:delete-target".into(), "undo-delete".into(),
-        None, open.root.clone(), Arc::new(NoFaults), 11,
-        [open.capture_apply_gate.clone(), open.session_ops.clone()], Arc::new(()), None,
-        CancellationToken::new()).await.unwrap();
     let cancel = CancellationToken::new();
     let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(run(Arc::downgrade(&open), handle.clone(), service.sessions.clone(),
         service.leases.clone(), service.self_writes.scoped(&open.root), service.events.clone(), cancel.clone(), Some(send)));
     let wake = open.actor.markdown_recovery_wake();
     wake.notify_one();
-    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv()).await.unwrap().unwrap(), vec![held]);
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv()).await.unwrap().unwrap(), vec![held.clone()]);
+    assert_eq!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().len(), 1);
+    open.actor.history_undo_in_turns("w".into(), "dohc-operation:delete-target".into(), "undo-delete".into(),
+        None, open.root.clone(), Arc::new(NoFaults), 11,
+        [open.capture_apply_gate.clone(), open.session_ops.clone()], Arc::new(()), None,
+        CancellationToken::new()).await.unwrap();
+    let capture = open.capture_apply_gate.lock().await;
+    let sessions = open.session_ops.lock().await;
+    let epoch = open.actor.markdown_recovery_epoch();
+    open.actor.reconcile_collections("w".into(), "main".into(), scratch.path().to_owned(),
+        service.leases.clone(), Arc::new(()), 12, Arc::new(NoFaults), CancellationToken::new()).await.unwrap();
+    assert!(open.actor.markdown_recovery_epoch() > epoch);
+    drop(sessions);
+    drop(capture);
+    let retried = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let attempts = passes.recv().await.unwrap();
+            if !attempts.is_empty() { break attempts; }
+        }
+    }).await.unwrap();
+    assert_eq!(retried, vec![held]);
     assert!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty());
     let capture = open.capture_apply_gate.lock().await;
     let sessions = open.session_ops.lock().await;

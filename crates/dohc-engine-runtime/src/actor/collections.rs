@@ -179,6 +179,7 @@ impl ActorHandle {
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
         let token: CancellationToken = CancellationToken::new();
+        let recovery = self.markdown_recovery.clone();
         let result = self.run_blocking(move |store, cache| {
             reconcile_collections_on_store(
                 store,
@@ -193,6 +194,7 @@ impl ActorHandle {
                 faults.as_ref(),
                 &token,
                 committed.as_deref(),
+                &recovery,
             )
         });
         if super::pending_reader_preparation(&result).is_some() {
@@ -215,6 +217,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = None;
+        let recovery = self.markdown_recovery.clone();
         self.run_with_reader_retry(move |store, cache| {
             reconcile_collections_on_store(
                 store,
@@ -229,6 +232,7 @@ impl ActorHandle {
                 faults.as_ref(),
                 &token,
                 None,
+                &recovery,
             )
         })
         .await
@@ -240,10 +244,11 @@ impl ActorHandle {
         leases: LeaseRegistry, self_writes: Arc<dyn SelfWriteRecorder>, now_ms: i64,
         faults: Arc<dyn FaultInjector>, token: CancellationToken, root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CollectionReconciliation, RuntimeError> {
+        let recovery = self.markdown_recovery.clone();
         self.run_with_reader_retry(move |store, cache| {
             reconcile_collections_on_store(store, cache, &workspace_id, &version_id, &root_dir,
                 Some(root_guard.as_ref()), &leases, self_writes.as_ref(), now_ms,
-                faults.as_ref(), &token, None)
+                faults.as_ref(), &token, None, &recovery)
         }).await
     }
 
@@ -551,6 +556,7 @@ mod collection_adoption_update_tests {
             &dohc_engine_storage::NoFaults,
             &CancellationToken::new(),
             None,
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
     }
 
@@ -2199,6 +2205,7 @@ fn reconcile_collections_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     committed: Option<&(dyn Fn(&CollectionReconciliation) + Send + Sync)>,
+    recovery: &super::markdown_recovery::MarkdownRecoverySignal,
 ) -> Result<CollectionReconciliation, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2256,6 +2263,14 @@ fn reconcile_collections_on_store(
             format!("collection-relation-cleanup:{}:{}:{}",
                 candidate.source_record_id, candidate.field_name, candidate.target_record_id),
         ));
+    }
+    if store.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, workspace_id))?
+        .iter().any(|owed| owed.key.version_id == version_id
+            && matches!(owed.kind, dohc_engine_collab::markdown_write_obligations::Kind::CollectionAdoption
+                | dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup)
+            && !markdown_obligation_candidates.iter().any(|(key, kind, operation)|
+                key == &owed.key && kind == &owed.kind && operation == &owed.operation_id)) {
+        recovery.request();
     }
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
@@ -2666,6 +2681,7 @@ mod collection_relation_cleanup_tests {
                 &NoFaults,
                 &CancellationToken::new(),
                 None,
+                &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
             )
             .unwrap()
         };
@@ -2839,6 +2855,7 @@ mod collection_relation_cleanup_tests {
             &NoFaults,
             &CancellationToken::new(),
             Some(&committed),
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
         .unwrap();
         assert_eq!(outcome.changed_paths, [SOURCE_PATH]);
