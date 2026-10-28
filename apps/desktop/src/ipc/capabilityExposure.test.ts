@@ -66,14 +66,14 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
-  it("records the 14 settings operations", () => {
+  it("records the 15 settings operations", () => {
     const channels = [
-      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "set-agent-color",
+      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "order-agents", "set-agent-color",
       "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
       "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
       "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
     ].map(name => `desktop:${name}`);
-    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(14);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(15);
   });
   it("records all 23 chat operations with their sender-workspace admission", () => {
     const channels = [

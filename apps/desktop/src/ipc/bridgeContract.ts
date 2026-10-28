@@ -465,7 +465,7 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
@@ -1423,7 +1423,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
@@ -5798,6 +5798,7 @@ export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
 export const RunnerSelfTestPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  agentId: AgentId,
 }).strict();
 export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 
@@ -5867,6 +5868,8 @@ export const stoppedRunOperations = {
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
   detail: z.string().min(1).max(2_000),
+  // The run's log, when the check started a runner.
+  logPath: z.string().min(1).max(4_096).optional(),
 }).strict();
 export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
 
@@ -5884,6 +5887,13 @@ export const SetAppPinnedPayload = z.object({
   pinned: z.boolean(),
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
+// Ids of entries in the settings file, broken ones included, so Undo can put
+// back an order with an entry dohc could not use.
+export const OrderAgentsPayload = z.object({
+  order: z.array(z.string().min(1).max(256)).max(256),
+}).strict();
+export type OrderAgentsPayload = z.infer<typeof OrderAgentsPayload>;
 
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,

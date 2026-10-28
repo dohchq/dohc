@@ -2134,12 +2134,15 @@ describe("settings IPC contract", () => {
   });
 
   it("accepts only a scoped runner self-test request and bounded result", () => {
-    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings", agentId: "codex" })).toEqual({
       workspaceId: "ws-settings",
+      agentId: "codex",
     });
+    expect(RunnerSelfTestPayload.safeParse({ workspaceId: "ws-settings" }).success).toBe(false);
     expect(
       RunnerSelfTestPayload.safeParse({
         workspaceId: "ws-settings",
+        agentId: "codex",
         command: "untrusted command",
       }).success,
     ).toBe(false);
@@ -2147,10 +2150,13 @@ describe("settings IPC contract", () => {
       RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" }),
     ).toEqual({ ok: true, detail: "self-test ok" });
     expect(
+      RunnerSelfTestResult.parse({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" }),
+    ).toEqual({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" });
+    expect(
       RunnerSelfTestResult.safeParse({
         ok: false,
         detail: "Runner timed out.",
-        logPath: "/tmp/log",
+        command: "untrusted command",
       }).success,
     ).toBe(false);
     expect(

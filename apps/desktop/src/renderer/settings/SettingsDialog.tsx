@@ -23,10 +23,6 @@ import {
   MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
-  firstAgent,
-  newAgentDefaults,
-  withAgent,
-  withFirstAgent,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -38,12 +34,13 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
-import { ownPresentation, ownAgentPresentation } from "../workbench/actorPresentation";
+import { ownPresentation } from "../workbench/actorPresentation";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
@@ -63,6 +60,7 @@ import {
   ThemeControl,
 } from "./SettingRow";
 import { SettingsNav } from "./SettingsNav";
+import type { ErrorDetailField } from "../shell/copyDetails";
 import { ReportsSettings } from "./ReportsSettings";
 import { UsageRecordSettings } from "./UsageRecordSettings";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -112,7 +110,12 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+  // `details` are facts for Copy details, one line each. A report with an
+  // `identity` replaces the row of that identity, and `onClearError` takes it back.
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+  onClearError?: (identity: string) => void;
+  /** A change that went through, with its Undo. */
+  onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -129,7 +132,7 @@ export function SettingsDialog(props: {
    * Main's open-time recorder decision for this workspace, undefined
    * until its status arrives. The engine setting lives here, so this surface
    * owes the recovery that actually works — and the two off states have
-   * different ones. See the runner note in `RunnerSettingsCard`.
+   * different ones. See `runnerEngineNote` in `AgentList`.
    */
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
@@ -312,10 +315,11 @@ export function SettingsDialog(props: {
     }
   }, [activeSection, filteredSections, query]);
 
-  const saveUserSettings = useCallback(async (settings: DesktopUserSettings) => {
+  // Answers with what main saved, or null. A failed save reports why and puts back what the file holds.
+  const saveUserSettings = useCallback(async (settings: DesktopUserSettings): Promise<DesktopUserSettingsResult | null> => {
     if (!userResult) {
       setError("User settings are still loading.");
-      return;
+      return null;
     }
     const requestId = userSaveRequestRef.next();
     const previous = userResult;
@@ -323,28 +327,52 @@ export function SettingsDialog(props: {
       settings,
       source: current?.source ?? "default",
       ...(current?.warning ? { warning: current.warning } : {}),
+      // The entries dohc could not use stay in their rows while it saves.
+      ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
     }));
     applyLookSettings(settings);
     markSaving();
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings, base: previous.settings });
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return saved;
       setUserResult(saved);
       markSaved();
+      return saved;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return null;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
       // `previous` can hold a change an earlier save failed to make, so the
       // dialog goes back to the settings the file holds.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return null;
       setUserResult(restored);
       applyLookSettings(restored.settings);
+      return null;
     }
   }, [markSaved, markSaving, props.onError, userResult]);
+
+  // Moves agents to the front of the file. A later save outranks it, as saves do.
+  const orderAgents = useCallback(async (order: readonly string[], failure?: string): Promise<boolean> => {
+    const requestId = userSaveRequestRef.next();
+    markSaving();
+    setError(null);
+    try {
+      const saved = await bridge().orderAgents({ order: [...order] });
+      if (!userSaveRequestRef.isCurrent(requestId)) return true;
+      setUserResult(saved);
+      markSaved();
+      return true;
+    } catch (cause) {
+      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      setSaveState("error");
+      setError(ipcErrorMessage(cause));
+      props.onError?.(failure ? withErrorWords(failure, cause) : ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      return false;
+    }
+  }, [markSaved, markSaving, props.onError]);
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -551,7 +579,6 @@ export function SettingsDialog(props: {
   }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
-  const agent = firstAgent(userSettings);
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
@@ -717,7 +744,7 @@ export function SettingsDialog(props: {
                 />
               </SettingRow>
             </SettingsSection>
-            <SettingsSection title="Your colors">
+            <SettingsSection title="You">
               <SettingRow
                 title="Your color"
                 modified={userSettings.appearance.yourColor !== null}
@@ -733,17 +760,6 @@ export function SettingsDialog(props: {
                   onChange={(yourColor) => void saveAppearance({ yourColor })}
                 />
               </SettingRow>
-              {agent ? (
-                <SettingRow title="Your agent's color" testId="settings-row-your-agent-color">
-                  <ChatAvatar presentation={ownAgentPresentation} name={agent.name} kind="agent" size="comment" />
-                  <HueControl
-                    label="Your agent's color"
-                    shape="agent"
-                    value={agent.hue}
-                    onChange={(hue) => void saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, hue })))}
-                  />
-                </SettingRow>
-              ) : null}
             </SettingsSection>
             <SettingsSection title="Editor">
               <SettingRow
@@ -811,33 +827,20 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
-              workspacePath={props.workspacePath}
-              preferredName={userSettings.profile.preferredName}
-              agentName={agent?.name}
-              onAgentNameChange={(name) =>
-                saveUserSettings(withFirstAgent(userSettings, (current) => ({
-                  ...(current ?? newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue)),
-                  name,
-                })))
-              }
-              onPreferredNameChange={(preferredName) =>
-                saveUserSettings({
-                  ...userSettings,
-                  profile: { ...userSettings.profile, preferredName },
-                })
-              }
-              agent={agent}
+              settings={userSettings}
+              agentProblems={userResult?.agentProblems}
+              onSave={saveUserSettings}
+              onOrder={orderAgents}
+              {...(props.onNotice ? { onNotice: props.onNotice } : {})}
+              onOpenSettingsFile={() => void openSettingsFile()}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
-              onAgentChange={(fields) =>
-                saveUserSettings(withFirstAgent(userSettings, (current) => ({
-                  ...(current ?? {
-                    ...newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue),
-                    name: "Agent",
-                  }),
-                  ...fields,
-                })))
-              }
+              {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+              trust={{
+                trusted: workspaceTrust.trusted,
+                asking: workspaceTrust.asking,
+                onTrust: () => void changeWorkspaceTrust("trusted"),
+              }}
             />
           </div>
         );
@@ -1145,12 +1148,12 @@ export function SettingsDialog(props: {
               >
                 <PreferredNameControl
                   value={userSettings.profile.preferredName}
-                  onChange={(preferredName) =>
-                    saveUserSettings({
+                  onChange={async (preferredName) => {
+                    await saveUserSettings({
                       ...userSettings,
                       profile: { ...userSettings.profile, preferredName },
-                    })
-                  }
+                    });
+                  }}
                   testIdPrefix="general-preferred-name"
                 />
               </SettingRow>
@@ -1211,6 +1214,9 @@ export function SettingsDialog(props: {
 
   const visibleSections = query.trim() ? filteredSections : SETTINGS_SECTIONS;
 
+  // Toasts don't move Settings. The panel gives back the room Overlay leaves
+  // for them, and its content leaves that room instead, so the last controls
+  // scroll clear of the toasts.
   return (
     <div
       ref={dialogRef}
@@ -1220,7 +1226,7 @@ export function SettingsDialog(props: {
       tabIndex={-1}
       data-testid={desktopPins.settingsDialog}
       data-active-section={activeSection}
-      className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
+      className="dohc-elevated relative -mb-[var(--dohc-toast-room,0px)] flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
     >
       <SettingsNav
         workspacePath={props.workspacePath}
@@ -1249,10 +1255,11 @@ export function SettingsDialog(props: {
         ) : null}
 
         {/* The right padding keeps the title clear of the close button. */}
-        <section className="min-h-0 flex-1 overflow-auto px-12 pb-12 pt-10 max-[720px]:px-4 max-[720px]:py-4">
+        <section className="min-h-0 flex-1 overflow-auto px-12 pt-10 pb-[calc(var(--dohc-toast-room,0px)+3rem)] scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
           {/* Only Sharing matched: no section's heading stands over its results. */}
           <h3
-            hidden={!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0}
+            // The Agents page shows its own title.
+            hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
             className="m-0 mb-6 text-base font-semibold text-ink"
           >
             {activeMeta.label}
