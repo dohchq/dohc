@@ -216,6 +216,19 @@ it("settles a terminal again when its owner wants it, past the settlement an ord
   expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
+// Proves: a held settlement of a terminal ends the reuse of that terminal's
+// earlier settlement, so the next ordinary settle asks the host again.
+it("asks the host again after a held settlement of a terminal it settled before", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
+    {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
+  expect(await f.consumer.settleWanted(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
 it("leaves an earlier unresolved file write to backoff without settling", async () => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
   const overloaded = new DaemonRefusalError({code: "OVERLOADED",message: "settlement-materialization-pending",retry: "afterBackoff"}, undefined);

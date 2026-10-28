@@ -5,7 +5,7 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 
 const state = vi.hoisted(() => ({
   event: undefined as undefined | ((event: {name: string; payload: unknown}) => void),
-  dispose: vi.fn(), drain: vi.fn(), settle: vi.fn(), restore: vi.fn(), madeOwner: false,
+  dispose: vi.fn(), drain: vi.fn(), settle: vi.fn(), settleWanted: vi.fn(), restore: vi.fn(), madeOwner: false,
   registration: undefined as unknown, seedApplied: vi.fn(),
 }));
 vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
@@ -28,6 +28,7 @@ vi.mock("./ownerCommittedDelivery.js", () => ({OwnerCommittedDelivery: class {
   documentForRestore() {return {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)};}
   drain(...args: unknown[]) {return state.drain(...args);}
   settle(...args: unknown[]) {return state.settle(...args);}
+  settleWanted(...args: unknown[]) {return state.settleWanted(...args);}
   stopRestore(...args: unknown[]) {return state.restore(...args);}
   prepareRestore(...args: unknown[]) {return state.restore(...args);}
   completeRestore(...args: unknown[]) {return state.restore(...args);}
@@ -44,6 +45,7 @@ beforeEach(() => {
   vi.clearAllMocks(); state.madeOwner = false;
   state.drain.mockReset().mockResolvedValue({kind: "done", terminalReceipt: null, continueDrain: false});
   state.settle.mockReset().mockResolvedValue({materialized: true});
+  state.settleWanted.mockReset().mockResolvedValue({materialized: true});
   state.seedApplied.mockReset().mockReturnValue(true);
 });
 async function fixture(changes = createNamedFrameChanges(16)) {
@@ -138,6 +140,19 @@ it("waits for the owner pass before a named drain or settlement acquires the sam
     await named; await settled;
     expect(state.drain).toHaveBeenCalledTimes(2); expect(state.settle).toHaveBeenCalledTimes(1);
   } finally {release.resolve({kind: "done", continueDrain: false}); f.delivery.close();}
+});
+
+// Proves: the owner's settlement request, as after consenting to a held write,
+// settles past the settlement an ordinary settle reuses.
+it("settles an owner's settlement request through settleWanted", async () => {
+  const f = await fixture();
+  try {
+    state.event!({name: "liveApplication.settlementWanted", payload: {registrationId: 9, binding}});
+    await expect.poll(() => state.settleWanted.mock.calls.length).toBe(1);
+    expect(state.settleWanted.mock.calls[0]![0]).toEqual(document);
+    expect(state.settle).not.toHaveBeenCalled(); expect(state.drain).not.toHaveBeenCalled();
+    expect(f.stop).not.toHaveBeenCalled();
+  } finally {f.delivery.close();}
 });
 
 it("carries bounded continuation and drops a dirty registration invalidated before its next pass", async () => {
