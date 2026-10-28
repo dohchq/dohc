@@ -2330,13 +2330,11 @@ mod collection_relation_cleanup_tests {
     }
 
     #[test]
-    #[ignore = "Main's source validation rejects the adopted reference-link body after relation cleanup"]
     fn adopted_lossy_relation_cleanup_preserves_source_without_opening() {
         assert_adopted_lossy_relation_cleanup_preserves_source(false);
     }
 
     #[test]
-    #[ignore = "Main's source validation rejects the adopted reference-link body after relation cleanup"]
     fn adopted_lossy_relation_cleanup_preserves_source_after_opening() {
         assert_adopted_lossy_relation_cleanup_preserves_source(true);
     }
@@ -2538,7 +2536,6 @@ mod collection_relation_cleanup_tests {
     }
 
     #[test]
-    #[ignore = "Record main's History restore behavior before fixing source preservation"]
     fn history_restore_after_relation_cleanup_rewrite() {
         let (scratch, mut store, mut cache) = adopted_lossy_fixture(false);
         delete_lossy_fixture_target(&scratch, &mut store);
@@ -2552,7 +2549,6 @@ mod collection_relation_cleanup_tests {
     }
 
     #[test]
-    #[ignore = "Record main's History restore behavior for an already rewritten lossy note"]
     fn history_restore_of_lossy_version_over_rewritten_text() {
         let (scratch, mut store, mut cache) = adopted_lossy_fixture(false);
         let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();

@@ -49,6 +49,7 @@ mod bounded_encoder;
 mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
+mod reference_links;
 mod restore_copy;
 mod wikilinks;
 
@@ -688,17 +689,27 @@ impl Ydoc {
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
             .any(|reading| {
                 let staged = Ydoc::wire();
-                staged
+                if staged
                     .rewrite_content_to_markdown_checked::<false>(
                         ContentKind::Richdoc,
                         source,
                         reading,
                         FileFold::No,
                     )
-                    .is_ok()
-                    && staged
+                    .is_err()
+                {
+                    return false;
+                }
+                let projects_alike = || {
+                    staged
                         .project_richdoc()
                         .is_ok_and(|projection| projection == canonical_projection)
+                };
+                (projects_alike()
+                    || (!reads_alike
+                        && reading == MarkdownReading::Source
+                        && staged.resolve_reference_links(source)
+                        && projects_alike()))
                     && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
             })
     }
@@ -11606,6 +11617,82 @@ mod projection_tests {
         let forged = "---\nid: rec\n---\n\nHidden\n";
         witness_source(&doc, forged);
         assert_eq!(settled(&doc, &canonical, forged), None);
+    }
+
+    #[test]
+    fn a_local_settle_keeps_desktop_reference_links() {
+        use yrs::types::Attrs;
+
+        let source = "<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| {
+            insert_md_paragraph(txn, &body, 0, "<details>\n<summary>Extras</summary>");
+            insert_md_paragraph(txn, &body, 1, "Sunscreen and a spare charger.");
+            insert_md_paragraph(txn, &body, 2, "</details>");
+            // The desktop seeds one XmlText with a link mark, then a plain
+            // paragraph for the definition (MarkdownDefinition).
+            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+            let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
+            text.insert_with_attributes(
+                txn,
+                4,
+                "the airline's bag rules",
+                Attrs::from([(
+                    "link".into(),
+                    json_to_any(&json!({
+                        "href": "https://example.com/bags",
+                        "target": "_blank",
+                        "rel": "noopener noreferrer nofollow",
+                        "class": null,
+                        "title": null,
+                    })),
+                )]),
+            );
+            let at = text.len(&*txn);
+            text.insert_with_attributes(txn, at, ".", Attrs::new());
+            insert_md_paragraph(txn, &body, 4, "[bags]: https://example.com/bags");
+        });
+        let canonical = witness_source(&doc, source);
+        assert_eq!(
+            canonical,
+            "&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\n\
+             Sunscreen and a spare charger.\n\n&lt;/details&gt;\n\n\
+             See [the airline's bag rules](https://example.com/bags).\n\n\
+             &#91;bags&#93;&#58; https&#58;//example&#46;com/bags"
+        );
+        assert_eq!(doc.preserved_markdown_source(&canonical), None);
+        assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
+        assert_eq!(settled(&doc, &canonical, "A different file body"), None);
+
+        // A witnessed source must rebuild this destination and this label.
+        for forged in [
+            source.replace("example.com/bags", "other.example/bags"),
+            source.replace("the airline's bag rules", "different rules"),
+            source.replace("[bags].", "[missing]."),
+        ] {
+            witness_source(&doc, &forged);
+            assert_eq!(settled(&doc, &canonical, &forged), None, "{forged}");
+        }
+    }
+
+    #[test]
+    fn a_local_settle_keeps_undefined_reference_links_as_plain_text() {
+        let source = "See [the airline's bag rules][bags].\n";
+        // marked emits plain text when no definition resolves the label.
+        let desktop = Ydoc::wire();
+        let body = desktop.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        desktop.with_delta(|txn| {
+            insert_md_paragraph(txn, &body, 0, source.trim_end());
+        });
+        let canonical = witness_source(&desktop, source);
+        let native = Ydoc::wire();
+        native
+            .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        assert_eq!(native.project_richdoc().unwrap(), canonical);
+        assert_eq!(canonical, source.trim_end());
+        assert_eq!(settled(&desktop, &canonical, source).as_deref(), Some(source));
     }
 
     fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
