@@ -2294,6 +2294,11 @@ mod collection_relation_cleanup_tests {
     const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     const SOURCE_OBJECT_ID: &str = "relation-source-object";
     const SOURCE_PATH: &str = "tasks/source.md";
+    const PACKING: &str = "tasks/packing.md";
+    const FLIGHTS: &str = "tasks/flights.md";
+    const SOURCE: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Packing list\n\n<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
+    const TARGET: &str = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Book flights\n";
+    const REWRITTEN: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n# Packing list\n\n&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\nSunscreen and a spare charger.\n\n&lt;/details&gt;\n\nSee [the airline's bag rules](https://example.com/bags).\n\n&#91;bags&#93;&#58; https&#58;//example&#46;com/bags";
 
     fn write_text(
         store: &mut EngineStore,
@@ -2336,14 +2341,7 @@ mod collection_relation_cleanup_tests {
         assert_adopted_lossy_relation_cleanup_preserves_source(true);
     }
 
-    fn assert_adopted_lossy_relation_cleanup_preserves_source(reopen_note: bool) {
-        use dohc_engine_domain::DeleteTextFile;
-
-        const PACKING: &str = "tasks/packing.md";
-        const FLIGHTS: &str = "tasks/flights.md";
-        const SOURCE: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Packing list\n\n<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
-        const TARGET: &str = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Book flights\n";
-
+    fn adopted_lossy_fixture(reopen_note: bool) -> (ScratchDir, EngineStore, WriterDocCache) {
         let scratch = ScratchDir::new().unwrap();
         let mut store =
             EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
@@ -2365,31 +2363,15 @@ mod collection_relation_cleanup_tests {
         }
         let mut cache = WriterDocCache::new();
         let token = CancellationToken::new();
-        let leases = LeaseRegistry::default();
         let reconcile = |store: &mut EngineStore, cache: &mut WriterDocCache, now_ms| {
-            reconcile_collections_on_store(
-                store,
-                cache,
-                WORKSPACE_ID,
-                VERSION_ID,
-                scratch.path(),
-                None,
-                &leases,
-                &(),
-                now_ms,
-                &NoFaults,
-                &token,
-                None,
-                &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
-            )
-            .unwrap()
+            reconcile_lossy_fixture(store, cache, scratch.path(), now_ms)
         };
         reconcile(&mut store, &mut cache, 3);
 
         for (path, seed) in [
             (
                 PACKING,
-                // Adoption seed from the isolated desktop reproduction at 303027d41.
+                // Adoption seed from a desktop build.
                 include_bytes!("../../tests/fixtures/adopted-lossy-packing-seed.bin").to_vec(),
             ),
             (FLIGHTS, {
@@ -2483,8 +2465,37 @@ mod collection_relation_cleanup_tests {
             .unwrap();
             assert!(state.lineage_existing);
         }
+        (scratch, store, cache)
+    }
+
+    fn reconcile_lossy_fixture(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        root: &std::path::Path,
+        now_ms: i64,
+    ) {
+        reconcile_collections_on_store(
+            store,
+            cache,
+            WORKSPACE_ID,
+            VERSION_ID,
+            root,
+            None,
+            &LeaseRegistry::default(),
+            &(),
+            now_ms,
+            &NoFaults,
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    }
+
+    fn delete_lossy_fixture_target(scratch: &ScratchDir, store: &mut EngineStore) {
+        use dohc_engine_domain::DeleteTextFile;
+
         std::fs::remove_file(scratch.path().join(FLIGHTS)).unwrap();
-        VersionedTextStore::new(&mut store)
+        VersionedTextStore::new(store)
             .delete_text_file(
                 &DeleteTextFile {
                     workspace_id: WORKSPACE_ID.into(),
@@ -2501,9 +2512,15 @@ mod collection_relation_cleanup_tests {
                 &NoFaults,
             )
             .unwrap();
-        reconcile(&mut store, &mut cache, 8);
+    }
+
+    fn assert_adopted_lossy_relation_cleanup_preserves_source(reopen_note: bool) {
+        let (scratch, mut store, mut cache) = adopted_lossy_fixture(reopen_note);
+        delete_lossy_fixture_target(&scratch, &mut store);
+        reconcile_lossy_fixture(&mut store, &mut cache, scratch.path(), 8);
         let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
         let without_relation = SOURCE.replace(&format!("related: {TARGET_ID}\n"), "");
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
         let cleaned = dohc_engine_collab::load_persisted(&store, &key)
             .unwrap()
             .unwrap();
@@ -2516,6 +2533,276 @@ mod collection_relation_cleanup_tests {
         assert!(
             actual == SOURCE.as_bytes() || actual == without_relation.as_bytes(),
             "cleanup changed the body (reopen_note={reopen_note}): {}",
+            String::from_utf8_lossy(&actual),
+        );
+    }
+
+    #[test]
+    #[ignore = "Record main's History restore behavior before fixing source preservation"]
+    fn history_restore_after_relation_cleanup_rewrite() {
+        let (scratch, mut store, mut cache) = adopted_lossy_fixture(false);
+        delete_lossy_fixture_target(&scratch, &mut store);
+        reconcile_lossy_fixture(&mut store, &mut cache, scratch.path(), 8);
+        assert_history_restore(
+            "history_restore_after_relation_cleanup_rewrite",
+            &scratch,
+            &mut store,
+            &mut cache,
+        );
+    }
+
+    #[test]
+    #[ignore = "Record main's History restore behavior for an already rewritten lossy note"]
+    fn history_restore_of_lossy_version_over_rewritten_text() {
+        let (scratch, mut store, mut cache) = adopted_lossy_fixture(false);
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let update = persisted
+            .doc
+            .frontmatter_drop_relation_target_preserving_markdown_source("related", TARGET_ID, false)
+            .unwrap()
+            .unwrap();
+        ydoc_record_update_on_store(
+            &mut store,
+            &mut cache,
+            &key,
+            PACKING,
+            ContentKind::Richdoc,
+            persisted.marker.regime,
+            &update,
+            Some("engine".into()),
+            None,
+            persisted.marker.lineage_claim_id,
+            false,
+            None,
+            None,
+            false,
+            8,
+            &NoFaults,
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap();
+        // Use the old fallback bytes with the same settlement write and marker.
+        // This fixture must also exist after cleanup stops producing these bytes.
+        settle_lossy_fixture(&scratch, &mut store, &mut cache, Some(REWRITTEN.into()), 9);
+        assert_eq!(
+            std::fs::read(scratch.path().join(PACKING)).unwrap(),
+            REWRITTEN.as_bytes()
+        );
+        assert_history_restore(
+            "history_restore_of_lossy_version_over_rewritten_text",
+            &scratch,
+            &mut store,
+            &mut cache,
+        );
+    }
+
+    fn settle_lossy_fixture(
+        scratch: &ScratchDir,
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        content_override: Option<String>,
+        now_ms: i64,
+    ) {
+        let state = ydoc_open_state_on_store(
+            store,
+            cache,
+            WORKSPACE_ID,
+            now_ms,
+            false,
+            None,
+            VERSION_ID,
+            PACKING,
+            Some(ContentKind::Richdoc),
+            false,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(state.lineage_existing);
+        ydoc_settle_on_store(
+            store,
+            cache,
+            scratch.path(),
+            &state.key,
+            PACKING,
+            ContentKind::Richdoc,
+            false,
+            state.lineage_claim_id.as_deref(),
+            state.head_blob_sha256,
+            content_override,
+            "history-restore-test",
+            &(),
+            now_ms,
+            &NoFaults,
+            &CancellationToken::new(),
+            None,
+            None,
+            None,
+            super::super::ydoc::SettlementKind::Document,
+            false,
+        )
+        .unwrap()
+        .into_settlement_for_internal_caller()
+        .unwrap();
+    }
+
+    fn assert_history_restore(
+        name: &str,
+        scratch: &ScratchDir,
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+    ) {
+        use super::super::versioned::{
+            WriteConditions, versioned_text_write_with_publication_on_store,
+            with_local_file_mutation_cache_reset,
+        };
+
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
+        let current = VersionedTextStore::new(store)
+            .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
+            .unwrap()
+            .unwrap();
+        // History restores the pre-moment bytes, not a separately supplied repair.
+        let earlier: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.before_blob_sha256 \
+                     WHERE m.workspace_id=?1 AND m.moment_id=?2",
+                    [WORKSPACE_ID, current.latest_moment_id.as_str()],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(earlier, SOURCE);
+        let before_bytes = std::fs::read(scratch.path().join(PACKING)).unwrap();
+        let before_doc = dohc_engine_collab::load_persisted(store, &key)
+            .unwrap()
+            .unwrap();
+        let before_reference = before_doc.doc.markdown_source_reference();
+        let before_source = before_reference
+            .as_ref()
+            .and_then(|reference| before_doc.doc.markdown_source(reference));
+        let moment_count = |store: &EngineStore| -> i64 {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT count(*) FROM moments WHERE workspace_id=?1",
+                        [WORKSPACE_ID],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        let before_count = moment_count(store);
+        let expected_sha = dohc_engine_storage::hex_sha256(&before_bytes);
+        assert_eq!(current.blob_sha256, expected_sha);
+        let input = WriteText {
+            workspace_id: WORKSPACE_ID.into(),
+            version_id: VERSION_ID.into(),
+            object_id: SOURCE_OBJECT_ID.into(),
+            path: PACKING.into(),
+            text: earlier,
+            moment_id: "packing-restore".into(),
+            request_id: Some("packing-restore-request".into()),
+            metadata_origin: "restore".into(),
+            metadata_summary: Some("Restored packing.md".into()),
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 10,
+        };
+        let result = with_local_file_mutation_cache_reset(cache, || {
+            versioned_text_write_with_publication_on_store(
+                store,
+                &input,
+                Some(scratch.path()),
+                Some(&current.latest_moment_id),
+                Some(&WriteConditions {
+                    create_only: false,
+                    expected_sha256: Some(expected_sha),
+                }),
+                None,
+                &NoFaults,
+                &CancellationToken::new(),
+            )
+        });
+        match result {
+            Ok(write) => {
+                let job = store
+                    .load_materialization_job(&format!("authored-mat_{}", write.moment.moment_id))
+                    .unwrap()
+                    .unwrap();
+                let (materialized, _) = super::super::materialization::materialize_pending_job(
+                    store,
+                    scratch.path(),
+                    WORKSPACE_ID,
+                    &job,
+                    &(),
+                    10,
+                    &NoFaults,
+                    None,
+                );
+                assert!(
+                    materialized,
+                    "restore did not reach disk: {}",
+                    std::fs::read_to_string(scratch.path().join(PACKING)).unwrap(),
+                );
+                assert_exact_lossy_restore(scratch, store);
+                settle_lossy_fixture(scratch, store, cache, None, 11);
+                assert_exact_lossy_restore(scratch, store);
+                eprintln!("RESTORE OUTCOME {name}: exact");
+            }
+            Err(error) => {
+                let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
+                let snapshot = VersionedTextStore::new(store)
+                    .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
+                    .unwrap()
+                    .unwrap();
+                let after_doc = dohc_engine_collab::load_persisted(store, &key)
+                    .unwrap()
+                    .unwrap();
+                let reference = after_doc.doc.markdown_source_reference();
+                let source = reference
+                    .as_ref()
+                    .and_then(|reference| after_doc.doc.markdown_source(reference));
+                assert!(
+                    actual == before_bytes
+                        && snapshot.blob_sha256 == current.blob_sha256
+                        && snapshot.text == current.text
+                        && after_doc.marker.head_update_seq == before_doc.marker.head_update_seq
+                        && reference == before_reference
+                        && source == before_source
+                        && moment_count(store) == before_count,
+                    "restore failed with {error:?} but changed state; disk: {}",
+                    String::from_utf8_lossy(&actual),
+                );
+                eprintln!("RESTORE OUTCOME {name}: refused-unchanged ({error:?})");
+            }
+        }
+    }
+
+    fn assert_exact_lossy_restore(scratch: &ScratchDir, store: &mut EngineStore) {
+        let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
+        let snapshot = VersionedTextStore::new(store)
+            .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
+            .unwrap()
+            .unwrap();
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
+        let persisted = dohc_engine_collab::load_persisted(store, &key)
+            .unwrap()
+            .unwrap();
+        let source = persisted
+            .doc
+            .markdown_source_reference()
+            .and_then(|reference| persisted.doc.markdown_source(&reference));
+        assert!(
+            actual == SOURCE.as_bytes()
+                && snapshot.text == SOURCE
+                && snapshot.blob_sha256 == dohc_engine_storage::hex_sha256(SOURCE.as_bytes())
+                && source.as_deref() == Some(SOURCE),
+            "restore was not exact; disk: {}",
             String::from_utf8_lossy(&actual),
         );
     }
