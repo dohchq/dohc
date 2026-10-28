@@ -97,7 +97,8 @@ export function useChatDispatchNotices(
             if (!isCurrent()) return;
             void bridge().dismissChatDispatchNotice({ workspaceId, id: notice.id }).catch((cause: unknown) => {
               if (!isCurrent()) return;
-              shown.delete(row);
+              // A newer notice for the same row keeps its tracking.
+              if (shown.get(row) === notice.id) shown.delete(row);
               report({ message: "dohc could not dismiss this notice. Open this workspace again to try again.", cause });
             });
           },

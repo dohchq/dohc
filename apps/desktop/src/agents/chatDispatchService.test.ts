@@ -2595,7 +2595,7 @@ describe("chatDispatchService", () => {
 
     fixture.spawnCalls[0]!.process.emitExit(0);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
-    let messages = await fixture.chat.listMessages({
+    const messages = await fixture.chat.listMessages({
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
     });
@@ -2606,17 +2606,14 @@ describe("chatDispatchService", () => {
 
     linkPending = false;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await vi.waitFor(async () => {
-      messages = await fixture.chat.listMessages({
-        workspaceId: WORKSPACE_ID,
-        threadId: trigger.threadId,
-      });
-      expect(fixture.dispatchNotices).toEqual([]);
-      expect(fixture.notices.map((notice) => notice.title)).toEqual([
-        "Nova's run produced no reply in \"Wait for my CLI reply provenance.\"",
-      ]);
-      expect(await owedRuns(fixture)).toEqual([]);
-    }, { interval: 0 });
+    // The backoff timer queued a recovery scan. Scans run one at a time on
+    // the workspace's queue, so one queued after it ends after it.
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.dispatchNotices).toEqual([]);
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Nova's run produced no reply in \"Wait for my CLI reply provenance.\"",
+    ]);
+    expect(await owedRuns(fixture)).toEqual([]);
   });
 
   it("posts the notice owed for a run that dohc stopped before saving its end", async () => {

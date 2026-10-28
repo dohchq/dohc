@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { ChatDispatchNotice, ChatDispatchNoticesEvent } from "../ipc/bridgeContract";
+import { CHAT_DISPATCH_NOTICES_MAX, type ChatDispatchNotice, type ChatDispatchNoticesEvent } from "../ipc/bridgeContract";
 
 // One notice per reason, except a pause: each paused chat keeps its own.
 function noticeKey(reason: ChatDispatchNotice["reason"], threadId?: string): string {
   return reason === "budget-paused" ? `${reason}:${threadId ?? ""}` : reason;
 }
+// The pauses fit beside the other two reasons. Past that, the oldest pause
+// gives way; its chat still shows Resume.
+const PAUSE_NOTICES_MAX = CHAT_DISPATCH_NOTICES_MAX - 2;
 
 export function createChatDispatchNotices(
   publish: (event: ChatDispatchNoticesEvent) => void,
@@ -23,7 +26,12 @@ export function createChatDispatchNotices(
     },
     report(workspaceId: string, notice: Omit<ChatDispatchNotice, "id">) {
       const notices = workspaces.get(workspaceId) ?? new Map<string, ChatDispatchNotice>();
-      notices.set(noticeKey(notice.reason, notice.threadId), { ...notice, id: randomUUID() });
+      const key = noticeKey(notice.reason, notice.threadId);
+      if (notice.reason === "budget-paused" && !notices.has(key)) {
+        const pauses = [...notices.keys()].filter((existing) => existing.startsWith("budget-paused:"));
+        if (pauses.length >= PAUSE_NOTICES_MAX) notices.delete(pauses[0]!);
+      }
+      notices.set(key, { ...notice, id: randomUUID() });
       workspaces.set(workspaceId, notices);
       revision += 1;
       publish(snapshot(workspaceId));

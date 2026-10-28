@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { CHAT_DISPATCH_NOTICES_MAX, ChatDispatchNoticesEvent } from "../ipc/bridgeContract";
 import { createChatDispatchNotices } from "./chatDispatchNotices";
 
 it("retains the latest notice per workspace and reason until that row is dismissed", () => {
@@ -53,6 +54,22 @@ it("keeps a pause per thread, and takes back only the thread that resumed", () =
   notices.clear("a", "budget-paused", "t1");
   expect(notices.register("a").notices.map(({ threadId }) => threadId)).toEqual(["t2"]);
   expect(publish).toHaveBeenLastCalledWith(notices.register("a"));
+});
+
+it("keeps every snapshot within the IPC contract, however many chats pause", () => {
+  const notices = createChatDispatchNotices(vi.fn());
+  notices.report("a", { reason: "restricted", threadId: "r", message: "Restricted." });
+  notices.report("a", { reason: "no-runner", threadId: "n", message: "No runner." });
+  for (let index = 0; index <= CHAT_DISPATCH_NOTICES_MAX; index += 1) {
+    notices.report("a", { reason: "budget-paused", threadId: `t${index}`, message: `Paused in t${index}.` });
+    expect(ChatDispatchNoticesEvent.safeParse(notices.register("a")).success).toBe(true);
+  }
+  const threads = notices.register("a").notices.map(({ threadId }) => threadId);
+  expect(threads).toHaveLength(CHAT_DISPATCH_NOTICES_MAX);
+  expect(threads.slice(0, 2)).toEqual(["r", "n"]);
+  // The oldest pauses gave way to the newest.
+  expect(threads).not.toContain("t0");
+  expect(threads.at(-1)).toBe(`t${CHAT_DISPATCH_NOTICES_MAX}`);
 });
 
 it("takes back one reason's notice and leaves the others", () => {

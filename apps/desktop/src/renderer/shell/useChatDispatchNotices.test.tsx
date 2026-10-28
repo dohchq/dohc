@@ -198,3 +198,20 @@ it("takes back a resumed chat's pause, and keeps another chat's", async () => {
   act(() => h.store.clear("a", "budget-paused", WAKE_POST.id));
   expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Agent dispatch notice: no-runner."]);
 });
+
+it("still takes back a resumed chat's newer pause after an older dismissal fails", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
+  h.store.report("a", { reason: "budget-paused", threadId: WAKE_POST.id, channelId: AGENT_DM.id, message: "Paused in \"Nova\"." });
+  const hook = h.mount();
+  await act(async () => {});
+  const failing = Promise.withResolvers<void>();
+  h.dismiss.mockReturnValueOnce(failing.promise);
+  await act(async () => hook.result.current.dismissShellError(hook.result.current.shellErrors[0]!.id));
+  act(() => h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning again." }));
+  await act(async () => failing.reject(new Error("Main is busy")));
+  act(() => h.store.clear("a", "budget-paused", GROUP_CHAT.id));
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
+    "Paused in \"Nova\".", "dohc could not dismiss this notice. Open this workspace again to try again.",
+  ]);
+});
