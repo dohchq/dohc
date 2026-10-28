@@ -436,7 +436,7 @@ async fn markdown_hold_relation_reconciliation_keeps_the_held_index_and_complete
     for pass in 0..2 {
         let result = reconcile_collections_on_store(&mut f.store, &mut f.cache, "w", "main",
             f.scratch.path(), None, &LeaseRegistry::new(), &(), 20 + pass, &NoFaults,
-            &CancellationToken::new(), None).unwrap();
+            &CancellationToken::new(), None, &super::super::markdown_recovery::MarkdownRecoverySignal::default()).unwrap();
         assert_eq!(result.held_documents.len(), 1);
         assert_eq!(result.changed_paths, if pass == 0 { vec!["tasks/b.md".to_owned()] } else { Vec::new() });
         assert_eq!(std::fs::read_to_string(f.scratch.path().join(PATH)).unwrap(), f.source);
@@ -461,7 +461,7 @@ async fn markdown_hold_relation_reconciliation_keeps_the_held_index_and_complete
     f.append(&clear);
     let result = reconcile_collections_on_store(&mut f.store, &mut f.cache, "w", "main",
         f.scratch.path(), None, &LeaseRegistry::new(), &(), 25, &NoFaults,
-        &CancellationToken::new(), None).unwrap();
+        &CancellationToken::new(), None, &super::super::markdown_recovery::MarkdownRecoverySignal::default()).unwrap();
     assert!(result.held_documents.is_empty());
     assert_eq!(result.changed_paths, [PATH]);
     assert!(f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap().is_empty());
