@@ -536,7 +536,20 @@ where
         // the relay. Its own later application counts by journal cursor.
         let tail = private_tail(conn,&held,previous_sequence,head)?;
         sequences.extend(tail.sequences.iter().copied());
+        // Earlier accepted receipts can remain beyond a private native boundary.
+        // Read at most the remaining application budget through the cursor index.
+        if (sequences.len() as i64) < head-previous_sequence {
+            let mut query = conn.prepare("SELECT local_ydoc_sequence FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT ?7").map_err(read_sql)?;
+            let mut rows = query.query(params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,previous_cursor,(max_applications-receipts.len()) as i64]).map_err(read_sql)?;
+            while let Some(row) = rows.next().map_err(read_sql)? {
+                let sequence: i64 = row.get(0).map_err(read_sql)?;
+                integer(sequence,1,head)?;
+                if sequence>previous_sequence { sequences.insert(sequence); }
+                if sequences.len() as i64 == head-previous_sequence { break; }
+            }
+        }
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
+        let covered_sequence = tail.sequences.iter().min().map_or(head, |sequence| sequence - 1);
         let accepted = if tail.any {
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
@@ -551,7 +564,7 @@ where
         };
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
-        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
+        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
             replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
     }).map_err(E::from)?;
