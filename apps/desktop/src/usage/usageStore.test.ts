@@ -9,7 +9,7 @@ import { createUsageStore, usageAsideName, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_N
 
 vi.mock("node:fs/promises", async importOriginal => ({ ...await importOriginal<typeof fs>() }));
 
-const pair = { capabilityId: "version.try", door: "renderer" } as const;
+const pair = { capabilityId: "version.merge", door: "renderer" } as const;
 const mapping: UsageBuildPair[] = [{ ...pair, status: "covered" }];
 const stores: ReturnType<typeof createUsageStore>[] = [];
 const today = () => localUsageDay(new Date());
@@ -226,7 +226,7 @@ describe("local usage store", () => {
     expect((await store.read()).enabled).toBe(true);
     const rows = await store.query({ ...query(), pairs: [pair, { capabilityId: "file.list", door: "mcp" },
       { capabilityId: "file.read", door: "mcp" }, { capabilityId: "file.search", door: "mcp" },
-      { capabilityId: "workspace.list", door: "mcp" }, { capabilityId: "version.try", door: "automation" }] });
+      { capabilityId: "workspace.list", door: "mcp" }, { capabilityId: "version.merge", door: "automation" }] });
     expect(rows.every(row => row.total === null && row.usedDays === null)).toBe(true);
   });
   it("rejects payloads and background ids, isolates snapshots, and keeps a measured zero", async () => {

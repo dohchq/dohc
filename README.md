@@ -28,7 +28,7 @@ Apps can use approved Collection data through the operations their owner grants.
 
 ## Where it is today
 
-dohc is an early alpha, released as nightly builds. Download the newest one from Releases, and dohc downloads each update automatically. On Windows and macOS, an update installs when you quit dohc. On Linux, select Restart when the update is ready, then approve the installation. We are still proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes. Read the known issues pinned at the top of the issue list before you start. Saving a note can rewrite Markdown that dohc doesn't keep yet, so try dohc on a copy of a notes folder.
+dohc is an early alpha, released as nightly builds. Download the newest one from Releases. When an update is available, select Update at the top right of dohc to download it, then select Restart to update. On Windows and macOS, a downloaded update also installs when you quit dohc. On Linux, approve the installation when the system asks. We are still proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes. Read the known issues pinned at the top of the issue list before you start. Saving a note can rewrite Markdown that dohc doesn't keep yet, so try dohc on a copy of a notes folder.
 
 The desktop app currently includes:
 

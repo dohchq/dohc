@@ -47,3 +47,6 @@ target-*/
 /services/share-web/src/testing/device-control/localhost-cert.pem
 /services/share-web/src/testing/device-control/localhost-key.pem
 /services/share-web/src/testing/device-control/tls-*/
+
+# Temp folders that scripts/self-host/cloudflare.test.mjs makes in the repo root.
+/.cloudflare-test-*/
