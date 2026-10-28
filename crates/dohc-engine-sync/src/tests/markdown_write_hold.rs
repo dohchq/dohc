@@ -29,7 +29,7 @@ fn unsafe_witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
 #[tokio::test]
 async fn markdown_hold_winning_lineage_keeps_the_losing_source_and_recovers_local_edits() {
     use dohc_engine_storage::hex_sha256;
-    for deferred in [false, true] {
+    for (deferred, pending_dependency) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut f = Fixture::new();
         let source = "<div>Source meaning stays in this file</div>\n";
         let source_sha = seed_text_head(&mut f.store, &f.key.object_id, PATH, source);
@@ -57,6 +57,15 @@ async fn markdown_hold_winning_lineage_keeps_the_losing_source_and_recovers_loca
         let update = local.richdoc_append_paragraph("Losing local edits need their own copy");
         f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
             tx, &f.key, &update, None, None, 1001)).unwrap();
+        if pending_dependency {
+            let dependency = Ydoc::wire();
+            dependency.plaintext_insert(0, "Missing predecessor");
+            let pending = dependency.plaintext_insert(0, "Pending dependency");
+            f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                tx, &f.key, &pending, None, None, 1002)).unwrap();
+            assert!(dohc_engine_collab::load_persisted(&f.store, &f.key)
+                .unwrap().unwrap().doc.has_pending_dependencies());
+        }
         let incoming = Ydoc::wire();
         incoming.apply(&base).unwrap();
         incoming.richdoc_append_paragraph("Winning lineage text");

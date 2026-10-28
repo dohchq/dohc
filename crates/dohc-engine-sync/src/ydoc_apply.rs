@@ -3148,9 +3148,26 @@ fn preserve_incomplete_base_in_tx(
         snapshot.blob_sha256 != hex_sha256(local.as_bytes())
             && snapshot.blob_sha256 != hex_sha256(incoming.as_bytes())
     });
+    // The winning lineage owns incoming; the losing projection stays visible.
+    let opened = conflict_replaced_lineage_in_tx(
+        tx,
+        key,
+        &payload.path,
+        &doc,
+        &local_projection,
+        (pending_authors != "[]").then_some(pending_authors.as_str()),
+        snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
+        &incoming,
+        origin_id,
+        origin_seq,
+        now_ms,
+        search_policy,
+        resolver,
+    )?;
+    let local_needs_recovery = !open && opened.is_none();
     let mut recovered_paths = Vec::new();
-    if open || external.is_some() {
-        let preserved = if open {
+    if open || external.is_some() || local_needs_recovery {
+        let preserved = if open || local_needs_recovery {
             local.to_owned()
         } else {
             text::read(tx, &external.unwrap().blob_sha256).map_err(SyncError::corrupt)?
@@ -3165,9 +3182,14 @@ fn preserve_incomplete_base_in_tx(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: true,
             },
-            &payload.lineage_claim_id,
+            if local_needs_recovery {
+                marker.lineage_claim_id.as_deref().unwrap_or(&payload.lineage_claim_id)
+            } else {
+                &payload.lineage_claim_id
+            },
             &preserved,
-            (open && pending_authors != "[]").then_some(pending_authors.as_str()),
+            ((open || local_needs_recovery) && pending_authors != "[]")
+                .then_some(pending_authors.as_str()),
             origin_id,
             origin_seq,
             now_ms,
@@ -3202,23 +3224,7 @@ fn preserve_incomplete_base_in_tx(
             recovered_paths.push(recovery.path);
         }
     }
-    // The winning lineage owns incoming; the losing projection stays visible.
-    let opened = conflict_replaced_lineage_in_tx(
-        tx,
-        key,
-        &payload.path,
-        &doc,
-        &local_projection,
-        (pending_authors != "[]").then_some(pending_authors.as_str()),
-        snapshot.map(|snapshot| snapshot.blob_sha256.as_str()),
-        &incoming,
-        origin_id,
-        origin_seq,
-        now_ms,
-        search_policy,
-        resolver,
-    )?
-    .unwrap_or(0);
+    let opened = opened.unwrap_or(0);
     let mut updates = vec![doc.encode_full_state()];
     let mut stmt = tx.prepare(
         "SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 \
