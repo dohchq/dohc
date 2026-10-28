@@ -1039,7 +1039,7 @@ function createEngineDocSession(
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
-    if (disposed || event.sessionId !== sessionId || event.workspaceId !== workspaceId || event.path !== path) return;
+    if (disposed || event.sessionId !== sessionId) return;
     if (event.headSha256 !== undefined) {
       currentHeadSha256 = event.headSha256;
       publish(current => ({ ...current, outcome: current.outcome?.kind === "bound"
