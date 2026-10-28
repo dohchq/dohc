@@ -167,6 +167,8 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 
 ## Controls
 
+A control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat. Give an agent the same action through the CLI or MCP.
+
 The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
@@ -247,6 +249,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 - Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
 - Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
 - In a panel, give the parent `px-1`.
+- A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its focus outline.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
 It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.

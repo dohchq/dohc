@@ -1264,19 +1264,25 @@ function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width
   );
 }
 
-const versionRows: MenuEntry[] = [
-  { id: "main", label: "Main", checked: true, onSelect: noop },
-  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
-  MENU_SEPARATOR,
-];
+// The versions menu on a version made from another version, and on Main.
 const radioMenuItems: MenuEntry[] = [
-  ...versionRows,
+  { id: "main", label: "Main", checked: false, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: true, onSelect: noop },
   { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
-  { id: "merge", label: "Merge into Main…", icon: <Merge size={14} aria-hidden />, disabled: true, onSelect: noop },
+  {
+    id: "merge",
+    label: "Merge into Main…",
+    icon: <Merge size={14} aria-hidden />,
+    disabled: true,
+    description: "Only versions made from Main can merge into Main.",
+    onSelect: noop,
+  },
 ];
 const fieldMenuItems: MenuEntry[] = [
-  ...versionRows,
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
   {
     id: "new",
     field: {
@@ -1285,6 +1291,7 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
+      hint: "Starts as a copy of Main",
     },
   },
 ];
@@ -1797,23 +1804,23 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
-        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled with its reason">
           <div
-            className="flex h-64 w-64 items-start justify-end"
+            className="flex h-72 w-72 items-start justify-end"
             data-force-state="focus focus-visible"
-            data-force-target="[role=menuitemradio]:nth-child(1)"
+            data-force-target="[role=menuitemradio]:nth-child(2)"
           >
-            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
-              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(1)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={256} testId={`states-menu-radio-${theme}`} />
             </div>
           </div>
         </Specimen>
       </Section>
 
       <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, Enter at its end">
+        <Specimen label="field: focus, Enter at its end, hint">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
-            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
       </Section>

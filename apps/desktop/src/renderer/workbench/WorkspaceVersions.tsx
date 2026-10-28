@@ -1,7 +1,7 @@
 import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
-import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
+import { isWorkspaceUpdatingError, versionNameRefusal } from "../../ipc/errorWords";
 import { ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -78,7 +78,7 @@ export function VersionMenu(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
-  onError: (message: string, cause: unknown) => void;
+  onError: (message: string, cause: unknown, retry?: () => void) => void;
   // Bumped by the shell when version state changed outside this menu, so the
   // selector re-reads the active version instead of showing a stale name.
   refreshKey?: number;
@@ -90,11 +90,13 @@ export function VersionMenu(props: {
   const [snapshot, setSnapshot] = useState<WorkspaceVersionsSnapshot | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [newName, setNewName] = useState<string | null>(null);
-  const [inlineError, setInlineError] = useState<string | null>(null);
+  // Why the field or the engine refused the name being typed.
+  const [nameError, setNameError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
-  const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
+  // A Try again opens the dialog already merging.
+  const [mergeSource, setMergeSource] = useState<{ version: WorkspaceVersionRecord; runOnOpen: boolean } | null>(null);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -182,7 +184,7 @@ export function VersionMenu(props: {
     setMenuOpen(open);
     if (open) return;
     setNewName(null);
-    setInlineError(null);
+    setNameError(null);
   }, []);
 
   const performSwitch = useCallback(
@@ -203,7 +205,6 @@ export function VersionMenu(props: {
       // selector-refresh failure that changed nothing.
       let announced = false;
       setBusy("switch");
-      setInlineError(null);
       let releaseOperation: (() => void) | null = null;
       try {
         releaseOperation = await props.beginLineageOperation();
@@ -275,16 +276,18 @@ export function VersionMenu(props: {
     [setMenu, performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
   );
 
+  // A refused name stays in the field with its reason. Any other failure is
+  // a notice whose Try again reopens the field with the name and creates.
   const performCreate = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
       if (trimmed.length === 0) {
-        setInlineError("Give the new version a name.");
+        setNameError("Give the new version a name.");
         return;
       }
       const token = beginOperation();
       setBusy("create");
-      setInlineError(null);
+      setNameError(null);
       let releaseOperation: (() => void) | null = null;
       try {
         releaseOperation = await props.beginLineageOperation();
@@ -300,13 +303,45 @@ export function VersionMenu(props: {
         setMenu(false);
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
-        setInlineError(ipcErrorMessage(error, "Could not create that version."));
+        const refusal = versionNameRefusal(error);
+        if (refusal !== null) {
+          setNameError(refusal === "taken"
+            ? `Another version is called ${trimmed}. Choose another name.`
+            : "dohc can't use that name. Choose another name.");
+          return;
+        }
+        props.onError(ipcErrorMessage(error, `Could not create ${trimmed}.`), error, () => {
+          setMenuOpen(true);
+          setNewName(trimmed);
+          void performCreate(trimmed);
+        });
       } finally {
         releaseOperation?.();
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, setMenu, props.beginLineageOperation, props.onWorkspaceStateChanged, workspaceId],
+    [beginOperation, setMenu, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, workspaceId],
+  );
+
+  // A failed merge is a notice. Its Try again reopens the dialog for the same
+  // version and merges there, unless the version is gone by then.
+  const failMerge = useCallback(
+    (version: WorkspaceVersionRecord, error: unknown) => {
+      setMergeSource(null);
+      void refresh().catch(() => undefined);
+      props.onError(ipcErrorMessage(error, `Could not merge ${version.name} into Main.`), error, () => {
+        void refresh().then(
+          (current) => {
+            if (current === null) return;
+            const found = current.versions.find((candidate) => candidate.id === version.id);
+            if (found) setMergeSource({ version: found, runOnOpen: true });
+            else props.onError(`${version.name} no longer exists, so it can't merge into Main.`, null);
+          },
+          (readError: unknown) => props.onError(ipcErrorMessage(readError, "Version controls are unavailable right now."), readError),
+        );
+      });
+    },
+    [props.onError, refresh],
   );
 
   if (!snapshot) return null;
@@ -321,22 +356,6 @@ export function VersionMenu(props: {
       data: { "data-version-id": version.id, "data-version-name": version.name },
       onSelect: () => requestSwitch(version.id),
     })),
-    MENU_SEPARATOR,
-  ];
-  if (props.onShareVersion) {
-    const share = props.onShareVersion;
-    items.push({
-      id: "share",
-      label: "Share this version…",
-      icon: <Share2 size={14} aria-hidden />,
-      testId: "version-share",
-      onSelect: () => {
-        setMenu(false);
-        share({ id: active?.id ?? "main", name: activeName });
-      },
-    });
-  }
-  items.push(
     newName === null
       ? {
           id: "new",
@@ -344,7 +363,7 @@ export function VersionMenu(props: {
           icon: <Plus size={14} aria-hidden />,
           testId: "version-new",
           onSelect: () => {
-            setInlineError(null);
+            setNameError(null);
             setNewName("");
           },
         }
@@ -357,18 +376,21 @@ export function VersionMenu(props: {
             onSubmit: () => void performCreate(newName),
             onCancel: () => {
               setNewName(null);
-              setInlineError(null);
+              setNameError(null);
             },
             placeholder: "Version name",
             maxLength: 80,
             busy: busy === "create",
-            hint: busy === "create" ? "Creating…" : undefined,
+            hint: nameError !== null ? (
+              <span data-testid="version-menu-error" role="alert" className="text-danger">{nameError}</span>
+            ) : busy === "create" ? "Creating…" : onMain ? "Starts as a copy of Main" : `Starts as a copy of ${activeName}. It can't merge into Main.`,
             testId: "version-new-input",
           },
         },
-  );
+  ];
+  const actions: MenuEntry[] = [];
   if (!onMain && active) {
-    items.push(
+    actions.push(
       {
         id: "compare",
         label: "Compare with Main",
@@ -385,16 +407,28 @@ export function VersionMenu(props: {
         icon: <Merge size={14} aria-hidden />,
         testId: "version-merge",
         disabled: !active.canMergeIntoMain,
-        title: active.canMergeIntoMain
-          ? `Bring everything from ${active.name} into Main`
-          : "This version was created inside another version, so it can't merge straight into Main yet.",
+        description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
         onSelect: () => {
           setMenu(false);
-          setMergeSource(active);
+          setMergeSource({ version: active, runOnOpen: false });
         },
       },
     );
   }
+  if (props.onShareVersion) {
+    const share = props.onShareVersion;
+    actions.push({
+      id: "share",
+      label: "Share this version…",
+      icon: <Share2 size={14} aria-hidden />,
+      testId: "version-share",
+      onSelect: () => {
+        setMenu(false);
+        share({ id: active?.id ?? "main", name: activeName });
+      },
+    });
+  }
+  if (actions.length > 0) items.push(MENU_SEPARATOR, ...actions);
 
   return (
     <div className="relative flex min-w-0 items-center">
@@ -421,28 +455,10 @@ export function VersionMenu(props: {
             <span data-testid="version-menu-active" className="min-w-0 truncate">
               {busy === "switch" ? "Switching…" : activeName}
             </span>
-            {!onMain ? (
-              <span
-                data-testid="version-menu-dot"
-                aria-hidden
-                className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
-              />
-            ) : null}
             <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
           </button>
         )}
-      >
-        {/* The text-files limit is stated once, in the merge confirm. */}
-        {inlineError ? (
-          <p
-            data-testid="version-menu-error"
-            role="alert"
-            className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-danger"
-          >
-            {inlineError}
-          </p>
-        ) : null}
-      </Menu>
+      />
 
       {pendingSwitch !== null ? (
         <Overlay onClose={() => setPendingSwitch(null)}>
@@ -469,16 +485,10 @@ export function VersionMenu(props: {
               .
             </p>
             <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                data-testid="version-switch-save-cancel"
-                onClick={() => setPendingSwitch(null)}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
-              >
+              <SecondaryButton data-testid="version-switch-save-cancel" onClick={() => setPendingSwitch(null)}>
                 Cancel
-              </button>
-              <button
-                type="button"
+              </SecondaryButton>
+              <PrimaryButton
                 data-testid="version-switch-save-continue"
                 autoFocus
                 onClick={() => {
@@ -486,10 +496,9 @@ export function VersionMenu(props: {
                   setPendingSwitch(null);
                   if (target) void performSwitch(target);
                 }}
-                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
                 Save and switch
-              </button>
+              </PrimaryButton>
             </div>
           </div>
         </Overlay>
@@ -498,10 +507,12 @@ export function VersionMenu(props: {
       {mergeSource ? (
         <VersionMergeDialog
           workspaceId={workspaceId}
-          source={mergeSource}
+          source={mergeSource.version}
+          runOnOpen={mergeSource.runOnOpen}
           activeTabDirty={props.activeTabDirty}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+          onFailed={(error) => failMerge(mergeSource.version, error)}
           onClose={() => {
             setMergeSource(null);
             void refresh().catch(() => undefined);
@@ -525,12 +536,13 @@ type MergeStage =
       conflicts: WorkspaceVersionConflict[];
       nextAfterConflictId: string | null;
     }
-  | { stage: "resolved-all" }
-  | { stage: "error"; message: string };
+  | { stage: "resolved-all" };
 
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
+  // Merge as soon as the dialog opens, for a Try again.
+  runOnOpen?: boolean;
   activeTabDirty: boolean;
   // VersionMenu's contract: drain writes, hold the release across the IPC.
   beginLineageOperation: () => Promise<() => void>;
@@ -540,10 +552,12 @@ export function VersionMergeDialog(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  // The merge failed. The owner closes the dialog and reports it.
+  onFailed: (error: unknown) => void;
   onClose: () => void;
 }) {
   const { workspaceId, source } = props;
-  const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
+  const [stage, setStage] = useState<MergeStage>({ stage: props.runOnOpen ? "running" : "confirm" });
   const liveToken = useRequestSequence();
   // Which loaded conflict window a "Show more" answer belongs to. Every
   // replacement of the window (the merge result, each resolution's remaining
@@ -589,14 +603,15 @@ export function VersionMergeDialog(props: {
       }
     } catch (error) {
       if (!liveToken.isCurrent(token)) return;
-      setStage({
-        stage: "error",
-        message: ipcErrorMessage(error, "Could not merge this version into Main."),
-      });
+      props.onFailed(error);
     } finally {
       releaseOperation?.();
     }
-  }, [props.beginLineageOperation, props.onWorkspaceStateChanged, source.id, workspaceId]);
+  }, [props.beginLineageOperation, props.onFailed, props.onWorkspaceStateChanged, source.id, workspaceId]);
+
+  useEffect(() => {
+    if (props.runOnOpen) void runMerge();
+  }, []);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
@@ -709,15 +724,6 @@ export function VersionMergeDialog(props: {
               All conflicts are resolved. Main is up to date.
             </p>
           ) : null}
-          {stage.stage === "error" ? (
-            <p
-              data-testid="version-merge-status"
-              className="m-0 text-xs leading-5 text-danger"
-              role="alert"
-            >
-              {stage.message}
-            </p>
-          ) : null}
           {stage.stage === "conflicts" ? (
             <>
               <p className="m-0 text-xs leading-5 text-muted" role="status" data-testid="version-merge-status">
@@ -746,34 +752,17 @@ export function VersionMergeDialog(props: {
         <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
           {stage.stage === "confirm" ? (
             <>
-              <button
-                type="button"
-                data-testid="version-merge-cancel"
-                onClick={finish}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
-              >
+              <SecondaryButton data-testid="version-merge-cancel" onClick={finish}>
                 Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="version-merge-confirm"
-                autoFocus
-                onClick={() => void runMerge()}
-                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
-              >
+              </SecondaryButton>
+              <PrimaryButton data-testid="version-merge-confirm" autoFocus onClick={() => void runMerge()}>
                 Merge into Main
-              </button>
+              </PrimaryButton>
             </>
           ) : (
-            <button
-              type="button"
-              data-testid="version-merge-done"
-              disabled={!canCloseExplicitly}
-              onClick={finish}
-              className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
-            >
+            <SecondaryButton data-testid="version-merge-done" disabled={!canCloseExplicitly} onClick={finish}>
               {stage.stage === "conflicts" ? "Finish later" : "Done"}
-            </button>
+            </SecondaryButton>
           )}
         </footer>
       </div>
