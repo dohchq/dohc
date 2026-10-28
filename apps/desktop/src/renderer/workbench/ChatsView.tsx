@@ -5131,7 +5131,7 @@ export function ChatsView(props: {
                             data-testid="chats-my-agent-state"
                             className="shrink-0 text-[10px] text-subtle"
                           >
-                            not set up
+                            {agent?.launch ? "off" : "not set up"}
                           </span>
                         )}
                         <AgentPresenceHint

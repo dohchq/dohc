@@ -174,9 +174,10 @@ describe("ChatsView agents' chats", () => {
     expect(mark(rows[0]!, "Nova")).toContain("border-agent");
     expect(mark(rows[1]!, "Ranger")).toContain("text-hue-teal");
     expect(mark(rows[2]!, "Helper")).toContain("border-agent");
-    // Each row says whether its own agent is set up, and its own unread count.
+    // Each row says whether its own agent is off or has no runner, and its own unread count.
     expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
-    expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
+    expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
     expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
     expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
 
@@ -230,7 +231,9 @@ describe("ChatsView agents' chats", () => {
 
     // An agent that's off says so about itself, even while the first agent is on.
     await user.click(await screen.findByTestId("chats-channel-back"));
-    await user.click((await screen.findAllByTestId("chats-my-agent"))[2]!);
+    const scout = (await screen.findAllByTestId("chats-my-agent"))[2]!;
+    expect(within(scout).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    await user.click(scout);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Scout");
     expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("needs-setup");
     expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner configured · dispatch is off");
