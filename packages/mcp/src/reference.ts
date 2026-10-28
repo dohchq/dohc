@@ -110,6 +110,10 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   show: "moment",
 };
 
+export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
+  list: "versionList", compare: "versionCompare", conflicts: "versionConflicts",
+};
+
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
@@ -189,6 +193,9 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },
   dohc_undo_operation: { cli: "historyUndo" },
+  dohc_list_versions: { cli: "versionList" },
+  dohc_compare_version: { cli: "versionCompare" },
+  dohc_list_version_conflicts: { cli: "versionConflicts" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },
@@ -396,6 +403,9 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
+  dohc_list_versions: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_compare_version: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_list_version_conflicts: "A shared view keeps no versions of its own, so it does not offer this tool.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
@@ -465,13 +475,14 @@ function verbReturns(command: string, name: string): string {
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
             : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+              : command === "version" ? VERSION_RESULTS[name]
               : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
     // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => !["file", "history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["file", "history", "version", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
@@ -511,6 +522,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
+  if (name === "version") checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));

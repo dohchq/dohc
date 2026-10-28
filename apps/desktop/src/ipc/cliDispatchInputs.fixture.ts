@@ -53,6 +53,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "file duplicate": ["Notes/a.md"],
   "history operation": ["dohc-operation:11111111-1111-4111-8111-111111111111"], "history undo": ["dohc-operation:11111111-1111-4111-8111-111111111111"],
   "history list": [], "history show": ["change"],
+  "version list": [], "version compare": ["Draft"], "version conflicts": [],
   "automation list": ["Tasks"], "automation buttons": ["Tasks"],
   "automation switch": ["Tasks", "stamp", "on", "--base", hash, "--submit-id", "switch-1"],
   "automation runs": ["Tasks", "stamp"], "automation run": ["Tasks", "stamp", "run"],

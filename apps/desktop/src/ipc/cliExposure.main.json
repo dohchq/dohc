@@ -58,7 +58,10 @@
     "show",
     "stopAgain",
     "stopSync",
-    "threads"
+    "threads",
+    "versionCompare",
+    "versionConflicts",
+    "versionList"
   ],
   "internalVerbs": [
     "chat",
@@ -121,7 +124,10 @@
     "show",
     "stopAgain",
     "stopSync",
-    "threads"
+    "threads",
+    "versionCompare",
+    "versionConflicts",
+    "versionList"
   ],
   "publicGroups": [
     "links",
@@ -134,6 +140,7 @@
     "app",
     "file",
     "history",
+    "version",
     "automation",
     "account"
   ],
@@ -218,6 +225,9 @@
     "history undo",
     "history list",
     "history show",
+    "version list",
+    "version compare",
+    "version conflicts",
     "automation list",
     "automation switch",
     "automation buttons",
@@ -271,6 +281,10 @@
         {
           "group": "history",
           "block": "  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"
+        },
+        {
+          "group": "version",
+          "block": "  version      Read the workspace's versions, how one differs from Main, and\n               open conflicts.\n               list, compare, conflicts\n"
         },
         {
           "group": "automation",
@@ -383,6 +397,10 @@
     "chat file-mentions": "Usage: dohc chat file-mentions [options]\n\nRead one bounded page of file mentions.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --subject <subject>   A file path or objectId as JSON.\n  --cursor <cursor>     Continue the previous page.\n  --as-agent            Post and read chat as an agent.\n  --json                Print the result as JSON.\n  --help                Show help. -h does the same.\n",
     "file": "Usage: dohc file <verb> [arguments] [options]\n\nChange workspace files.\n\nVerbs:\n  duplicate   Duplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc file <verb> --help to see its arguments and options.\n",
     "file duplicate": "Usage: dohc file duplicate <path> [options]\n\nDuplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
-    "chat links": "Usage: dohc chat links <group> [options]\n\nRead one page of files mentioned in a chat.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n"
+    "chat links": "Usage: dohc chat links <group> [options]\n\nRead one page of files mentioned in a chat.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
+    "version": "Usage: dohc version <verb> [arguments] [options]\n\nRead the workspace's versions, how one differs from Main, and open conflicts.\n\nVerbs:\n  list        List the versions and which one is active.\n  compare     List the files that differ between Main and a version.\n  conflicts   List open conflicts from merges and from sync.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc version <verb> --help to see its arguments and options.\n",
+    "version list": "Usage: dohc version list [options]\n\nList the versions and which one is active.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
+    "version compare": "Usage: dohc version compare <version> [options]\n\nList the files that differ between Main and a version.\n\nName a version by its name or ID, as version list prints them. With --json,\nprint both sides' text.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --after <path>   Continue after this path from the previous page.\n  --as-agent       Post and read chat as an agent.\n  --json           Print the result as JSON.\n  --help           Show help. -h does the same.\n",
+    "version conflicts": "Usage: dohc version conflicts [options]\n\nList open conflicts from merges and from sync.\n\nWith --json, print each conflict's sides.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --after <conflict>   Continue after this conflict ID from the previous page.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n"
   }
 }

@@ -93,6 +93,9 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_list_versions: ["version.list"],
+  dohc_compare_version: ["version.compare"],
+  dohc_list_version_conflicts: ["version.conflicts.list"],
   dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
@@ -1937,6 +1940,18 @@ export async function undoOperation(ctx: ToolContext, args: { operationId: strin
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
   if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
   return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
+}
+
+// The versions menu's reads. Owner workspace only; files History does not
+// track and secret files are left out.
+export async function listVersions(ctx: ToolContext) {
+  return requestCli(ctx, "versionList", {});
+}
+export async function compareVersion(ctx: ToolContext, args: { version: string; afterPath?: string }) {
+  return requestCli(ctx, "versionCompare", args);
+}
+export async function listVersionConflicts(ctx: ToolContext, args: { afterConflictId?: string }) {
+  return requestCli(ctx, "versionConflicts", args);
 }
 
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {

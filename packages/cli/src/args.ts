@@ -83,6 +83,9 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
+  | { verb: "versionList" }
+  | { verb: "versionCompare"; version: string; afterPath?: string }
+  | { verb: "versionConflicts"; afterConflictId?: string }
   | { verb: "historyUndo"; operationId: string }
   | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
@@ -1244,6 +1247,38 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
+  },
+  version: {
+    summary: "Read the workspace's versions, how one differs from Main, and open conflicts.",
+    notes: ["Versions belong to the owning workspace."],
+    verbs: {
+      list: {
+        capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
+        parse: input => { noExtraArgs(input.operands, "version list"); return { verb: "versionList" }; },
+      },
+      compare: {
+        capabilityId: "version.compare", summary: "List the files that differ between Main and a version.", operands: "<version>",
+        flags: [{ name: "--after", value: "path", text: "Continue after this path from the previous page." }],
+        notes: ["Name a version by its name or ID, as version list prints them. With --json, print both sides' text."],
+        parse: input => {
+          const [version, ...extra] = input.operands;
+          if (!version) fail("version compare requires a version name or id");
+          noExtraArgs(extra, "version compare");
+          const afterPath = lastValue(input, "--after");
+          return { verb: "versionCompare", version, ...(afterPath ? { afterPath } : {}) };
+        },
+      },
+      conflicts: {
+        capabilityId: "version.conflicts.list", summary: "List open conflicts from merges and from sync.", operands: "",
+        flags: [{ name: "--after", value: "conflict", text: "Continue after this conflict ID from the previous page." }],
+        notes: ["With --json, print each conflict's sides."],
+        parse: input => {
+          noExtraArgs(input.operands, "version conflicts");
+          const afterConflictId = lastValue(input, "--after");
+          return { verb: "versionConflicts", ...(afterConflictId ? { afterConflictId } : {}) };
+        },
+      },
+    },
   },
   automation: {
     summary: "Press Button fields, read an automation's runs, and try a failed run again.",

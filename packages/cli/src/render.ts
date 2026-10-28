@@ -393,6 +393,23 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
         ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
     }
+    case "versionList": {
+      const list = result as CliResultByVerb["versionList"];
+      if (!list.ok) return list.reason;
+      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+    }
+    case "versionCompare": {
+      const compare = result as CliResultByVerb["versionCompare"];
+      if (!compare.ok) return compare.reason;
+      return [...compare.files.map(file => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`),
+        ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : [])].join("\n");
+    }
+    case "versionConflicts": {
+      const page = result as CliResultByVerb["versionConflicts"];
+      if (!page.ok) return page.reason;
+      return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+        ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])].join("\n");
+    }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);
     case "moment":

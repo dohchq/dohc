@@ -165,6 +165,37 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
+### `dohc_list_versions`
+
+List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId } | { ok: false, reason }`.
+
+### `dohc_compare_version`
+
+Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `version`: `string`. Required.
+- `afterPath`: `string`
+
+Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_list_version_conflicts`
+
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `afterConflictId`: `string`
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
 ### `dohc_list_changes`
 
 List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.
@@ -1742,6 +1773,50 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+
+### `dohc version`
+
+Read the workspace's versions, how one differs from Main, and open conflicts.
+
+Versions belong to the owning workspace.
+
+#### `dohc version list`
+
+```sh
+dohc version list [options]
+```
+
+List the versions and which one is active.
+
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId }`.
+
+#### `dohc version compare`
+
+```sh
+dohc version compare <version> [options]
+```
+
+List the files that differ between Main and a version.
+
+Name a version by its name or ID, as version list prints them. With --json, print both sides' text.
+
+- `--after <path>`: Continue after this path from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath }`.
+
+#### `dohc version conflicts`
+
+```sh
+dohc version conflicts [options]
+```
+
+List open conflicts from merges and from sync.
+
+With --json, print each conflict's sides.
+
+- `--after <conflict>`: Continue after this conflict ID from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
 
 ### `dohc automation`
 

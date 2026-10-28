@@ -194,6 +194,15 @@ const fileDeleteArgsSchema = z.object({
   requestId: requestIdSchema,
 }).strict();
 
+const versionListArgsSchema = z.object(argsBase).strict();
+// `version` is a version's name or id, as version list prints them.
+const versionCompareArgsSchema = z.object({
+  ...argsBase,
+  version: z.string().min(1).max(200),
+  afterPath: z.string().min(1).max(4096).optional(),
+}).strict();
+const versionConflictsArgsSchema = z.object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() }).strict();
+
 const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
@@ -491,6 +500,9 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
@@ -571,6 +583,9 @@ export const CLI_CAPABILITIES = {
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
+  versionList: ["version.list"],
+  versionCompare: ["version.compare"],
+  versionConflicts: ["version.conflicts.list"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
@@ -1142,6 +1157,74 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// A workspace's versions and the active one, whose files the folder shows.
+// canMergeIntoMain is false for a version made from another version.
+const versionListResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    versions: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      kind: z.enum(["main", "named"]),
+      createdAtMs: z.number(),
+      canMergeIntoMain: z.boolean(),
+    }).strict()),
+    activeVersionId: z.string().min(1),
+  }).strict(),
+  rawFailureSchema,
+]);
+
+// Version rows leave out secret-backed files and paths the workspace's rules
+// don't track, as History does.
+const versionCompareResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    version: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
+    // One page of the files that differ from Main. Pass nextAfterPath back as
+    // afterPath for the next page.
+    files: z.array(z.object({
+      path: z.string().min(1),
+      status: z.enum(["added", "modified", "deleted"]),
+      // Main's side; absent when the file exists only in the version.
+      currentText: z.string().optional(),
+      // The version's side; absent when the file exists only in Main.
+      incomingText: z.string().optional(),
+      // A binary file differs by its bytes, so neither side has text.
+      binary: z.boolean().optional(),
+    }).strict()),
+    nextAfterPath: z.string().min(1).nullable(),
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const conflictBinarySchema = z.object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) }).strict().nullable();
+const versionConflictsResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    // One page of open conflicts: from a merge, or from two computers editing
+    // the same file while apart (origin "sync"). A side's text is null when
+    // that side has no file or holds binary.
+    conflicts: z.array(z.object({
+      conflictId: z.string().min(1),
+      path: z.string().min(1),
+      sourceVersionId: z.string().min(1),
+      targetVersionId: z.string().min(1),
+      origin: z.enum(["merge", "sync"]),
+      contentKind: z.enum(["text", "binary"]),
+      currentText: z.string().nullable(),
+      incomingText: z.string().nullable(),
+      baseText: z.string().nullable(),
+      currentBinary: conflictBinarySchema.optional(),
+      incomingBinary: conflictBinarySchema.optional(),
+      baseBinary: conflictBinarySchema.optional(),
+    }).strict()),
+    nextAfterConflictId: z.string().min(1).nullable(),
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
 // visible copy beside its file.
@@ -1542,6 +1625,9 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  versionList: versionListResultSchema,
+  versionCompare: versionCompareResultSchema,
+  versionConflicts: versionConflictsResultSchema,
   keptCopies: keptCopiesResultSchema,
   // The engine's answer: Collection updates wait for an unfinished pull.
   collectionsWaiting: z.discriminatedUnion("ok", [

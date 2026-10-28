@@ -79,6 +79,8 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     deleteRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["deleteRetainedCopies"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
       async () => ({ versions: [], activeVersionId: "main" })), ...historyPageFields,
+    compareVersions: vi.fn<Capture["compareVersions"]>(async () => ({ files: [], nextAfterPath: null })),
+    listOpenConflictsPage: vi.fn<Capture["listOpenConflictsPage"]>(async () => ({ conflicts: [], nextAfterConflictId: null })),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
@@ -402,6 +404,74 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("moment", { id: "no-such-change" })).toEqual(unreadable);
       expect(await cli("history", "show", "notes")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: History is hidden because dohc can't read .dohc/files.toml\n" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("shows versions, a comparison and open conflicts to the CLI and the MCP, only for files History tracks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-versions-"));
+    try {
+      await mkdir(join(root, ".dohc"));
+      await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');
+      const f = fixture(root);
+      const version = (id: string, name: string, kind: "main" | "named") => ({
+        id, workspaceId: "workspace", kind, name, createdAtMs: 10, ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+      f.capture.listVersions.mockResolvedValue({ versions: [version("main", "Main", "main"), version("draft", "Draft", "named")], activeVersionId: "draft" });
+      f.capture.compareVersions.mockResolvedValue({ files: [
+        { path: "notes.md", status: "modified", currentText: "old", incomingText: "new" },
+        { path: "private/journal.md", status: "added", incomingText: "dear diary" },
+        { path: "keys.env", status: "modified", protected: true },
+      ], nextAfterPath: "notes.md" });
+      const side = (path: string, text: string) => ({ exists: true, path, contentKind: "text" as const, text });
+      const conflict = (id: string, path: string) => ({
+        id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
+        base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+      f.capture.listOpenConflictsPage.mockResolvedValue({
+        conflicts: [conflict("c1", "notes.md"), conflict("c2", "private/journal.md")], nextAfterConflictId: null });
+      await f.create().startDesktopCliServer();
+      const token = "a".repeat(64);
+      const send = async (request: CliRequestWithoutToken) => {
+        const response = cliTransportResponseSchema.parse(JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())) as unknown);
+        if (!response.ok) throw new Error(response.error);
+        return response.result;
+      };
+      const cli = (...argv: string[]) => executeCli({ argv, cwd: root, env: {}, request: send });
+      // The MCP's dohc_list_versions, dohc_compare_version and dohc_list_version_conflicts send these as the agent.
+      const mcp = (verb: "versionList" | "versionCompare" | "versionConflicts", args: Record<string, unknown> = {}) =>
+        send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
+
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
+        versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
+
+      // Untracked and secret files are left out; the page still continues.
+      expect((await cli("version", "compare", "Draft", "--after", "a.md")).stdout).toBe("modified · notes.md\nMore files; use --after notes.md\n");
+      expect(f.capture.compareVersions).toHaveBeenLastCalledWith("draft", { afterPath: "a.md" });
+      expect(await mcp("versionCompare", { version: "draft" })).toEqual({ ok: true, version: { id: "draft", name: "Draft" },
+        files: [{ path: "notes.md", status: "modified", currentText: "old", incomingText: "new" }], nextAfterPath: "notes.md" });
+      expect(await cli("version", "compare", "Later")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: No version is called Later. Run dohc version list to see them.\n" });
+      expect(await mcp("versionCompare", { version: "Main" })).toEqual({ ok: false, reason: "Versions compare with Main. Name another version." });
+
+      expect((await cli("version", "conflicts")).stdout).toBe("c1 · merge · notes.md\n");
+      expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
+        conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+
+      // Unreadable rules hide every file, so the answer names the rules file.
+      await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
+      expect(await mcp("versionCompare", { version: "Draft" })).toEqual({ ok: false, status: "policy-unreadable", unreadable: [".dohc/files.toml"],
+        reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
+      expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+
+      // A shared view keeps no versions of its own.
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      expect(await mcp("versionList")).toEqual({ ok: false, reason: "Versions belong to the owning workspace. Open it to continue." });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -90,6 +90,12 @@ function buildCliRequest(
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "versionList":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
+    case "versionCompare":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version, ...(command.afterPath ? { afterPath: command.afterPath } : {}) } };
+    case "versionConflicts":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ...(command.afterConflictId ? { afterConflictId: command.afterConflictId } : {}) } };
     case "fileDuplicate":
       return {protocolVersion: common.protocolVersion, verb: command.verb, args: {cwd: common.cwd, actor: common.actor, path: command.path, requestId: command.requestId ?? randomUUID(), agent: command.agent}};
     case "historyUndo":
@@ -339,7 +345,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
