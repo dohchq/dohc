@@ -1,8 +1,9 @@
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatChannelRecord,
   ChatDecisionRecord,
+  ChatDispatchStateForThreadResult,
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -46,7 +47,8 @@ export function ChatLane(props: {
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
-  // What a picked agent's offer says. The lane does not read its dispatch.
+  // What a picked agent's offer says. Only an agent DM's lane reads its
+  // dispatch, to stop the agent's run.
   agentSetup?: AgentSetupSummary | null;
   // A sent message asks an agent that Restricted Mode holds. The shell opens
   // main's trust dialog for the workspace named.
@@ -66,6 +68,8 @@ export function ChatLane(props: {
   const setComposer = props.draft?.onChange ?? setOwnComposer;
   const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
   const [sending, setSending] = useState(false);
+  const [dispatch, setDispatch] = useState<ChatDispatchStateForThreadResult | null>(null);
+  const [stopping, setStopping] = useState(false);
   // The first message the reader had not seen when the lane opened.
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
   const [atEnd, setAtEnd] = useState(true);
@@ -79,6 +83,7 @@ export function ChatLane(props: {
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
+  const agentDm = props.channel.kind === "agent";
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
   });
@@ -118,13 +123,20 @@ export function ChatLane(props: {
         setThreadId(null);
         setMessages([]);
         setDecisions([]);
+        setDispatch(null);
         setLoading(false);
         return;
       }
       // Read the watermark before content so a concurrent write cannot be
       // remembered as painted until its content has actually been loaded.
-      const { revision } = await bridge().getChatThreadRevision({ workspaceId, threadId: lane.id });
+      // A run can start or end without a new message, so the dispatch is
+      // read on every pass.
+      const [{ revision }, nextDispatch] = await Promise.all([
+        bridge().getChatThreadRevision({ workspaceId, threadId: lane.id }),
+        agentDm ? bridge().chatDispatchStateForThread({ workspaceId, threadId: lane.id }) : null,
+      ]);
       if (!isCurrent()) return;
+      setDispatch(nextDispatch);
       if (!force && paintedRevision.current?.threadId === lane.id && paintedRevision.current.revision === revision) {
         markRead(paintedRevision.current);
         return;
@@ -154,7 +166,7 @@ export function ChatLane(props: {
       setLoading(false);
       onError(ipcErrorMessage(error, "Could not load the chat."), error);
     }
-  }, [channelId, markRead, onError, reactions, workspaceId]);
+  }, [agentDm, channelId, markRead, onError, reactions, workspaceId]);
 
   useEffect(() => {
     setThreadId(null);
@@ -163,6 +175,8 @@ export function ChatLane(props: {
     setOwnComposer("");
     setPoll(null);
     setSending(false);
+    setDispatch(null);
+    setStopping(false);
     setFirstUnreadMessageId(null);
     setAtEnd(true);
     paintedRevision.current = null;
@@ -295,6 +309,21 @@ export function ChatLane(props: {
     }
   }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load]);
 
+  const liveRunId = dispatch?.liveRunId ?? null;
+  const stopRun = useCallback(async () => {
+    if (liveRunId === null || stopping) return;
+    const current = token.current;
+    setStopping(true);
+    try {
+      await bridge().stopAgentRun({ workspaceId, runId: liveRunId });
+      if (current === token.current) void load();
+    } catch (error) {
+      if (current === token.current) onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+    } finally {
+      if (current === token.current) setStopping(false);
+    }
+  }, [liveRunId, load, onError, stopping, workspaceId]);
+
   const threadReactions = threadId ? reactions.view(threadId) : null;
   const reactionControls = useMemo<ChatReactionControls | undefined>(() => threadId && threadReactions
     ? {
@@ -330,6 +359,28 @@ export function ChatLane(props: {
 
   return (
     <div data-testid="chats-lane" className="flex min-h-0 flex-1 flex-col">
+      {dispatch && liveRunId !== null ? (
+        <div
+          data-testid="chats-lane-dispatch-status"
+          className="flex h-7 shrink-0 items-center justify-center gap-2 border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
+        >
+          <span>agent working{dispatch.pendingCount > 0 ? ` · ${dispatch.pendingCount} queued` : ""}</span>
+          {!props.locked ? (
+            <button
+              type="button"
+              data-testid="chats-lane-stop-agent-run"
+              aria-label="Stop agent run"
+              title="Stop agent run"
+              disabled={stopping}
+              onClick={() => void stopRun()}
+              className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+            >
+              <Square size={8} fill="currentColor" aria-hidden />
+              Stop
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <ChatMessageList
         testIdPrefix="chats-lane"
         messages={messages}

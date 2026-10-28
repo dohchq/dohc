@@ -15,9 +15,9 @@ let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
 const onAgentWaitsForTrust = vi.fn();
-function lane(id = "channel-1", workspaceId = "workspace-a") {
+function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel") {
   return <ReactionStoreProvider workspaceId={workspaceId}>
-    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
+    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind })}
       locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
       onAgentWaitsForTrust={onAgentWaitsForTrust} />
   </ReactionStoreProvider>;
@@ -472,6 +472,61 @@ describe("ChatLane", () => {
     await waitFor(() => expect(composer.value).toBe(""));
     fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
     expect(choiceValues()).toEqual(["", ""]);
+  });
+
+  const working = { liveRunId: "run-1", pendingCount: 0, paused: false };
+  const idle = { liveRunId: null, pendingCount: 0, paused: false };
+
+  it("stops the agent's run from its DM", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" });
+    bridgeMock.stopAgentRun.mockImplementationOnce(async () => {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop agent run" }));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull());
+    expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", runId: "run-1" });
+  });
+
+  it("shows a run that starts without a new message", async () => {
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, pendingCount: 2 });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect((await screen.findByTestId("chats-lane-dispatch-status")).textContent).toBe("agent working · 2 queuedStop");
+  });
+
+  it("ignores a run answer from a workspace the reader left", async () => {
+    const stale = deferred<typeof working>();
+    bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(stale.promise);
+    const view = render(lane("agent-dm", "workspace-a", "agent"));
+    await waitFor(() => expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledOnce());
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", body: "Workspace B" })] });
+    view.rerender(lane("agent-dm", "workspace-b", "agent"));
+    await screen.findByText("Workspace B");
+    await act(async () => stale.resolve(working));
+    expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+  });
+
+  it("does not report a stop that finishes after the reader left the workspace", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    const stop = deferred<void>();
+    bridgeMock.stopAgentRun.mockReturnValueOnce(stop.promise);
+    const view = render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop agent run" }));
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    view.rerender(lane("agent-dm", "workspace-b", "agent"));
+    await act(async () => stop.reject(new Error("Run ended")));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("reads no run state for a group's chat", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    expect(bridgeMock.chatDispatchStateForThread).not.toHaveBeenCalled();
   });
 
   it("drops the poll with the draft when the group changes", async () => {
