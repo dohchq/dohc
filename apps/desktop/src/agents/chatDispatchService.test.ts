@@ -2606,9 +2606,9 @@ describe("chatDispatchService", () => {
 
     linkPending = false;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    // The backoff timer queued a recovery scan. Scans run one at a time on
-    // the workspace's queue, so one queued after it ends after it.
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    // The backoff timer queued a recovery scan. Work on the workspace's
+    // queue runs in order, so this empty step ends after that scan.
+    await fixture.service.betweenScans(WORKSPACE_ID, async () => {});
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
       "Nova's run produced no reply in \"Wait for my CLI reply provenance.\"",
