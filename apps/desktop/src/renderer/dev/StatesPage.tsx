@@ -2880,7 +2880,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </TopmatterSpecimen>
         </Specimen>
-        <Specimen label="locked, with <>">
+        <Specimen label="locked, every line a pill: no <>">
           <TopmatterSpecimen>
             <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} onShowSource={noop} />
           </TopmatterSpecimen>
