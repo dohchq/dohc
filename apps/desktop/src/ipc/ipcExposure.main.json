@@ -69,6 +69,7 @@
     "desktop:dismiss-share-handoff",
     "desktop:dismiss-share-skips",
     "desktop:dismiss-stop-and-restore",
+    "desktop:download-update",
     "desktop:duplicate-workspace-file",
     "desktop:end-agent-run",
     "desktop:engine-ydoc-acknowledge-lineage-replacement",

@@ -280,6 +280,8 @@ function replyToolCall(threadId: string, runId: string): string {
 // A Claude Code run loads only the person's own Claude Code settings
 // (agentToolCatalog.ts), and a Codex run doesn't trust the workspace
 // (codexRunConfig.ts). Both leave out the workspace's instruction files.
+// Both tools' profiles refuse anything that needs approval, so the run hears
+// it before a refusal turns its reply into an explanation.
 function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
   const form = replyFormFor(tool);
   const instructionsFile = tool === "claude"
@@ -287,6 +289,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
     : tool === "codex"
       ? "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there. "
       : "";
+  const approvals = tool ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line. " : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -297,7 +300,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${approvals}Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {

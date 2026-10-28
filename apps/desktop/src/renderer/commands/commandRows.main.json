@@ -130,7 +130,7 @@
     },
     {
       "id": "install-update",
-      "label": "Update and restart"
+      "label": "Restart to update"
     },
     {
       "id": "toggle-theme",

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,17 +71,31 @@ function tomlStrings(value) {
   return [...value.matchAll(/'([^']*)'|("(?:[^"\\]|\\.)*")/gu)].map((match) => match[1] ?? JSON.parse(match[2]));
 }
 
-// The dohc MCP server a Codex launch names, after checking the launch.
+// The dohc MCP server a Codex launch names, after checking the launch. The
+// run's permissions profile and folder trust follow the server's entries, and
+// on Windows so does the unelevated sandbox when no config chose one
+// (codexRunConfig.ts). The profile is named for the run and keeps .dohc
+// read-only. Every name Codex looks the workspace up by is untrusted.
 function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode"];
+  const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
+  const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
-  if (args.length !== 3 + 12 + 5 ||
+  const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
+  const root = realpathSync.native(process.cwd());
+  const rootKey = process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
+  if (args.length !== 1 + 2 * keys.length + 3 ||
     !command || cwd !== dirname(command) ||
+    !/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "") ||
+    config.get("default_permissions") !== `'${profile}'` ||
+    config.get("projects") !== `{${trust.map(([entry]) => entry).join(",")}}` ||
+    !tomlStrings(trust.map(([, key]) => key).join(",")).includes(rootKey) ||
+    (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
-    JSON.stringify(args.slice(-5)) !== JSON.stringify(["--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]) ||
+    JSON.stringify(args.slice(-3)) !== JSON.stringify(["--skip-git-repo-check", "--ephemeral", "-"]) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
     config.get("mcp_servers.dohc.enabled_tools") !== "['dohc_reply_to_chat']" ||
     config.get("mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode") !== "'approve'") {
