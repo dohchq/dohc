@@ -536,11 +536,11 @@ where
         // the relay. Its own later application counts by journal cursor.
         let tail = private_tail(conn,&held,previous_sequence,head)?;
         sequences.extend(tail.sequences.iter().copied());
-        // Earlier accepted receipts can remain beyond a private native boundary.
-        // Read at most the remaining application budget through the cursor index.
+        // A private boundary can retain accepted receipts across several intervals.
+        // Bound distinct native sequences by the uncovered native gap.
         if (sequences.len() as i64) < head-previous_sequence {
-            let mut query = conn.prepare("SELECT local_ydoc_sequence FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT ?7").map_err(read_sql)?;
-            let mut rows = query.query(params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,previous_cursor,(max_applications-receipts.len()) as i64]).map_err(read_sql)?;
+            let mut query = conn.prepare("SELECT DISTINCT local_ydoc_sequence FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor<=?6 AND local_ydoc_sequence>?7 ORDER BY journal_cursor DESC LIMIT ?8").map_err(read_sql)?;
+            let mut rows = query.query(params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,previous_cursor,previous_sequence,head-previous_sequence]).map_err(read_sql)?;
             while let Some(row) = rows.next().map_err(read_sql)? {
                 let sequence: i64 = row.get(0).map_err(read_sql)?;
                 integer(sequence,1,head)?;
