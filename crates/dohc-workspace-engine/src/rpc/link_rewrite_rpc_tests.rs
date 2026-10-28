@@ -160,7 +160,9 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
         .unwrap()
         .modified()
         .unwrap();
-    let service = Arc::new(EngineService::new());
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        crate::capture_driver::CaptureApplyProbe::default(),
+    ));
     let transport = InProcessTransport::new(service.clone());
     let opened = service
         .workspace_open(
@@ -296,6 +298,18 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
     }
     let undone = rpc(&transport, &handle, "history.undo", "undo-held").await;
     assert_eq!(undone["notRestored"], json!([]));
+    let undone = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = rpc(&transport, &handle, "history.undo", "undo-held").await;
+            if result["materialized"] == true {
+                break result;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("committed Undo placement must finish");
+    assert_eq!(undone["materialized"], true);
     for (path, expected) in [
         ("held.md", nested.as_str()),
         ("pristine.md", nested.as_str()),
@@ -313,6 +327,7 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
             .unwrap()
             .unwrap();
         assert_eq!(head.text, expected);
+        assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), expected);
     }
     assert_eq!(
         std::fs::metadata(root.join("held.md"))
