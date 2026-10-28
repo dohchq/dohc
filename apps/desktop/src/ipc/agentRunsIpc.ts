@@ -7,8 +7,10 @@ import {
   StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
   ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
+  stoppedRunOperations,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations } from "./operationTable";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -45,7 +47,7 @@ export function createAgentRunsIpc<
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
-  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
+  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "retryStoppedRun" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
   detectAgentTools(workspaceRoot: string, signal: AbortSignal): Promise<AgentToolsResult["tools"]>;
@@ -187,6 +189,28 @@ export function createAgentRunsIpc<
         input.threadId,
       );
     }));
+
+    registerOperations<typeof stoppedRunOperations, Event, Operation>({
+      handle: registerHandler,
+      assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+    }, stoppedRunOperations, {
+      retryStoppedRun: async (input) => {
+        const { workspace } = await requireEngineCapture(
+          input.workspaceId,
+          "Chats",
+        );
+        assertWritableWorkspace(workspace);
+        return {
+          queued: await chatDispatchService.retryStoppedRun(
+            input.workspaceId,
+            input.threadId,
+            input.runId,
+          ),
+        };
+      },
+    });
 
     registerHandler(CHANNELS.runnerSelfTest, async (event, payload) => {
       assertTrustedSender(event);

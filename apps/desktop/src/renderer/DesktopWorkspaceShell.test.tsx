@@ -1865,7 +1865,7 @@ describe("customize", () => {
 
   it("hands a Chats setting to the person's agent in the agent's chat", async () => {
     const agentChannel: ChatChannelRecord = {
-      id: "channel-agent", name: "Agent", slug: "agent", kind: "agent",
+      id: "channel-agent", name: "Agent", slug: "my-agent", kind: "agent", agentId: "default",
       createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
     };
     // Share answers unlock the channel's composer; without them it fails closed.
