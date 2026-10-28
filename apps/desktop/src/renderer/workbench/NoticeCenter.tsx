@@ -3,7 +3,7 @@ import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -17,8 +17,6 @@ import { RELAY_API_VERSION_CAUSE } from "@dohc/workspace-contracts/relay";
 import { SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
-import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
@@ -72,6 +70,8 @@ export interface WorkspaceErrorNotice {
   title?: string;
   message: string;
   lastLine?: string;
+  // A terminal command the message asks the person to run, shown with its copy.
+  command?: string;
   details: string;
   filePaths?: readonly string[];
   atMs: number;
@@ -579,6 +579,15 @@ export function WorkspaceErrorToast(props: {
           <div className="min-w-0 flex-1 select-text">
             <div className="flex min-w-0">{text.title}</div>
             {text.body}
+            {error.command ? (
+              <div className="mt-1 flex min-w-0 items-start gap-1">
+                <code data-testid="workspace-shell-toast-command" className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted">
+                  {error.command}
+                </code>
+                <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
+                  getText={() => error.command ?? ""} />
+              </div>
+            ) : null}
           </div>
         )}
       </NoticeText>
@@ -767,9 +776,6 @@ export function NoticeCenter(props: {
   // shell owns the dialog and the move; the notice only announces the
   // refusal and offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
-  // Opens the restart confirmation for a ready update. Without it the
-  // notice center installs directly.
-  onRestartToUpdate?: () => void;
   // Workspace errors the shell reported. Newest first in the list; the
   // newest unseen one is also a toast, so an error is noticed without
   // pushing the workspace around.
@@ -964,17 +970,6 @@ export function NoticeCenter(props: {
     },
     [cancelOpen, onOpenSentNotice, sentAccount],
   );
-  const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
-    string | null
-  >(null);
-  const [updateActionError, setUpdateActionError] = useState<string | null>(null);
-  const [installPending, setInstallPending] = useState(false);
-  const { updateState: desktopUpdateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed((update) => {
-      setUpdateActionError(update.status === "error" ? update.message : null);
-    });
-  const updateState =
-    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
 
   // Closing the toast keeps the row. A newer problem is a new revision, so
   // its toast shows again.
@@ -982,11 +977,6 @@ export function NoticeCenter(props: {
   const crashReport = props.crashReport ?? null;
   const crashToastVisible =
     crashReport !== null && crashReport.revision !== closedCrashRevision;
-
-  const readyUpdateKey =
-    updateState?.status === "ready"
-      ? `${updateState.version ?? "unknown"}:${updateState.message}`
-      : null;
 
   // Derived from the status, never accumulated: a snapshot that repeats
   // itself renders the same notice, and delivery that recovers to active (or
@@ -1107,31 +1097,6 @@ export function NoticeCenter(props: {
   );
   const { onOpenSharingDeclined } = props;
 
-  const installUpdate = useCallback(async () => {
-    if (installPending) return;
-    try {
-      setInstallPending(true);
-      // Through the guard: with set-aside drafts
-      // present the recovery dialog opens instead of the one-shot install,
-      // and its confirm makes the only quitAndInstall call.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      acceptUpdateResult(result.state);
-      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
-      if (!result.accepted || result.state.status === "error") {
-        setUpdateActionError(
-          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
-        );
-      } else {
-        setUpdateActionError(null);
-      }
-    } catch {
-      setUpdateActionError("Could not restart into the update.");
-    } finally {
-      setInstallPending(false);
-    }
-  }, [acceptUpdateResult, installPending]);
-
   useEffect(() => {
     if (!open) return;
 
@@ -1206,6 +1171,7 @@ export function NoticeCenter(props: {
         title: error.title ?? error.message,
         body: error.title ? error.message : "",
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.command ? { command: error.command } : {}),
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -1466,38 +1432,6 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (updateState?.status === "ready") {
-      next.push({
-        id: "update-ready",
-        tone: "neutral",
-        title: "Update ready",
-        body: updateActionError ?? updateState.message,
-        ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
-        ...(updateState.canInstall
-          ? {
-              actions: [{
-                label: installPending ? "Restarting" : "Restart",
-                onClick: () => {
-                  if (props.onRestartToUpdate) props.onRestartToUpdate();
-                  else void installUpdate();
-                },
-                disabled: installPending,
-              }],
-            }
-          : {}),
-        Icon: Download,
-      });
-    } else if (updateActionError) {
-      next.push({
-        id: "update-error",
-        tone: "danger",
-        title: "Update failed",
-        body: updateActionError,
-        actions: [{ label: "Open Settings", onClick: props.onOpenSettings }],
-        Icon: AlertTriangle,
-      });
-    }
-
     return next;
   }, [
     crashReport,
@@ -1536,10 +1470,6 @@ export function NoticeCenter(props: {
     onOpenLiveDocuments,
     refusalsDetails,
     refusalsKey,
-    installPending,
-    installUpdate,
-    updateActionError,
-    updateState,
   ]);
 
   // Set-aside drafts count as one notice: they may belong to paths
@@ -1571,10 +1501,6 @@ export function NoticeCenter(props: {
   const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
-  // The update toast closes once its row is read.
-  const updateRow = notices.find((notice) => notice.id === "update-ready" || notice.id === "update-error");
-  const updateToastVisible = updateRow !== undefined && unreadNotices.includes(updateRow) &&
-    (updateActionError !== null || readyUpdateKey !== dismissedUpdateToastKey);
   // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
@@ -1968,60 +1894,6 @@ export function NoticeCenter(props: {
                 aria-label="Close crash report notice"
                 onClick={() => setClosedCrashRevision(crashReport.revision)}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-          ) : null}
-          {updateToastVisible ? (
-            <div
-              data-testid="update-toast"
-              role="status"
-              className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <span className="min-w-0">
-                {updateActionError ?? updateState?.message}
-                {updateState?.installCommand ? (
-                  <code data-testid="update-toast-install-command" className="mt-1 block select-text break-all font-mono text-[11px] text-muted">
-                    {updateState.installCommand}
-                  </code>
-                ) : null}
-              </span>
-              {updateState?.installCommand ? (
-                <CopyButton iconOnly pinName label="Copy command" testId="update-toast-install-command-copy"
-                  getText={() => updateState.installCommand ?? ""} />
-              ) : null}
-              {updateState?.canInstall ? (
-                <button
-                  type="button"
-                  disabled={installPending}
-                  onClick={() => {
-                    if (props.onRestartToUpdate) props.onRestartToUpdate();
-                    else void installUpdate();
-                  }}
-                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
-                >
-                  {installPending ? "Restarting" : "Restart"}
-                </button>
-              ) : updateActionError ? (
-                <button
-                  type="button"
-                  onClick={props.onOpenSettings}
-                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
-                >
-                  Open Settings
-                </button>
-              ) : null}
-              <button
-                type="button"
-                aria-label="Dismiss update notice"
-                onClick={() => {
-                  setUpdateActionError(null);
-                  if (readyUpdateKey) {
-                    setDismissedUpdateToastKey(readyUpdateKey);
-                  }
-                }}
-                className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
               </button>

@@ -301,7 +301,7 @@ describe("application menu template", () => {
     expect((appMenu.submenu as MenuItemConstructorOptions[]).map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
       "about",
       "Check for updates",
-      "Update and restart",
+      "Restart to update",
       "separator",
       "Settings…",
       "separator",
@@ -387,7 +387,7 @@ describe("application menu template", () => {
     ]);
     expect(template.at(-1)?.role).toBe("help");
     expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
-      "Check for updates", "Update and restart", "separator", "About dohc",
+      "Check for updates", "Restart to update", "separator", "About dohc",
     ]);
     expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(false);
   });
@@ -404,7 +404,7 @@ describe("application menu template", () => {
     const { template, sendCommand } = build(false, "linux", true);
     const helpItems = items(template, "Help");
     const check = helpItems.find((i) => i.label === "Check for updates");
-    const install = helpItems.find((i) => i.label === "Update and restart");
+    const install = helpItems.find((i) => i.label === "Restart to update");
     const fakeWindow = { id: 5 };
 
     (check?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
@@ -417,7 +417,7 @@ describe("application menu template", () => {
   it("disables Help restart when no update is installable", () => {
     const { template } = build();
     const install = items(template, "Help").find(
-      (i) => i.label === "Update and restart",
+      (i) => i.label === "Restart to update",
     );
 
     expect(install?.enabled).toBe(false);

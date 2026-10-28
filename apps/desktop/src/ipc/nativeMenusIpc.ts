@@ -207,7 +207,7 @@ export function registerNativeMenusIpcHandlers<
                   item("Settings", "settings"),
                   separator,
                   item("Check for Updates…", "check-updates"),
-                  item("Update and Restart", "install-update", {
+                  item("Restart to Update", "install-update", {
                     enabled: currentUpdateState().canInstall === true,
                   }),
                   separator,

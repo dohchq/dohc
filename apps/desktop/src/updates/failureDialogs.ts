@@ -1,4 +1,5 @@
 import type { MessageBoxOptions, MessageBoxReturnValue } from "electron";
+import { installsOnQuit } from "./electronUpdater";
 import type { UpdateFailure } from "./updateAfterFailure";
 
 type MessageDialog = { showMessageBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> };
@@ -10,6 +11,29 @@ const FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
   "window-load": "This dohc window could not load.",
   "unfinished-launch": "dohc closed before it finished starting.",
 };
+
+/**
+ * Asks before anything downloads. Declining a failed startup quits; any other
+ * failure carries on without the update.
+ */
+export async function confirmDownloadDialog(
+  dialog: MessageDialog,
+  failure: UpdateFailure,
+  version: string,
+): Promise<boolean> {
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: failure === "startup" ? `Update ${version} is available.` : FAILURE_MESSAGES[failure],
+    detail: failure === "startup"
+      ? "It may fix what stopped dohc from starting. Download it?"
+      : `Update ${version} is available and may fix this. Download it?`,
+    buttons: ["Download", failure === "startup" ? "Quit" : "Not now"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+  return response === 0;
+}
 
 /**
  * Downloads can take minutes with nothing else on screen, so a native box
@@ -45,8 +69,7 @@ export async function confirmRestartDialog(
   platform: NodeJS.Platform = process.platform,
 ): Promise<boolean> {
   const quits = failure === "startup" || failure === "unfinished-launch";
-  // A downloaded update also installs on quit (autoInstallOnAppQuit), except on Linux.
-  const onQuit = platform === "linux" ? "" : " If you quit, the update installs as dohc closes.";
+  const onQuit = installsOnQuit(platform) ? " If you quit, the update installs as dohc closes." : "";
   const { response } = await dialog.showMessageBox({
     type: "info",
     message: failure === "startup" ? `Update ${version} is downloaded.` : FAILURE_MESSAGES[failure],

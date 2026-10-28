@@ -140,7 +140,8 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 | Situation | Where it goes |
 | --- | --- |
 | The whole workspace is unusable | A full-height state over the workbench, which goes inert |
-| One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
+| One thing failed, and the workspace still works | A toast at the bottom right, then a row in Notices until it is retried or dismissed |
+| An update is available or downloaded | The Update button at the top right of the title bar. No toast and no row |
 | Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
 | An action whose result the person can see | No toast and no row |
 | A control's own input is wrong | Inline, beside the control |
