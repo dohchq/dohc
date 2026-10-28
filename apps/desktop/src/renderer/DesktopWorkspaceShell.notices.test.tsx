@@ -1734,6 +1734,28 @@ describe("notices sent to you", () => {
     );
   }
 
+  it("keeps a held Notice dismissed after the Notice list updates", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const shown: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held",
+      body: "A note needs review before saving" };
+    const notices = sentNotices([shown]);
+    const view = renderWithNotices(bridge, { sentNotices: notices });
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("notice-held-dismiss"));
+    expect(notices.dismiss).toHaveBeenCalledExactlyOnceWith(shown);
+    view.rerender(<>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
+        sentNotices={{ ...notices, notices: [] }} />
+    </>);
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    expect(screen.queryByTestId("notice-held")).toBeNull();
+    expect(notices.dismiss).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a newer refusal after an older shell dismissal finishes", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));

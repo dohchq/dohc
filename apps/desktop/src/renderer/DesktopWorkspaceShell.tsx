@@ -5545,7 +5545,7 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
-      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && ["sync-refusal", "markdown-write-held"].includes(notice.kind));
       if (refusal) {
         const askedFor = workspaceId;
         void props.sentNotices!.dismiss(refusal).catch(error => {
