@@ -21,7 +21,7 @@ describe("renderer usage", () => {
     expect(UsageVersionCoverage.safeParse({ appVersion: "0.1.0", pairs: RENDERER_USAGE_COVERAGE }).success).toBe(true);
     expect(RENDERER_USAGE_COVERAGE).toHaveLength(Object.keys(CAPABILITIES).length * USAGE_DOORS.length);
     const ids = Object.values(RENDERER_USAGE_ACTIONS).flatMap(group => Object.values(group));
-    expect(ids.toSorted()).toEqual(["version.create", "version.merge", "version.conflict.resolve", "file.kept.save", "version.try", "crash.send", "automation.schedule.run", "automation.notice.retry"].toSorted());
+    expect(ids.toSorted()).toEqual(["version.create", "version.merge", "version.conflict.resolve", "file.kept.save", "crash.send", "automation.schedule.run", "automation.notice.retry"].toSorted());
     expect(RENDERER_USAGE_COVERAGE.filter(pair => pair.status === "covered").map(pair => pair.capabilityId).sort()).toEqual(ids.sort());
   });
 
@@ -54,7 +54,7 @@ describe("renderer usage", () => {
   });
 
   it("reports typing, automatic switches and unconfirmed dismissals as unknown use", () => {
-    const ids = ["search.start", "version.switch", "version.try.dismiss", "crash.dismiss", "chat.dispatch.notice.dismiss"] as const;
+    const ids = ["search.start", "version.switch", "crash.dismiss", "chat.dispatch.notice.dismiss"] as const;
     const rows = queryUsage({ version: 1, enabled: true, cleanExit: true,
       days: [{ day: "2026-10-07", appVersions: ["0.1.0"], complete: true }], counts: [],
       coverage: [{ appVersion: "0.1.0", pairs: [...RENDERER_USAGE_COVERAGE] }],
@@ -68,7 +68,6 @@ describe("renderer usage", () => {
     expect(usage).not.toHaveProperty("search");
     expect(usage).not.toHaveProperty("dispatch");
     expect(usage.version).not.toHaveProperty("switchWorkspaceVersion");
-    expect(usage.version).not.toHaveProperty("dismissTryInVersionReview");
     expect(usage.crash).not.toHaveProperty("dismissCrashReport");
   });
 
@@ -81,9 +80,8 @@ describe("renderer usage", () => {
     usage.version.createWorkspaceVersion!({ ...workspace, name: "PRIVATE NAME" }, versions, event);
     usage.version.mergeWorkspaceVersion!({ ...workspace, versionId: "PRIVATE VERSION" }, { mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null }, event);
     usage.version.resolveWorkspaceVersionConflict!({ ...workspace, conflictId: "PRIVATE CONFLICT", resolution: { kind: "keep-current" } }, { conflicts: [], nextAfterConflictId: null }, event);
-    usage.version.tryInWorkspaceVersion!({ ...workspace, task: "PRIVATE TASK" }, { versionId: "PRIVATE VERSION", versionName: "PRIVATE NAME", runId: "PRIVATE RUN" }, event);
     expect(record.mock.calls.map(([row]) => row)).toEqual([
-      ...["version.create", "version.merge", "version.conflict.resolve", "version.try"]
+      ...["version.create", "version.merge", "version.conflict.resolve"]
         .map(capabilityId => ({ capabilityId, door: "renderer" })),
     ]);
     expect(JSON.stringify(record.mock.calls)).not.toContain("PRIVATE");

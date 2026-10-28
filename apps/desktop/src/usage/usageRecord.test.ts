@@ -89,15 +89,15 @@ describe("usage record bridge", () => {
   it("switches Off keeping the saved counts, On again, and clears the counts and any temporary snapshot", async () => {
     const { store, io, disk, call } = setup();
     await store.load();
-    store.recordSuccess({ capabilityId: "version.try", door: "renderer" });
+    store.recordSuccess({ capabilityId: "version.merge", door: "renderer" });
     await expect(call("setUsageRecordEnabled", { enabled: false })).resolves.toBeUndefined();
-    expect(store.recordSuccess({ capabilityId: "version.try", door: "renderer" })).toBe(false);
+    expect(store.recordSuccess({ capabilityId: "version.merge", door: "renderer" })).toBe(false);
     let read = usageRecordView(await store.read(), DESKTOP_USAGE_COVERAGE, FILE);
     expect(read).toMatchObject({ enabled: false });
     expect(JSON.parse(disk.get(FILE)!).enabled).toBe(false);
-    expect(read.status === "readable" && read.rows.find(row => row.capabilityId === "version.try")!.doors.renderer.count).toBe(1);
+    expect(read.status === "readable" && read.rows.find(row => row.capabilityId === "version.merge")!.doors.renderer.count).toBe(1);
     await call("setUsageRecordEnabled", { enabled: true });
-    expect(store.recordSuccess({ capabilityId: "version.try", door: "renderer" })).toBe(true);
+    expect(store.recordSuccess({ capabilityId: "version.merge", door: "renderer" })).toBe(true);
     disk.set(`${FILE}.tmp`, "{}");
     await expect(call("clearUsageRecord", {})).resolves.toBeUndefined();
     expect(io.rm).toHaveBeenCalledWith(`${FILE}.tmp`, { force: true });
@@ -110,12 +110,12 @@ describe("usage record bridge", () => {
   it("reads back the unchanged record after a Clear or switch whose write failed", async () => {
     const { store, io, call } = setup();
     await store.load();
-    store.recordSuccess({ capabilityId: "version.try", door: "renderer" });
-    const tried = (read: unknown) => (read as Extract<UsageRecordResult, { status: "readable" }>)
-      .rows.find(row => row.capabilityId === "version.try")!.doors.renderer.count;
+    store.recordSuccess({ capabilityId: "version.merge", door: "renderer" });
+    const merged = (read: unknown) => (read as Extract<UsageRecordResult, { status: "readable" }>)
+      .rows.find(row => row.capabilityId === "version.merge")!.doors.renderer.count;
     io.rename.mockRejectedValueOnce(new Error("disk unavailable"));
     await expect(call("clearUsageRecord", {})).rejects.toThrow("disk unavailable");
-    expect(tried(await call("readUsageRecord", {}))).toBe(1);
+    expect(merged(await call("readUsageRecord", {}))).toBe(1);
     io.rename.mockRejectedValueOnce(new Error("disk unavailable"));
     await expect(call("setUsageRecordEnabled", { enabled: false })).rejects.toThrow("disk unavailable");
     expect(await call("readUsageRecord", {})).toMatchObject({ status: "readable", enabled: true });
@@ -146,7 +146,7 @@ describe("usage record bridge", () => {
     });
     await expect(call("clearUsageRecord", {})).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
     await expect(call("setUsageRecordEnabled", { enabled: true })).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
-    expect(store.recordSuccess({ capabilityId: "version.try", door: "renderer" })).toBe(false);
+    expect(store.recordSuccess({ capabilityId: "version.merge", door: "renderer" })).toBe(false);
     await vi.advanceTimersByTimeAsync(86_400_000);
     await store.close();
     expect(disk.get(FILE)).toBe(raw);

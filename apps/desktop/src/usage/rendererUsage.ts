@@ -6,8 +6,8 @@ import type { OperationCompletions } from "../ipc/operationTable";
 type Invocation = { capabilityId: (typeof USAGE_ACTION_IDS)[number]; door: "renderer" };
 
 // Only these table handlers have a deliberate invocation and a success signal.
-// Search follows typing; switch and Try dismissal can be automatic. Dismissals
-// do not report whether anything changed. All remain explicitly uncovered.
+// Search follows typing; switch can be automatic. Dismissals do not report
+// whether anything changed. All remain explicitly uncovered.
 // Compare is a mount/refresh reader. Mark, host choice and path retry can
 // return normally without completing their requested change.
 export const RENDERER_USAGE_ACTIONS = {
@@ -16,7 +16,6 @@ export const RENDERER_USAGE_ACTIONS = {
     mergeWorkspaceVersion: workspaceVersionOperations.mergeWorkspaceVersion.capabilityId,
     resolveWorkspaceVersionConflict: workspaceVersionOperations.resolveWorkspaceVersionConflict.capabilityId,
     saveKeptCopy: workspaceVersionOperations.saveKeptCopy.capabilityId,
-    tryInWorkspaceVersion: workspaceVersionOperations.tryInWorkspaceVersion.capabilityId,
   },
   crash: {
     sendCrashReport: crashReportOperations.sendCrashReport.capabilityId,
@@ -41,7 +40,6 @@ export function createRendererUsage<Event>(recordSuccess: (input: Invocation) =>
     mergeWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.mergeWorkspaceVersion),
     resolveWorkspaceVersionConflict: () => count(RENDERER_USAGE_ACTIONS.version.resolveWorkspaceVersionConflict),
     saveKeptCopy: (_input, result) => { if (result.status === "saved") count(RENDERER_USAGE_ACTIONS.version.saveKeptCopy); },
-    tryInWorkspaceVersion: () => count(RENDERER_USAGE_ACTIONS.version.tryInWorkspaceVersion),
   };
   const crash: OperationCompletions<typeof crashReportOperations, Event> = {
     sendCrashReport: (_input, result) => { if (result.sent) count(RENDERER_USAGE_ACTIONS.crash.sendCrashReport); },
