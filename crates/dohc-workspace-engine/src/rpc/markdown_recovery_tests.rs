@@ -1287,6 +1287,193 @@ async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
     service.workspace_close(Some(handle)).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_notifies_when_reopened_local_consent_clears_the_old_session_hold() {
+    let scratch = ScratchDir::new().unwrap();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let source = "- parent\n  - child\n";
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+        .unwrap();
+    doc.richdoc_append_paragraph("Local edit awaiting consent");
+    let key = DocKey::new("w", "main", "note").unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        store.bind_root_token(token, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("w", "main", 1, &NoFaults)
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "w".into(),
+                    version_id: "main".into(),
+                    object_id: "note".into(),
+                    path: "note.md".into(),
+                    text: source.into(),
+                    moment_id: "source".into(),
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &doc.encode_full_state(),
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("note.md"),
+                    content_kind: ContentKind::Richdoc,
+                    regime: dohc_engine_collab::Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
+            &NoFaults,
+            3,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+    }
+    std::fs::write(scratch.path().join("note.md"), source).unwrap();
+    let mut previous_session = None;
+    for reopened in [false, true] {
+        let service = EngineService::new();
+        let mut events = service.events.subscribe_with_wakes();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        open.actor
+            .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(Arc::new(
+                dohc_engine_reader::Reader::new(Some(witness_reader(&scratch, "witness-unsafe"))),
+            ))))
+            .await
+            .unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}),
+                if reopened { 2 } else { 1 },
+            )
+            .await
+            .unwrap();
+        drop(egress);
+        let id = session["sessionId"].as_str().unwrap().to_owned();
+        if reopened {
+            assert_ne!(previous_session.as_ref(), Some(&id));
+            assert!(
+                !open
+                    .actor
+                    .sync_refusal_notices("w".into())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if event.name == crate::events::SYNC_REFUSALS_CHANGED_EVENT
+                        && event.payload["workspaceId"] == "w"
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("recovery reports the persisted hold before consent");
+            let saved = service
+                .ydoc_settle(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({"sessionId":id,"allowLossySourceSha256":hex_sha256(source.as_bytes())}),
+                )
+                .await
+                .unwrap();
+            assert!(
+                saved["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Local edit awaiting consent")
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if event.name == crate::events::SYNC_REFUSALS_CHANGED_EVENT
+                        && event.payload["workspaceId"] == "w"
+                        && open
+                            .actor
+                            .sync_refusal_notices("w".into())
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("Notices is told when recovery clears the previous session's hold");
+            service
+                .ydoc_settle(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({"sessionId":id}),
+                )
+                .await
+                .unwrap();
+            assert!(
+                open
+                    .actor
+                    .sync_refusal_notices("w".into())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let saved = std::fs::read_to_string(scratch.path().join("note.md")).unwrap();
+            assert_eq!(saved.matches("Local edit awaiting consent").count(), 1);
+        } else {
+            let error = service
+                .ydoc_settle(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({"sessionId":id}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.message, "markdown-write-held");
+            assert!(
+                !open
+                    .actor
+                    .sync_refusal_notices("w".into())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+                source
+            );
+        }
+        previous_session = Some(id);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+}
+
 pub(in crate::rpc) fn witness_reader(
     scratch: &ScratchDir,
     mode: &str,

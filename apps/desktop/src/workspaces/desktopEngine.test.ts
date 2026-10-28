@@ -753,6 +753,19 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
+  it("refreshes Notices when local Markdown recovery changes its held obligations", async () => {
+    const f = fixture();
+    const changed = vi.fn();
+    f.dependencies.onRefusalsChanged = changed;
+    try {
+      await f.engine.start();
+      f.client.emit("sync.refusalsChanged", {workspaceId: "workspace"});
+      expect(changed).toHaveBeenCalledOnce();
+      f.client.emit("ydoc.remoteUpdate", {sessionId: "editor", resyncRequired: true});
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { await f.close(); }
+  });
+
   it("keeps the composed session and relay owners through a real daemon restart", async () => {
     const f = fixture(); const relaunched = deferred();
     await f.addWorkspace("workspace");

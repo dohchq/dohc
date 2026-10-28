@@ -73,6 +73,7 @@ async fn run(
     let wake = initial.actor.markdown_recovery_wake();
     drop(initial);
     let mut attempted = HashMap::<i64, String>::new();
+    let mut reported_holds = None;
     loop {
         tokio::select! { biased; () = cancel.cancelled() => return, () = wake.notified() => {} }
         let Some(open) = open.upgrade() else {
@@ -89,6 +90,19 @@ async fn run(
                 continue;
             }
         };
+        let holds: Vec<_> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let owed = &candidate.obligation;
+                owed.held_checkpoint_sha256.as_ref().map(|checkpoint| {
+                    (owed.order, checkpoint.clone(), owed.held_head_sha256.clone())
+                })
+            })
+            .collect();
+        if reported_holds.as_ref() != Some(&holds) {
+            reported_holds = Some(holds);
+            events.emit_refusals_changed(&open.workspace_id);
+        }
         let present: HashSet<_> = candidates.iter().map(|row| row.obligation.order).collect();
         attempted.retain(|order, _| present.contains(order));
         if candidates.iter().all(|candidate| {

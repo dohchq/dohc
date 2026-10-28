@@ -241,6 +241,23 @@ describe("useShellError", () => {
     expect(retry).not.toHaveBeenCalled();
   });
 
+  it("keeps a held notice read when its persisted mark arrives, then removes the completed hold", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show.", target: { path: "note.md" }, createdAtMs: 1,
+      readAtMs: null, postedHere: true };
+    const retry = vi.fn();
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]?.seen).toBe(false);
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]?.seen).toBe(true);
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]?.seen).toBe(true);
+    act(() => result.current.showSyncRefusals([], retry));
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("opens History when author names did not sync, instead of retrying sync", () => {
     const retry = vi.fn();
     const openHistory = vi.fn();

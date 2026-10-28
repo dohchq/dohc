@@ -453,7 +453,7 @@ export function useShellError(workspaceId: string) {
           title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
-          atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
+          atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
