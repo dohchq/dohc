@@ -10,7 +10,7 @@ import { liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js"
 
 afterEach(cleanupLiveDeliveryFixtures);
 
-it("retries an unmaterialized owner settlement and caches only its completed result", async () => {
+it("retries an unmaterialized owner settlement and rechecks later explicit requests", async () => {
   const f = registered();
   try {
     let sequence = 0, settles = 0;
@@ -31,10 +31,10 @@ it("retries an unmaterialized owner settlement and caches only its completed res
       ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)},
     });
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(false);
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(true);
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(true);
-    expect(settles).toBe(2);
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: false});
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
+    expect(settles).toBe(3);
   } finally {f.close();}
 });
 
