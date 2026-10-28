@@ -72,6 +72,7 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  stoppedRunOperations,
   chatDispatchPauseOperations,
   ChatDispatchPausedEvent,
   ChatAgentRequestsChangedEvent,
@@ -561,6 +562,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentRunStateOperations, invoke),
   onAgentRunState: (listener) =>
     onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
+  ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   onChatDispatchPaused: (listener) =>
     onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
