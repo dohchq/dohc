@@ -94,6 +94,8 @@ pub struct YdocResyncState {
     pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    /// Record facts the resync's deferred drain committed, in drain order.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -3866,6 +3868,7 @@ fn ydoc_resync_on_store(
         lineage_originated_here,
         recovered_paths,
         artifact_assets,
+        record_facts: drained.record_facts,
     })
 }
 

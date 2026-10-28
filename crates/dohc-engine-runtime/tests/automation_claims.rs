@@ -19,7 +19,7 @@ use dohc_engine_runtime::{
     CancellationToken, LifecycleState, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
-use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::{GateFaults, PanicFaults, ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
@@ -192,6 +192,112 @@ fn claim_rows(db: &Path, workspace_id: &str) -> Vec<(String, String, Option<Stri
             Ok::<_, rusqlite::Error>(rows)
         })
         .expect("read claims")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_returns_deferred_record_facts_once_in_drain_order() {
+    for count in [1_i64, 3] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
+        seed_collection_replica(&db, WS, OBJECT, PATH, &initial);
+        let key = DocKey::new(WS, "main", OBJECT).expect("key");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &initial)
+            .expect("collection base");
+        let mut store = EngineStore::open(&db, 10).expect("store");
+        let base = store
+            .put_binary_blob(&doc.encode_full_state())
+            .expect("base blob");
+        let envelope = |seq: i64, sha: &str| ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WS.to_owned(),
+            origin_id: "resync-peer".to_owned(),
+            origin_seq: seq,
+            relay_seq: Some(seq),
+            op_kind: "ydoc.update".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main", "objectId": OBJECT, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": base, "isBaseState": seq == 0,
+                "actorOriginId": "resync-peer"
+            }),
+            recorded_at_ms: 100 + seq,
+        };
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        apply_ydoc_envelope(
+            &mut store,
+            &mut cache,
+            &envelope(0, &base),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("replicated base");
+        for seq in 1..=count {
+            let bytes = doc
+                .frontmatter_set("status", &format!("remote-{seq}"))
+                .expect("remote field edit");
+            let sha = store.put_binary_blob(&bytes).expect("edit blob");
+            let applied = apply_ydoc_envelope(
+                &mut store,
+                &mut cache,
+                &envelope(seq, &sha),
+                &NoFaults,
+                &AlwaysLive,
+            )
+            .expect("defer same-lineage edit");
+            assert!(matches!(
+                applied.primary,
+                dohc_engine_sync::ApplyDisposition::Applied(result) if result.deferred
+            ));
+        }
+        drop(store);
+
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 200).expect("actor").actor;
+        let mismatched = actor
+            .ydoc_resync(
+                key.clone(),
+                Some("old-session-claim".to_owned()),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("claim replacement handshake");
+        assert!(mismatched.record_facts.is_empty());
+        assert_eq!(mismatched.lineage_claim_id.as_deref(), Some(base.as_str()));
+
+        let state = actor
+            .ydoc_resync(
+                key.clone(),
+                Some(base.clone()),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("drain through resync");
+        assert_eq!(state.record_facts.len(), count as usize);
+        for (index, facts) in state.record_facts.iter().enumerate() {
+            let seq = index as i64 + 1;
+            assert_eq!(facts.source, Some(("resync-peer".to_owned(), seq)));
+            assert_eq!(facts.collection_path, "tasks");
+            assert_eq!(facts.record_id, RECORD);
+            assert!(!facts.created);
+            assert_eq!(facts.fields.len(), 1);
+            assert_eq!(facts.fields[0].field_name, "status");
+            assert_eq!(
+                facts.fields[0].next_json,
+                Some(serde_json::json!(format!("remote-{seq}")).to_string())
+            );
+        }
+        let retried = actor
+            .ydoc_resync(key, Some(base), CancellationToken::new(), None)
+            .await
+            .expect("retry resync");
+        assert!(retried.record_facts.is_empty());
+        supervisor.close(&db).expect("close actor");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1562,6 +1668,8 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,
             },

@@ -2248,6 +2248,7 @@ impl EngineService {
                     lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
+                    record_facts: Vec::new(),
                 },
                 Some(draft.descriptor),
             ),
@@ -2269,6 +2270,13 @@ impl EngineService {
                 None,
             ),
         };
+        // Post-commit: the resync's drain committed these history rows, and no
+        // other path fires a parked update's events. Never claims —
+        // drained updates are synced, and only the origin device claims its
+        // automation triggers (ADR 0008).
+        for facts in &state.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session
                 .set_lineage_claim(state.lineage_claim_id.clone())

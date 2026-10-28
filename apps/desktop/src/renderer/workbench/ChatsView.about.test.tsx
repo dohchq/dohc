@@ -73,7 +73,7 @@ describe("a conversation tab tells About what it shows", () => {
 
   it("publishes the agent's chat under the tab's name", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent" })],
+      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent", agentId: "default" })],
       fileThreads: [],
     });
     renderTab(chatTabPath({ kind: "channel", id: "agent-1" }));
@@ -84,7 +84,7 @@ describe("a conversation tab tells About what it shows", () => {
 
   it("leaves the agent out of the faces in its own chat, as the page's header does", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent" })],
+      channels: [channel(), channel({ id: "agent-1", name: "agent", slug: "agent", kind: "agent", agentId: "default" })],
       fileThreads: [],
     });
     const collaboration = presenceWith([

@@ -28,6 +28,7 @@ const WORKSPACE = {
 const dispatch = {
   workspaceId: WORKSPACE.workspaceId,
   triggerMessageId: "trigger",
+  agentId: "default",
   threadId: "thread",
   state: "running" as const,
   runId: "run-fixed",
@@ -41,6 +42,7 @@ const run = {
   runId: "run-fixed",
   threadId: "thread",
   triggerMessageId: "trigger",
+  agentId: "default",
   command: "codex",
   startedAtMs: 3,
   logPath: "logs/run-fixed/run-fixed.log",
@@ -75,8 +77,6 @@ function dispatchResult(request: Request): JsonValue {
       return { workspace: "handle-1" };
     case "workspace.close":
       return { closed: true };
-    case "chats.dispatch.recordEligibleTriggers":
-      return 2;
     case "chats.dispatch.enqueue":
       return { enqueued: true };
     case "chats.dispatch.claimNextPending":
@@ -205,48 +205,6 @@ describe("live agent dispatch store", () => {
     ).toEqual(Array(5).fill(AGENT_DISPATCH_RPC_DEADLINE_MS));
   });
 
-  it("deadlines and transport-retries eligible-trigger recording", async () => {
-    let attempts = 0;
-    const client = mockClient((request) => {
-      if (request.method === "workspace.open") {
-        return { workspace: `handle-record-${attempts}` };
-      }
-      if (request.method === "workspace.close") return { closed: true };
-      if (request.method !== "chats.dispatch.recordEligibleTriggers") {
-        throw new Error(`Unexpected request: ${request.method}`);
-      }
-      attempts += 1;
-      if (attempts === 1) {
-        throw {
-          code: "transport-error",
-          message: "record response was lost",
-        };
-      }
-      return 2;
-    });
-    const sessions = new EngineWorkspaceSessions(
-      { currentClient: () => client },
-      { sleep: async () => undefined },
-    );
-    openSessions.push(sessions);
-    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
-
-    await expect(
-      store.recordEligibleTriggers({
-        workspaceId: WORKSPACE.workspaceId,
-        verifiedUserId: "user",
-      }),
-    ).resolves.toBe(2);
-    const requests = client.requests.filter(
-      ({ method }) => method === "chats.dispatch.recordEligibleTriggers",
-    );
-    expect(requests).toHaveLength(2);
-    expect(requests.map(({ deadlineMs }) => deadlineMs)).toEqual([
-      AGENT_DISPATCH_RPC_DEADLINE_MS,
-      AGENT_DISPATCH_RPC_DEADLINE_MS,
-    ]);
-  });
-
   it("live_dispatch_round_trips_every_store_method_and_extra_rpc", async () => {
     const client = mockClient(dispatchResult);
     const sessions = new EngineWorkspaceSessions({
@@ -259,16 +217,11 @@ describe("live agent dispatch store", () => {
     const { store } = handle;
 
     await expect(
-      store.recordEligibleTriggers({
-        workspaceId: WORKSPACE.workspaceId,
-        verifiedUserId: "user",
-      }),
-    ).resolves.toBe(2);
-    await expect(
       store.recordTrigger({
         workspaceId: WORKSPACE.workspaceId,
         triggerMessageId: "trigger",
         threadId: "thread",
+        agentId: "default",
       }),
     ).resolves.toBe(true);
     await expect(
@@ -281,6 +234,7 @@ describe("live agent dispatch store", () => {
       store.failPendingForThread({
         workspaceId: WORKSPACE.workspaceId,
         threadId: "thread",
+        agentId: "default",
         reason: "stop",
       }),
     ).resolves.toBe(1);
@@ -350,6 +304,7 @@ describe("live agent dispatch store", () => {
       handle.requeueFailedTrigger({
         workspaceId: WORKSPACE.workspaceId,
         triggerMessageId: "trigger",
+        agentId: "default",
         runId: run.runId,
       }),
     ).resolves.toBe(true);
@@ -430,7 +385,6 @@ describe("live agent dispatch store", () => {
       ),
     ).toEqual(
       new Set([
-        "chats.dispatch.recordEligibleTriggers",
         "chats.dispatch.enqueue",
         "chats.dispatch.claimNextPending",
         "chats.dispatch.failPendingForThread",
@@ -565,6 +519,7 @@ describe("live agent dispatch store", () => {
       handle.requeueFailedTrigger({
         workspaceId: WORKSPACE.workspaceId,
         triggerMessageId: dispatch.triggerMessageId,
+        agentId: dispatch.agentId,
         runId: run.runId,
       }),
     ).resolves.toBe(true);

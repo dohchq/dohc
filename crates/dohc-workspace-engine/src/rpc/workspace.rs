@@ -1183,8 +1183,7 @@ impl EngineService {
             None
         } else {
             // Mandatory readiness barrier: derived mention rows must exist before
-            // this workspace can expose a mention read or advance the dispatch
-            // scan cursor past an older `@agent` message.
+            // this workspace can expose a mention read.
             Self::read_under_ctx(
                 &cancellation,
                 "workspace.open (mention backfill)",
@@ -2331,6 +2330,7 @@ mod tests {
                 &RequestContext::unbounded(),
                 Some(first_handle.clone()),
                 json!({
+                    "agentId": "default",
                     "triggerMessageId": "trigger-survives",
                     "threadId": "thread-survives",
                     "nowMs": 10,

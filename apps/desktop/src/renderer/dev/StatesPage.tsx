@@ -9,8 +9,10 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatDispatchStoppedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
+  ChatRunRecord,
   ChatThreadRecord,
   CloudStatusResult,
   DatabaseSnapshotResult,
@@ -847,6 +849,50 @@ function ChatThreadSpecimen() {
         threadLocked={false}
         flashMessageId={null}
         runRecords={{}}
+        stoppedRun={null}
+        stoppedRunBusy={false}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
+// A run dohc's quit or restart stopped: under the request when it posted
+// nothing, under its last post when it did.
+const STOPPED_REQUEST = chatMessage("opening", "Draft day 2 from the bookings, and add the ferry times.", 0);
+const STOPPED_REPLY: ChatMessageRecord = {
+  id: "stopped-reply", threadId: "post-plain", authorKind: "agent", authorDisplayName: "Claude Code",
+  presentation: neutralPresentation, body: "Ferry times are in day-2.md. Starting on the hotels next.",
+  createdAtMs: CHAT_AT + 60_000, parentMessageId: "opening",
+};
+const STOPPED_RUN: ChatRunRecord = {
+  runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
+  startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
+};
+function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"]; posted: boolean; retryable?: boolean; busy?: boolean }) {
+  return (
+    <div className="w-[560px]">
+      <ThreadMessages
+        nav={CHAT_THREAD_NAV}
+        messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
+        stoppedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", ending: props.ending, retryable: props.retryable ?? true }}
+        stoppedRunBusy={props.busy ?? false}
+        onRetryStoppedRun={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -869,11 +915,11 @@ const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 // The agent picked from the roster, in each state its offer says. The
 // specimen agent takes the default agent colour, not a chosen one.
 const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
-const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+const AGENT_DRAFT = "@Nova can you check funnel.csv against last week?";
 function agentOffer(state: AgentOfferState): AgentAddressedOffer {
   return {
     kind: "agent-addressed",
-    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    agent: { id: "agent:default", kind: "agent", handle: "Nova", label: "Nova" },
     presentation: { group: "states-agent", hue: null, self: false },
     state,
     working: state === "working",
@@ -1103,6 +1149,19 @@ const LONG_NOTICE = {
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
   copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
   onDismiss: noop,
 };
 
@@ -1728,6 +1787,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2368,6 +2428,18 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
           <ChatThreadSpecimen />
         </Specimen>
+        <Specimen label="stopped when dohc quit, before the agent posted">
+          <ChatStoppedRunSpecimen ending="quit" posted={false} />
+        </Specimen>
+        <Specimen label="stopped when dohc restarted, after the agent posted">
+          <ChatStoppedRunSpecimen ending="restarted" posted />
+        </Specimen>
+        <Specimen label="stopped, Try again pressed">
+          <ChatStoppedRunSpecimen ending="quit" posted={false} busy />
+        </Specimen>
+        <Specimen label="stopped again after its second attempt">
+          <ChatStoppedRunSpecimen ending="quit" posted retryable={false} />
+        </Specimen>
       </Section>
 
       <Section part="settings-frame" title="Settings frame">
@@ -2759,6 +2831,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <PropertiesPanel body={LONG_PILL} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a list: its items, with commas">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\ntags:\n  - kyoto\n  - food\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a list it can't edit: a lock, and why on hover or focus">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />
@@ -3044,7 +3126,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               room the end of its conversation keeps, so it gets that room. */}
           <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
             <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
-              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              value={`@Nova ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
               sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={

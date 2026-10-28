@@ -58,6 +58,10 @@ struct ChatMessageSendParams {
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -257,6 +261,8 @@ pub(super) struct MessageWire<'a> {
     origin: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     automation: Option<AutomationWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<&'a str>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -283,6 +289,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             parent_message_id: message.parent_message_id.as_deref(),
             origin: message.origin.as_deref(),
             automation: message.automation.as_ref().map(AutomationWire::from),
+            author_agent_id: message.author_agent_id.as_deref(),
         }
     }
 }
@@ -608,6 +615,8 @@ impl EngineService {
                         .map(LocalAttachmentInput::from)
                         .collect(),
                     automation: params.automation.map(ChatMessageAutomation::from),
+                    author_agent_id: params.author_agent_id,
+                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -881,6 +890,7 @@ mod tests {
             created_at_ms: 10,
             automation: None,
             link_author: None,
+            author_agent_id: None,
             attachments: Vec::new(),
         }
     }
