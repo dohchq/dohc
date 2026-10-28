@@ -1,6 +1,7 @@
 import type { ChatDispatchNotice, ChatDispatchStoppedRun } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import { cutText } from "@dohc/automation-executor/automation-chat";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";
@@ -58,31 +59,29 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
   }
 }
 
-const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
-  "no-reply": "produced no reply",
-  "timed-out": "timed out",
-  failed: "failed",
-  "not-started": "failed to start",
-  restarted: "stopped when dohc restarted",
-  quit: "stopped when dohc quit",
-  stopped: "stopped",
-  restricted: "did not start in Restricted Mode",
-};
+const NOTICE_AGENT_NAME_MAX_CHARS = 32;
 
-// "Your agent finished in "Plan day 2"" or "Your agent's run in "Plan day
-// 2" failed", shortening the thread's name to fit. Without a name, the
-// sentence names no thread.
-function runNoticeTitle(outcome: RunOutcome, thread: string): string {
-  const sentence = (name: string | null) => {
-    const where = name === null ? "" : ` in "${name}"`;
-    if (outcome === "stopped") return `Stopped the run${where}`;
-    return outcome === "finished"
-      ? `Your agent finished${where}`
-      : `Your agent's run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
-  };
-  if (!thread) return sentence(null);
-  const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
-  return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
+// "Atlas's run failed in "Plan day 2"" or "Restricted Mode blocked Atlas's
+// run in "Plan day 2"". What happened comes first and names last, so a clamp
+// cuts only a name: the agent's Settings name at 32 characters, then the
+// thread's to fit. An agent no longer in Settings is "Your agent".
+function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
+  const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
+  const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
+  const sentence = {
+    finished: `${agent ?? "Your agent"} finished`,
+    stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
+    "no-reply": `${whose(true)} produced no reply`,
+    "timed-out": `${whose(true)} timed out`,
+    failed: `${whose(true)} failed`,
+    "not-started": `${whose(true)} failed to start`,
+    restarted: `dohc restarted and stopped ${whose(false)}`,
+    quit: `dohc quit and stopped ${whose(false)}`,
+    restricted: `Restricted Mode blocked ${whose(false)}`,
+  } satisfies Record<RunOutcome, string>;
+  const what = sentence[outcome];
+  if (!thread) return what;
+  return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
 }
 
 // A run that failed to start says why and what to do next.
@@ -775,7 +774,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
+      title: runNoticeTitle(
+        outcome,
+        await threadTitle(workspace, run.threadId),
+        (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
+      ),
       body: runNoticeBody(run, outcome, nodeAvailable),
       target: { thread: run.threadId, run: run.runId },
     });
