@@ -35,6 +35,7 @@ import {
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliVerb,
+  type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
@@ -96,6 +97,10 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_versions: ["version.list"],
   dohc_compare_version: ["version.compare"],
   dohc_list_version_conflicts: ["version.conflicts.list"],
+  dohc_create_version: ["version.create"],
+  dohc_switch_version: ["version.switch"],
+  dohc_merge_version: ["version.merge"],
+  dohc_resolve_version_conflict: ["version.conflict.resolve"],
   dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
@@ -1952,6 +1957,19 @@ export async function compareVersion(ctx: ToolContext, args: { version: string; 
 }
 export async function listVersionConflicts(ctx: ToolContext, args: { afterConflictId?: string }) {
   return requestCli(ctx, "versionConflicts", args);
+}
+// The versions menu's changes. Each first saves the edits open in dohc.
+export async function createVersion(ctx: ToolContext, args: { name: string }) {
+  return requestCli(ctx, "versionCreate", args);
+}
+export async function switchVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionSwitch", args);
+}
+export async function mergeVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionMerge", args);
+}
+export async function resolveVersionConflict(ctx: ToolContext, args: { conflictId: string; resolution: VersionResolution }) {
+  return requestCli(ctx, "versionResolve", args);
 }
 
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {

@@ -391,3 +391,49 @@ test("an agent creates a document and comments on it where the person reads comm
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Before an agent changes versions, the window saves what the person typed.
+// Main holds the typing until the window has heard the change is coming, so
+// the change can only keep it by waiting for the window.
+test("an agent's version change keeps what the person typed but main had not seen", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  let desktop: Desktop | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "# Plan\n\nThe person writes here.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await waitForCliEndpoint(temp.homeDir);
+    await openDocument(page, "notes/plan.md");
+    await page.evaluate(() => {
+      const heard: string[] = [];
+      (globalThis as { __dohcRounds?: string[] }).__dohcRounds = heard;
+      window.dohcDesktop!.onVersionRound((message) => heard.push(message.kind));
+    });
+
+    const editor = page.getByTestId("markdown-editor");
+    await editor.getByText("The person writes here.").click();
+    await page.keyboard.press("End");
+    await holdEditorUpdates(desktop);
+    await page.keyboard.type(" Queued.");
+    await expect(editor).toContainText("The person writes here. Queued.");
+
+    const creating = agentCli(temp, "versionCreate", { name: "Ideas" });
+    await expect.poll(() => page.evaluate(() => (globalThis as { __dohcRounds?: string[] }).__dohcRounds), { timeout: 30_000 })
+      .toEqual(["begin"]);
+    await releaseEditorUpdates(desktop);
+    await expect(creating).resolves.toEqual({ ok: true, version: { id: expect.any(String), name: "Ideas" } });
+    await expect.poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 }).toContain("The person writes here. Queued.");
+    await expect(editor).toContainText("The person writes here. Queued.");
+
+    await expect(agentCli(temp, "versionSwitch", { version: "Main" })).resolves.toMatchObject({ ok: true, version: { name: "Main" } });
+    await expect.poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 }).toContain("The person writes here. Queued.");
+    await expect(editor).toContainText("The person writes here. Queued.");
+    assertDesktopEngineHealthy(desktop.logs);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

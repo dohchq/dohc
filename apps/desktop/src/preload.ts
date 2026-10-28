@@ -41,6 +41,8 @@ import {
   EngineYDocSaveStateEvent,
   ExitRoundAnswerPayload,
   ExitRoundMessage,
+  VersionRoundAnswerPayload,
+  VersionRoundMessage,
   ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
@@ -535,6 +537,10 @@ const bridge: DohcDesktopBridge = {
   onExitRound: (listener) => onEvent(CHANNELS.exitRound, ExitRoundMessage, listener),
   answerExitRound: async (payload) => {
     await ipcRenderer.invoke(CHANNELS.exitRoundAnswer, ExitRoundAnswerPayload.parse(payload));
+  },
+  onVersionRound: (listener) => onEvent(CHANNELS.versionRound, VersionRoundMessage, listener),
+  answerVersionRound: async (payload) => {
+    await ipcRenderer.invoke(CHANNELS.versionRoundAnswer, VersionRoundAnswerPayload.parse(payload));
   },
   holdQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.holdQuit);

@@ -25,6 +25,11 @@ function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
+  return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+    ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
+}
+
 function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
   const local = preview.workspaces.map((workspace) => lineSafe(workspace.name));
   return [
@@ -404,11 +409,25 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return [...compare.files.map(file => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`),
         ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : [])].join("\n");
     }
-    case "versionConflicts": {
+    case "versionConflicts":
+    case "versionResolve": {
       const page = result as CliResultByVerb["versionConflicts"];
       if (!page.ok) return page.reason;
-      return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
-        ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])].join("\n");
+      return conflictLines(page).join("\n");
+    }
+    case "versionCreate": {
+      const created = result as CliResultByVerb["versionCreate"];
+      return created.ok ? `Created and switched to ${lineSafe(created.version.name)} · ${created.version.id}` : created.reason;
+    }
+    case "versionSwitch": {
+      const switched = result as CliResultByVerb["versionSwitch"];
+      return switched.ok ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed` : switched.reason;
+    }
+    case "versionMerge": {
+      const merge = result as CliResultByVerb["versionMerge"];
+      if (!merge.ok) return merge.reason;
+      return [`Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
+        ...conflictLines(merge)].join("\n");
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);

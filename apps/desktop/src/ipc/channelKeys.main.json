@@ -242,6 +242,8 @@
   "updateState",
   "usageRecordStopped",
   "userSettingsChanged",
+  "versionRound",
+  "versionRoundAnswer",
   "windowFullScreen",
   "withdrawShareChanges",
   "workspaceActivated",

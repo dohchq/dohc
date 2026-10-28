@@ -220,6 +220,7 @@ import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare, type Op
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
+import { useVersionRounds } from "./shell/useVersionRounds";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
@@ -2286,6 +2287,7 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  useVersionRounds(workspaceId, beginLineageOperation, onVersionWorkspaceStateChanged);
   // The Explorer selects these paths once their rows render. The newest
   // request wins, so a slow import cannot take the selection back.
   const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; paths: readonly string[] } | null>(null);

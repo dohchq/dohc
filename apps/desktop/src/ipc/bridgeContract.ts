@@ -5938,6 +5938,30 @@ export const ExitRoundAnswerPayload = z.object({
 });
 export type ExitRoundAnswerPayload = z.infer<typeof ExitRoundAnswerPayload>;
 
+// One version round message from main. Before the CLI or MCP changes a
+// workspace's versions, `begin` asks each window showing it to save its open
+// edits and hold new Collection writes, as the window does before its own
+// version change. `end` closes the round. With `changed`, the change ran, and
+// the window moves its editors and history to `activeVersionId`, or asks
+// which version is active when it is absent.
+export const VersionRoundMessage = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("begin"), roundId: z.number().int().positive(), workspaceId: z.string().min(1) }),
+  z.object({
+    kind: z.literal("end"),
+    roundId: z.number().int().positive(),
+    changed: z.boolean(),
+    activeVersionId: z.string().min(1).optional(),
+  }),
+]);
+export type VersionRoundMessage = z.infer<typeof VersionRoundMessage>;
+// Ready once the window saved its edits and holds new ones, or the reason it
+// couldn't, in a person's words.
+export const VersionRoundAnswerPayload = z.discriminatedUnion("ready", [
+  z.object({ roundId: z.number().int().positive(), ready: z.literal(true) }),
+  z.object({ roundId: z.number().int().positive(), ready: z.literal(false), reason: z.string().min(1).max(1000) }),
+]);
+export type VersionRoundAnswerPayload = z.infer<typeof VersionRoundAnswerPayload>;
+
 export const UpdateCheckResult = z.object({
   checked: z.boolean(),
   state: UpdateStateEvent,
@@ -7528,6 +7552,10 @@ export interface DohcDesktopBridge
   // round id it was asked under.
   onExitRound(listener: (message: ExitRoundMessage) => void): () => void;
   answerExitRound(payload: ExitRoundAnswerPayload): Promise<void>;
+  // Version rounds: before the CLI or MCP changes this workspace's versions,
+  // main asks the window to save its open edits, then says what changed.
+  onVersionRound(listener: (message: VersionRoundMessage) => void): () => void;
+  answerVersionRound(payload: VersionRoundAnswerPayload): Promise<void>;
   // A late draft vetoes an approved exit's unload; the renderer tells main
   // the approval is off, and resumes the quit once the user confirms.
   holdQuit(): Promise<void>;
