@@ -429,6 +429,32 @@ it("wakes the owner after a held consent settle and keeps its native session usa
   await provider.evict();
 });
 
+it.each([false, true])("only requests owner settlement for a consented hold after resync=%s", async afterResync => {
+  const engine = seedPlaintextEngine("seed");
+  const held = new DaemonRefusalError({code: "CONFLICT", message: "markdown-write-held", retry: "no"}, undefined);
+  const pending = new DaemonRefusalError({code: "INVALID_PARAMS", message: "ydoc-remote-updates-pending", retry: "no"}, undefined);
+  let attempt = 0;
+  const adapter = new YdocLiveAdapter({
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.settle) {
+        if (afterResync && attempt++ % 2 === 0) throw pending;
+        throw held;
+      }
+      return engine.sendRequest(request);
+    },
+  });
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const wanted = vi.fn();
+  session.onSettlementWanted(wanted);
+  await expect(session.settle()).rejects.toBe(held);
+  expect(wanted).not.toHaveBeenCalled();
+  await expect(session.settle({allowLossySourceSha256: "a".repeat(64)})).rejects.toBe(held);
+  expect(wanted).toHaveBeenCalledOnce();
+  await session.evict();
+  adapter.dispose();
+});
+
 it.each([148, 161, 192, 193, 572, 575, 577])("retains CommonMark %i source and an edited paragraph through client reopen and reconnect", async number => {
   const example = commonmark.examples.find(row => row.example === number)!;
   const source = example.markdown + "\n\nEditable paragraph.\n";

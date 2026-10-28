@@ -1172,11 +1172,11 @@ export class YdocAdapterSession {
         try {
           raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
         } catch (retryError) {
-          if (isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
+          if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
           throw retryError;
         }
       } else {
-        if (isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
+        if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
         throw error;
       }
     }
