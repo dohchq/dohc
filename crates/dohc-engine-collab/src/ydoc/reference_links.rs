@@ -54,7 +54,8 @@ impl Ydoc {
                             let mut source = String::new();
                             let mut plain = true;
                             for run in text.diff(&txn, YChange::identity) {
-                                plain &= run.attributes.as_ref().is_none_or(|attrs| attrs.is_empty());
+                                plain &=
+                                    run.attributes.as_ref().is_none_or(|attrs| attrs.is_empty());
                                 match run.insert {
                                     Out::Any(Any::String(value)) => source.push_str(&value),
                                     _ => return None,
@@ -94,10 +95,16 @@ impl Ydoc {
         let mut resolved_paragraphs = Vec::new();
         let mut resolved_bytes = 0;
         for (_, text, source, plain) in &paragraphs {
-            // Other inline syntax needs the desktop reader's full parse.
+            // Other inline syntax needs the desktop reader's full parse. A bare URL takes the brackets
+            // after it.
             if !*plain
                 || definition_paragraph(source)
-                || source.contains(['\\', '`', '!', '<', '>', '&', '*', '_', '~', '{', '}'])
+                || source.contains(['\\', '`', '!', '<', '>', '&', '*', '_', '~', '{', '}', '='])
+                || source.contains("://")
+                || source
+                    .as_bytes()
+                    .windows(4)
+                    .any(|part| part.eq_ignore_ascii_case(b"www."))
             {
                 continue;
             }

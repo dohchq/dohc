@@ -11687,7 +11687,10 @@ mod projection_tests {
             .unwrap();
         assert_eq!(native.project_richdoc().unwrap(), canonical);
         assert_eq!(canonical, source.trim_end());
-        assert_eq!(settled(&desktop, &canonical, source).as_deref(), Some(source));
+        assert_eq!(
+            settled(&desktop, &canonical, source).as_deref(),
+            Some(source)
+        );
     }
 
     fn assert_reference_link_pass_refused(source: &str) {
@@ -11696,7 +11699,11 @@ mod projection_tests {
             .unwrap();
         let before = doc.encode_full_state();
         assert!(!doc.resolve_reference_links(source), "{source:?}");
-        assert_eq!(doc.encode_full_state(), before, "a refused pass must not edit");
+        assert_eq!(
+            doc.encode_full_state(),
+            before,
+            "a refused pass must not edit"
+        );
     }
 
     #[test]
@@ -11749,6 +11756,10 @@ mod projection_tests {
             "See *[r][bags]*.",
             "See _[r][bags]_.",
             "See ![r][bags].",
+            "See https://x.com/[r][bags].",
+            "See WWW.x.com/[r][bags].",
+            "See [==r==][bags].",
+            "See ==[r][bags]==.",
         ] {
             for source in [
                 format!("{unsupported}\n\nSee [r][bags].\n\n[bags]: https://e.com"),

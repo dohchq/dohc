@@ -2426,7 +2426,10 @@ mod collection_relation_cleanup_tests {
             .unwrap()
             .unwrap();
         let reference = seeded.doc.markdown_source_reference().unwrap();
-        assert_eq!(seeded.doc.markdown_source(&reference).as_deref(), Some(SOURCE));
+        assert_eq!(
+            seeded.doc.markdown_source(&reference).as_deref(),
+            Some(SOURCE)
+        );
         assert_eq!(
             dohc_engine_collab::read_marker(&store, &key)
                 .unwrap()
@@ -2548,12 +2551,7 @@ mod collection_relation_cleanup_tests {
         let (scratch, mut store, mut cache) = adopted_lossy_fixture(false);
         delete_lossy_fixture_target(&scratch, &mut store);
         reconcile_lossy_fixture(&mut store, &mut cache, scratch.path(), 8);
-        assert_history_restore(
-            true,
-            &scratch,
-            &mut store,
-            &mut cache,
-        );
+        assert_history_restore(true, &scratch, &mut store, &mut cache);
     }
 
     #[test]
@@ -2565,7 +2563,9 @@ mod collection_relation_cleanup_tests {
             .unwrap();
         let update = persisted
             .doc
-            .frontmatter_drop_relation_target_preserving_markdown_source("related", TARGET_ID, false)
+            .frontmatter_drop_relation_target_preserving_markdown_source(
+                "related", TARGET_ID, false,
+            )
             .unwrap()
             .unwrap();
         ydoc_record_update_on_store(
@@ -2596,12 +2596,7 @@ mod collection_relation_cleanup_tests {
             std::fs::read(scratch.path().join(PACKING)).unwrap(),
             REWRITTEN.as_bytes()
         );
-        assert_history_restore(
-            false,
-            &scratch,
-            &mut store,
-            &mut cache,
-        );
+        assert_history_restore(false, &scratch, &mut store, &mut cache);
     }
 
     fn settle_lossy_fixture(
@@ -2761,7 +2756,10 @@ mod collection_relation_cleanup_tests {
                 assert_eq!(moment_count(store), before_count + 1);
             }
             Err(error) => {
-                assert!(!expect_exact, "restore after cleanup must succeed: {error:?}");
+                assert!(
+                    !expect_exact,
+                    "restore after cleanup must succeed: {error:?}"
+                );
                 let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
                 let snapshot = VersionedTextStore::new(store)
                     .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
