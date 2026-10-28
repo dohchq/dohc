@@ -24,6 +24,9 @@ type TitlebarPanelToggle = {
 // 1100px, where the names would start to cut, quick-open narrows to its icon
 // and shortcut; the header sets the width for both.
 const QUICK_OPEN_WIDTH = "var(--quick-open-width)";
+// Centered, unless the names at their floors reach it: then it starts 12px
+// after them, as the left group ends 12px before it.
+const QUICK_OPEN_LEFT = `max(50% - ${QUICK_OPEN_WIDTH} / 2, anchor(--titlebar-names-end right, 0px) + 12px)`;
 
 function LayoutToggle(props: {
   label: string;
@@ -249,18 +252,13 @@ export function Titlebar(props: {
         ) : null}
       </div>
 
-      {/* Centered, unless the names at their floors reach it: then it starts
-          12px after them, as the left group ends 12px before it. */}
       {props.onQuickOpen ? (
         <button
           type="button"
           data-testid="titlebar-quick-open"
           title="Go to…"
           onClick={props.onQuickOpen}
-          style={{
-            width: QUICK_OPEN_WIDTH,
-            left: `max(50% - ${QUICK_OPEN_WIDTH} / 2, anchor(--titlebar-names-end right, 0px) + 12px)`,
-          }}
+          style={{ width: QUICK_OPEN_WIDTH, left: QUICK_OPEN_LEFT }}
           className="titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden className="shrink-0" />
@@ -269,12 +267,16 @@ export function Titlebar(props: {
         </button>
       ) : null}
 
-      {/* Ends 12px before quick-open, as the left group starts 12px after it. */}
+      {/* Starts 12px after quick-open, wherever the names put it, and ends
+          16px before the window controls, as it would in the row. Buttons
+          that can't fit run toward the window controls, not over quick-open. */}
       {hasRightGroup ? (
         <div
           data-testid="titlebar-right-group"
-          className="ml-auto flex flex-1 items-center justify-end gap-2"
-          style={props.onQuickOpen ? { maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${rightInset} - 28px)` } : undefined}
+          className={`flex items-center justify-end-safe gap-2 ${props.onQuickOpen ? "absolute inset-y-0" : "ml-auto flex-1"}`}
+          style={props.onQuickOpen
+            ? { left: `calc(${QUICK_OPEN_LEFT} + ${QUICK_OPEN_WIDTH} + 12px)`, right: `calc(${rightInset} + 16px)` }
+            : undefined}
         >
           {/* The button's own box: its width decides whether the label fits. */}
           {props.update ? <div className="@container flex min-w-7 flex-1 justify-end">{props.update}</div> : null}
@@ -313,7 +315,7 @@ export function Titlebar(props: {
           macOS has no right-side controls. */}
       <div
         aria-hidden
-        className={`${hasRightGroup ? "ml-2" : "ml-auto"} h-full shrink-0`}
+        className={`${hasRightGroup && !props.onQuickOpen ? "ml-2" : "ml-auto"} h-full shrink-0`}
         style={{ width: rightInset }}
       />
     </header>
