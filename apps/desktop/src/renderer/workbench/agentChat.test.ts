@@ -40,6 +40,14 @@ describe("agentChatIdentity", () => {
       presentation: neutralPresentation,
     });
   });
+
+  // Dispatch wakes no agent for a chat without an agent id, so it isn't the default agent's.
+  it("keeps the stored name of a chat that names no agent", () => {
+    expect(agentChatIdentity({ name: "Scout" }, AGENTS)).toEqual({
+      label: "Scout",
+      presentation: neutralPresentation,
+    });
+  });
 });
 
 describe("orderAgentChats", () => {

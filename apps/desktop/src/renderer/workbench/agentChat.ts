@@ -24,7 +24,7 @@ export function agentChatIdentity(
     return { label: agent.name, presentation: { group: "", hue: agent.hue === "olive" ? null : agent.hue, self: false } };
   }
   return {
-    label: (channel.agentId ?? DEFAULT_AGENT_ID) === DEFAULT_AGENT_ID ? "Your agent" : channel.name,
+    label: channel.agentId === DEFAULT_AGENT_ID ? "Your agent" : channel.name,
     presentation: neutralPresentation,
   };
 }
