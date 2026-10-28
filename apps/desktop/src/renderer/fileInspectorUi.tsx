@@ -239,7 +239,7 @@ export function OpenExternallyLink(props: { workspaceId: string; path: string; o
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
       .catch((error: unknown) =>
-        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+        props.onError?.("dohc could not open this note externally.", error, openExternally, `lossy-note-open:${props.path}`),
       );
   };
   return (
