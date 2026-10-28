@@ -834,26 +834,13 @@ it.skipIf(engine.missing).each([
     } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
     await pushUntilDrained(relay);
+    // The unchanged seed has no journal interval, so it leaves no settlement to publish and nothing for the relay to refuse.
     const refusedDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
-    const seedRefusals: Array<{originId: string; originSeq: number}> = [];
     try {
-      const refused = refusedDb.prepare("SELECT p.origin_id,p.origin_seq,p.authors_json,r.payload_json FROM live_settlement_publication_admissions p JOIN replication_log r USING(workspace_id,origin_id,origin_seq) WHERE p.workspace_id=? AND json_extract(p.admission_json,'$.status')='refused'").all(workspaceId);
-      expect(refused).toHaveLength(hasId ? 0 : 1);
-      for (const row of refused) {
-        const payload = JSON.parse(String(row.payload_json));
-        // The unchanged seed has no journal interval. The later adoption does.
-        expect(payload.settlementReference.record).toMatchObject({previousCursor: 0, terminalCursor: 0, applicationCount: 0});
-        expect(payload.payloadBeforeBlobSha256).toBe(payload.payloadAfterBlobSha256);
-        expect(payload.authors).toBeUndefined();
-        expect(row.authors_json).toBeNull();
-        seedRefusals.push({originId: String(row.origin_id), originSeq: Number(row.origin_seq)});
-      }
+      expect(refusedDb.prepare("SELECT origin_id,origin_seq FROM live_settlement_publication_admissions WHERE workspace_id=? AND json_extract(admission_json,'$.status')='refused'").all(workspaceId)).toEqual([]);
     } finally {refusedDb.close();}
     expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
-      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
-        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
-          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
-      });
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({notices: []});
     peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
@@ -946,10 +933,7 @@ it.skipIf(engine.missing).each([
       return readFile(join(rootB, path), "utf8");
     }, {timeout: 120_000}).toBe(markdown);
     expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
-      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({
-        notices: seedRefusals.map(coordinate => expect.objectContaining({...coordinate,
-          document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
-      });
+      new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {workspaceId}, {workspace}))).toEqual({notices: []});
     expect(errors).toEqual([]);
     if (stopQuarantine) {
       await delivery?.stop(); delivery = undefined;
