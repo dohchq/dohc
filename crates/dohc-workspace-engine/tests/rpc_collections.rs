@@ -3556,7 +3556,11 @@ async fn wait_for_record_events(
 }
 
 fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
-    assert_eq!(notices.len(), 2, "one field change and one update: {notices:?}");
+    assert_eq!(
+        notices.len(),
+        2,
+        "one field change and one update: {notices:?}"
+    );
     assert_eq!(
         notices
             .iter()
