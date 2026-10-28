@@ -105,6 +105,47 @@ async fn markdown_hold_winning_lineage_keeps_the_losing_source_and_recovers_loca
     }
 }
 
+#[test]
+fn markdown_hold_winning_lineage_equal_text_needs_no_recovery_copy() {
+    for deferred in [false, true] {
+        let mut f = Fixture::new();
+        let local = Ydoc::wire();
+        local.apply(&f.doc.encode_full_state()).unwrap();
+        let source = local.project(ContentKind::Richdoc).unwrap().content;
+        dohc_engine_collab::claim_base_at_relay(&mut f.store, &f.key, ContentKind::Richdoc,
+            &local.encode_full_state(), &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+            &NoFaults, 1000).unwrap();
+        f.store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE ydoc_docs SET path=?1", [PATH])
+            .map_err(SyncError::persist)).unwrap();
+        let dependency = Ydoc::wire();
+        dependency.plaintext_insert(0, "Missing predecessor");
+        let pending = dependency.plaintext_insert(0, "Pending dependency");
+        f.store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+            tx, &f.key, &pending, None, None, 1001)).unwrap();
+        assert!(dohc_engine_collab::load_persisted(&f.store, &f.key)
+            .unwrap().unwrap().doc.has_pending_dependencies());
+        let incoming = Ydoc::wire();
+        incoming.richdoc_append_paragraph("Accepted base text");
+        assert_eq!(incoming.project(ContentKind::Richdoc).unwrap().content, source);
+        let bytes = incoming.encode_full_state();
+        f.claim = f.store.put_binary_blob(&bytes).unwrap();
+        let mut op = f.op(0, &bytes, true);
+        op.relay_seq = Some(10);
+        let leases: &dyn LeaseProbe = if deferred { &AlwaysLive } else { &NoLiveLeases };
+        apply_ydoc_envelope(&mut f.store, &mut f.cache, &op, &NoFaults, leases).unwrap();
+        if deferred {
+            assert_eq!(drain_deferred_ydoc_for_key(&mut f.store, &mut f.cache, &f.key, &NoFaults).unwrap().drained, 1);
+        }
+        assert_eq!(f.store.table_row_count("snapshots").unwrap(), 0);
+        assert_eq!(f.store.table_row_count("conflicts").unwrap(), 0);
+        let persisted = dohc_engine_collab::load_persisted(&f.store, &f.key).unwrap().unwrap().doc;
+        assert_eq!(persisted.project(ContentKind::Richdoc).unwrap().content, source);
+        assert_eq!(dohc_engine_collab::read_marker(&f.store, &f.key).unwrap().unwrap().lineage_claim_id,
+            Some(f.claim.clone()));
+    }
+}
+
 struct Fixture {
     scratch: ScratchDir,
     db: std::path::PathBuf,

@@ -3164,7 +3164,8 @@ fn preserve_incomplete_base_in_tx(
         search_policy,
         resolver,
     )?;
-    let local_needs_recovery = !open && opened.is_none();
+    let local_needs_recovery = !open && opened.is_none()
+        && hex_sha256(local.as_bytes()) != hex_sha256(incoming.as_bytes());
     let mut recovered_paths = Vec::new();
     if open || external.is_some() || local_needs_recovery {
         let preserved = if open || local_needs_recovery {
