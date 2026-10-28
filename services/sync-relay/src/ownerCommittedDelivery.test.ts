@@ -216,17 +216,26 @@ it("settles a terminal again when its owner wants it, past the settlement an ord
   expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
-// Proves: a held settlement of a terminal ends the reuse of that terminal's
-// earlier settlement, so the next ordinary settle asks the host again.
-it("asks the host again after a held settlement of a terminal it settled before", async () => {
+// Proves: a held settlement of a terminal, or one that has not reached the file, ends
+// the reuse of that terminal's earlier settlement, so the next ordinary settle asks the host again.
+it.each(["held", "unmaterialized"] as const)("asks the host again once a settlement of a terminal it settled before comes back %s", async outcome => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
   expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
-  f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
-    {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
-  expect(await f.consumer.settleWanted(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
-  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
-  expect(settled).toEqual([receipt(2), receipt(2)]);
+  if (outcome === "held") {
+    f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
+      {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
+    expect(await f.consumer.settleWanted(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  } else {
+    const settle = f.client.sendRequest.getMockImplementation()!;
+    f.client.sendRequest.mockImplementationOnce(async (input, signal) => {
+      const reply = await settle(input, signal) as {id: number; result: {status: string; settlement: object}};
+      return {...reply, result: {...reply.result, settlement: {...reply.result.settlement, materialized: false}}};
+    });
+    expect(await f.consumer.settleWanted(document)).toMatchObject({settlementId: "settlement-2", materialized: false});
+  }
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 2, materialized: true});
+  expect(settled).toHaveLength(outcome === "held" ? 2 : 3);
 });
 
 it("leaves an earlier unresolved file write to backoff without settling", async () => {

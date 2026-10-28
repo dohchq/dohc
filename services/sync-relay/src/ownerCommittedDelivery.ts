@@ -152,9 +152,9 @@ export class OwnerCommittedDelivery {
             if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
             const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
             check(); latest.assertCurrent();
-            if (settlementPending(settled)) {adopted.settled = undefined; pendingReason = settled.reason; break;}
+            adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
+            if (settlementPending(settled)) {pendingReason = settled.reason; break;}
             if (!settled.materialized) { pendingReason = SETTLEMENT_UNMATERIALIZED; break; }
-            adopted.settled = settled;
             settledSinceApply = true;
             continue;
           }
@@ -192,8 +192,7 @@ export class OwnerCommittedDelivery {
       if (!wanted && adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
       const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
-      if (settlementPending(settled)) {adopted.settled = undefined; return settled;}
-      if (settled.materialized) adopted.settled = settled;
+      adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
       return settled;
     } finally { this.#active.delete(key); }
   }
