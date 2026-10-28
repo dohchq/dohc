@@ -748,7 +748,7 @@ export function createNoticeStore(deps: {
           // Says only what holds for every refused save: its author names did not sync.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = markdownHeld ? lossyNoteRefusal(document?.path ?? "") : attributionRefused
+          const body = markdownHeld ? lossyNoteRefusal(document?.path || "a file") : attributionRefused
             ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
             : bindingChanged
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`

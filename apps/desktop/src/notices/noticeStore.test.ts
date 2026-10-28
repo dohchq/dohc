@@ -1271,6 +1271,19 @@ it("rebuilds refusal Notices from the engine and keeps read marks across restart
   expect((await again.store.list()).notices).toEqual([]);
 });
 
+it.each([null, ""])("names a file in held Notices without a path (%s)", async path => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "pathless-hold", originId: null, originSeq: null,
+    refusalCoordinates: [{ obligationOrder: 7, checkpointSha256: "held", headSha256: null }],
+    reason: "markdown-write-held",
+    document: path === null ? null : { versionId: "main", path, objectId: "note", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [shown] = (await first.store.list()).notices;
+  expect(shown).toMatchObject({ kind: "markdown-write-held", target: {} });
+  expect(shown!.body).toBe("dohc can't change a file without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.");
+});
+
 it("keeps local hold identity through restart and dismisses only the shown checkpoint", async () => {
   const firstCoordinate = { obligationOrder: 7, checkpointSha256: "first", headSha256: null };
   const nextCoordinate = { ...firstCoordinate, checkpointSha256: "next" };
