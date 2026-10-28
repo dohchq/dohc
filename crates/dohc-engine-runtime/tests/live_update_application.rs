@@ -1044,8 +1044,10 @@ async fn markdown_hold_accepted_prefix_survives_restart_without_publishing_a_pri
             baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
             covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
             max_pending_bytes,max_pending_age_ms) VALUES('relay-A','adoption','workspace','main','one',?1,?2,\
-            'source',?3,?4,0,0,?3,?3,0,0,0,'null','{}',1000000,1000000)",
+            'source',?3,?4,0,0,?3,?3,0,0,0,'null','{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
             rusqlite::params![claim,serde_json::to_string(&binding).unwrap(),hex_sha256(source.as_bytes()),source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
             .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);
@@ -1103,7 +1105,7 @@ async fn markdown_hold_accepted_prefix_survives_restart_without_publishing_a_pri
                     5,
                     Arc::new(NoFaults),
                     tokio_util::sync::CancellationToken::new(),
-                    Some(0),
+                    None,
                 )
                 .await
                 .unwrap();

@@ -81,7 +81,7 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
     let binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(&root, binding).unwrap();
     let db = engine_db_path(&root).unwrap();
-    let nested = format!("- parent\n  - child\n\n{BODY}\n");
+    let nested = format!("- parent\n  - child\n\n{BODY}");
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(binding, &NoFaults).unwrap();
     VersionedTextStore::new(&mut store)
@@ -103,8 +103,17 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
         std::fs::write(root.join(&path), source).unwrap();
         if object != "safe" {
             let doc = Ydoc::wire();
-            doc.richdoc_wikilinks_for_test(source).unwrap();
+            doc.richdoc_wikilinks_after_markdown_for_test("- parent\n  - child", BODY)
+                .unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
+            let projection = doc.project(ContentKind::Richdoc).unwrap().content;
+            assert_eq!(
+                doc.settled_markdown_source(&projection, || Ok::<_, ()>(Some(source.to_owned())))
+                    .unwrap()
+                    .as_deref(),
+                Some(source),
+                "{projection:?}"
+            );
             if object == "held" {
                 doc.richdoc_append_paragraph("Accepted edit awaiting a safe baseline");
             }
@@ -157,7 +166,7 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
         .workspace_open(
             &RequestContext::unbounded(),
             json!({
-                "rootDir":root.to_string_lossy(),"workspaceId":WS,"captureMode":"none",
+                "rootDir":root.to_string_lossy(),"workspaceId":WS,
             }),
         )
         .await
@@ -165,6 +174,8 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
     let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
     let open = service.open(Some(&handle)).unwrap();
     let _links_hold = open.actor.hold_link_drain();
+    lock(&open.capture).as_ref().unwrap().request_shutdown();
+    drop(open.capture_apply_gate.lock().await);
     open.actor
         .configure_reader_resolver(Arc::new(
             dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
@@ -210,7 +221,7 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
         .await
         .unwrap();
     let forward = rpc(&transport, &handle, "history.rewriteLinks", "forward-held").await;
-    assert_eq!(forward["uncheckedCount"], 1);
+    assert_eq!(forward["uncheckedCount"], 1, "{forward}");
     assert_eq!(forward["complete"], false);
     assert_eq!(forward["documents"], 2);
     assert_eq!(

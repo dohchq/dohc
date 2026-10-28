@@ -7,7 +7,6 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 
 struct Fixture {
-    scratch: ScratchDir,
     db: PathBuf,
     supervisor: crate::WorkspaceSupervisor,
     actor: ActorHandle,
@@ -15,6 +14,7 @@ struct Fixture {
     claim: String,
     source: String,
     pending: Arc<reader_resolver::PendingProof>,
+    scratch: ScratchDir,
 }
 
 impl Fixture {
@@ -263,9 +263,11 @@ impl Fixture {
                  baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
                  covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
                  max_pending_bytes,max_pending_age_ms) VALUES ('relay','adoption','w','main','note',?1,?2,'source',?3,?4,\
-                 0,0,?3,?3,0,?5,0,'null','{}',1000000,1000000)",
+                 0,0,?3,?3,0,?5,0,'null','{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
                 params![binding.lineage_claim_id, serde_json::to_string(&binding).unwrap(), source_sha,
-                    source_length, marker.head_update_seq]).map_err(StorageError::persist_public)
+                    source_length, marker.head_update_seq]).map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay", &binding)
+                    .map_err(StorageError::persist_public)
             })?;
             Ok(())
         }).await.unwrap();
@@ -1358,7 +1360,7 @@ async fn markdown_hold_no_session_recovery_keeps_debt_when_an_outside_head_repla
                     path: "note.md".into(),
                     text: "Outside change\n".into(),
                     moment_id: "outside".into(),
-                    metadata_origin: "capture".into(),
+                    metadata_origin: "test".into(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
@@ -1471,7 +1473,11 @@ async fn markdown_hold_absent_reader_snapshot_refuses_before_the_hold_and_keeps_
                     Some(grant.clone())
                 )
                 .await,
-            Err(RuntimeError::Collab(CollabError::MarkdownReaderUnavailable))
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "dohc could not verify this file. Try again."
+                }
+            ))
         ));
         assert!(!grant.is_consumed());
         assert!(!f.scratch.path().join("note.md").exists());
@@ -1907,6 +1913,13 @@ async fn markdown_hold_safe_expired_and_native_notes_save_without_conversion_con
 #[tokio::test]
 async fn markdown_hold_converted_head_allows_ordinary_edits_before_and_after_witness_clear() {
     let f = Fixture::new().await;
+    f.actor.run(|store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute_batch(
+            "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+             INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+        ).map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
     f.settle(false, Some(f.consent()))
         .await
         .unwrap()
@@ -2038,11 +2051,13 @@ fn markdown_hold_validated_source_override_saves_without_consent_but_rejects_oth
         VersionedTextStore::new(&mut store)
             .ensure_main_version("w", "main", 1, &NoFaults)
             .unwrap();
-        store.write_with(&NoFaults, |tx| tx.execute(
-            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('w','note',1)", [])
-            .map_err(StorageError::persist_public)).unwrap();
         let source = "- parent\n  - child\n";
         let successor = format!("---\ntitle: Saved\n---\n\n{source}");
+        if absent {
+            store.write_with(&NoFaults, |tx| tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('w','note',1)", [])
+                .map_err(StorageError::persist_public)).unwrap();
+        }
         let key = DocKey::new("w", "main", "note").unwrap();
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
@@ -2287,7 +2302,7 @@ async fn markdown_hold_outside_head_change_refuses_the_old_consent_without_losin
                     path: "note.md".into(),
                     text: "Outside change\n".into(),
                     moment_id: "outside".into(),
-                    metadata_origin: "capture".into(),
+                    metadata_origin: "test".into(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
@@ -2563,7 +2578,7 @@ async fn markdown_hold_owner_only_debt_survives_restart_at_an_already_settled_te
             21,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Some(0),
+            None,
         )
         .await
         .unwrap();

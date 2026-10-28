@@ -311,9 +311,19 @@ pub fn advance_refresh_head_in(
 mod tests {
     use super::*;
 
+    fn connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE versions(workspace_id TEXT,version_id TEXT,PRIMARY KEY(workspace_id,version_id));
+             INSERT INTO versions VALUES ('w','main');",
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
     fn markdown_audited_hold_coalesces_and_requires_cursor_and_native_sequence() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = connection();
         conn.execute_batch(include_str!(
             "../../dohc-engine-storage/src/markdown_write_obligations.sql"
         ))
@@ -397,7 +407,7 @@ mod tests {
 
     #[test]
     fn markdown_refresh_tracks_only_ordinary_successors_of_its_consented_head() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = connection();
         conn.execute_batch(include_str!(
             "../../dohc-engine-storage/src/markdown_write_obligations.sql"
         ))

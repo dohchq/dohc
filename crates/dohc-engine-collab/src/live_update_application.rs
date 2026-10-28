@@ -941,6 +941,29 @@ struct Registration {
     binding: LiveObjectBinding,
     live: bool,
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn initialize_adopted_history_for_test(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let baseline =
+        get_binary_blob(tx, &binding.lineage_claim_id)?.ok_or(ApplicationError::Corrupt)?;
+    let held = Registration {
+        workspace_id: binding.workspace_id.clone(),
+        namespace: namespace.into(),
+        coordinate: ApplicationHostCoordinate {
+            host_id: "test-host".into(),
+            host_epoch: 1,
+            instance_id: "test-instance".into(),
+            connection_id: "test-connection".into(),
+        },
+        binding: binding.clone(),
+        live: true,
+    };
+    accepted_history::initialize(tx, &held, &baseline)
+}
 /// One trusted delivery owner for an engine workspace. Never deserialize this
 /// from an event. The production caller authenticates registration and namespace.
 pub struct ApplicationOwner {

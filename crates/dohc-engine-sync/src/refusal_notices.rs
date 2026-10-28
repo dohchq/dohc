@@ -426,6 +426,11 @@ mod tests {
             self as obligations, Kind, Obligation,
         };
         let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE versions(workspace_id TEXT,version_id TEXT,PRIMARY KEY(workspace_id,version_id));
+             INSERT INTO versions VALUES ('ws','main');",
+        )
+        .unwrap();
         conn.execute_batch(include_str!(
             "../../dohc-engine-storage/src/markdown_write_obligations.sql"
         ))

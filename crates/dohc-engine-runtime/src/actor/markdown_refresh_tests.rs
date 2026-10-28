@@ -3,12 +3,12 @@ use dohc_engine_domain::WriteText;
 use dohc_engine_testkit::ScratchDir;
 
 struct Fixture {
-    _scratch: ScratchDir,
     store: EngineStore,
     cache: WriterDocCache,
     key: DocKey,
     source: String,
     converted: String,
+    _scratch: ScratchDir,
 }
 
 impl Fixture {
@@ -77,25 +77,31 @@ impl Fixture {
     }
 
     fn head(&mut self, text: &str, moment: &str, complete: bool) {
-        let result = VersionedTextStore::new(&mut self.store)
-            .write_text(
-                &WriteText {
-                    workspace_id: "w".into(),
-                    version_id: "main".into(),
-                    object_id: "note".into(),
-                    path: "note.md".into(),
-                    text: text.into(),
-                    moment_id: moment.into(),
-                    metadata_origin: "ydoc".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 4,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .unwrap();
+        let TxnOutcome::Committed(result) = self
+            .store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: "w".into(),
+                        version_id: "main".into(),
+                        object_id: "note".into(),
+                        path: "note.md".into(),
+                        text: text.into(),
+                        moment_id: moment.into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 4,
+                        request_id: None,
+                    },
+                )
+            })
+            .unwrap()
+        else {
+            panic!("fixture write crashed")
+        };
         self.store
             .write_with(&NoFaults, |tx| {
                 enqueue_write(tx, &result, Preimage::Absent, "ydoc")?;

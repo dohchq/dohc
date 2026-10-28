@@ -9,12 +9,12 @@ const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PATH: &str = "tasks/a.md";
 
 struct Fixture {
-    scratch: ScratchDir,
     store: EngineStore,
     cache: WriterDocCache,
     key: DocKey,
     source: String,
     modified: std::time::SystemTime,
+    scratch: ScratchDir,
 }
 
 impl Fixture {
@@ -704,22 +704,7 @@ async fn markdown_hold_collection_driver_waits_for_witness_and_proof_before_one_
             .map_err(StorageError::persist_public)
         })
         .unwrap();
-    let doc = f.doc();
-    let resolver = dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
-        dohc_engine_reader::Reader::new(None),
-    ));
-    let proof = match f.store.read_with(|conn| {
-        dohc_engine_collab::reader_resolver::resolve(
-            conn,
-            &f.key,
-            &doc,
-            &doc.project(ContentKind::Richdoc)?.content,
-            Some(&resolver),
-        )
-    }) {
-        Err(CollabError::MarkdownReaderPending(proof)) => proof,
-        _ => panic!("expected a proof preparation request"),
-    };
+    let proof = super::super::reader_tests::pending_snapshot_proof();
     let marker = dohc_engine_collab::read_marker(&f.store, &f.key)
         .unwrap()
         .unwrap();

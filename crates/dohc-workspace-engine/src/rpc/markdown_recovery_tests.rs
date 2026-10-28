@@ -23,6 +23,10 @@ async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligati
     let db = engine_db_path(&scratch).unwrap();
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(token, &NoFaults).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute_batch(
+        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+         INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+    ).map_err(StorageError::persist_public)).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
@@ -384,6 +388,10 @@ async fn markdown_recovery_undo_keeps_a_dismissed_cleanup_notice_dismissed_while
     let db = engine_db_path(&scratch).unwrap();
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(token, &NoFaults).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute_batch(
+        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+         INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+    ).map_err(StorageError::persist_public)).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
@@ -617,6 +625,10 @@ async fn markdown_recovery_completed_blocker_retries_skipped_work_without_a_docu
     let db = engine_db_path(&scratch).unwrap();
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(token, &NoFaults).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute_batch(
+        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+         INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+    ).map_err(StorageError::persist_public)).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
@@ -987,6 +999,10 @@ async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
         .remove(&mut wire.transact_mut(), "dohcLineageEpoch");
     let mut store = EngineStore::open(&db, 1).unwrap();
     store.bind_root_token(token, &NoFaults).unwrap();
+    store.write_with(&NoFaults, |tx| tx.execute_batch(
+        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+         INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+    ).map_err(StorageError::persist_public)).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
@@ -1293,11 +1309,13 @@ pub(in crate::rpc) fn witness_reader(
     let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &manifest.to_string())
         .replace("MODE", &serde_json::to_string(mode).unwrap());
-    let bundle = scratch.path().join("reader.cjs");
+    static NEXT_READER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_READER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bundle = scratch.path().join(format!("reader-{id}.cjs"));
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
     manifest["sources"] = json!([]);
-    let manifest_path = scratch.path().join("reader-manifest.json");
+    let manifest_path = scratch.path().join(format!("reader-{id}-manifest.json"));
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     dohc_engine_reader::Config {
         node,

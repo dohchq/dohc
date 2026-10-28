@@ -274,9 +274,11 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
                 baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
                 covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
                 max_pending_bytes,max_pending_age_ms) VALUES ('relay','adoption','w','main','note',?1,?2,'source',?3,?4,\
-                0,0,?3,?3,0,?5,0,'null','{}',1000000,1000000)",
+                0,0,?3,?3,0,?5,0,'null','{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
                 rusqlite::params![binding.lineage_claim_id,serde_json::to_string(&binding).unwrap(),source_sha,
-                    source.len() as i64,marker.head_update_seq]).map_err(StorageError::persist_public)
+                    source.len() as i64,marker.head_update_seq]).map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay", &binding)
+                    .map_err(StorageError::persist_public)
         }).unwrap();
         drop(store);
         std::fs::write(scratch.path().join("note.md"), &source).unwrap();
@@ -580,9 +582,11 @@ async fn adopted_rpc_fixture() -> (
             baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
             covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
             max_pending_bytes,max_pending_age_ms) VALUES ('relay','adoption','w','main','note',?1,?2,'source',?3,?4,\
-            0,0,?3,?3,0,?5,0,'null','{}',1000000,1000000)",
+            0,0,?3,?3,0,?5,0,'null','{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
             rusqlite::params![binding.lineage_claim_id,serde_json::to_string(&binding).unwrap(),source_sha,
-                source.len() as i64,marker.head_update_seq]).map_err(StorageError::persist_public)
+                source.len() as i64,marker.head_update_seq]).map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay", &binding)
+                    .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);
     std::fs::write(scratch.path().join("note.md"), &source).unwrap();

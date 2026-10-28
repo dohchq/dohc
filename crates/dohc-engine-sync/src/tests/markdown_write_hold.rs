@@ -193,6 +193,9 @@ async fn markdown_hold_winning_lineage_keeps_the_losing_source_and_recovers_loca
 fn markdown_hold_winning_lineage_equal_text_needs_no_recovery_copy() {
     for deferred in [false, true] {
         let mut f = Fixture::new();
+        f.store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','held-object',1000)",
+            []).map_err(SyncError::persist)).unwrap();
         let local = Ydoc::wire();
         local.apply(&f.doc.encode_full_state()).unwrap();
         let source = local.project(ContentKind::Richdoc).unwrap().content;
