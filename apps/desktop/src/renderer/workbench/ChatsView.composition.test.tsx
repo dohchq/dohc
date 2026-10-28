@@ -188,6 +188,54 @@ describe("ChatsView agents' chats", () => {
     expect(screen.getByText("Ranger", { selector: "span.text-subtle" })).toBeTruthy();
   });
 
+  it("describes the runner of the agent whose chat it is, not the first agent's", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({ id: "chat-default", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
+        channel({ id: "chat-codex", name: "Codex", slug: "agent-codex", kind: "agent", agentId: "codex" }),
+        channel({ id: "chat-scout", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout" }),
+      ],
+      fileThreads: [],
+    });
+    const settings = settingsWithAgent({ name: "Claude Code", launch: { command: "claude -p" } });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        workspaceId: "workspace-a",
+        preferredName: "Sam",
+        agentName: "Claude Code",
+        runnerConfigured: true,
+        runnerEnabled: true,
+        agentRunActive: false,
+        agents: [{ id: "default", name: "Claude Code", enabled: true }, { id: "codex", name: "Codex", enabled: true }],
+      },
+      userSettings: {
+        ...settings,
+        agents: {
+          ...settings.agents,
+          codex: testAgent({ name: "Codex", hue: "teal", launch: { command: "codex exec" } }),
+          scout: testAgent({ name: "Scout", enabled: false }),
+        },
+      },
+      onSaveUserSettings: vi.fn(async () => undefined),
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    await user.click(screen.getAllByTestId("chats-my-agent")[1]!);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Codex");
+    expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("ready");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runs codex");
+    expect(screen.getByTestId("chats-agent-screen-runner").title).toBe("codex exec");
+
+    // An agent that's off says so about itself, even while the first agent is on.
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await user.click((await screen.findAllByTestId("chats-my-agent"))[2]!);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Scout");
+    expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("needs-setup");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner configured · dispatch is off");
+  });
+
   it("names the program a runner command starts, with the whole command on hover", () => {
     expect(runnerProgram('node "C:\\w\\dohc\\apps\\desktop\\e2e\\fixtures\\fakeChatRunner.mjs" ask')).toBe("node fakeChatRunner.mjs");
     expect(runnerProgram("codex exec --sandbox read-only")).toBe("codex");

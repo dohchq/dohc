@@ -108,7 +108,7 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { firstAgentCommand, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -4404,6 +4404,9 @@ export function ChatsView(props: {
     const channelLocked = channelIsLocked(nav.channel);
     const channelAgent = nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents) : null;
     const channelSettingsAgent = channelAgent ? settingsAgents.find((agent) => agent.id === nav.channel.agentId) : undefined;
+    // The strip under an agent's chat describes that agent's own runner.
+    const channelLaunch = channelSettingsAgent?.enabled ? channelSettingsAgent.launch : undefined;
+    const channelCommand = channelLaunch ? launchCommand(channelLaunch) : "";
     const groupType = nav.channel.type ?? "posts";
     const showLane = groupType === "chat" || (groupType === "both" && groupLane === "chat");
     const channelGrants = nav.channel.wireId
@@ -4534,20 +4537,20 @@ export function ChatsView(props: {
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
-            data-state={agentReady ? "ready" : "needs-setup"}
+            data-state={channelLaunch ? "ready" : "needs-setup"}
             className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
             <Bot size={12} aria-hidden className="shrink-0 text-agent" />
             <span
               data-testid="chats-agent-screen-runner"
               className="min-w-0 flex-1 truncate"
-              title={agentReady ? (props.userSettings ? firstAgentCommand(props.userSettings) : undefined) : undefined}
+              title={channelCommand || undefined}
             >
-              {agentReady
-                ? props.userSettings && firstAgentCommand(props.userSettings)
-                  ? `Runs ${runnerProgram(firstAgentCommand(props.userSettings))}`
+              {channelLaunch
+                ? channelCommand
+                  ? `Runs ${runnerProgram(channelCommand)}`
                   : "Runner on"
-                : props.agentSetup.runnerConfigured
+                : channelSettingsAgent?.launch
                   ? "Runner configured · dispatch is off"
                   : props.agentSetup.agentRunActive
                     ? "Agent run active · connect an agent to reply here"
