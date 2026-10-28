@@ -84,6 +84,9 @@ impl ActorHandle {
                             settle.key.object_id, settle.lineage_claim_id, settle.operation_id],
                     ).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 }
+                if owed.kind == Kind::RelationCleanup {
+                    super::collections::synchronize_collection_index_from_head_in_tx(tx, &owed.key, &owed.path)?;
+                }
                 obligations::complete_in(tx, &owed, now_ms)?;
                 Ok(())
             })? {
