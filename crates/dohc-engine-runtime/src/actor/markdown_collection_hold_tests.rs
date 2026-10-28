@@ -243,6 +243,43 @@ impl super::super::WorkspaceRootGuard for CaptureRoot {
 }
 
 #[tokio::test]
+async fn markdown_hold_recovery_collection_reconciliation_does_not_wake_itself_for_missing_work() {
+    let mut f = Fixture::new(true).await;
+    assert!(matches!(f.cleanup(), CollectionRelationCleanupExecution::Held(_)));
+    let owed = f.store.read_with(|conn| obligations::pending_in(conn, "w")).unwrap().remove(0);
+    let target = format!("---\nid: {TARGET}\n---\n\nRestored target\n");
+    VersionedTextStore::new(&mut f.store).write_text(&WriteText {
+        workspace_id: "w".into(), version_id: "main".into(), object_id: "target".into(),
+        path: "tasks/b.md".into(), text: target.clone(), moment_id: "restore-target".into(),
+        metadata_origin: "test".into(), metadata_summary: None, metadata_correlation_id: None,
+        author_json: None, now_ms: 11, request_id: None,
+    }, &NoFaults).unwrap();
+    std::fs::write(f.scratch.path().join("tasks/b.md"), target).unwrap();
+    f.store.write_with(&NoFaults, |tx| {
+        reconcile_collections_in_tx(tx, "w", "main")?;
+        set_collection_adoption_state_in_tx(tx, "w", "main", "tasks/b.md", TARGET, "adopted")?;
+        Ok::<_, DomainError>(())
+    }).unwrap();
+    let db = engine_db_path(&f.scratch).unwrap();
+    drop(f.store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 20).unwrap().actor;
+    actor.configure_reader_resolver(f.cache.reader_resolver.clone().unwrap()).await.unwrap();
+    let root = f.scratch.path().to_owned();
+    let epoch = actor.markdown_recovery_epoch();
+    let result = actor.reconcile_collections_guarded("w".into(), "main".into(), root.clone(),
+        LeaseRegistry::new(), Arc::new(()), 21, Arc::new(NoFaults), CancellationToken::new(),
+        Arc::new(CaptureRoot(root.clone()))).await.unwrap();
+    assert!(!result.markdown_obligation_candidates.iter().any(|(key, kind, operation)|
+        key == &owed.key && kind == &owed.kind && operation == &owed.operation_id));
+    assert_eq!(actor.markdown_recovery_epoch(), epoch);
+    let pending = actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert!(pending.iter().any(|row| row.obligation.order == owed.order));
+    assert_eq!(std::fs::read_to_string(root.join(PATH)).unwrap(), f.source);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
 async fn markdown_hold_capture_preparation_hands_off_from_a_plain_thread_to_async_recovery() {
     let mut f = Fixture::new(false).await;
     let expected_id: String = f.store.read_with(|conn| conn.query_row(

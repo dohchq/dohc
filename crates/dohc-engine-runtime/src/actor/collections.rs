@@ -244,11 +244,10 @@ impl ActorHandle {
         leases: LeaseRegistry, self_writes: Arc<dyn SelfWriteRecorder>, now_ms: i64,
         faults: Arc<dyn FaultInjector>, token: CancellationToken, root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CollectionReconciliation, RuntimeError> {
-        let recovery = self.markdown_recovery.clone();
         self.run_with_reader_retry(move |store, cache| {
             reconcile_collections_on_store(store, cache, &workspace_id, &version_id, &root_dir,
                 Some(root_guard.as_ref()), &leases, self_writes.as_ref(), now_ms,
-                faults.as_ref(), &token, None, &recovery)
+                faults.as_ref(), &token, None, &super::markdown_recovery::MarkdownRecoverySignal::default())
         }).await
     }
 
