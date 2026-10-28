@@ -484,7 +484,7 @@ export function runnerProgram(command: string): string {
     if (tokens.length === 2) break;
   }
   const basename = (token: string): string => token.split(/[\\/]/u).pop() ?? token;
-  const program = tokens[0] ? basename(tokens[0]) : "";
+  const program = tokens[0] ? basename(tokens[0]).replace(/\.exe$/iu, "") : "";
   const script = tokens[1] ? basename(tokens[1]) : "";
   return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
@@ -3849,7 +3849,8 @@ export function ChatsView(props: {
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
                     : item.channel.kind === "agent"
-                      ? "Agent"
+                      // Home's channel carries no agent id; the listed chat does.
+                      ? agentChatIdentity(overview.channels.find((entry) => entry.id === item.channel?.id) ?? item.channel, settingsAgents).label
                       : `#${item.channel.name}`
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
@@ -5191,7 +5192,7 @@ export function ChatsView(props: {
                   {agentReady ? (
                     <>
                       <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
-                      Manage agent
+                      Manage agents
                     </>
                   ) : (
                     <>

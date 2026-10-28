@@ -173,7 +173,7 @@ describe("ChatsView agents' chats", () => {
     const mark = (row: HTMLElement, name: string) => row.querySelector(`[title="${name}"]`)!.className;
     expect(mark(rows[0]!, "Nova")).toContain("border-agent");
     expect(mark(rows[1]!, "Ranger")).toContain("text-hue-teal");
-    expect(mark(rows[2]!, "Helper")).toContain("border-agent");
+    expect(mark(rows[2]!, "Helper")).toContain("border-subtle bg-panel text-subtle");
     // Each row says whether its own agent is off or has no runner, and its own unread count.
     expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
     expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("off");
@@ -242,9 +242,9 @@ describe("ChatsView agents' chats", () => {
   it("names the program a runner command starts, with the whole command on hover", () => {
     expect(runnerProgram('node "C:\\w\\dohc\\apps\\desktop\\e2e\\fixtures\\fakeChatRunner.mjs" ask')).toBe("node fakeChatRunner.mjs");
     expect(runnerProgram("codex exec --sandbox read-only")).toBe("codex");
-    expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent.exe");
+    expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent");
     expect(runnerProgram("python3 /home/me/bot.py")).toBe("python3 bot.py");
-    expect(runnerProgram('"C:\\Program Files\\nodejs\\node.exe" "C:\\Agent Scripts\\bot.mjs"')).toBe("node.exe bot.mjs");
+    expect(runnerProgram('"C:\\Program Files\\nodejs\\node.exe" "C:\\Agent Scripts\\bot.mjs"')).toBe("node bot.mjs");
     expect(runnerProgram("'/opt/my agent/run.sh' --fast")).toBe("run.sh");
     expect(runnerProgram("")).toBe("");
   });

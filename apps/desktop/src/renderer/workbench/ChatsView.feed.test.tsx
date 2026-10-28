@@ -24,6 +24,7 @@ import {
   shareListing,
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
+import { settingsWithAgent } from "../../testing/agentSettings";
 
 const ABOUT_NOTICES: AboutNotices = { report: vi.fn(), clear: vi.fn() };
 const ACCESS_CONTEXT: AccessContext = { facts: { cloud: "checking", shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -152,6 +153,20 @@ describe("ChatsView hybrid feed", () => {
     const avatar = within(feedItem).getByTitle("Ada");
     expect(avatar.dataset.authorKind).toBe("link");
     expect(avatar.className).toContain("border-dashed");
+  });
+
+  it("names an agent's chat on Home by the agent's Settings name", async () => {
+    const agentChat = { id: "channel-agent", name: "My agent", slug: "my-agent", kind: "agent" as const };
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ ...agentChat, agentId: "default" })], fileThreads: [],
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...personalFeedItem("Done", "message-agent"), channel: agentChat }],
+    });
+    renderView(undefined, undefined, { userSettings: settingsWithAgent({ name: "Nova" }) });
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await waitFor(() => expect(screen.getByTestId("chats-feed-item").textContent).toContain("Nova"));
+    expect(screen.getByTestId("chats-feed-item").textContent).not.toContain("My agent");
   });
 
   it("shows a known viewer's Like before the write and its listing answer", async () => {

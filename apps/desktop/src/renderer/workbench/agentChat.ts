@@ -1,6 +1,6 @@
 import type { ActorPresentation, ChatChannelRecord } from "../../ipc/bridgeContract";
 import { DEFAULT_AGENT_ID, type Agent } from "../../settings/userSettings";
-import { neutralPresentation } from "./actorPresentation";
+import { goneAgentPresentation } from "./actorPresentation";
 
 export type SettingsAgent = Pick<Agent, "id" | "name" | "hue">;
 
@@ -12,7 +12,7 @@ export interface AgentChatIdentity {
 /**
  * How an agent's chat names and marks its agent: by the agent's current
  * Settings name and hue. A chat whose agent was removed from Settings keeps
- * the name it was stored with and a plain mark. The default agent's chat is
+ * the name it was stored with and a mark with no hue. The default agent's chat is
  * always stored as "My agent", so it says "Your agent", as its run notices do.
  */
 export function agentChatIdentity(
@@ -25,7 +25,7 @@ export function agentChatIdentity(
   }
   return {
     label: channel.agentId === DEFAULT_AGENT_ID ? "Your agent" : channel.name,
-    presentation: neutralPresentation,
+    presentation: goneAgentPresentation,
   };
 }
 

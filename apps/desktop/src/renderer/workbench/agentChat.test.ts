@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { agentChatIdentity, orderAgentChats, type SettingsAgent } from "./agentChat";
-import { neutralPresentation } from "./actorPresentation";
+import { goneAgentPresentation } from "./actorPresentation";
 
 const AGENTS: SettingsAgent[] = [
   { id: "default", name: "Nova", hue: "olive" },
@@ -27,17 +27,17 @@ describe("agentChatIdentity", () => {
     });
   });
 
-  it("keeps a removed agent's stored name, with a plain mark", () => {
+  it("keeps a removed agent's stored name, with a mark that has no hue", () => {
     expect(agentChatIdentity(chat("helper", "Helper"), AGENTS)).toEqual({
       label: "Helper",
-      presentation: neutralPresentation,
+      presentation: goneAgentPresentation,
     });
   });
 
   it("calls the removed default agent's chat Your agent", () => {
     expect(agentChatIdentity(chat("default", "My agent"), [])).toEqual({
       label: "Your agent",
-      presentation: neutralPresentation,
+      presentation: goneAgentPresentation,
     });
   });
 
@@ -45,7 +45,7 @@ describe("agentChatIdentity", () => {
   it("keeps the stored name of a chat that names no agent", () => {
     expect(agentChatIdentity({ name: "Scout" }, AGENTS)).toEqual({
       label: "Scout",
-      presentation: neutralPresentation,
+      presentation: goneAgentPresentation,
     });
   });
 });
