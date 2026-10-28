@@ -67,9 +67,11 @@ function setEngine(state: UseEngineDoc): void {
   });
 }
 
-function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"]): UseEngineDoc {
+// `headSha256` is the head of the file the session opened on.
+function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"], headSha256?: string): UseEngineDoc {
   return {
     available: true,
+    headSha256,
     opening: false,
     doc,
     objectId: "object-1",
@@ -277,7 +279,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
     vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));
     vi.stubGlobal("dohcDesktop", bridge);
     engine.closedWhenDisabled = true;
-    engine.state = engineState(markdownToYDoc(versionA), null);
+    engine.state = engineState(markdownToYDoc(versionA), null, "a".repeat(64));
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
     fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
@@ -285,10 +287,10 @@ describe("FileInspector when an open note changed outside dohc", () => {
 
     // Another app writes version B, and the note reloads.
     disk = { text: versionB, contentHash: "b".repeat(64) };
-    setEngine(engineState(markdownToYDoc(versionA), state));
+    setEngine(engineState(markdownToYDoc(versionA), state, "a".repeat(64)));
     if (state === "unsaved") fireEvent.click(await screen.findByRole("button", { name: "Reload" }));
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
-    setEngine(engineState(markdownToYDoc(versionB), null));
+    setEngine(engineState(markdownToYDoc(versionB), null, "b".repeat(64)));
 
     await screen.findByTestId("lossy-note-notice");
     expect(document.querySelector('[data-testid="markdown-editor"][contenteditable="true"]')).toBeNull();
@@ -311,7 +313,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     engine.closedWhenDisabled = true;
     engine.sharedLease = true;
-    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null);
+    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null, "a".repeat(64));
     render(
       <>
         <div data-testid="pane-1"><FileInspector workspaceId="ws-1" path="a.md" /></div>
@@ -329,9 +331,9 @@ describe("FileInspector when an open note changed outside dohc", () => {
     // Another app writes version B over unsaved text, and pane 1 reloads it
     // into the session both panes share.
     disk = { text: versionB, contentHash: "b".repeat(64) };
-    setEngine(engineState(seededFrom(versionA, "a".repeat(64)), "unsaved"));
+    setEngine(engineState(seededFrom(versionA, "a".repeat(64)), "unsaved", "a".repeat(64)));
     fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
-    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null));
+    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null, "b".repeat(64)));
 
     await waitFor(() => expect(pane2.getByTestId("view-markdown").textContent).toContain("Version B, from another app."));
     if (lossy) {
@@ -354,7 +356,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     engine.closedWhenDisabled = true;
     engine.sharedLease = true;
-    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null);
+    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null, "a".repeat(64));
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
     fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
     fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
@@ -363,12 +365,12 @@ describe("FileInspector when an open note changed outside dohc", () => {
     const readsBeforeReload = vi.mocked(bridge.readWorkspaceText).mock.calls.length;
     let answer!: (read: Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>) => void;
     vi.mocked(bridge.readWorkspaceText).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
-    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null));
+    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null, "b".repeat(64)));
     await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(readsBeforeReload + 1));
     expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
 
     vi.mocked(bridge.readWorkspaceText).mockResolvedValue({ text: other, contentHash: "c".repeat(64), truncated: false });
-    setEngine(engineState(markdownToYDoc(other), null));
+    setEngine(engineState(markdownToYDoc(other), null, "c".repeat(64)));
     view.rerender(<FileInspector workspaceId={changed === "workspace" ? "ws-2" : "ws-1"} path={changed === "path" ? "b.md" : "a.md"} refreshKey={1} />);
     await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Current text."));
     await act(async () => { answer({ text: versionB, contentHash: "b".repeat(64), truncated: false }); });

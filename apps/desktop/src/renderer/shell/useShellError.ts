@@ -438,7 +438,7 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearCollectionsWaiting = useCallback(() => clearKind("collections-waiting"), [clearKind]);
-  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void, openHistory?: () => void) => {
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void, openHistory?: () => void, read?: (id: string) => void) => {
     setShellErrors(current => [
       ...current.filter(error => error.kind !== "sync-refusal"),
       ...notices.map(notice => {
@@ -450,13 +450,16 @@ export function useShellError(workspaceId: string) {
         const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
         const path = notice.target?.path;
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-          title: bindingChanged || attributionRefused ? notice.title : undefined,
+          title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
           atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
-          ...(attributionRefused ? { tone: "warning" as const } : {}),
-          ...((bindingChanged || markdownHeld) && path && openFile ? { action: { label: markdownHeld ? "Open note" : "Open", run: () => openFile(path) } } : {}),
+          // A hold is on purpose: nothing failed.
+          ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
+          ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}),
+          // Opening the note reads the row, so its toast closes. The row stays until the change is saved.
+          ...(markdownHeld && path && openFile ? { action: { label: "Open note", run: () => { openFile(path); read?.(notice.noticeId); } } } : {}),
           ...(attributionRefused && openHistory ? { action: { label: "Open History", run: openHistory } } : {}) };
       }),
     ]);

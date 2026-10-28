@@ -312,6 +312,8 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
+  // The engine holds a change to this lossy note until someone chooses Edit anyway.
+  changeHeld?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -874,6 +876,7 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
+            changeHeld={props.changeHeld}
             onEditAnyway={() => {
               const source = typeof boundSource === "string" ? boundSource : contentHash;
               setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash });

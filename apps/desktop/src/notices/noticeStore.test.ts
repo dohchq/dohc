@@ -1281,7 +1281,7 @@ it.each([null, ""])("names a file in held Notices without a path (%s)", async pa
   const first = await computer(null, { refusalNotices });
   const [shown] = (await first.store.list()).notices;
   expect(shown).toMatchObject({ kind: "markdown-write-held", target: {} });
-  expect(shown!.body).toBe("A change to a file is waiting. Saving it would also change parts dohc can't show, such as raw HTML or reference links.");
+  expect(shown).toMatchObject({ title: "Held a change to a note", body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links." });
 });
 
 it("keeps local hold identity through restart and dismisses only the shown checkpoint", async () => {
@@ -1297,7 +1297,7 @@ it("keeps local hold identity through restart and dismisses only the shown check
   const first = await computer(null, { refusalNotices, dismissRefusal });
   const [shown] = (await first.store.list()).notices;
   expect(shown).toMatchObject({ kind: "markdown-write-held", target: { path: "note.md" }, refusalCoordinates: [firstCoordinate] });
-  expect(shown!.body).toBe("A change to “note.md” is waiting. Saving it would also change parts dohc can't show, such as raw HTML or reference links. Open the note to review it.");
+  expect(shown).toMatchObject({ title: "Held a change to note.md", body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links." });
   expect(shown!.detail).not.toContain("Origin:");
   await first.store.mark([shown!], "dismissed", null);
   expect(dismissRefusal).toHaveBeenCalledWith(WORKSPACE, "local-hold", [firstCoordinate]);

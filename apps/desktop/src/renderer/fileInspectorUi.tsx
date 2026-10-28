@@ -266,6 +266,8 @@ export function LossyNoteNotice(props: {
   path: string;
   // The hash of the bytes the note was read from, which saving would rewrite.
   contentHash: string | null;
+  // A change to the note waits for Edit anyway.
+  held?: boolean;
   onError?: ReportButtonError;
   // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
@@ -305,7 +307,9 @@ export function LossyNoteNotice(props: {
     >
       <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0" />
-        dohc can't edit this document yet without changing parts it can't show.
+        {props.held
+          ? "dohc held a change to this note. Saving it would also change parts dohc can't show."
+          : "dohc can't edit this document yet without changing parts it can't show."}
       </span>
       <span className="flex shrink-0 items-center gap-3">
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />

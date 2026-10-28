@@ -5463,10 +5463,6 @@ export function DesktopWorkspaceShell(props: {
       clearIdentity("file-observation");
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
-  useEffect(() => {
-    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView]);
   const hideWorkspaceError = useCallback((id: string) => {
     hideShellError(id);
     const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
@@ -5476,6 +5472,14 @@ export function DesktopWorkspaceShell(props: {
       if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
     });
   }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
+  useEffect(() => {
+    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, hideWorkspaceError);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, hideWorkspaceError]);
+  // The notes whose change dohc holds, for their band.
+  const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
+    notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
+  [props.sentNotices?.notices, workspaceId]);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
@@ -6313,6 +6317,7 @@ export function DesktopWorkspaceShell(props: {
                 onEditorReady={onEditorReady}
                 workspaceId={workspaceId}
                 path={tabPath}
+                changeHeld={heldNotes.has(tabPath)}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, and share-mount pulls all
                 // re-read the open file (every counter only ever increases).

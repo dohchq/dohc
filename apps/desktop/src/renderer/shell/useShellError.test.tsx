@@ -224,17 +224,20 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
-  it("offers Open note for a held local save", () => {
+  it("shows a held local save as a warning whose Open note reads it", () => {
     const retry = vi.fn();
     const open = vi.fn();
+    const read = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
-      recipientShareId: null, senderKind: null, senderLabel: null, title: "A change needs your review",
-      body: "This note needs your review.", target: { path: "note.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
-    act(() => result.current.showSyncRefusals([notice], retry, open));
-    expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open note" } });
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.", target: { path: "note.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open, undefined, read));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: notice.title, message: notice.body, tone: "warning",
+      retry: null, action: { label: "Open note" } });
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(open).toHaveBeenCalledWith("note.md");
+    expect(read).toHaveBeenCalledWith("held-save");
     expect(retry).not.toHaveBeenCalled();
   });
 

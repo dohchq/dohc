@@ -82,7 +82,7 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
-    openEngineYDocSession: vi.fn(async () => ({
+    openEngineYDocSession: vi.fn(async (): Promise<{ available: true; initialUpdate: Uint8Array; lineageGeneration: number; headSha256?: string }> => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)),
       lineageGeneration: 1,
@@ -114,6 +114,15 @@ describe("a lossy note", () => {
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("says when dohc holds a change to it", async () => {
+    bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    render(<FileInspector workspaceId="ws-1" path="a.md" changeHeld />);
+
+    const notice = await screen.findByTestId("lossy-note-notice");
+    expect(notice.textContent).toContain("dohc held a change to this note. Saving it would also change parts dohc can't show.");
+    expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+  });
+
   it("opens the file in the system's app", async () => {
     const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
     const user = userEvent.setup();
@@ -125,6 +134,9 @@ describe("a lossy note", () => {
 
   it("warns before Edit anyway, and opens the editor only once the person confirms", async () => {
     const bridge = bridgeFor([{ text: LOSSY, contentHash: sha(LOSSY) }]);
+    // The session opens on the bytes the person read, so consent covers it.
+    bridge.openEngineYDocSession.mockResolvedValue({ available: true,
+      initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)), lineageGeneration: 1, headSha256: sha(LOSSY) });
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 

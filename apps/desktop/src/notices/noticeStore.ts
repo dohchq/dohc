@@ -205,6 +205,16 @@ function unattributedTitle(path: string | null | undefined): string {
   return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
+// What dohc did comes first and the note's name last, with no quotes, as in
+// "Couldn't save packing.md".
+function heldTitle(path: string | null | undefined): string {
+  const lead = "Held a change to ";
+  const name = [...(path?.slice(path.lastIndexOf("/") + 1) ?? "")];
+  const room = NOTICE_TITLE_MAX_CHARS - lead.length;
+  const title = `${lead}${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}`;
+  return name.length && isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a note`;
+}
+
 const RelayRow = z.object({
   wake: z.custom<AutomationWake>(isAutomationWake).optional(),
   noticeId: NoticeRow.shape.noticeId,
@@ -749,7 +759,7 @@ export function createNoticeStore(deps: {
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
           const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = markdownHeld
-            ? `A change to ${name} is waiting. Saving it would also change parts dohc can't show, such as raw HTML or reference links.${target.path ? " Open the note to review it." : ""}`
+            ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
             : attributionRefused
             ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
             : bindingChanged
@@ -760,6 +770,7 @@ export function createNoticeStore(deps: {
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
             title: attributionRefused ? unattributedTitle(document?.path)
+              : markdownHeld ? heldTitle(document?.path)
               : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`,

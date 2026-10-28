@@ -1741,7 +1741,7 @@ describe("notices sent to you", () => {
       body: "A note needs review before saving" };
     const notices = sentNotices([shown]);
     const view = renderWithNotices(bridge, { sentNotices: notices });
-    await screen.findByTestId("workspace-shell-error");
+    await screen.findByTestId("workspace-shell-notice");
     await user.click(await screen.findByTestId("notice-center-toggle"));
     await user.click(await screen.findByTestId("notice-held-dismiss"));
     expect(notices.dismiss).toHaveBeenCalledExactlyOnceWith(shown);
@@ -1751,7 +1751,7 @@ describe("notices sent to you", () => {
         {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
         sentNotices={{ ...notices, notices: [] }} />
     </>);
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-notice")).toBeNull());
     expect(screen.queryByTestId("notice-held")).toBeNull();
     expect(notices.dismiss).toHaveBeenCalledTimes(1);
   });
