@@ -557,6 +557,60 @@ impl WorkspaceRootGuard for RecoveryRoot {
 }
 
 #[tokio::test]
+async fn markdown_hold_dismissal_survives_restart_recovery_until_the_document_changes() {
+    for queued in [false, true] {
+        let mut f = Fixture::new().await;
+        assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+        let checkpoint = f.actor.run(|store, _| {
+            // Model a live checkpoint whose encoding differs from the reloaded document.
+            let checkpoint = hex_sha256(b"live session checkpoint encoding");
+            store.write_with(&NoFaults, |tx| tx.execute(
+                "UPDATE markdown_write_obligations SET held_checkpoint_sha256=?1", [&checkpoint])
+                .map_err(StorageError::persist_public))?;
+            let notices = dohc_engine_sync::list_refusal_notices(store, "w")?;
+            assert_eq!(notices.len(), 1);
+            dohc_engine_sync::dismiss_refusal_notice(store, "w", &notices[0].notice_id,
+                &notices[0].refusal_coordinates, &NoFaults)?;
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(checkpoint)
+        }).await.unwrap();
+        f.supervisor.close(&f.db).unwrap();
+        f.actor = f.supervisor.open(&f.db, 20).unwrap().actor;
+        f.actor.configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            Arc::new(Reader::new(Some(super::super::reader_tests::fake_reader(
+                &f.scratch, "witness-unsafe"))))))).await.unwrap();
+        let owed = f.actor.markdown_recovery_candidates("w".into()).await.unwrap().remove(0).obligation;
+        let root = f.scratch.path().to_owned();
+        assert!(matches!(f.actor.recover_markdown_write(owed, root.clone(), Arc::new(RecoveryRoot(root)),
+            LeaseRegistry::new(), Arc::new(()), 21, CancellationToken::new()).await,
+            Err(RuntimeError::MarkdownWriteHeld { .. })));
+        f.actor.run(move |store, _| {
+            let pending = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].held_checkpoint_sha256.as_deref(), Some(checkpoint.as_str()));
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(())
+        }).await.unwrap();
+        let key = f.key.clone();
+        f.actor.run(move |store, cache| {
+            let doc = dohc_engine_collab::load_persisted(store, &key)?.unwrap().doc;
+            let update = doc.richdoc_append_paragraph("A new edit needs a new Notice");
+            store.write_with(&NoFaults, |tx| dohc_engine_collab::record_update_in_tx(
+                tx, &key, &update, None, None, 22))?;
+            cache.remove(&key);
+            Ok(())
+        }).await.unwrap();
+        assert!(matches!(f.settle(queued, None).await, Err(RuntimeError::MarkdownWriteHeld { .. })));
+        f.actor.run(|store, _| {
+            assert_eq!(dohc_engine_sync::list_refusal_notices(store, "w")?.len(), 1);
+            Ok(())
+        }).await.unwrap();
+        f.unchanged().await;
+        f.supervisor.close(&f.db).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn markdown_hold_no_session_recovery_reopens_debt_without_reappending_accepted_edits() {
     let mut f = Fixture::new().await;
     let modified = std::fs::metadata(f.scratch.path().join("note.md")).unwrap().modified().unwrap();

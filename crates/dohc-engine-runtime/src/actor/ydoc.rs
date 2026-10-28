@@ -2737,6 +2737,9 @@ pub(super) fn ydoc_settle_on_store(
                     && row.kind == owed.kind && row.operation_id == owed.operation_id) {
                 owed.held_checkpoint_sha256 = previous.held_checkpoint_sha256;
                 owed.held_head_sha256 = previous.held_head_sha256;
+                if owed.kind != WriteObligationKind::AuditedSettle {
+                    owed.retry_inputs["headUpdateSeq"] = previous.retry_inputs["headUpdateSeq"].clone();
+                }
             }
             if owed.kind == WriteObligationKind::AuditedSettle {
                 write_obligations::record_audited_in(tx, &owed, now_ms)?;
@@ -3305,7 +3308,8 @@ fn ydoc_settle_attempt_on_store(
             path: path.to_owned(),
             retry_inputs: if let Some(audit) = live_audit { audit.markdown_retry_inputs() } else {
                 serde_json::json!({"expectedHeadSha256": expected_head_sha,
-                    "restoreGeneration": restore_generation, "useReader": use_reader}) },
+                    "restoreGeneration": restore_generation, "useReader": use_reader,
+                    "headUpdateSeq": current_marker.head_update_seq}) },
             held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: current_sha.clone(),
             source_sha256: None, settled_head_sha256: None,
         };
@@ -3317,6 +3321,15 @@ fn ydoc_settle_attempt_on_store(
                 obligation.operation_id = retry.operation_id();
                 obligation.retry_inputs = serde_json::to_value(retry)
                     .map_err(StorageError::persist_public)?;
+            }
+            if let Some(previous) = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                .find(|row| row.key == *key && row.lineage_claim_id == obligation.lineage_claim_id
+                    && row.kind == obligation.kind && row.operation_id == obligation.operation_id
+                    && row.held_checkpoint_sha256.is_some()
+                    && row.retry_inputs.get("headUpdateSeq").and_then(serde_json::Value::as_i64)
+                        == Some(current_marker.head_update_seq)) {
+                obligation.held_checkpoint_sha256 = previous.held_checkpoint_sha256;
+                obligation.held_head_sha256 = previous.held_head_sha256;
             }
             if obligation.kind == WriteObligationKind::AuditedSettle {
                 write_obligations::record_audited_in(tx, &obligation, now_ms)?;
