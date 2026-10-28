@@ -41,7 +41,6 @@ import type {
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
-  TryInVersionRunState,
   WorkbenchMenuCommand,
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
@@ -240,10 +239,6 @@ import {
   ProposalReviewDialog,
   proposerName,
 } from "./workbench/ProposalReviewDialog";
-import {
-  TryInVersionBanner,
-  TryInVersionReviewCard,
-} from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
   ChatsNav,
@@ -943,7 +938,8 @@ export function DesktopWorkspaceShell(props: {
   // polls and subscriptions off onError, so a fresh arrow per shell render
   // tore them down and re-armed them every render.
   const reportFailureMessage = useCallback(
-    (message: string, cause?: unknown, retry?: () => void) => reportShellFailure({ message, cause, ...(retry ? { retry } : {}) }),
+    (message: string, cause?: unknown, retry?: () => void, identity?: string) =>
+      reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
@@ -1822,12 +1818,9 @@ export function DesktopWorkspaceShell(props: {
   // Each loaded change's older and newer change to the same file, for the
   // diff page's steps. One pass per History answer.
   const momentSteps = useMemo(() => fileMomentSteps(engineHistory?.entries ?? []), [engineHistory]);
-  // The sync and try snapshots ride the refresh response but are not the
-  // timeline: no pagination competes for them, so they apply as soon as they
-  // arrive. Each is its own lane with its own watermark, because a local
-  // write only ever knows about the lane it wrote — dismissing a review says
-  // nothing about sync state, and rejecting both would strand a status bar
-  // that has no other source (the dismiss emits no activity event).
+  // The sync snapshot rides the refresh response but is not the timeline: no
+  // pagination competes for it, so it applies as soon as it arrives, in its
+  // own lane with its own watermark.
   //
   // Each lane owns its state, so a write that names no request cannot be
   // written at all. The history page is not one of these: it carries
@@ -2036,13 +2029,6 @@ export function DesktopWorkspaceShell(props: {
   const [latestMomentOrder, latestMomentLane] = useSnapshotLane(engineHistoryToken, -1);
   // The refresh whose read of that moment may still retry.
   const latestMomentRequest = useRef(0);
-  // "Try it in a version" (PR 0N-2): the workspace's live try session —
-  // running banner or the run's review card. Refreshed with history (the
-  // manager pings the same workspace-activity channel on every transition).
-  const [tryState, tryStateLane] = useSnapshotLane<TryInVersionRunState | null>(
-    engineHistoryToken,
-    null,
-  );
   // A file's chat waiting in About, named for the tab it belongs to. It ends
   // when focus leaves that tab, whether or not About is open to show it.
   const [searchChatTarget, setSearchChatTarget] = useState<AboutSearchHit | null>(null);
@@ -2059,12 +2045,6 @@ export function DesktopWorkspaceShell(props: {
   const onSearchHitClosed = useCallback(() => {
     setSearchChatTarget((target) => (target?.read ? null : target));
   }, []);
-  // The local writer on the try lane. Dismissing the review card clears it
-  // here, and that IS the user acting: it supersedes whatever a request issued
-  // earlier will eventually say.
-  const onTryReviewDismissed = useCallback(() => {
-    tryStateLane.set(null);
-  }, [tryStateLane]);
   const reportSettingsFailure = useCallback(
     (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
@@ -2100,9 +2080,9 @@ export function DesktopWorkspaceShell(props: {
     // says engine-on, and every History read would error.
     const token = ++engineHistoryToken.current;
     if (historyReadable(syncStatusLane.latest())) {
-      // Four reads ride one refresh, and they answer four different
+      // Three reads ride one refresh, and they answer three different
       // questions. One batch made every answer hostage to the worst of them:
-      // a try-state failure discarded a history page the engine had already
+      // a sibling's failure discarded a history page the engine had already
       // served, and the timeline then said it could not load. An
       // aggregate await is hostage to the slowest of them the same way — a
       // sibling that never settles would hold a failed history read in
@@ -2112,12 +2092,10 @@ export function DesktopWorkspaceShell(props: {
       // out first, and only its own failure is this refresh's failure.
       //
       // The snapshots need no ordering against the page: nothing can block
-      // them, and holding them for a later commit would republish a world the
-      // user has already acted on — a dismissed review card, most visibly.
-      // Each is handed whole to the lane rule, which judges both ways it can
-      // settle.
+      // them. Each is handed whole to the lane rule, which judges both ways it
+      // can settle.
       const pageRead = refreshHistoryPage(token);
-      // Asking again IS this refresh: it re-reads all four, so the lane that
+      // Asking again IS this refresh: it re-reads all three, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
       const askAgain = () => {
@@ -2145,18 +2123,6 @@ export function DesktopWorkspaceShell(props: {
         (status) => status,
         (error) =>
           reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
-      );
-      // A shared view has no versions, so it has no try run to read.
-      if (!shareView) tryStateLane.settle(
-        token,
-        bridge().getTryInVersionState({ workspaceId }),
-        (trySession) => trySession.state,
-        (error) =>
-          reportLaneFailure(
-            "dohc could not refresh this workspace's try run.",
-            error,
-            askAgain,
-          ),
       );
       return pageRead;
     }
@@ -2189,7 +2155,6 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     supersedeHistoryPage,
     syncStatusLane,
-    tryStateLane,
     workspaceAdmission,
     workspaceId,
   ]);
@@ -2214,9 +2179,9 @@ export function DesktopWorkspaceShell(props: {
   //
   // The capture capability. Everything that calls through
   // `requireEngineCapture` reads this one value — the version selector, the
-  // Try-in-version banner and review card, the shell's version fetch, the
-  // persisted compare and moment-diff tabs, the Chats view, About and tab, the
-  // graph's chat mentions and the linked-mentions panel — so the fact is
+  // shell's version fetch, the persisted compare and moment-diff tabs, the
+  // Chats view, About and tab, the graph's chat mentions and the
+  // linked-mentions panel — so the fact is
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
   //
@@ -2252,8 +2217,8 @@ export function DesktopWorkspaceShell(props: {
       //
       // So the operation says which version it left the workspace on. Every
       // caller that moved the workspace knows: a switch names its target, a
-      // create and a try name the version they forked into, and going back to
-      // Main names Main. Nobody has to ask, and there is no window.
+      // create names the version it forked into, and going back to Main names
+      // Main. Nobody has to ask, and there is no window.
       //
       // Nothing is discarded here. This callback also runs for merges and
       // conflict resolutions that never changed the version at all, so a
@@ -5578,6 +5543,7 @@ export function DesktopWorkspaceShell(props: {
             onOpenCompare={openVersionCompareTab}
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
+            clearError={clearIdentity}
             {...(shareView
               ? {}
               : {
@@ -5588,9 +5554,8 @@ export function DesktopWorkspaceShell(props: {
                       versionName: version.name,
                     }),
                 })}
-            // versionEpoch bumps whenever any surface changed version
-            // state (the 0N-2 review card switches back to Main outside
-            // this menu) — the selector re-reads instead of going stale.
+            // versionEpoch bumps whenever version state changed outside
+            // this menu, so the selector re-reads instead of going stale.
             refreshKey={versionEpoch}
           />
         ) : undefined}
@@ -5905,23 +5870,6 @@ export function DesktopWorkspaceShell(props: {
             host any tab surface, and its tab row carries the open
             document's actions. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          {/* "Try it in a version" (PR 0N-2): honest run status while the
-              agent works, then the review card when the run ends. Never a
-              shared view (tryState never exists there). */}
-          {captureAvailable && tryState?.status === "running" ? (
-            <TryInVersionBanner task={tryState.task} versionName={tryState.versionName} />
-          ) : null}
-          {captureAvailable && tryState?.status === "review" ? (
-            <TryInVersionReviewCard
-              workspaceId={workspaceId}
-              state={tryState}
-              activeTabDirty={anyTabDirty}
-              beginLineageOperation={beginLineageOperation}
-              onOpenCompare={openVersionCompareTab}
-              onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-              onDismissed={onTryReviewDismissed}
-            />
-          ) : null}
           <EditorGroupLayout
             groups={wb.editorGroups.map((editorGroup, groupIndex) => {
               const tabPath = editorGroup.activeTab;

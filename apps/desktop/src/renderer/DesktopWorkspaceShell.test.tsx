@@ -2084,7 +2084,6 @@ describe("workbench render cost", () => {
       const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
-      const tryStates = bridge.getTryInVersionState.mock.calls.length;
 
       act(() =>
         bridge.emitWorkspaceActivity({
@@ -2105,7 +2104,6 @@ describe("workbench render cost", () => {
       // Run state arrives from main's pushes, so a refresh does not read it.
       expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
       expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
-      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
       act(() => bridge.emitWorkspaceActivity({
         workspaceId: WORKSPACE.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: false,
       }));

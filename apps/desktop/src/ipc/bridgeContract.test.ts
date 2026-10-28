@@ -101,9 +101,6 @@ import {
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
-  TryInVersionRunState,
-  TryInVersionStateResult,
-  TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
   WorkspaceVersionConflict,
@@ -3293,86 +3290,6 @@ describe("workspace versions IPC contract", () => {
         workspaceId: "ws-versions",
         conflictId: "conflict-1",
         resolution: { kind: "keep-combined" },
-      }).success,
-    ).toBe(false);
-  });
-});
-
-describe("try-in-version IPC contract", () => {
-  it("accepts a well-formed gesture payload and state shapes", () => {
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-      }).task,
-    ).toBe("tidy the notes");
-    expect(
-      TryInVersionStateResult.parse({ state: null }).state,
-    ).toBeNull();
-    expect(
-      TryInVersionStateResult.parse({
-        state: {
-          status: "running",
-          task: "tidy the notes",
-          versionId: "version-1",
-          versionName: "Try: tidy the notes",
-          runId: "run-1",
-          startedAtMs: 1,
-          mergeAvailable: true,
-        },
-      }).state?.status,
-    ).toBe("running");
-    // Review state: an unavailable count is null, never invented.
-    expect(
-      TryInVersionRunState.parse({
-        status: "review",
-        task: "tidy the notes",
-        versionId: "version-1",
-        versionName: "Try: tidy the notes",
-        runId: "run-1",
-        startedAtMs: 1,
-        endedAtMs: 2,
-        runOutcome: "complete",
-        changedFileCount: null,
-        mergeAvailable: false,
-      }).changedFileCount,
-    ).toBeNull();
-  });
-
-  it("rejects blank or oversized tasks and malformed states", () => {
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "   ",
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "x".repeat(2001),
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "watching",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        mergeAvailable: true,
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "review",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        changedFileCount: -1,
-        mergeAvailable: true,
       }).success,
     ).toBe(false);
   });

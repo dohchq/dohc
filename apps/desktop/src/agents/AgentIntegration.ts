@@ -66,7 +66,7 @@ export interface AgentIntegrationOptions {
   // Fired after a known run's terminal status is durably recorded.
   // endAgentRun is the single funnel every terminal path goes through
   // (a Settings stop, the endAgentRun IPC),
-  // so run-completion consumers (the try-in-version review card) hook here.
+  // so run-completion consumers (the post-run dispatch scan) hook here.
   onRunEnded?: (input: {
     attachmentId: symbol;
     workspaceId: string;

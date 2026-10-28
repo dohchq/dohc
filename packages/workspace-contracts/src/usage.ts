@@ -9,7 +9,7 @@ export const USAGE_MAX_COUNT = 2_147_483_647;
 // An issued id alone is never permission to count an invocation.
 export const USAGE_ACTION_IDS = [
   "version.create", "version.switch", "version.compare", "version.merge",
-  "version.conflict.resolve", "file.kept.save", "version.try", "version.try.dismiss",
+  "version.conflict.resolve", "file.kept.save",
   "search.start", "crash.dismiss", "crash.send", "chat.dispatch.notice.dismiss",
   "automation.host.choose", "automation.host.takeover", "notice.mark",
   "automation.schedule.run", "automation.notice.retry", "workspace.open.retry",
