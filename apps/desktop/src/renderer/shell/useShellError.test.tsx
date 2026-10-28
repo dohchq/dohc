@@ -80,6 +80,24 @@ describe("useShellError", () => {
     expect(next.result.current.shellErrors[0]!.title).toBe("Kept a copy of m.md");
   });
 
+  it("renders and stores nothing again when a status repeats its copies", () => {
+    let renders = 0;
+    const { result } = renderHook(() => { renders += 1; return useShellError("ws-a"); });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    // Each status answer carries a new array, so each call builds its own.
+    const repeat = (copies: () => (readonly [string, string, string])[]) => {
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      const rows = result.current.shellErrors, rendered = renders, writes = setItem.mock.calls.length;
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      expect(result.current.shellErrors).toBe(rows);
+      expect(renders).toBe(rendered);
+      expect(setItem).toHaveBeenCalledTimes(writes);
+    };
+    repeat(() => []);
+    repeat(() => [["n.md", "n (kept copy).md", "copy-n-1"]]);
+    setItem.mockRestore();
+  });
+
   it("keeps a held source error in Notices with the repair words and retry", async () => {
     const capture = { deferredWrites: [], running: true, settled: true, degraded: false, heldFiles: [{
       workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",

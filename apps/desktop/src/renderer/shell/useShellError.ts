@@ -779,8 +779,10 @@ export function useShellError(workspaceId: string) {
   const showOutsideCopies = useCallback((copies: readonly (readonly [string, string, string])[], open: (path: string) => void) => {
     const key = `dohc:outside-write-copies:${workspaceId}`;
     let saved: Record<string, { copy: string; dismissed: boolean }> = {};
+    let stored = "{}";
     try {
-      const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+      stored = localStorage.getItem(key) ?? stored;
+      const parsed: unknown = JSON.parse(stored);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         for (const [path, value] of Object.entries(parsed)) {
           if (value && typeof value === "object" && "copy" in value && typeof value.copy === "string" &&
@@ -796,7 +798,9 @@ export function useShellError(workspaceId: string) {
     for (const entry of Object.keys(saved)) if (!present.has(entry)) delete saved[entry];
     for (const path of shownOutsideCopies.current.keys()) if (!latest.has(path)) shownOutsideCopies.current.delete(path);
     const listed = new Set([...latest].filter(([, { id }]) => !saved[id]?.dismissed).map(([path]) => `outside-copy:${path}`));
-    setShellErrors(current => current.filter(row => !row.identity?.startsWith("outside-copy:") || listed.has(row.identity)));
+    // Each status answer repeats the list, so an unchanged one renders and writes nothing.
+    const stays = (row: ShellError) => !row.identity?.startsWith("outside-copy:") || listed.has(row.identity);
+    if (!shellErrorsRef.current.every(stays)) setShellErrors(current => current.filter(stays));
     for (const [path, { copy, id }] of latest) {
       const identity = `outside-copy:${path}`;
       const shownKey = id;
@@ -816,7 +820,7 @@ export function useShellError(workspaceId: string) {
         retry: null, tone: "warning", onDismiss: dismiss,
         action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true } }, seen);
     }
-    persist();
+    if (JSON.stringify(saved) !== stored) persist();
   }, [push, workspaceId]);
   // A native copy that was saved opens from its new path.
   const showKeptCopySaved = useCallback(
