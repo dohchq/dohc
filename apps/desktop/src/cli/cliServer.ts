@@ -3514,6 +3514,8 @@ async function dispatchWorkspace(
       const started = await options.chatWrites.startThread(context, {
         writer: cliChatWriter(actor, context, options),
         channelId: channel.engine.id,
+        // A chat-only group shows only its chat lane.
+        ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
         body: request.args.body,
         needsDecision: request.args.needsDecision,

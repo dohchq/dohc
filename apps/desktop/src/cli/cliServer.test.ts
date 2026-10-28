@@ -3704,12 +3704,12 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
-  it("posts into a group whatever its type, and lists both lanes of every group", async () => {
+  it("posts into a chat-only group's chat lane, and lists both lanes of every group", async () => {
     if (!store) throw new Error("Store is not available");
     const chat = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Chat group", kind: "channel", type: "chat", purpose: "Plan the launch" });
     await post({ actor: "human", group: chat.slug, title: "Hello", body: "In chat" });
-    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(1);
-    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" })).toHaveLength(0);
+    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" })).toHaveLength(1);
+    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(0);
     const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: chat.slug });
     expect(listed.group.purpose).toBe("Plan the launch");
     expect(listed.threads).toHaveLength(1);
