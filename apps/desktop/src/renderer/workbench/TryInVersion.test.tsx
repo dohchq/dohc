@@ -171,6 +171,7 @@ describe("TryInVersionReviewCard", () => {
         }
         onOpenCompare={handlers?.onOpenCompare ?? (() => {})}
         onWorkspaceStateChanged={handlers?.onWorkspaceStateChanged ?? (() => {})}
+        onError={() => {}}
         onDismissed={handlers?.onDismissed ?? (() => {})}
       />,
     );
@@ -367,6 +368,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={onWorkspaceStateChanged}
         onError={onError}
+        onConflictError={() => {}}
       />,
     );
     await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Try: tidy the notes"));
@@ -417,6 +419,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={() => {}}
         onError={onError}
+        onConflictError={() => {}}
       />,
     );
 
@@ -439,6 +442,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
           onOpenCompare={() => {}}
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}
+          onConflictError={() => {}}
           refreshKey={refreshKey}
         />
       );

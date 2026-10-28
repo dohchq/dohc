@@ -89,6 +89,7 @@ export function TryInVersionReviewCard(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
+  onError: (message: string, cause: unknown) => void;
   onDismissed: () => void;
 }) {
   const { workspaceId, state } = props;
@@ -313,6 +314,7 @@ export function TryInVersionReviewCard(props: {
           activeTabDirty={props.activeTabDirty}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+          onError={props.onError}
           onOutcome={(outcome) => {
             // After a completed merge, return to Main so the folder shows the
             // merged result (a merge into an inactive Main changes no disk

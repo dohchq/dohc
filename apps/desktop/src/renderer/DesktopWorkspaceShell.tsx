@@ -5610,6 +5610,7 @@ export function DesktopWorkspaceShell(props: {
             onOpenCompare={openVersionCompareTab}
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
+            onConflictError={reportShellError}
             {...(shareView
               ? {}
               : {
@@ -5952,6 +5953,7 @@ export function DesktopWorkspaceShell(props: {
               beginLineageOperation={beginLineageOperation}
               onOpenCompare={openVersionCompareTab}
               onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
+              onError={reportShellError}
               onDismissed={onTryReviewDismissed}
             />
           ) : null}

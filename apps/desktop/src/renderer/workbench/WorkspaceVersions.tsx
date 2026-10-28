@@ -81,6 +81,9 @@ export function VersionMenu(props: {
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onError: (message: string, cause: unknown) => void;
+  // A conflict choice in the merge dialog reports a fallback and the error,
+  // so a refusal can show its own title and instructions.
+  onConflictError: (fallback: string, error: unknown) => void;
   // Bumped by the shell when another surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
   // version instead of showing a stale name.
@@ -517,6 +520,7 @@ export function VersionMenu(props: {
           activeTabDirty={props.activeTabDirty}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+          onError={props.onConflictError}
           onClose={() => {
             setMergeSource(null);
             void refresh().catch(() => undefined);
@@ -705,6 +709,9 @@ export function VersionMergeDialog(props: {
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  // The merge lists every open conflict, sync ones included, so their
+  // refusals need the shell's toast and Notices row.
+  onError: (message: string, cause: unknown) => void;
   onClose: () => void;
   // Optional (PR 0N-2): how the dialog was left when it closed — "merged"
   // (clean or all conflicts resolved), "conflicts-open" (Finish later), or
@@ -916,6 +923,7 @@ export function VersionMergeDialog(props: {
                   onLoadMore={loadMoreConflicts}
                   sourceNameFor={() => source.name}
                   onResolved={onResolved}
+                  onError={props.onError}
                 />
               </div>
             </>
