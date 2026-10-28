@@ -4279,7 +4279,7 @@ pub fn retry_markdown_projection_in_tx(
         .map_err(map_collab_hard_error)?
         .ok_or_else(|| local_corruption("held Markdown projection has no lineage"))?;
     if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
-        || marker.path.as_deref() != Some(&owed.path)
+        || marker.path.as_deref().is_some_and(|path| path != owed.path)
     {
         return Err(SyncError::RetryableState {
             reason: "ydoc-lineage-changed",
