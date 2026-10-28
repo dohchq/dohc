@@ -1050,9 +1050,12 @@ export class ChatsLiveAdapter {
     return result;
   }
 
-  async latestRunForThread(workspaceId: string, threadId: string): Promise<ChatRun | null> {
+  async latestRunForThread(workspaceId: string, threadId: string, agentId?: string): Promise<ChatRun | null> {
     this.assertWorkspace(workspaceId);
-    return this.request(CHATS_METHOD.dispatchLatestRunForThread, { threadId });
+    return this.request(CHATS_METHOD.dispatchLatestRunForThread, {
+      threadId,
+      ...(agentId !== undefined ? { agentId } : {}),
+    });
   }
 
   async getRunRecord(runId: string): Promise<ChatRun | null> {

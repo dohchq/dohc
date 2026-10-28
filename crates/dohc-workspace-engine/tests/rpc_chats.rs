@@ -4121,6 +4121,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(latest, claim["run"]);
+    let agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "default" }),
+    )
+    .await;
+    assert_eq!(agents_latest, claim["run"]);
+    let other_agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "nova" }),
+    )
+    .await;
+    assert_eq!(other_agents_latest, Value::Null);
     let open = call(
         &transport,
         &handle,
@@ -4205,6 +4223,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
+    let thread_recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(thread_recoveries["recoveries"], recoveries["recoveries"]);
+    let other_thread_recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({ "threadId": "other-thread" }),
+    )
+    .await;
+    assert_eq!(other_thread_recoveries["recoveries"], json!([]));
     let handled = call(
         &transport,
         &handle,

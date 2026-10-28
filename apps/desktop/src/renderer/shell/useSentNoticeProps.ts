@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { isAutomationControlsTarget, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
-import type { GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { ChatDispatchStoppedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
@@ -33,6 +33,18 @@ export type OpenOnSwitch = string | { automationControls: string; sharedFile?: s
 
 // Main dismisses a failed run's notice once its run is queued again.
 const nothingToReread = () => undefined;
+
+const AGENT_RUN_RETRY_FAILED = "dohc could not start your agent's run again.";
+const NO_STOPPED_RUNS: ReadonlyMap<string, ChatDispatchStoppedRun> = new Map();
+
+// The run an agent run's notice names, when this computer ran it in this
+// workspace.
+function agentRunOfNotice(notice: NoticeRow, workspaceId: string): { threadId: string; runId: string } | null {
+  const target = notice.target;
+  return notice.kind === "agent-run" && notice.postedHere && notice.workspaceId === workspaceId && target?.thread && target.run
+    ? { threadId: target.thread, runId: target.run }
+    : null;
+}
 
 // A share a notice named, for the Open a share surface, and the notice's
 // file, to open once the share is added. `controls` opens an automation's
@@ -102,6 +114,46 @@ export function useSentNoticeProps(input: {
     [openChat, workspaceId],
   );
 
+  // Each conversation's latest run, when dohc's restart or quit stopped it.
+  // A notice offers Try again on that run while its conversation does.
+  // When the read fails the notice just offers no Try again.
+  const [stoppedRuns, setStoppedRuns] = useState(NO_STOPPED_RUNS);
+  const [stoppedRunsRevision, setStoppedRunsRevision] = useState(0);
+  // The runs the notices name, as a key, so a new list naming the same runs
+  // reads nothing again.
+  const agentRunsKey = useMemo(() => {
+    const notices = [...(sentNotices?.notices ?? []), ...(sentNotices?.toast ? [sentNotices.toast] : [])];
+    const runs = notices.flatMap((notice) => {
+      const run = agentRunOfNotice(notice, workspaceId);
+      return run ? [JSON.stringify([run.threadId, run.runId])] : [];
+    });
+    return `[${[...new Set(runs)].sort().join(",")}]`;
+  }, [sentNotices?.notices, sentNotices?.toast, workspaceId]);
+  const stoppedRunReads = useRequestSequence([workspaceId]);
+  useEffect(() => {
+    const request = stoppedRunReads.next();
+    const threadIds = [...new Set((JSON.parse(agentRunsKey) as [string, string][]).map(([threadId]) => threadId))];
+    if (threadIds.length === 0) {
+      setStoppedRuns(NO_STOPPED_RUNS);
+      return;
+    }
+    void Promise.all(threadIds.map(async (threadId) => {
+      try {
+        return [threadId, (await bridge().chatDispatchStateForThread({ workspaceId, threadId })).stoppedRun] as const;
+      } catch {
+        return [threadId, undefined] as const;
+      }
+    })).then((states) => {
+      if (!stoppedRunReads.isCurrent(request)) return;
+      setStoppedRuns(new Map(states.flatMap(([threadId, stopped]) => (stopped ? [[threadId, stopped] as const] : []))));
+    });
+  }, [agentRunsKey, stoppedRunReads, stoppedRunsRevision, workspaceId]);
+  const retriesStoppedRun = useCallback((notice: NoticeRow) => {
+    const run = agentRunOfNotice(notice, workspaceId);
+    const stopped = run ? stoppedRuns.get(run.threadId) : undefined;
+    return stopped !== undefined && stopped.runId === run?.runId && stopped.retryable;
+  }, [stoppedRuns, workspaceId]);
+
   const describe = useCallback(
     (notice: NoticeRow): SentNotice => {
       const place = sentNoticePlace(notice, workspaces, workspaceId);
@@ -118,10 +170,10 @@ export function useSentNoticeProps(input: {
             (place.kind === "workspace" ? place.mount ?? workspaceName(place.workspace) : null),
         openable: place.kind !== "none",
         // Open takes a notice from another workspace there first.
-        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId,
+        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId || retriesStoppedRun(notice),
       };
     },
-    [workspaceId, workspaces],
+    [retriesStoppedRun, workspaceId, workspaces],
   );
   const rows = useMemo(
     () => (sentNotices?.notices ?? []).filter(notice => notice.kind !== "sync-refusal" || notice.workspaceId !== workspaceId).map(describe),
@@ -270,6 +322,34 @@ export function useSentNoticeProps(input: {
     onSwitchedOff,
   });
 
+  const retryAutomationNotice = noticeRetry.retry;
+  // Try again on a stopped agent run puts its request back in line, then
+  // reads again whether the notice still offers it. Main queues nothing when
+  // the request is already back in line, as after a second press or a Try
+  // again in the conversation, so the read just takes the button away.
+  const retrySentNotice = useCallback(
+    (notice: NoticeRow) => {
+      const run = agentRunOfNotice(notice, workspaceId);
+      if (!run) {
+        retryAutomationNotice(notice);
+        return;
+      }
+      const epoch = workspace.current();
+      const attempt = () => {
+        void bridge().retryStoppedRun({ workspaceId, ...run }).then(
+          () => {
+            if (workspace.isCurrent(epoch)) setStoppedRunsRevision((revision) => revision + 1);
+          },
+          (error: unknown) => {
+            if (workspace.isCurrent(epoch)) reportShellError(AGENT_RUN_RETRY_FAILED, error, attempt);
+          },
+        );
+      };
+      attempt();
+    },
+    [reportShellError, retryAutomationNotice, workspace, workspaceId],
+  );
+
   const onDismissSentNotice = useCallback(
     (notice: NoticeRow) => {
       if (!sentNotices) return;
@@ -301,7 +381,7 @@ export function useSentNoticeProps(input: {
     onReadSentNotice,
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
-    onRetrySentNotice: noticeRetry.retry,
+    onRetrySentNotice: retrySentNotice,
     // The confirmation Try again asks for before a run starts over.
     retryDialog: noticeRetry.dialog,
   };

@@ -5823,15 +5823,46 @@ export type ChatDispatchStateForThreadPayload = z.infer<
   typeof ChatDispatchStateForThreadPayload
 >;
 
+export const ChatDispatchStoppedRun = z.object({
+  runId: OPAQUE_ID,
+  triggerMessageId: OPAQUE_ID,
+  ending: z.enum(["restarted", "quit"]),
+  // Whether Try again can run its request once more.
+  retryable: z.boolean(),
+}).strict();
+export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
+
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   pausedReason: z.string().min(1).max(500).optional(),
+  // The conversation's latest run, when dohc's restart or quit stopped it.
+  stoppedRun: ChatDispatchStoppedRun.optional(),
 }).strict();
 export type ChatDispatchStateForThreadResult = z.infer<
   typeof ChatDispatchStateForThreadResult
 >;
+
+export const RetryStoppedRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: OPAQUE_ID,
+  runId: OPAQUE_ID,
+}).strict();
+export type RetryStoppedRunPayload = z.infer<typeof RetryStoppedRunPayload>;
+
+// False when the run can't be tried again any more, as after a second press.
+export const RetryStoppedRunResult = z.object({ queued: z.boolean() }).strict();
+export type RetryStoppedRunResult = z.infer<typeof RetryStoppedRunResult>;
+export const stoppedRunOperations = {
+  retryStoppedRun: {
+    capabilityId: "agent.run.retry",
+    scope: "workspace",
+    channel: "desktop:retry-stopped-run",
+    payload: RetryStoppedRunPayload, result: RetryStoppedRunResult,
+    guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
+  },
+} as const satisfies OperationTable;
 
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
@@ -7234,6 +7265,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
+    OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
