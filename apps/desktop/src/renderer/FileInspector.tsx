@@ -558,7 +558,6 @@ export const FileInspector = memo(function FileInspector(
     open: lossyOpen,
     // Edit anyway already accepted what saving does.
     doc: checksLossyNote && !editingAnyway ? engine.doc : null,
-    checkedHash: checked.checkedHash,
     headSha256: engine.headSha256,
   });
   useEffect(() => {

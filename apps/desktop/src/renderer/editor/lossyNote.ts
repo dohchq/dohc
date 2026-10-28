@@ -189,7 +189,7 @@ export function useLossyNote(input: {
 }
 
 /** Checks the saved source's meaning and the authoritative file head, including after edits. */
-export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null; headSha256?: string | null}): LossyNoteCheck {
+export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; headSha256?: string | null}): LossyNoteCheck {
   const [metaRevision, setMetaRevision] = useState(0);
   useEffect(() => {
     const meta = input.doc?.getMap('meta');
