@@ -150,7 +150,7 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
     }
 }
 
-fn candidate_fingerprint(candidate: &dohc_engine_runtime::MarkdownRecoveryCandidate,
+fn candidate_fingerprint(candidate: &dohc_engine_runtime::actor::MarkdownRecoveryCandidate,
     sessions: &Mutex<HashMap<String, YdocSession>>, handle: &WorkspaceHandle, epoch: u64) -> String {
     let owed = &candidate.obligation;
     let consent = lock(sessions).values().find(|session|
