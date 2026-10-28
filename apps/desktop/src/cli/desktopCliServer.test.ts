@@ -418,11 +418,20 @@ describe("desktop CLI workspace context", () => {
       const version = (id: string, name: string, kind: "main" | "named") => ({
         id, workspaceId: "workspace", kind, name, createdAtMs: 10, ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
       f.capture.listVersions.mockResolvedValue({ versions: [version("main", "Main", "main"), version("draft", "Draft", "named")], activeVersionId: "draft" });
-      f.capture.compareVersions.mockResolvedValue({ files: [
-        { path: "notes.md", status: "modified", currentText: "old", incomingText: "new" },
-        { path: "private/journal.md", status: "added", incomingText: "dear diary" },
-        { path: "keys.env", status: "modified", protected: true },
-      ], nextAfterPath: "notes.md" });
+      // Each engine page continues after its last path, shown or hidden.
+      const pages: Record<string, Awaited<ReturnType<Capture["compareVersions"]>>> = {
+        first: { files: [
+          { path: "keys.env", status: "modified", protected: true },
+          { path: "notes.md", status: "modified", currentText: "old", incomingText: "new" },
+          { path: "private/journal.md", status: "added", incomingText: "dear diary" },
+        ], nextAfterPath: "private/journal.md" },
+        "notes.md": { files: [
+          { path: "private/journal.md", status: "added", incomingText: "dear diary" },
+          { path: "private/later.md", status: "added", incomingText: "later" },
+        ], nextAfterPath: "private/later.md" },
+        "private/later.md": { files: [{ path: "zeta.md", status: "added", incomingText: "z" }], nextAfterPath: null },
+      };
+      f.capture.compareVersions.mockImplementation(async (_id, options) => pages[options?.afterPath ?? "first"]!);
       const side = (path: string, text: string) => ({ exists: true, path, contentKind: "text" as const, text });
       const conflict = (id: string, path: string) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
@@ -447,11 +456,17 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
         versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
 
-      // Untracked and secret files are left out; the page still continues.
-      expect((await cli("version", "compare", "Draft", "--after", "a.md")).stdout).toBe("modified · notes.md\nMore files; use --after notes.md\n");
-      expect(f.capture.compareVersions).toHaveBeenLastCalledWith("draft", { afterPath: "a.md" });
+      // Untracked and secret files are left out, and the next page starts
+      // after the last file shown, never after a hidden one.
+      expect((await cli("version", "compare", "Draft")).stdout).toBe("modified · notes.md\nMore files; use --after notes.md\n");
       expect(await mcp("versionCompare", { version: "draft" })).toEqual({ ok: true, version: { id: "draft", name: "Draft" },
         files: [{ path: "notes.md", status: "modified", currentText: "old", incomingText: "new" }], nextAfterPath: "notes.md" });
+      // A page with no file to show is read past.
+      expect((await cli("version", "compare", "Draft", "--after", "notes.md")).stdout).toBe("added · zeta.md\n");
+      expect(f.capture.compareVersions).toHaveBeenLastCalledWith("draft", { afterPath: "private/later.md" });
+      expect(await mcp("versionCompare", { version: "Draft", afterPath: "notes.md" })).toEqual({ ok: true, version: { id: "draft", name: "Draft" },
+        files: [{ path: "zeta.md", status: "added", incomingText: "z" }], nextAfterPath: null });
+      expect((await cli("version", "compare", "Draft", "--json")).stdout).not.toMatch(/private\/|keys\.env/);
       expect(await cli("version", "compare", "Later")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: No version is called Later. Run dohc version list to see them.\n" });
       expect(await mcp("versionCompare", { version: "Main" })).toEqual({ ok: false, reason: "Versions compare with Main. Name another version." });
@@ -460,6 +475,8 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
         conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
+      expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
       // Unreadable rules hide every file, so the answer names the rules file.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");

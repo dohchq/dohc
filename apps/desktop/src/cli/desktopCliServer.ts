@@ -498,14 +498,20 @@ export function createDesktopCliServer<State>(
                 // Unreadable rules hide every file, as the desktop's History does.
                 const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
                 if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
-                const page = await capture.compareVersions(versionId, afterPath === undefined ? {} : { afterPath });
                 const admitted = historyPathAdmission(policy);
-                return {
-                  files: page.files
+                // A page continues after its last path, which can be a hidden
+                // file. Continue after the last shown file instead, and read
+                // past pages that show none.
+                let after = afterPath;
+                for (;;) {
+                  const page = await capture.compareVersions(versionId, after === undefined ? {} : { afterPath: after });
+                  const files = page.files
                     .filter(file => !file.protected && admitted(file.path))
-                    .map(({ protected: _protected, ...file }) => file),
-                  nextAfterPath: page.nextAfterPath,
-                };
+                    .map(({ protected: _protected, ...file }) => file);
+                  if (page.nextAfterPath === null) return { files, nextAfterPath: null };
+                  if (files.length > 0) return { files, nextAfterPath: files[files.length - 1]!.path };
+                  after = page.nextAfterPath;
+                }
               },
               conflicts: async (afterConflictId) => {
                 const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
