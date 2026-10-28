@@ -67,7 +67,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
   });
 
-  it("renders under Agents, stays out of the group list, and uses the agent placeholder", async () => {
+  it("renders under Agents, stays out of the group list, and opens on its conversation", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -83,6 +83,9 @@ describe("ChatsView My agent", () => {
       ],
       fileThreads: [],
     });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" ? [] : [thread({ channelId: "channel-agent" })],
+    }));
     renderView();
 
     const agentSection = await screen.findByTestId("chats-my-agent-section");
@@ -94,10 +97,43 @@ describe("ChatsView My agent", () => {
 
     await user.click(screen.getByTestId("chats-my-agent"));
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("My agent");
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Chat", "Posts"]);
+    expect(screen.getByTestId("chats-group-lane-chat").getAttribute("aria-selected")).toBe("true");
     expect(
-      (screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).placeholder,
+      (screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).placeholder,
     ).toBe("Message your agent…");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    // Older posts stay readable under Posts, which takes no new ones.
+    await user.click(screen.getByTestId("chats-group-lane-posts"));
+    expect(await screen.findByTestId("chats-thread")).toBeTruthy();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+
+  it("shows a new message in an agent DM's conversation", async () => {
+    const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
+    const conversation = thread({ id: "conversation", channelId: agentDm.id, title: "" });
+    const sent = message({ id: "message-new", threadId: conversation.id, body: "Book the train" });
+    let started = false;
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentDm], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" && started ? [conversation] : [],
+    }));
+    bridgeMock.listChatMessages.mockImplementation(async () => ({ messages: started ? [sent] : [] }));
+    bridgeMock.startChannelThread.mockImplementation(async () => {
+      started = true;
+      return { thread: conversation, message: sent, viewerAuthorId: "author-me" };
+    });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-my-agent"));
+    const composer = await screen.findByTestId("chats-lane-composer");
+    await waitFor(() => expect((composer as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(composer, { target: { value: "Book the train" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(await screen.findByText("Book the train")).toBeTruthy();
+    expect(bridgeMock.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: agentDm.id, body: "Book the train", lane: "chat",
+    }));
+    expect(bridgeMock.startChannelThread.mock.lastCall?.[0]).not.toHaveProperty("title");
   });
 
   it("names a set-up agent under Agents and offers Manage, with no card in the conversation", async () => {

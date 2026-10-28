@@ -33,6 +33,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         message_id: "opening-message".to_owned(),
         title: Some("Project discussion".to_owned()),
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_owner_display_name: None,

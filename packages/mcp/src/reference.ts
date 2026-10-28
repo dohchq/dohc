@@ -156,7 +156,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
   inbox: [["chat", "inbox"]],
-  show: [["chat", "show", "th_1", "--peek"]],
+  show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
   post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],

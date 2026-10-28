@@ -20,15 +20,29 @@ function setup() {
       return () => { listeners.delete(listener); removed.push(listener); };
     },
     registerChatDispatchNotices: register, dismissChatDispatchNotice: dismiss,
+    listChatChannels: async () => ({ channels: [AGENT_DM, GROUP] }),
+    listChannelThreads: async ({ channelId, lane }: { channelId: string; lane: "posts" | "chat" }) =>
+      ({ threads: [WAKE_POST, GROUP_CHAT].filter((thread) => thread.channelId === channelId && thread.lane === lane) }),
   });
   const trust = vi.fn();
+  const openChat = vi.fn();
   const mount = (workspaceId = "a", ready = true) => renderHook((props) => {
     const errors = useShellError(props.workspaceId);
-    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, trust);
+    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, trust, openChat);
     return errors;
   }, { initialProps: { workspaceId, ready } });
-  return { store, register, dismiss, mount, listeners, removed, trust };
+  return { store, register, dismiss, mount, listeners, removed, trust, openChat };
 }
+const AGENT_DM = {
+  id: "agent-dm", name: "My agent", slug: "my-agent", kind: "agent" as const,
+  createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0,
+};
+const WAKE_POST = {
+  id: "wake", channelId: AGENT_DM.id, lane: "posts" as const, title: "", createdAtMs: 2, updatedAtMs: 2,
+  messageCount: 11, lastReadSequence: 11, unreadCount: 0,
+};
+const GROUP = { ...AGENT_DM, id: "group", name: "Planning", slug: "planning", kind: "channel" as const };
+const GROUP_CHAT = { ...WAKE_POST, id: "group-chat", channelId: GROUP.id, lane: "chat" as const };
 const notice = (reason: ChatDispatchNotice["reason"], message: string = `Agent dispatch notice: ${reason}.`) => ({ reason, threadId: "thread", message });
 
 it("replays background notices, replaces each reason, and clears dismissed rows across windows", async () => {
@@ -39,6 +53,9 @@ it("replays background notices, replaces each reason, and clears dismissed rows 
   const second = h.mount();
   await act(async () => {});
   expect(first.result.current.shellErrors).toHaveLength(2);
+  expect(first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner"))
+    .toMatchObject({ title: "No agent could take this request" });
+  expect(first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner")?.tone).toBeUndefined();
   const row = first.result.current.shellErrors[0]!;
   act(() => first.result.current.hideShellError(row.id));
   expect(first.result.current.shellErrors[0]?.seen).toBe(true);
@@ -135,4 +152,22 @@ it("does not open the trust dialog from a row left by another workspace", async 
   hook.rerender({ workspaceId: "b", ready: true });
   act(() => row.action!.run());
   expect(h.trust).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["a paused post", AGENT_DM, WAKE_POST, '"Nova"'],
+  ["a group's paused conversation", GROUP, GROUP_CHAT, "#Planning"],
+])("opens %s itself, where Resume is", async (_case, channel, thread, place) => {
+  const h = setup();
+  h.store.report("a", {
+    reason: "budget-paused", threadId: thread.id, channelId: channel.id,
+    message: `Your agent ran 10 times in 10 minutes in ${place}. Choose Resume there to continue.`,
+  });
+  const hook = h.mount();
+  await act(async () => {});
+  const [paused] = hook.result.current.shellErrors;
+  expect(paused).toMatchObject({ title: "Agent replies paused", tone: "warning" });
+  expect(paused?.action?.label).toBe("Open");
+  await act(async () => paused?.action?.run());
+  expect(h.openChat).toHaveBeenCalledWith({ level: "thread", channel, thread });
 });

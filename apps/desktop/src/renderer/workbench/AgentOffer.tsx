@@ -21,11 +21,11 @@ const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: { pos
   runs: { words: "Runs when you send", hideFolder: { post: "@max-[15rem]:hidden", stream: "@max-[16rem]/composer:hidden" } },
   working: { words: "Runs after the current run", hideFolder: { post: "@max-[17rem]:hidden", stream: "@max-[18rem]/composer:hidden" } },
   paused: {
-    words: "Dispatch paused · runs after Resume",
+    words: "Replies paused · runs after Resume",
     hideFolder: { post: "@max-[21rem]:hidden", stream: "@max-[22rem]/composer:hidden" },
   },
-  "runner-off": { words: "Agent dispatch is off" },
-  "no-command": { words: "No agent runner is configured" },
+  "runner-off": { words: "Chat runner is off in Settings" },
+  "no-command": { words: "No chat runner is set up" },
   unknown: { words: null },
 };
 
@@ -119,7 +119,7 @@ export const AgentOffer = memo(function AgentOffer(props: {
         <button
           type="button"
           data-testid="composer-agent-offer-setup"
-          aria-label="Set up agent dispatch in Settings → Agents"
+          aria-label="Set up the chat runner in Settings → Agents"
           title="Settings → Agents"
           onClick={props.onSetUp}
           className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"

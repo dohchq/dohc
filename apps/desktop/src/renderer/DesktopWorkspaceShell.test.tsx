@@ -1895,13 +1895,14 @@ describe("customize", () => {
 
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
-    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
+    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-lane-composer");
     await waitFor(() => expect(composer.value).toBe([
       'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
       "dohc applies the file when it is saved.",
       "What I want: ",
     ].join("\n")));
-    expect(document.activeElement).toBe(composer);
+    // The conversation takes input, and focus, once it has loaded.
+    await waitFor(() => expect(document.activeElement).toBe(composer));
     expect(composer.selectionStart).toBe(composer.value.length);
   });
 });

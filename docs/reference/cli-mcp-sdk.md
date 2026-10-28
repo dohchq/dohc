@@ -433,11 +433,14 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
-- `threadId`: `string`. Required.
+- `threadId`: `string`
+- `group`: `string`
+- `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
+- `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -934,14 +937,16 @@ With `--json`, prints `{ schemaVersion, threads: { lane?, id, title, commentCoun
 #### `dohc chat show`
 
 ```sh
-dohc chat show <thread-or-message> [options]
+dohc chat show <thread-message-or-group> [options]
 ```
 
-Show a thread or message and mark the thread read.
+Show a thread or message and mark the thread read, or show a group's posts and conversation.
 
 - `--peek`: Show it without changing what is marked read. A read-only shared view requires it.
+- `--before <position>`: For a group, show the page older than this position, as printed after older:.
+- `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 

@@ -5619,6 +5619,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         message_id: "local-opening".into(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: ChatActorKind::Human,
         author_display_name: "Alice".into(),
         author_owner_display_name: None,
@@ -5776,4 +5777,126 @@ async fn conversation_links_rpc_seeds_on_demand_and_pages_with_restart_errors() 
         ErrorCode::InvalidParams
     );
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-stream").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "group", "name": "Team", "kind": "channel", "nowMs": 2 }),
+    )
+    .await;
+    for (thread, message, lane, at) in [
+        ("post-1", "p-1", "posts", 10),
+        ("chat", "c-1", "chat", 20),
+        ("chat-2", "c-2", "chat", 30),
+        ("post-2", "p-2", "posts", 40),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.start",
+            json!({
+                "channelId": "group", "threadId": thread, "messageId": message, "lane": lane,
+                "authorKind": "agent", "authorDisplayName": "Scout", "body": message, "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let db_path = engine_db_path(&scratch).expect("db");
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    // One message asked two agents.
+    conn.execute_batch(
+        "INSERT INTO chat_dispatch_ledger (workspace_id, trigger_message_id, agent_id, thread_id, \
+         state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+         VALUES ('rpc-stream', 'c-2', 'research', 'chat', 'pending', NULL, NULL, 0, 31, 31), \
+                ('rpc-stream', 'c-2', 'default', 'chat', 'pending', NULL, NULL, 0, 31, 31);",
+    )
+    .expect("requests");
+    drop(conn);
+
+    let newest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "pageLimit": 2 }),
+    )
+    .await;
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["message"]["id"].as_str().expect("id").to_owned())
+            .collect()
+    };
+    assert_eq!(ids(&newest), ["c-2", "p-2"]);
+    assert_eq!(
+        newest["items"][0]["message"]["agentRequests"],
+        json!([
+            { "agentId": "default", "state": "waiting" },
+            { "agentId": "research", "state": "waiting" },
+        ])
+    );
+    assert_eq!(newest["items"][1]["post"]["replyCount"], json!(0));
+    assert_eq!(
+        newest["nextBefore"],
+        json!({ "createdAtMs": 30, "lane": "chat", "id": "c-2" })
+    );
+    assert_eq!(newest["readPosition"], Value::Null);
+    let older = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "before": newest["nextBefore"].clone() }),
+    )
+    .await;
+    assert_eq!(ids(&older), ["p-1", "c-1"]);
+    assert_eq!(older["nextBefore"], Value::Null);
+
+    let messages = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "chat" }),
+    )
+    .await;
+    assert_eq!(messages["messages"][0].get("agentRequests"), None);
+    assert_eq!(
+        messages["messages"][1]["agentRequests"][0]["state"],
+        json!("waiting")
+    );
+
+    let found = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.get",
+        json!({ "threadId": "chat" }),
+    )
+    .await;
+    assert_eq!(found["thread"]["lane"], json!("chat"));
+    assert_eq!(found["channel"]["channelId"], json!("group"));
+    assert_eq!(found["messageCount"], json!(2));
+
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "pageLimit": 101 }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
 }

@@ -3537,7 +3537,7 @@ function rememberPendingCliRunMessageLink(
 }
 
 // Sends a workspace's event only to windows showing that workspace.
-function sendToWorkspaceWindows(channel: string, event: { workspaceId: string }): void {
+function sendToWorkspaceWindows<Event extends { workspaceId: string }>(channel: string, event: Event): void {
   sendToWorkspaceWindowsOf({
     windows: BrowserWindow.getAllWindows(),
     workspaceIdOf: (webContents) => rendererWorkspaceSessions.current(webContents)?.workspaceId,
@@ -3568,6 +3568,7 @@ const chatDispatchService = createChatDispatchService({
   startSelfTestThread: (workspace, input) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const started = await chatWrites.startThread({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) }, {
       ...input,
+      ownThread: true,
       // CLI origin keeps this person's test message from starting an agent run.
       writer: { via: "cli", actor: "human" },
       resolveAttachments: async () => [],
@@ -3628,6 +3629,10 @@ const chatDispatchService = createChatDispatchService({
   onRunUpdated: (workspace) =>
     withWorkspaceAttachment(workspace, () =>
       notifyRenderer({ workspaceId: workspace.workspaceId }),
+    ),
+  onAgentRequestsChanged: (workspace, channelId) =>
+    withWorkspaceAttachment(workspace, () =>
+      sendToWorkspaceWindows(CHANNELS.chatAgentRequestsChanged, { workspaceId: workspace.workspaceId, channelId }),
     ),
   setRunAttribution: (workspace, run) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
@@ -3908,11 +3913,11 @@ async function wakeAutomationAgent(
         return (await place.store.ensureAgentChannel({ workspaceId, agentId: agent.id, name: agent.name })).id;
       },
       threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
-      start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
+      start: ({ channelId, message: wake, ownThread }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId, ownThread }),
       send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-      recordTrigger: ({ triggerMessageId, threadId, agentId }) => {
+      recordTrigger: (trigger) => {
         signal.throwIfAborted();
-        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId, agentId });
+        return chatDispatchService.recordTrigger(workspace, trigger);
       },
       scan: () => {
         signal.throwIfAborted();

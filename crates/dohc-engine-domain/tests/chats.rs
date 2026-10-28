@@ -43,6 +43,7 @@ fn start_thread(
         message_id: message_id.to_owned(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: kind,
         author_display_name: "Ada".to_owned(),
         author_owner_display_name: None,

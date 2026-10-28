@@ -3341,8 +3341,9 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
-  // Which lane a "both" group shows.
+  // Which lane a "both" group shows. An agent DM opens on its conversation.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
+  const [agentLane, setAgentLane] = useState<"posts" | "chat">("chat");
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -4216,13 +4217,13 @@ export function ChatsView(props: {
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
-            <span>dispatch paused on this computer — </span>
+            <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
               <button
                 type="button"
                 data-testid="chats-resume-computer-dispatch"
                 onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
-                  props.onError(withErrorWords("dohc could not resume agent dispatch.", error), error))}
+                  props.onError(withErrorWords("dohc could not resume agent replies on this computer.", error), error))}
                 className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
               >
                 Resume
@@ -4234,10 +4235,9 @@ export function ChatsView(props: {
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            title={dispatchState.pausedReason}
             className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
-            <span>dispatch paused — </span>
+            <span>Agent replies paused</span>
             {!threadLocked ? (
               <button
                 type="button"
@@ -4385,8 +4385,13 @@ export function ChatsView(props: {
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
-    const groupType = nav.channel.type ?? "posts";
-    const showLane = groupType === "chat" || (groupType === "both" && groupLane === "chat");
+    // An agent DM is one conversation. Its older posts stay under Posts, which
+    // takes no new ones.
+    const agentDm = nav.channel.kind === "agent";
+    const groupType = agentDm ? "both" : nav.channel.type ?? "posts";
+    const lane = agentDm ? agentLane : groupLane;
+    const setLane = agentDm ? setAgentLane : setGroupLane;
+    const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -4420,20 +4425,19 @@ export function ChatsView(props: {
           }
         >
           {(
-            [
-              ["posts", "Posts"],
-              ["chat", "Chat"],
-            ] as const
+            agentDm
+              ? ([["chat", "Chat"], ["posts", "Posts"]] as const)
+              : ([["posts", "Posts"], ["chat", "Chat"]] as const)
           ).map(([value, label]) => (
             <button
               key={value}
               type="button"
               role="tab"
-              aria-selected={groupLane === value}
+              aria-selected={lane === value}
               data-testid={`chats-group-lane-${value}`}
-              onClick={() => setGroupLane(value)}
+              onClick={() => setLane(value)}
               className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                groupLane === value
+                lane === value
                   ? "bg-selected text-ink"
                   : "text-muted hover:bg-hover hover:text-ink"
               }`}
@@ -4531,7 +4535,7 @@ export function ChatsView(props: {
                   ? `Runs ${runnerProgram(firstAgentCommand(props.userSettings))}`
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
-                  ? "Runner configured · dispatch is off"
+                  ? "Chat runner is off in Settings"
                   : props.agentSetup.agentRunActive
                     ? "Agent run active · connect an agent to reply here"
                     : "No runner yet · add an agent under Agents"}
@@ -4684,6 +4688,9 @@ export function ChatsView(props: {
             onSetupAgent={props.onSetupAgent}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            {...(agentDm ? {
+              draft: { value: newThreadBody, onChange: setNewThreadBody, autoFocus: props.focusNewPost },
+            } : {})}
           />
         ) : (
         <PostFeedList
@@ -4695,7 +4702,7 @@ export function ChatsView(props: {
           bottomPadding={64}
           topPadding={0}
           header={<>
-            {!channelLocked ? (
+            {!channelLocked && !agentDm ? (
               <div className="mb-4 mt-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
@@ -4705,11 +4712,7 @@ export function ChatsView(props: {
                   sending={startingThread}
                   surface="post"
                   authorName={collaboration?.displayName || "You"}
-                  placeholder={
-                    nav.channel.kind === "agent"
-                      ? "Message your agent…"
-                      : `What's happening in #${nav.channel.name}?`
-                  }
+                  placeholder={`What's happening in #${nav.channel.name}?`}
                   sendLabel="Start post"
                   candidates={mentionCandidates}
                   fileCandidates={fileMentionCandidates}
@@ -4735,10 +4738,10 @@ export function ChatsView(props: {
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
                 <span className="text-[13px] text-subtle">
-                  {nav.channel.kind === "agent"
-                    ? "No posts yet."
+                  {agentDm
+                    ? "No posts."
                     : `No posts in #${nav.channel.name} yet.`}
-                  {channelLocked ? "" : " Start one above."}
+                  {channelLocked || agentDm ? "" : " Start one above."}
                 </span>
               </div>
             )}

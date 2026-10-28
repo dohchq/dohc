@@ -1570,6 +1570,7 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         message_id: message_id.to_owned(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_owner_display_name: None,
@@ -2060,6 +2061,7 @@ fn ask_agent(
         ..post(message_id, "Plan the trip", now_ms)
     };
     if let Some(chain_depth) = wake_depth {
+        request.own_thread = true;
         request.author_kind = ChatActorKind::Automation;
         request.author_display_name = "Ask my agent".to_owned();
         request.author_owner_display_name = Some("Ice".to_owned());

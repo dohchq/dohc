@@ -166,14 +166,16 @@ export function MentionComposer(props: {
   const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // A composer asked for focus at mount takes it once, when it first takes
+  // input: a later render must not pull focus back.
+  const pendingFocus = useRef(props.autoFocus === true);
   useEffect(() => {
     const node = textareaRef.current;
-    if (!props.autoFocus || !node) return;
+    if (!pendingFocus.current || !node || props.disabled) return;
+    pendingFocus.current = false;
     node.focus();
     node.setSelectionRange(node.value.length, node.value.length);
-    // Only on mount: a later render must not pull focus back.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.disabled]);
   const rosterPick = useRef<AgentRosterPick | null>(null);
   const beforeInput = useRef<{ from: number; to: number } | null>(null);
   useEffect(() => {

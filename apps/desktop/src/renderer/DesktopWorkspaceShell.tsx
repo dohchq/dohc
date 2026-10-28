@@ -2018,7 +2018,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("dohc could not trust this workspace.", error, () => void trustWorkspace());
     }
   }, [reportShellError, requestWorkspaceTrust]);
-  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind, () => void trustWorkspace());
   // A send that asks an agent Restricted Mode holds opens main's dialog, only
   // for the workspace this shell still shows.
   const trustForHeldAgent = useCallback((forWorkspaceId: string) => {
@@ -2922,6 +2921,11 @@ export function DesktopWorkspaceShell(props: {
     setChatsThreadRevision((current) => current + 1);
   }, []);
   const openChatsNavInTab = chatEditors.open;
+  useChatDispatchNotices(
+    workspaceId, workspaceIsReady, reportShellFailure, clearKind,
+    () => void trustWorkspace(),
+    (nav) => { openChatsNavInTab(nav); },
+  );
   const askAgent = useAskAgent({
     workspaceId,
     agentSetup,

@@ -1,7 +1,7 @@
 import { readThreadDispatchState } from "./threadDispatchState";
 import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
-import type { CliResultByVerb } from "@dohc/cli/protocol";
+import type { CliShowThreadResult } from "@dohc/cli/protocol";
 import type {
   ChatMessage,
   ChatThreadId,
@@ -10,9 +10,14 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { cliGroupKind, FILES_GROUP } from "../cli/cliServer";
 
+// A run sees the newest messages of its thread, within a size its agent can
+// read at once, and always the message that asked for it.
+export const RUNNER_CONTEXT_MESSAGES = 40;
+export const RUNNER_CONTEXT_CHARS = 48_000;
+
 type RunnerThreadStore = Pick<
   LinkedChatStore,
-  "listChannels" | "listMessages" | "listThreadDecisions" | "listThreads"
+  "getMessage" | "getThread" | "listMessagesPage" | "listThreadDecisions"
 >;
 
 interface RunnerThreadContextInput {
@@ -20,6 +25,9 @@ interface RunnerThreadContextInput {
   dispatchStore: AwaitableAgentDispatchStore;
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
+  askingMessageId: string;
+  /** How this run reads what was left out, when it can. */
+  readEarlier?: string;
 }
 
 function messageForMarkdown(
@@ -28,7 +36,7 @@ function messageForMarkdown(
     string,
     { state: "open" | "resolved"; options?: readonly string[]; chosenOption?: string }
   >,
-): CliResultByVerb["show"]["messages"][number] {
+): CliShowThreadResult["messages"][number] {
   const decision = decisionByMessage.get(message.id);
   return {
     id: message.id,
@@ -51,24 +59,35 @@ function messageForMarkdown(
 export async function buildRunnerThreadContext(
   input: RunnerThreadContextInput,
 ): Promise<string> {
-  const [threads, channels, messages, decisions] = await Promise.all([
-    input.store.listThreads({ workspaceId: input.workspaceId }),
-    input.store.listChannels({ workspaceId: input.workspaceId }),
-    input.store.listMessages({
-      workspaceId: input.workspaceId,
-      threadId: input.threadId,
-    }),
-    input.store.listThreadDecisions(input.workspaceId, input.threadId),
+  const { workspaceId, threadId } = input;
+  const { thread, channel, messageCount } = await input.store.getThread({ workspaceId, threadId });
+  // The engine cuts a page at a byte budget, so long messages take more than one.
+  const newest = async (): Promise<ChatMessage[]> => {
+    const read: ChatMessage[] = [];
+    let after = messageCount > RUNNER_CONTEXT_MESSAGES
+      ? messageCount - RUNNER_CONTEXT_MESSAGES - 1
+      : null;
+    do {
+      const page = await input.store.listMessagesPage({
+        workspaceId,
+        threadId,
+        ...(after === null ? {} : { afterMessageOrder: after }),
+        limit: RUNNER_CONTEXT_MESSAGES - read.length,
+      });
+      read.push(...page.messages);
+      after = page.messages.length > 0 ? page.nextAfterMessageOrder : null;
+    } while (after !== null && read.length < RUNNER_CONTEXT_MESSAGES);
+    return read;
+  };
+  const [newestMessages, decisions, dispatch] = await Promise.all([
+    newest(),
+    input.store.listThreadDecisions(workspaceId, threadId),
+    readThreadDispatchState(input.dispatchStore, workspaceId, threadId),
   ]);
-  const thread = threads.find((candidate) => candidate.id === input.threadId);
-  if (!thread) {
-    throw new Error(`Chat thread ${JSON.stringify(input.threadId)} was not found.`);
-  }
-  const channel = thread.channelId
-    ? channels.find((candidate) => candidate.id === thread.channelId)
-    : undefined;
-  if (thread.channelId && !channel) {
-    throw new Error(`The group, direct message, or agent lane holding thread ${JSON.stringify(input.threadId)} was not found.`);
+  let messages = newestMessages;
+  if (!messages.some((message) => message.id === input.askingMessageId)) {
+    const asking = await input.store.getMessage({ workspaceId, messageId: input.askingMessageId });
+    messages = [asking, ...messages.slice(messages.length < RUNNER_CONTEXT_MESSAGES ? 0 : 1)];
   }
   const decisionByMessage = new Map(
     decisions.map((decision) => [
@@ -80,23 +99,38 @@ export async function buildRunnerThreadContext(
       },
     ]),
   );
-  const markdownInput: CliResultByVerb["show"] = {
-    dispatch: await readThreadDispatchState(input.dispatchStore, input.workspaceId, input.threadId),
-    thread: {
-      id: thread.id,
-      title: thread.title,
-      group: channel
-        ? {
-            id: channel.id,
-            name: channel.kind === "agent" ? channel.slug : channel.name,
-            slug: channel.slug,
-            kind: cliGroupKind(channel.kind),
-          }
-        : FILES_GROUP,
-      commentCount: Math.max(0, messages.length - 1),
-      openDecisionCount: decisions.filter((decision) => decision.state === "open").length,
-    },
-    messages: messages.map((message) => messageForMarkdown(message, decisionByMessage)),
+  const render = (shown: readonly ChatMessage[]): string => {
+    const markdown = renderThreadMarkdown({
+      dispatch,
+      thread: {
+        id: thread.id,
+        title: thread.title,
+        group: channel
+          ? {
+              id: channel.id,
+              name: channel.kind === "agent" ? channel.slug : channel.name,
+              slug: channel.slug,
+              kind: cliGroupKind(channel.kind),
+            }
+          : FILES_GROUP,
+        commentCount: Math.max(0, messageCount - 1),
+        openDecisionCount: decisions.filter((decision) => decision.state === "open").length,
+      },
+      messages: shown.map((message) => messageForMarkdown(message, decisionByMessage)),
+    });
+    const omitted = messageCount - shown.length;
+    if (omitted <= 0) return markdown;
+    const note = `${omitted} earlier ${omitted === 1 ? "message in this thread isn't" : "messages in this thread aren't"} shown.${
+      input.readEarlier ? ` Read ${omitted === 1 ? "it" : "them"} with \`${input.readEarlier}\`.` : ""
+    }`;
+    // The note goes under the thread's header, before its first message.
+    return markdown.replace("\n\n", `\n${note}\n\n`);
   };
-  return renderThreadMarkdown(markdownInput);
+  let markdown = render(messages);
+  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > 1) {
+    const oldest = messages.findIndex((message) => message.id !== input.askingMessageId);
+    messages = messages.toSpliced(oldest, 1);
+    markdown = render(messages);
+  }
+  return markdown;
 }

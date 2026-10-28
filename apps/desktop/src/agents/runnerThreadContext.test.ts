@@ -130,6 +130,7 @@ describe("buildRunnerThreadContext", () => {
       store,
       workspaceId: WORKSPACE_ID,
       threadId: "th_1",
+      askingMessageId: "msg_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
     await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1", agentId: "default" });
     const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
@@ -138,9 +139,70 @@ describe("buildRunnerThreadContext", () => {
     await dispatchStore.store.markFailureHandled(claim.run.runId);
     cliShowFixture.dispatch.lastRun = { state: "failed", failureReason: "no-reply", exitCode: 0 };
     await expect(buildRunnerThreadContext({
-      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1",
+      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1", askingMessageId: "msg_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
     await dispatchStore.store.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "th_1", paused: true, reason: "re-dispatch budget exceeded" });
-    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
+    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1", askingMessageId: "msg_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
+  });
+
+  async function seedThread(bodies: readonly string[]): Promise<void> {
+    let id = 1;
+    await loopback.sendRequest({
+      id: id++, method: CHATS_METHOD.threadCreate, workspace: WORKSPACE_ID, idempotencyKey: "th_long",
+      params: { threadId: "th_long", nowMs: FIRST_MESSAGE_AT_MS - 1_000, title: "Long thread", linkedFile: { objectId: "object_long", pathHint: "long.md" } },
+    });
+    for (const [index, body] of bodies.entries()) {
+      await loopback.sendRequest({
+        id: id++, method: CHATS_METHOD.messageSend, workspace: WORKSPACE_ID, idempotencyKey: `m_${index}`,
+        params: { threadId: "th_long", messageId: `m_${index}`, nowMs: FIRST_MESSAGE_AT_MS + index, authorKind: "human", authorDisplayName: "Sam", body, attachments: [] },
+      });
+    }
+  }
+
+  const shownIds = (markdown: string) => [...markdown.matchAll(/· (m_\d+)$/gm)].map((match) => match[1]);
+  const context = (askingMessageId: string, readEarlier?: string) => buildRunnerThreadContext({
+    store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId,
+    ...(readEarlier ? { readEarlier } : {}),
+  });
+
+  it("shows the newest 40 messages and says how many were left out", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    const markdown = await context("m_44", "dohc chat show th_long --peek");
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
+    expect(markdown).toContain("5 earlier messages in this thread aren't shown. Read them with `dohc chat show th_long --peek`.");
+    expect(await context("m_44")).toContain("5 earlier messages in this thread aren't shown.\n");
+  });
+
+  it("reads the newest 40 when the engine cuts each page short", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    // The engine ends a page at its byte budget and names where the next starts.
+    const shortPages = {
+      ...store,
+      listMessagesPage: async (page: Parameters<typeof store.listMessagesPage>[0]) =>
+        await store.listMessagesPage({ ...page, limit: Math.min(page.limit, 15) }),
+    };
+    const markdown = await buildRunnerThreadContext({
+      store: shortPages, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId: "m_44",
+    });
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
+  });
+
+  it("keeps the asking message when it is older than the newest 40", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    const ids = shownIds(await context("m_0"));
+    expect(ids).toHaveLength(40);
+    expect(ids[0]).toBe("m_0");
+    expect(ids.slice(1)).toEqual(Array.from({ length: 39 }, (_, index) => `m_${index + 6}`));
+  });
+
+  it("drops the oldest messages past 48,000 characters, but never the asking one", async () => {
+    await seedThread(Array.from({ length: 20 }, (_, index) => `${index}`.padEnd(5_000, ".")));
+    const markdown = await context("m_0");
+    expect(markdown.length).toBeLessThanOrEqual(48_000);
+    const ids = shownIds(markdown);
+    expect(ids[0]).toBe("m_0");
+    expect(ids.at(-1)).toBe("m_19");
+    expect(ids.length).toBeGreaterThan(5);
+    expect(markdown).toContain(`${20 - ids.length} earlier messages in this thread aren't shown.`);
   });
 });

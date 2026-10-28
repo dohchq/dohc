@@ -27,8 +27,11 @@ export interface AgentWakeDependencies {
   /** The agent's chat id, made when it does not exist yet. */
   agentChannelId(agent: WokenAgent): Promise<string>;
   threadExists(threadId: string): Promise<boolean>;
-  /** Starts the thread with its first message. */
-  start(input: { channelId: string; message: AutomationChatMessage }): Promise<unknown>;
+  /**
+   * Starts the thread with its first message. A wake keeps its own thread,
+   * never the DM's conversation, so the trigger it records names that thread.
+   */
+  start(input: { channelId: string; message: AutomationChatMessage; ownThread: true }): Promise<unknown>;
   /** Adds the message to the thread. */
   send(input: { message: AutomationChatMessage }): Promise<unknown>;
   /** Queues the message as the agent's trigger; a message is queued once. */
@@ -52,7 +55,7 @@ export async function wakeAgent(dependencies: AgentWakeDependencies, message: Au
       if (!(error instanceof Error && error.message === KEY_ALREADY_USED)) throw error;
     }
   } else {
-    await dependencies.start({ channelId: await dependencies.agentChannelId(agent), message });
+    await dependencies.start({ channelId: await dependencies.agentChannelId(agent), message, ownThread: true });
   }
   await dependencies.recordTrigger({ triggerMessageId: message.messageId, threadId: message.threadId, agentId: agent.id });
   await dependencies.scan();

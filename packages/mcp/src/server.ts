@@ -534,9 +534,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
+        "Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.",
       inputSchema: {
-        threadId: z.string().min(1).max(200),
+        threadId: z.string().min(1).max(200).optional(),
+        group: z.string().min(1).max(500).optional(),
+        before: z.object({
+          createdAtMs: z.number().int().nonnegative(),
+          lane: z.enum(["posts", "chat"]),
+          id: z.string().min(1).max(200),
+        }).strict().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
       },
     },
     async (args) => text(await readChat(ctx, args)),

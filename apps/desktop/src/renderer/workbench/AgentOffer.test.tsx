@@ -67,9 +67,9 @@ describe("the agent offer", () => {
   it.each([
     ["runs", "Runs when you send", "reaches trip-planner", "run"],
     ["working", "Runs after the current run", "reaches trip-planner", "working"],
-    ["paused", "Dispatch paused · runs after Resume", "reaches trip-planner", null],
-    ["runner-off", "Agent dispatch is off", null, null],
-    ["no-command", "No agent runner is configured", null, null],
+    ["paused", "Replies paused · runs after Resume", "reaches trip-planner", null],
+    ["runner-off", "Chat runner is off in Settings", null, null],
+    ["no-command", "No chat runner is set up", null, null],
     // Alone, the folder says what it is.
     ["unknown", null, "Reaches trip-planner", null],
   ] as const)("%s says %j", (state, words, reach, mark) => {

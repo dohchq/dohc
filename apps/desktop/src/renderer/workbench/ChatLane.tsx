@@ -53,13 +53,18 @@ export function ChatLane(props: {
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
   workspacePath?: string;
+  // An agent DM's unsent message, kept with the tab's other drafts so a
+  // request handed to the agent lands here.
+  draft?: { value: string; onChange: (value: string) => void; autoFocus?: boolean };
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const reactions = useReactions();
   const [loading, setLoading] = useState(true);
-  const [composer, setComposer] = useState("");
+  const [ownComposer, setOwnComposer] = useState("");
+  const composer = props.draft?.value ?? ownComposer;
+  const setComposer = props.draft?.onChange ?? setOwnComposer;
   const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
   const [sending, setSending] = useState(false);
   // The first message the reader had not seen when the lane opened.
@@ -156,7 +161,7 @@ export function ChatLane(props: {
     setThreadId(null);
     setMessages([]);
     setDecisions([]);
-    setComposer("");
+    setOwnComposer("");
     setPoll(null);
     setSending(false);
     setFirstUnreadMessageId(null);
@@ -330,7 +335,7 @@ export function ChatLane(props: {
         testIdPrefix="chats-lane"
         messages={messages}
         loading={loading}
-        emptyLabel={`No messages in #${props.channel.name} yet.`}
+        emptyLabel={props.channel.kind === "agent" ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
         key={`${workspaceId}:${channelId}`}
         listRef={listRef}
         mentionCandidates={props.mentionCandidates}
@@ -365,10 +370,11 @@ export function ChatLane(props: {
         <MentionComposer
           testIdPrefix="chats-lane"
           composerId="chats-lane-composer"
+          autoFocus={props.draft?.autoFocus}
           value={composer}
           sending={sending}
           disabled={loading}
-          placeholder={`Message #${props.channel.name}`}
+          placeholder={props.channel.kind === "agent" ? "Message your agent…" : `Message #${props.channel.name}`}
           sendLabel="Send message"
           candidates={props.mentionCandidates}
           fileCandidates={props.fileCandidates}

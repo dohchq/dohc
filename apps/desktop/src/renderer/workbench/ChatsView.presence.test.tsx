@@ -410,6 +410,7 @@ describe("ChatsView presence (MU-C1)", () => {
     expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("");
 
     await user.click(screen.getByTestId("chats-my-agent"));
+    await user.click(await screen.findByTestId("chats-group-lane-posts"));
     await user.click(await screen.findByTestId("chats-thread"));
     await screen.findByTestId("chats-thread-view");
     await waitFor(() => expect(t.topics).toContain("chat:thread:thread-agent"));
