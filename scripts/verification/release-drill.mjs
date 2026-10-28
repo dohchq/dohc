@@ -27,6 +27,7 @@ export const SCENARIOS = ["main-fails-to-load", "main-crashes-every-launch"];
 export const FEED_VERSION = "999.0.0";
 const INSTALLER = `dohc-${FEED_VERSION}-setup.exe`;
 const ENGINE = "dohc-workspace-engine.exe";
+const ANSWER = "download-answer";
 const desktopRoot = join(repoRoot, "apps/desktop");
 
 // The product's own bounds (updates/updateAfterFailure.ts): 15 s for the feed
@@ -36,20 +37,34 @@ const PRODUCT_WAIT_MS = 15_000 + 5 * 60_000;
 const LAUNCH_BOUND_MS = 2 * PRODUCT_WAIT_MS + 2 * 60_000;
 
 // Loaded first by the scratch entry module. It records every native dialog
-// to the drill log and answers the way a person who reads and waits would:
-// they press Download, a download notice stays open until the app closes it,
-// and the restart question stays open until the drill ends the process.
-export const DIALOG_RECORDER = `import { appendFileSync } from "node:fs";
-import { dialog } from "electron";
+// and every request through electron's net, which electron-updater uses, to
+// the drill log. It answers the way a person who reads and waits would: they
+// press Download once the drill writes the answer file, a download notice
+// stays open until the app closes it, and the restart question stays open
+// until the drill ends the process.
+export const DIALOG_RECORDER = `import { appendFileSync, existsSync } from "node:fs";
+import { dialog, net } from "electron";
 const record = (entry) => appendFileSync(process.env.DOHC_DRILL_LOG, JSON.stringify({ pid: process.pid, at: Date.now(), ...entry }) + "\\n");
 record({ kind: "entry" });
+const request = net.request;
+net.request = (options, ...rest) => {
+  record({ kind: "request", path: typeof options === "string" ? options : options.url ?? options.path });
+  return request.call(net, options, ...rest);
+};
 dialog.showErrorBox = (title, content) => { record({ kind: "error-box", title, content }); };
 dialog.showMessageBox = (...args) => {
   const options = args.length > 1 ? args[1] : args[0];
   const shown = { message: options.message, detail: options.detail, buttons: options.buttons };
   if (options.buttons?.[0] === "Download") {
     record({ kind: "question", ...shown });
-    return Promise.resolve({ response: 0, checkboxChecked: false });
+    return new Promise((resolve) => {
+      const answer = setInterval(() => {
+        if (!existsSync(process.env.DOHC_DRILL_ANSWER)) return;
+        clearInterval(answer);
+        record({ kind: "answered" });
+        resolve({ response: 0, checkboxChecked: false });
+      }, 100);
+    });
   }
   if (options.buttons?.length === 1) {
     record({ kind: "notice", ...shown });
@@ -103,6 +118,17 @@ export function feedManifest(installer) {
 export function readDrillLog(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").slice(0, -1).filter(Boolean).map((line) => JSON.parse(line));
+}
+
+// Consent, from the app's own log: the person was asked, answered Download,
+// and the installer was requested only after that answer. The app writes
+// these lines in the order they happened.
+export function downloadedOnlyAfterAnswer(entries) {
+  const answered = entries.findIndex((logged) => logged.kind === "answered");
+  if (answered < 0) return false;
+  const installer = (logged) => logged.kind === "request" && logged.path?.includes(INSTALLER);
+  const before = entries.slice(0, answered);
+  return before.some((logged) => logged.kind === "question") && !before.some(installer) && entries.slice(answered).some(installer);
 }
 
 // The scratch app links these to the real app. They are removed as links
@@ -207,6 +233,7 @@ function launchEnv(scratch, logPath, feedUrl) {
     DOHC_DESKTOP_MOCK_UPDATES: "1",
     DOHC_UPDATE_URL: feedUrl,
     DOHC_DRILL_LOG: logPath,
+    DOHC_DRILL_ANSWER: join(scratch, ANSWER),
     // The updater caches downloads under LOCALAPPDATA; keep them in scratch.
     LOCALAPPDATA: join(scratch, "localappdata"),
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
@@ -335,13 +362,15 @@ export async function runDrill({
     copyFileSync(engine, join(app, "target", "debug", ENGINE));
     const profile = join(scratch, "profile");
     const markerPath = join(profile, "dohc-launch.json");
-    const offered = (entries) => entries.find((logged) => logged.kind === "dialog");
-    // The installer is requested only after the person pressed Download.
-    const askedFirst = (entries, message) => {
+    // Download is pressed only after the drill has read the question, so a
+    // download that does not wait for it starts first and fails the check.
+    const offered = (entries) => {
+      if (entries.some((logged) => logged.kind === "question")) writeFileSync(join(scratch, ANSWER), "Download\n");
+      return entries.find((logged) => logged.kind === "dialog");
+    };
+    const asked = (entries, message, detail) => {
       const question = entries.find((logged) => logged.kind === "question");
-      const installer = feed.requests.find((request) => request.published && request.name === INSTALLER);
-      return question?.message === message && question.detail === `Update ${FEED_VERSION} is available. Download it?` &&
-        installer !== undefined && installer.at >= question.at;
+      return question?.message === message && question.detail === detail && downloadedOnlyAfterAnswer(entries);
     };
 
     if (scenario === "main-fails-to-load") {
@@ -349,7 +378,8 @@ export async function runDrill({
       const dialog = await launch(1, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
       check("reports that dohc failed to start", entries.some((logged) => logged.kind === "error-box" && logged.title === "dohc failed to start"));
-      check("asks before it downloads the newer build", askedFirst(entries, "dohc could not start."), { entries, requests: feed.requests });
+      check("asks before it downloads the newer build", asked(entries, `Update ${FEED_VERSION} is available.`,
+        "It may fix what stopped dohc from starting. Download it?"), entries);
       check("offers the restart into the newer build", dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
       // DOHC_TEST_HOME is main's state directory in a test run, so the report
@@ -372,8 +402,8 @@ export async function runDrill({
       const dialog = await launch(3, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
       check("launch 3 checks before main loads", entries.filter((logged) => logged.kind === "main-loaded").length === 2);
-      check("launch 3 asks before it downloads the newer build", askedFirst(entries, "dohc closed before it finished starting."),
-        { entries, requests: feed.requests });
+      check("launch 3 asks before it downloads the newer build", asked(entries, "dohc closed before it finished starting.",
+        `Update ${FEED_VERSION} is available and may fix this. Download it?`), entries);
       check("launch 3 offers the restart into the newer build", dialog.message === "dohc closed before it finished starting." &&
         dialog.detail?.startsWith(`Update ${FEED_VERSION} is downloaded.`) &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);

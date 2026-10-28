@@ -23,8 +23,10 @@ export async function confirmDownloadDialog(
 ): Promise<boolean> {
   const { response } = await dialog.showMessageBox({
     type: "info",
-    message: failure === "startup" ? "dohc could not start." : FAILURE_MESSAGES[failure],
-    detail: `Update ${version} is available. Download it?`,
+    message: failure === "startup" ? `Update ${version} is available.` : FAILURE_MESSAGES[failure],
+    detail: failure === "startup"
+      ? "It may fix what stopped dohc from starting. Download it?"
+      : `Update ${version} is available and may fix this. Download it?`,
     buttons: ["Download", failure === "startup" ? "Quit" : "Not now"],
     defaultId: 0,
     cancelId: 1,

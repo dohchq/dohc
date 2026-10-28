@@ -29,15 +29,19 @@ describe("confirmDownloadDialog", () => {
     const startup = await asked("startup", 0);
     expect(startup.accepted).toBe(true);
     expect(startup.options).toMatchObject({
-      message: "dohc could not start.",
-      detail: "Update 1.2.4 is available. Download it?",
+      message: "Update 1.2.4 is available.",
+      detail: "It may fix what stopped dohc from starting. Download it?",
       buttons: ["Download", "Quit"],
+      defaultId: 0,
       cancelId: 1,
     });
     for (const failure of ["unfinished-launch", "window-crash"] as const) {
       const other = await asked(failure, 1);
       expect(other.accepted).toBe(false);
-      expect(other.options).toMatchObject({ buttons: ["Download", "Not now"] });
+      expect(other.options).toMatchObject({
+        detail: "Update 1.2.4 is available and may fix this. Download it?",
+        buttons: ["Download", "Not now"],
+      });
     }
   });
 });
