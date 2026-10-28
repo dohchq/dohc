@@ -300,6 +300,28 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: focused }));
   });
 
+  // jsdom has no layout or styles: rows 28px apart from 4px down, in a list that shows 100px.
+  it("scrolls a list shorter than its rows to the checked row it opens on", async () => {
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+        const menu = this.closest('[role="menu"]');
+        return menu && menu !== this ? 4 + [...menu.querySelectorAll('[role^="menuitem"]')].indexOf(this) * 28 : 0;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28),
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100),
+    ];
+    try {
+      const user = userEvent.setup();
+      render(<Harness items={Array.from({ length: 10 }, (_, index) => ({ id: `v${index}`, label: `Version ${index}`, onSelect: vi.fn(), checked: index === 9 }))} />);
+      await user.click(screen.getByTestId("row-menu"));
+      expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Version 9" }));
+      // The last row ends at 284: 284 - 100.
+      expect(screen.getByRole("menu").scrollTop).toBe(184);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   it("says why a disabled row cannot run on a second line, dimming only its icon and label", async () => {
     const user = userEvent.setup();
     render(

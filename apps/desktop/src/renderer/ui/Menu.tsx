@@ -291,6 +291,13 @@ export function Menu(props: {
     };
   }, [open, width]);
 
+  // Placed, a list shorter than its rows shows its top, so it scrolls to the
+  // row focus opened on.
+  useLayoutEffect(() => {
+    const row = rowElements.current[openRow.current];
+    if (place && list.current && row === document.activeElement) revealMenuRow(list.current, row);
+  }, [place]);
+
   useLayoutEffect(() => {
     const id = refocus.current;
     if (id === null) return;
