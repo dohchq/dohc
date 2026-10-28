@@ -165,7 +165,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const canonical = yDocToMarkdown(doc)
         imported = markdownToYDoc(source)
         if (doc.getMap('meta').get('dohcMarkdownSourceReader') === 1
-          && (witness.source !== source || !root(doc).eq(root(imported)))) {
+          && (witness.source !== source || !root(doc).eq(root(imported))
+            || !sameFrontmatterValue(getDohcYDocFrontmatter(doc), getDohcYDocFrontmatter(imported)))) {
           // Expiry needs a valid old reading and a strict proof of the current state.
           requireReading(utf8.encode(witness.source).length <= MAX_SOURCE_BYTES, 'capacity-refused')
           earlier = witness.source === source ? undefined : markdownToYDoc(witness.source)
