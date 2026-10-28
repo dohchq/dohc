@@ -619,7 +619,8 @@ export function AgentList(props: {
 
   return (
     <section data-testid="agent-list" aria-labelledby="agents-title">
-      <div className="mb-6 flex min-h-8 items-center gap-2">
+      {/* The title sits where every Settings page title sits; the buttons beside it reach 4 px higher. */}
+      <div className="-mt-1 mb-5 flex min-h-8 items-center gap-2">
         <h3 id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
         <CopyButton
           key={workspaceId}
@@ -641,12 +642,12 @@ export function AgentList(props: {
         ) : null}
       </div>
       {paused && anyLaunch ? (
-        <p data-testid="agents-paused" className="-mt-4 mb-6 flex items-center gap-1.5 text-[12px] text-muted">
+        <p data-testid="agents-paused" className="-mt-3 mb-6 flex items-center gap-1.5 text-[12px] text-muted">
           <Pause size={13} aria-hidden />Paused until you resume or quit dohc.
         </p>
       ) : null}
       {config && "unavailable" in config ? (
-        <p data-testid="mcp-unavailable" className="-mt-4 mb-6 text-[12px] text-danger">{config.message}</p>
+        <p data-testid="mcp-unavailable" className="-mt-3 mb-6 text-[12px] text-danger">{config.message}</p>
       ) : null}
       <div ref={card} className="rounded-lg border border-line bg-panel px-4">
         {restricted && props.trust ? (
