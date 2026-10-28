@@ -196,7 +196,7 @@ describe("VersionMenu", () => {
     ["an empty name", "  ", null, "Give the new version a name."],
     ["a taken name", "Draft", "VersionedTextStoreError [version-name-conflict]: version-name-conflict", "Another version is called Draft. Choose another name."],
     ["a name the engine refuses", "Ideas", "VersionedTextStoreError [invalid-version-name]: invalid-version-name", "dohc can't use that name. Choose another name."],
-  ] as const)("keeps %s in the field and says why there", async (_case, name, refusal, words) => {
+  ] as const)("keeps %s in the field and says why there until the name changes", async (_case, name, refusal, words) => {
     if (refusal !== null) bridgeMock.createWorkspaceVersion.mockRejectedValue(acrossIpc("desktop:create-workspace-version", refusal));
     const user = userEvent.setup();
     const props = renderMenu();
@@ -209,6 +209,10 @@ describe("VersionMenu", () => {
     expect(descriptionOf(field)).toBe(words);
     expect(field.value).toBe(name);
     expect(props.onError).not.toHaveBeenCalled();
+
+    await user.type(field, "2");
+    expect(screen.queryByTestId("version-menu-error")).toBeNull();
+    expect(descriptionOf(field)).toBe("Starts as a copy of Draft. It can't merge into Main.");
   });
 
   it("reports any other create failure with a Try again that creates the same name", async () => {

@@ -379,7 +379,10 @@ export function VersionMenu(props: {
           field: {
             label: "New version name",
             value: newName,
-            onChange: setNewName,
+            onChange: (value) => {
+              setNewName(value);
+              setNameError(null);
+            },
             onSubmit: () => void performCreate(newName),
             onCancel: () => {
               setNewName(null);
