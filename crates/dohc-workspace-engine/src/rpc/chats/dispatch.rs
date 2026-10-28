@@ -95,6 +95,24 @@ struct ChatDispatchFailPendingParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchLatestRunParams {
+    thread_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRecoveriesParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    thread_id: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchRecordRunMessageParams {
     message_id: String,
     run_id: String,
@@ -557,14 +575,17 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatThreadParams = parse(params)?;
+        let params: ChatDispatchLatestRunParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let run = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.latestRunForThread",
-            open.actor
-                .chat_dispatch_latest_run_for_thread(open.workspace_id.clone(), params.thread_id),
+            open.actor.chat_dispatch_latest_run_for_thread(
+                open.workspace_id.clone(),
+                params.thread_id,
+                params.agent_id,
+            ),
         )
         .await?;
         Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))
@@ -777,12 +798,15 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatPageParams = parse(params)?;
+        let params: ChatDispatchRecoveriesParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let binding =
-            chat_cursor_binding("chats.dispatch.listAppQuitRecoveries", &workspace_id, &[]);
+        let binding = chat_cursor_binding(
+            "chats.dispatch.listAppQuitRecoveries",
+            &workspace_id,
+            &[params.thread_id.as_deref().unwrap_or("")],
+        );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor
             .as_ref()
@@ -791,8 +815,12 @@ impl EngineService {
         let rows = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.listAppQuitRecoveries",
-            open.actor
-                .chat_dispatch_list_app_quit_recoveries(workspace_id, after, page_limit + 1),
+            open.actor.chat_dispatch_list_app_quit_recoveries(
+                workspace_id,
+                params.thread_id,
+                after,
+                page_limit + 1,
+            ),
         )
         .await?;
         let values: Vec<Value> = rows

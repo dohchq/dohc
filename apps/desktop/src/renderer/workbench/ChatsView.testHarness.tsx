@@ -164,6 +164,7 @@ export const bridgeMock = {
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
+  retryStoppedRun: vi.fn(),
   readChatDispatchPaused: vi.fn(),
   setChatDispatchPaused: vi.fn(),
   onChatDispatchPaused: vi.fn(),
@@ -375,6 +376,7 @@ beforeEach(() => {
     for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
   });
   bridgeMock.resumeThreadDispatch.mockResolvedValue(undefined);
+  bridgeMock.retryStoppedRun.mockResolvedValue({ queued: true });
   bridgeMock.markChatThreadRead.mockResolvedValue({
     lastReadSequence: 1,
     revision: 1,

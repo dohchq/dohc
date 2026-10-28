@@ -3665,11 +3665,12 @@ const chatDispatchService = createChatDispatchService({
       ? agentDispatchStoreHandleFor(workspace).requeueFailedTrigger(input)
       : false;
   },
-  listAppQuitRecoveries: (workspace) => {
+  listAppQuitRecoveries: (workspace, threadId) => {
     const current = workspaceForDispatch(workspace.workspaceId);
     return current && current.attachmentId === workspace.attachmentId
       ? agentDispatchStoreHandleFor(workspace).listAppQuitRecoveries(
           workspace.workspaceId,
+          threadId,
         )
       : [];
   },

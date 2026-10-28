@@ -163,6 +163,7 @@ export const CAPABILITIES = {
   "chat.dispatch.pause.read": capability("Read whether agent dispatch is paused on this computer.", {ipc: ["readChatDispatchPaused"]}),
   "chat.dispatch.pause.switch": capability("Pause or resume agent dispatch on this computer.", {ipc: ["setChatDispatchPaused"]}),
   "agent.run.state.read": capability("Read whether this computer's agent is working in this workspace.", {ipc: ["readAgentRunState"]}),
+  "agent.run.retry": capability("Try an agent run again after dohc's restart or quit stopped it.", {ipc: ["retryStoppedRun"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),
   "automation.host.choose": capability("Choose the computer that runs schedules.", {ipc: ["chooseScheduleHost"]}),
   "automation.host.takeover": capability("Take over scheduled work.", {ipc: ["takeOverScheduleHost"]}),

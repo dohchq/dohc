@@ -996,10 +996,11 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         thread_id: String,
+        agent_id: Option<String>,
     ) -> Result<Option<AgentRunRecord>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .latest_run_for_thread(&workspace_id, &thread_id)
+                .latest_run_for_thread(&workspace_id, &thread_id, agent_id.as_deref())
                 .map_err(RuntimeError::from)
         })
         .await
@@ -1182,12 +1183,13 @@ impl ActorHandle {
     pub async fn chat_dispatch_list_app_quit_recoveries(
         &self,
         workspace_id: String,
+        thread_id: Option<String>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_app_quit_recoveries(&workspace_id, after, limit)
+                .list_app_quit_recoveries(&workspace_id, thread_id.as_deref(), after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

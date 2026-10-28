@@ -100,8 +100,9 @@ export interface SentNotice {
   folder: string | null;
   // Open has somewhere to go, or something to say about why it cannot.
   openable: boolean;
-  // A failed run on the owner's self-hosted server, in this workspace: Try
-  // again runs it there.
+  // Try again has a run to start again: a failed run on the owner's
+  // self-hosted server in this workspace, or an agent run on this computer
+  // that dohc's restart or quit stopped.
   retryable: boolean;
 }
 
