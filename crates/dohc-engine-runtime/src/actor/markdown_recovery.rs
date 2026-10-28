@@ -42,6 +42,30 @@ impl ActorHandle {
         }).await
     }
 
+    pub async fn retire_markdown_collection_obligation(&self, owed: Obligation, now_ms: i64) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+                let unsettled: Option<bool> = tx.query_row(
+                    "SELECT settled_update_seq IS NOT head_update_seq FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+                    params![owed.key.workspace_id, owed.key.version_id, owed.key.object_id, owed.lineage_claim_id],
+                    |row| row.get(0)).optional().map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                if unsettled == Some(true) {
+                    let settle = Obligation {
+                        kind: Kind::Session, operation_id: format!("settle:{}", owed.operation_id),
+                        ..owed.clone()
+                    };
+                    obligations::record_in(tx, &settle, now_ms)?;
+                }
+                obligations::complete_in(tx, &owed, now_ms)?;
+                Ok(())
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        }).await
+    }
+
     pub async fn markdown_recovery_candidates(&self, workspace: String)
         -> Result<Vec<MarkdownRecoveryCandidate>, RuntimeError> {
         self.run(move |store, cache| {

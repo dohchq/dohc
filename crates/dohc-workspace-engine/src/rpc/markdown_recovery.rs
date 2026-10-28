@@ -108,7 +108,7 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
                             Ok(_) if !result.waits_for_pull && !result.markdown_obligation_candidates.iter()
                                 .any(|(key, kind, operation)| key == &owed.key && kind == &owed.kind
                                     && operation == &owed.operation_id) => {
-                                open.actor.complete_markdown_obligation(owed.clone(), now).await.map(|()| true)
+                                open.actor.retire_markdown_collection_obligation(owed.clone(), now).await.map(|()| true)
                             }
                             Ok(_) => Ok(false),
                             Err(error) => Err(error),

@@ -90,6 +90,7 @@ async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligati
     let pending = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].obligation.kind, Kind::RelationCleanup);
+    let collection_order = pending[0].obligation.order;
     let cancel = CancellationToken::new();
     let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(run(Arc::downgrade(&open), handle.clone(), service.sessions.clone(),
@@ -116,8 +117,20 @@ async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligati
             if !attempts.is_empty() { break attempts; }
         }
     }).await.unwrap();
-    assert_eq!(retried, vec![held]);
-    assert!(open.actor.markdown_recovery_candidates("w".into()).await.unwrap().is_empty());
+    assert_eq!(retried, vec![held.clone()]);
+    let pending = open.actor.markdown_recovery_candidates("w".into()).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].obligation.kind, Kind::Session);
+    assert_ne!(pending[0].obligation.order, collection_order);
+    assert!(pending[0].obligation.operation_id.starts_with("settle:"));
+    wake.notify_one();
+    let settle_attempt = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let attempts = passes.recv().await.unwrap();
+            if !attempts.is_empty() { break attempts; }
+        }
+    }).await.unwrap();
+    assert_eq!(settle_attempt, vec![held.clone()]);
     let capture = open.capture_apply_gate.lock().await;
     let sessions = open.session_ops.lock().await;
     let mut head = hex_sha256(b"Original source\n");
@@ -140,8 +153,16 @@ async fn markdown_recovery_undo_retries_an_already_attempted_collection_obligati
     drop(sessions);
     drop(capture);
     let store = EngineStore::open_read_only(&db).unwrap();
-    assert!(store.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, "w")).unwrap().is_empty());
-    assert!(dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().is_empty());
+    let pending = store.read_with(|conn| dohc_engine_collab::markdown_write_obligations::pending_in(conn, "w")).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].kind, Kind::Session);
+    assert_eq!(dohc_engine_sync::list_refusal_notices(&store, "w").unwrap().len(), 1);
+    let persisted = dohc_engine_collab::load_persisted(&store, &held).unwrap().unwrap();
+    assert!(persisted.doc.frontmatter_json().get("related").is_none());
+    assert!(persisted.doc.project(ContentKind::Richdoc).unwrap().content.contains("Accepted edits stay canonical"));
+    assert!(store.read_with(|conn| conn.query_row(
+        "SELECT settled_update_seq IS NOT head_update_seq FROM ydoc_docs WHERE object_id='held'", [],
+        |row| row.get::<_, bool>(0))).unwrap());
     assert_eq!(std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(), source);
     service.workspace_close(Some(handle)).await.unwrap();
 }
