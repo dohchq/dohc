@@ -3081,7 +3081,7 @@ fn preserve_base_sides_in_tx(
             == Some(snapshot.blob_sha256.as_str())
             || last_settled_sha == Some(snapshot.blob_sha256.as_str())
             || losing_projection
-                .is_some_and(|local| hex_sha256(local.as_bytes()) == snapshot.blob_sha256);
+                .is_some_and(|local| hex_sha256(local.content.as_bytes()) == snapshot.blob_sha256);
         if !head_is_preserved
             && snapshot.blob_sha256 != hex_sha256(incoming_content.as_bytes())
             && open_sync_conflict_id(tx, key)?.is_none()
