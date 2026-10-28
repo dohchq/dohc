@@ -16,7 +16,7 @@ import { PublicationAgent } from "@dohc/cli/app-publication";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
-import { OperationRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { OperationRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { datasetOperations } from "./datasetOperations";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -126,6 +126,7 @@ import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
+  AgentId,
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
   ZOOM_STEPS,
@@ -903,6 +904,8 @@ export type DeleteWorkspacePathPayload = z.infer<
 // file the workspace owns. There the change is what can be taken back: the
 // granter's copy is untouched until they accept it.
 export const DeleteWorkspacePathResult = z.object({ trashed: z.boolean() }).extend(OperationRecovery.partial().shape);
+export const ReadHistoryOperationPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
+export { HistoryOperationReadResult as ReadHistoryOperationResult };
 export const UndoHistoryOperationPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: HistoryOperationId }).strict();
 export { HistoryOperationUndoResult as UndoHistoryOperationResult };
 export type DeleteWorkspacePathResult = z.infer<typeof DeleteWorkspacePathResult>;
@@ -1089,6 +1092,10 @@ export const OpenFileExternallyPayload = z.object({
 export type OpenFileExternallyPayload = z.infer<
   typeof OpenFileExternallyPayload
 >;
+
+// What Open externally gives for a file: the file itself, or a read-only copy.
+export const ReadExternalOpenResult = z.object({ readOnlyCopy: z.boolean() });
+export type ReadExternalOpenResult = z.infer<typeof ReadExternalOpenResult>;
 
 export const WriteWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2297,6 +2304,8 @@ export const ChatChannelRecord = z.object({
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
+  // The agent whose chat this is, on an agent's chat only.
+  agentId: AgentId.optional(),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
   purpose: z.string().max(200).optional(),

@@ -75,6 +75,8 @@ fn start_with(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms,
                 request_id: None,
             },
@@ -114,6 +116,8 @@ fn start_message(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms,
                 request_id: None,
             },
@@ -150,6 +154,8 @@ fn send_text(
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms,
                 request_id: None,
             },
@@ -244,6 +250,8 @@ fn attachment_insert_and_replication_op_commit_together() {
             needs_decision: false,
             options: Vec::new(),
             attachments: vec![attachment("object")],
+            author_agent_id: None,
+            named_agent_ids: Vec::new(),
             now_ms: 20,
             request_id: Some("request".to_owned()),
         },
@@ -471,6 +479,8 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
         needs_decision: false,
         options: Vec::new(),
         attachments: vec![attachment("object-a")],
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 20,
         request_id: Some("request".to_owned()),
     };
@@ -516,6 +526,8 @@ fn send_message_returns_authoritative_attachments() {
                 needs_decision: false,
                 options: Vec::new(),
                 attachments: vec![attachment("object")],
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: None,
             },
@@ -651,6 +663,8 @@ fn local_start_and_send_index_mentions_atomically() {
             needs_decision: false,
             options: Vec::new(),
             attachments: Vec::new(),
+            author_agent_id: None,
+            named_agent_ids: Vec::new(),
             now_ms: 40,
             request_id: None,
         },
@@ -756,7 +770,7 @@ fn mention_backfill_is_idempotent() {
 }
 
 #[test]
-fn mention_backfill_completes_before_first_read_and_scanner() {
+fn mention_backfill_completes_before_first_read() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     start_message(
@@ -783,13 +797,10 @@ fn mention_backfill_completes_before_first_read_and_scanner() {
     let mentions = LinkedChatStore::new(&mut store)
         .list_mentions_for_handle(WS, "agent", false, None, 10)
         .expect("read");
-    let dispatched = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 50, &NO_FAULTS)
-        .expect("scan");
     assert_eq!(
-        (mentions.len(), dispatched),
-        (1, 1),
-        "advancing the scan before readiness permanently skips this row."
+        mentions.len(),
+        1,
+        "reading before the backfill misses this row."
     );
 }
 
@@ -850,7 +861,7 @@ fn mention_unread_filter_uses_agent_coordinate_tie_break() {
         20,
     );
     LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, "thread", 20, "a-message", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, None, "thread", 20, "a-message", None, 30, &NO_FAULTS)
         .expect("mark read");
     let rows = LinkedChatStore::new(&mut store)
         .list_mentions_for_handle(
@@ -873,84 +884,81 @@ fn mention_unread_filter_uses_agent_coordinate_tie_break() {
     );
 }
 
-#[test]
-fn eligible_scan_overlaps_high_water_timestamp_by_one_ms() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "first",
-        ChatActorKind::Human,
-        None,
-        None,
-        "no mention",
-        20,
-    );
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
-            .expect("first scan"),
-        0
-    );
-    send_text(
-        &mut store,
-        "thread",
-        "same-time",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    let inserted = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 40, &NO_FAULTS)
-        .expect("overlap scan");
-    assert_eq!(
-        inserted, 1,
-        "scanning strictly after the prior maximum misses a late equal-time row."
-    );
+#[allow(clippy::too_many_arguments)]
+fn send_naming(
+    store: &mut EngineStore,
+    thread_id: &str,
+    message_id: &str,
+    kind: ChatActorKind,
+    origin: Option<&str>,
+    named_agent_ids: &[&str],
+    body: &str,
+    now_ms: i64,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> Result<(), dohc_engine_domain::DomainError> {
+    LinkedChatStore::new(store)
+        .send_message(
+            &SendMessage {
+                automation: None,
+                workspace_id: WS.to_owned(),
+                thread_id: thread_id.to_owned(),
+                message_id: message_id.to_owned(),
+                author_kind: kind,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                parent_message_id: None,
+                origin: origin.map(str::to_owned),
+                body: body.to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                named_agent_ids: named_agent_ids.iter().map(|id| (*id).to_owned()).collect(),
+                now_ms,
+                request_id: None,
+            },
+            faults,
+        )
+        .map(|_| ())
+}
+
+fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT trigger_message_id, agent_id, state, created_at_ms, updated_at_ms \
+                     FROM chat_dispatch_ledger WHERE workspace_id=?1 \
+                     ORDER BY trigger_message_id, agent_id",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            stmt.query_map([WS], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<_, _>>()
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("requests")
 }
 
 #[test]
-fn eligible_scan_ledger_pk_makes_overlap_idempotent() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    let first = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
-        .expect("first");
-    let second = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 40, &NO_FAULTS)
-        .expect("retry");
-    assert_eq!(
-        (first, second),
-        (1, 0),
-        "losing INSERT OR IGNORE makes overlap create or count a duplicate."
-    );
-}
-
-#[test]
-fn eligible_scan_accepts_agent_channel_or_indexed_agent_mention() {
+fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, "agent-channel", 11, &NO_FAULTS)
-        .expect("agent channel");
+        .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
+        .expect("agent chat");
     start_message(
         &mut store,
-        "agent-channel",
+        "research-chat",
         "agent-thread",
         "direct",
         ChatActorKind::Human,
@@ -962,444 +970,404 @@ fn eligible_scan_accepts_agent_channel_or_indexed_agent_mention() {
     start_message(
         &mut store,
         "channel",
-        "mention-thread",
-        "mentioned",
+        "group-thread",
+        "group",
         ChatActorKind::Human,
         None,
         None,
         "hello @agent",
         21,
     );
-    let inserted = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
-        .expect("scan");
     assert_eq!(
-        inserted, 2,
-        "requiring both predicates, or only one, changes the union cardinality."
+        requests(&store),
+        vec![(
+            "direct".to_owned(),
+            "research".to_owned(),
+            "pending".to_owned(),
+            20,
+            20
+        )],
+        "a group message that names no agent wakes none, and @agent is not a trigger.",
     );
 }
 
 #[test]
-fn eligible_scan_rejects_agent_authored_and_cli_messages() {
+fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
+        .expect("agent chat");
     start_message(
         &mut store,
-        "channel",
+        "research-chat",
         "agent-thread",
-        "agent",
-        ChatActorKind::Agent,
+        "direct",
+        ChatActorKind::Human,
         None,
         None,
-        "@agent",
+        "hello",
         20,
     );
     start_message(
         &mut store,
         "channel",
-        "cli-thread",
+        "group-thread",
+        "opening",
+        ChatActorKind::Human,
+        None,
+        None,
+        "Opening",
+        21,
+    );
+    send_naming(
+        &mut store,
+        "group-thread",
+        "asks-both",
+        ChatActorKind::Human,
+        None,
+        &["research", "default"],
+        "Can you both look?",
+        30,
+        &NO_FAULTS,
+    )
+    .expect("send");
+    let unread = |store: &mut EngineStore, run_id: &str, after: Option<(i64, String)>| {
+        LinkedChatStore::new(store)
+            .list_agent_unread_requests(WS, run_id, after, 10)
+            .map(|requests| {
+                requests
+                    .into_iter()
+                    .map(|request| request.message_id)
+                    .collect::<Vec<_>>()
+            })
+    };
+    let read = |store: &mut EngineStore, run_id: Option<&str>| {
+        LinkedChatStore::new(store)
+            .mark_thread_read_by_agent(
+                WS,
+                run_id,
+                "group-thread",
+                30,
+                "asks-both",
+                None,
+                40,
+                &NO_FAULTS,
+            )
+            .expect("read");
+    };
+
+    let research = LinkedChatStore::new(&mut store)
+        .claim_next_pending(WS, "run-1", "", None, 35, &NO_FAULTS)
+        .expect("claim")
+        .expect("research's run");
+    assert_eq!(research.run.agent_id, "research");
+    assert_eq!(
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct", "asks-both"]
+    );
+    assert_eq!(
+        unread(&mut store, "run-1", Some((20, "direct".to_owned()))).expect("requests"),
+        vec!["asks-both"]
+    );
+    read(&mut store, None);
+    assert_eq!(
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct", "asks-both"],
+        "an agent outside a run keeps its own place."
+    );
+    read(&mut store, Some("run-1"));
+    assert_eq!(
+        unread(&mut store, "run-1", None).expect("requests"),
+        vec!["direct"]
+    );
+    LinkedChatStore::new(&mut store)
+        .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    assert_eq!(
+        unread(&mut store, "run-1", None).unwrap_err().code(),
+        "run-not-found",
+        "a run that ended no longer reads as its agent."
+    );
+
+    let default = LinkedChatStore::new(&mut store)
+        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .expect("claim")
+        .expect("the default agent's run");
+    assert_eq!(default.run.agent_id, "default");
+    assert_eq!(
+        unread(&mut store, "run-2", None).expect("requests"),
+        vec!["asks-both"],
+        "research reading the message leaves it unread for the default agent."
+    );
+    read(&mut store, Some("run-2"));
+    assert!(
+        unread(&mut store, "run-2", None)
+            .expect("requests")
+            .is_empty()
+    );
+    assert_eq!(
+        unread(&mut store, "no-such-run", None).unwrap_err().code(),
+        "run-not-found"
+    );
+}
+
+#[test]
+fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "thread",
+        "opening",
+        ChatActorKind::Human,
+        None,
+        None,
+        "Opening",
+        20,
+    );
+    send_naming(
+        &mut store,
+        "thread",
+        "both",
+        ChatActorKind::Human,
+        None,
+        &["research", "default", "research"],
+        "@Research and @Myagent",
+        30,
+        &NO_FAULTS,
+    )
+    .expect("send");
+    assert_eq!(
+        requests(&store)
+            .into_iter()
+            .map(|(trigger, agent, ..)| (trigger, agent))
+            .collect::<Vec<_>>(),
+        vec![
+            ("both".to_owned(), "default".to_owned()),
+            ("both".to_owned(), "research".to_owned()),
+        ],
+        "a repeated name wakes its agent once."
+    );
+    let mut chats = LinkedChatStore::new(&mut store);
+    let first = chats
+        .claim_next_pending(WS, "run-1", "", None, 40, &NO_FAULTS)
+        .expect("claim")
+        .expect("first agent");
+    assert_eq!(
+        (
+            first.dispatch.agent_id.as_str(),
+            first.run.agent_id.as_str()
+        ),
+        ("default", "default")
+    );
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-2", "", None, 41, &NO_FAULTS)
+            .expect("claim while running")
+            .is_none(),
+        "one run at a time per workspace."
+    );
+    chats
+        .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    let second = chats
+        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .expect("claim")
+        .expect("second agent");
+    assert_eq!(
+        (
+            second.dispatch.trigger_message_id.as_str(),
+            second.run.agent_id.as_str()
+        ),
+        ("both", "research"),
+        "covering the first agent's run must not take the other agent's request."
+    );
+    chats
+        .complete_dispatch(WS, "run-2", 0, 70, &NO_FAULTS)
+        .expect("complete");
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-3", "", None, 80, &NO_FAULTS)
+            .expect("claim")
+            .is_none()
+    );
+}
+
+#[test]
+fn cli_messages_wake_no_agent_and_only_people_name_agents() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .ensure_agent_channel(WS, "agent-chat", "default", "My agent", 11, &NO_FAULTS)
+        .expect("agent chat");
+    start_message(
+        &mut store,
+        "agent-chat",
+        "thread",
         "cli",
         ChatActorKind::Human,
         None,
         Some("cli"),
-        "@agent",
+        "from the terminal",
+        20,
+    );
+    send_naming(
+        &mut store,
+        "thread",
+        "cli-named",
+        ChatActorKind::Human,
+        Some("cli"),
+        &["research"],
+        "@Research",
         21,
+        &NO_FAULTS,
+    )
+    .expect("cli send");
+    assert!(requests(&store).is_empty());
+    let agent_naming = send_naming(
+        &mut store,
+        "thread",
+        "agent-named",
+        ChatActorKind::Agent,
+        None,
+        &["research"],
+        "@Research",
+        22,
+        &NO_FAULTS,
     );
-    let inserted = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
-        .expect("scan");
-    assert_eq!(
-        inserted, 0,
-        "removing either author/origin gate admits an invalid trigger."
+    assert!(matches!(
+        agent_naming,
+        Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+    ));
+    let bad_id = send_naming(
+        &mut store,
+        "thread",
+        "bad-id",
+        ChatActorKind::Human,
+        None,
+        &["Research"],
+        "@Research",
+        23,
+        &NO_FAULTS,
     );
+    assert!(matches!(
+        bad_id,
+        Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+    ));
+    assert!(requests(&store).is_empty());
 }
 
 #[test]
-fn eligible_scan_enforces_verified_author_when_present() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "owned-thread",
-        "owned",
-        ChatActorKind::Human,
-        Some("alice"),
-        None,
-        "@agent",
-        20,
-    );
-    start_message(
-        &mut store,
-        "channel",
-        "anonymous-thread",
-        "anonymous",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    let bob = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, Some("bob"), 30, &NO_FAULTS)
-        .expect("bob scan");
-    let alice = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, Some("alice"), 40, &NO_FAULTS)
-        .expect("alice overlap");
-    assert_eq!(
-        (bob, alice),
-        (1, 1),
-        "trusting display name or requiring identity for NULL changes these counts."
-    );
-}
-
-#[test]
-fn eligible_scan_advances_over_ineligible_messages() {
+fn a_request_rolls_back_with_its_message() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     start_message(
         &mut store,
         "channel",
         "thread",
-        "message",
+        "opening",
         ChatActorKind::Human,
         None,
         None,
-        "ordinary",
-        123,
-    );
-    let inserted = LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 200, &NO_FAULTS)
-        .expect("scan");
-    let cursor: i64 = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id=?1",
-                [WS],
-                |row| row.get(0),
-            )
-        })
-        .expect("cursor");
-    assert_eq!(
-        (inserted, cursor),
-        (0, 123),
-        "MAX over eligible-only rows leaves the scanner pinned behind noise."
-    );
-}
-
-#[test]
-fn eligible_trigger_created_time_is_message_time_and_updated_time_is_scan_time() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        123,
-    );
-    LinkedChatStore::new(&mut store)
-        .record_eligible_triggers(WS, None, 900, &NO_FAULTS)
-        .expect("scan");
-    let times: (i64, i64) = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT created_at_ms, updated_at_ms FROM chat_dispatch_ledger",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-        })
-        .expect("times");
-    assert_eq!(
-        times,
-        (123, 900),
-        "stamping both fields with scan time breaks pending ordering semantics."
-    );
-}
-
-#[test]
-fn eligible_scan_rolls_back_ledger_and_cursor_together() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
+        "Opening",
         20,
     );
-    let result = LinkedChatStore::new(&mut store).record_eligible_triggers(
-        WS,
+    let failed = send_naming(
+        &mut store,
+        "thread",
+        "named",
+        ChatActorKind::Human,
         None,
+        &["default"],
+        "@Myagent",
         30,
         ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist).as_ref(),
     );
-    assert!(result.is_err());
-    let counts: (i64, i64) = store
-        .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row("SELECT COUNT(*) FROM chat_dispatch_ledger", [], |row| {
-                    row.get(0)
-                })
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_dispatch_scan_cursor",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("counts");
-    assert_eq!(
-        counts,
-        (0, 0),
-        "splitting ledger/cursor writes can strand exactly one durable half."
-    );
-}
-
-fn local_discovery_state(store: &EngineStore) -> (i64, i64, i64) {
-    store
-        .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_dispatch_ledger WHERE workspace_id=?1",
-                    [WS],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id=?1",
-                    [WS],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id=?1",
-                    [WS],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("discovery state")
-}
-
-#[test]
-fn backward_clock_local_triggers_survive_scan_rollback_and_restart_and_dispatch_once() {
-    let (scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "initial-thread",
-        "initial",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        100,
-    );
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 101, &NO_FAULTS)
-            .unwrap(),
-        1
-    );
-    start_message(
-        &mut store,
-        "channel",
-        "low-thread",
-        "low-first",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    send_text(
-        &mut store,
-        "initial-thread",
-        "low-reply",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        15,
-    );
-    assert_eq!(local_discovery_state(&store), (1, 100, 2));
-    let failed = LinkedChatStore::new(&mut store).record_eligible_triggers(
-        WS,
-        None,
-        80,
-        ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist).as_ref(),
-    );
     assert!(failed.is_err());
-    assert_eq!(local_discovery_state(&store), (1, 100, 2));
-    drop(store);
-    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 80).unwrap();
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 80, &NO_FAULTS)
-            .unwrap(),
-        2
-    );
-    assert_eq!(local_discovery_state(&store), (3, 100, 0));
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 81, &NO_FAULTS)
-            .unwrap(),
-        0
-    );
-    let times: Vec<(String, i64, i64)> = store.read_with(|conn| {
-        let mut stmt = conn.prepare("SELECT trigger_message_id, created_at_ms, updated_at_ms FROM chat_dispatch_ledger WHERE workspace_id=?1 AND trigger_message_id <> 'initial' ORDER BY trigger_message_id")
-            .map_err(StorageError::corrupt_public)?;
-        stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .map_err(StorageError::corrupt_public)?.collect::<Result<_, _>>().map_err(StorageError::corrupt_public)
-    }).unwrap();
-    assert_eq!(
-        times,
-        vec![
-            ("low-first".to_owned(), 20, 80),
-            ("low-reply".to_owned(), 15, 80)
-        ]
-    );
+    let messages: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE message_id='named'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("messages");
+    assert_eq!((messages, requests(&store).len()), (0, 0));
 }
 
 #[test]
-fn backward_clock_discovery_consumes_ineligible_local_rows_without_widening_old_row_eligibility() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "initial-thread",
-        "initial",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        100,
-    );
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, Some("alice"), 101, &NO_FAULTS)
-            .unwrap(),
-        1
-    );
-    for (id, kind, author, origin, body) in [
-        ("owned", ChatActorKind::Human, Some("alice"), None, "@agent"),
-        (
-            "other-owner",
-            ChatActorKind::Human,
-            Some("bob"),
-            None,
-            "@agent",
-        ),
-        ("cli", ChatActorKind::Human, None, Some("cli"), "@agent"),
-        ("agent", ChatActorKind::Agent, None, None, "@agent"),
-        ("ordinary", ChatActorKind::Human, None, None, "ordinary"),
-    ] {
-        start_message(
-            &mut store, "channel", id, id, kind, author, origin, body, 20,
-        );
-    }
-    // Received or pre-existing rows never pass through the local write queue.
-    store.write_with(&NO_FAULTS, |tx| {
-        tx.execute("INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES (?1,'initial-thread',1,'old-unqueued','human','Ada','@agent',20)", [WS])
-            .map_err(StorageError::persist_public)?;
-        tx.execute("INSERT INTO chat_mentions (workspace_id,thread_id,message_id,handle,author_kind,created_at_ms) VALUES (?1,'initial-thread','old-unqueued','agent','human',20)", [WS])
-            .map_err(StorageError::persist_public)?;
-        Ok::<_, StorageError>(())
-    }).unwrap();
-    assert_eq!(local_discovery_state(&store), (1, 100, 5));
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, Some("alice"), 110, &NO_FAULTS)
-            .unwrap(),
-        1
-    );
-    assert_eq!(local_discovery_state(&store), (2, 100, 0));
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, Some("bob"), 120, &NO_FAULTS)
-            .unwrap(),
-        0
-    );
-    store.write_with(&NO_FAULTS, |tx| {
-        tx.execute("UPDATE chat_channels SET kind='agent' WHERE workspace_id=?1 AND channel_id='channel'", [WS])
-            .map_err(StorageError::persist_public)?;
-        Ok::<_, StorageError>(())
-    }).unwrap();
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, Some("bob"), 130, &NO_FAULTS)
-            .unwrap(),
-        0
-    );
-}
-
-#[test]
-fn backward_clock_discovery_bounds_each_queue_page_and_continues_the_backlog() {
+fn a_mention_that_woke_a_dohc_agent_is_not_in_the_agent_inbox() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     start_message(
         &mut store,
         "channel",
         "thread",
-        "initial",
+        "opening",
         ChatActorKind::Human,
         None,
         None,
-        "@agent",
-        100,
+        "Opening",
+        20,
     );
+    // A dohc agent named "Agent": the sender resolves @Agent to its id.
+    send_naming(
+        &mut store,
+        "thread",
+        "named",
+        ChatActorKind::Human,
+        None,
+        &["helper"],
+        "@Agent please look",
+        30,
+        &NO_FAULTS,
+    )
+    .expect("send");
     assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 101, &NO_FAULTS)
-            .unwrap(),
-        1
+        requests(&store)
+            .into_iter()
+            .map(|(trigger, agent, ..)| (trigger, agent))
+            .collect::<Vec<_>>(),
+        vec![("named".to_owned(), "helper".to_owned())],
+        "the named agent wakes exactly once."
     );
-    for index in 0..501 {
-        send_text(
-            &mut store,
-            "thread",
-            &format!("low-{index:03}"),
-            ChatActorKind::Human,
-            None,
-            None,
-            "@agent",
-            20,
-        );
-    }
-    assert_eq!(local_discovery_state(&store), (1, 100, 501));
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 110, &NO_FAULTS)
-            .unwrap(),
-        500
+    let inbox = LinkedChatStore::new(&mut store)
+        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .expect("inbox");
+    assert!(
+        inbox.is_empty(),
+        "an outside agent reading @agent must not pick up a dohc agent's request."
     );
-    assert_eq!(local_discovery_state(&store), (501, 100, 1));
-    assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 120, &NO_FAULTS)
-            .unwrap(),
-        1
+}
+
+#[test]
+fn a_plain_agent_mention_stays_in_the_agent_inbox() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "thread",
+        "plain",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent please look",
+        20,
     );
-    assert_eq!(local_discovery_state(&store), (502, 100, 0));
+    assert!(requests(&store).is_empty(), "@agent wakes no dohc agent.");
+    let inbox = LinkedChatStore::new(&mut store)
+        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .expect("inbox");
     assert_eq!(
-        LinkedChatStore::new(&mut store)
-            .record_eligible_triggers(WS, None, 130, &NO_FAULTS)
-            .unwrap(),
-        0
+        inbox
+            .iter()
+            .map(|row| row.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["plain"]
     );
 }
 

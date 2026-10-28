@@ -197,4 +197,4 @@ Pins do not enter the owner's replication log or count against the owner's quota
 
 ## History operation
 
-A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete and move Undo also use the operation's recovery record.
+A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete and move Undo also use the operation's recovery record. A file move's operation also holds its link rewrites, and its Undo reverses them.

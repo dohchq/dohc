@@ -89,7 +89,7 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
-  firstAgent,
+  agentMentionCandidates,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -1175,22 +1175,14 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
-  const localAgentName = (props.userSettings && firstAgent(props.userSettings.settings)?.name) ?? "Your agent";
-  const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.agentRunActive);
+  // Each agent that is on, by name: @ and its name's handle wakes it.
+  const setupAgents = agentSetup?.agents;
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
-      ...(localAgentEnabled
-        ? [{
-            id: "agent:default",
-            kind: "agent" as const,
-            handle: "agent",
-            label: localAgentName,
-            description: "your agent",
-          }]
-        : []),
+      ...agentMentionCandidates(setupAgents ?? []),
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
-    [localAgentEnabled, localAgentName],
+    [setupAgents],
   );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
@@ -5462,8 +5454,8 @@ export function DesktopWorkspaceShell(props: {
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile]);
+      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView]);
   const hideWorkspaceError = useCallback((id: string) => {
     hideShellError(id);
     const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");

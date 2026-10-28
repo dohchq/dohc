@@ -1174,14 +1174,16 @@ export class EngineClient implements EngineTransport {
    * method whose work reports (today `workspace.open`).
    *
    * Aborting `signal` rejects at once and drops the daemon's later answer, so
-   * the outcome is unknown. Use `cancelRequest` to learn what happened.
+   * the outcome is unknown. `cancelSignal` asks for cancellation and keeps
+   * waiting for the daemon's answer, bound to this request's wire id.
    */
   async sendRequest(
     request: Request,
     signal?: AbortSignal,
     onProgress?: () => void,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
-    return this.sendRequestWithInput(request, undefined, signal, undefined, true, onProgress);
+    return this.sendRequestWithInput(request, undefined, signal, undefined, true, onProgress, cancelSignal);
   }
 
   /** Whether this session negotiated PROGRESS_CAPABILITY with the engine. */
@@ -1199,6 +1201,7 @@ export class EngineClient implements EngineTransport {
     restoreOutput?: PrivateLiveOutput,
     ordinary = false,
     onProgress?: () => void,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
     const deadlineMs = request.deadlineMs ?? null;
     const expiresAt = deadlineMs === null ? null : performance.now() + deadlineMs;
@@ -1277,6 +1280,7 @@ export class EngineClient implements EngineTransport {
       cancellationSent = true;
       abandon(cancellationError(), true);
     };
+    const cancel = () => { void this.cancelRequest(wireId).catch(() => undefined); };
     const response = new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         deadlineMs !== null
@@ -1305,6 +1309,8 @@ export class EngineClient implements EngineTransport {
         ...(progress ? { onProgress } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
+      cancelSignal?.addEventListener("abort", cancel, { once: true });
+      if (cancelSignal?.aborted) cancel();
       writeTask = this.writeFrame(() => {
         let payload = serializedEnvelope;
         if (ordinary && expiresAt !== null) {
@@ -1357,6 +1363,7 @@ export class EngineClient implements EngineTransport {
       throw error;
     } finally {
       signal?.removeEventListener("abort", abort);
+      cancelSignal?.removeEventListener("abort", cancel);
       if (ordinary) {
         this.ordinaryRequests--;
         this.ordinaryRequestBytes -= retainedBytes;
@@ -1731,13 +1738,11 @@ export class EngineClient implements EngineTransport {
    * before the daemon started to write it, gets no answer. It ends at its own
    * deadline with `EngineRequestDeadlineError`, and the outcome is unknown.
    */
-  async cancelRequest(callerId: number): Promise<void> {
-    const pending = [...this.pending.entries()].find(
-      ([, request]) => request.callerId === callerId,
-    );
+  private async cancelRequest(wireId: number): Promise<void> {
+    const pending = this.pending.get(wireId);
     if (!pending) return;
-    if (pending[1].cancelUnsent?.()) return;
-    await this.writeEnvelope({ type: "cancel", id: pending[0] });
+    if (pending.cancelUnsent?.()) return;
+    await this.writeEnvelope({ type: "cancel", id: wireId });
   }
 
   onEvent(handler: (event: Event) => void): () => void {

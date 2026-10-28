@@ -32,7 +32,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await page.getByTestId("chats-new-channel-name").fill("Agent name check");
     await page.getByTestId("chats-new-channel-name").press("Enter");
     const view = page.locator("main");
-    await view.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await view.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await view.getByTestId("chats-new-thread-composer").press("Enter");
     const reply = view.getByTestId("chats-comment-bubble").filter({ hasText: "done: checked the exports" });
     await expect(reply).toBeVisible();

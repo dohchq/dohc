@@ -720,6 +720,20 @@ pub(super) fn workspace_unavailable() -> WireError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn undo_refusal_wire_text_keeps_the_domain_prefix() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
+            dohc_engine_domain::DomainError::UndoRefused {
+                path: "a.md".into(),
+                reason: "link changed after rename",
+            },
+        ));
+        assert_eq!(
+            error.message,
+            "domain error: Undo refused: link changed after rename: a.md"
+        );
+    }
+
+    #[test]
     fn changed_chat_authority_has_a_restartable_wire_reason() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
         assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);

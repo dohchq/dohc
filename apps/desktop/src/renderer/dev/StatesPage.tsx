@@ -869,11 +869,11 @@ const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 // The agent picked from the roster, in each state its offer says. The
 // specimen agent takes the default agent colour, not a chosen one.
 const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
-const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+const AGENT_DRAFT = "@Nova can you check funnel.csv against last week?";
 function agentOffer(state: AgentOfferState): AgentAddressedOffer {
   return {
     kind: "agent-addressed",
-    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    agent: { id: "agent:default", kind: "agent", handle: "Nova", label: "Nova" },
     presentation: { group: "states-agent", hue: null, self: false },
     state,
     working: state === "working",
@@ -1103,6 +1103,19 @@ const LONG_NOTICE = {
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
   copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
   onDismiss: noop,
 };
 
@@ -1728,6 +1741,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2759,6 +2773,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <PropertiesPanel body={LONG_PILL} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a list: its items, with commas">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\ntags:\n  - kyoto\n  - food\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a list it can't edit: a lock, and why on hover or focus">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />
@@ -3044,7 +3068,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               room the end of its conversation keeps, so it gets that room. */}
           <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
             <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
-              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              value={`@Nova ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
               sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={

@@ -864,11 +864,11 @@ describe("outbound backpressure", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const controller = new AbortController();
-    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, controller.signal).catch(error => error);
+    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, mode === "abort" ? controller.signal : undefined, undefined, mode === "cancelRequest" ? controller.signal : undefined).catch(error => error);
     let cancellation: Promise<void> | undefined;
     try {
       if (mode === "abort") controller.abort(new Error("cancelled"));
-      if (mode === "cancelRequest") cancellation = transport.cancelRequest(2);
+      if (mode === "cancelRequest") controller.abort();
       expect(await second).toBeInstanceOf(Error);
       peer.drain(); await cancellation; await nextImmediate();
       expect(peer.received.filter(envelope => envelope.type === "request" || envelope.type === "cancel"))
@@ -1636,9 +1636,10 @@ describe("request progress", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const queued = transport.sendRequest({ ...request(2, "queued"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
-    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress).catch(error => error);
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress, cancel.signal).catch(error => error);
     try {
-      await transport.cancelRequest(3);
+      cancel.abort();
       expect(await cancelled).toMatchObject({ wireError: { code: "CANCELLED" } });
       clock.mockReturnValue(400);
       peer.drain();
@@ -2419,7 +2420,25 @@ describe("EngineClient", () => {
     transport.close();
   });
 
-  it("cancels the wire request behind a caller id", async () => {
+  it("cancels only the rewrite when two pending requests share a caller id", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = envelope => envelopes.push(envelope);
+    const open = transport.sendRequest(request(1, "workspace.open"));
+    const cancel = new AbortController();
+    const rewrite = transport.sendRequest(request(1, "history.rewriteLinks"), undefined, undefined, cancel.signal);
+    cancel.abort(); await nextImmediate();
+    expect(envelopes).toMatchObject([{type: "request", id: 1, method: "workspace.open"},
+      {type: "request", id: 2, method: "history.rewriteLinks"}, {type: "cancel", id: 2}]);
+    peer.send({type: "error", id: 2, error: {code: "CANCELLED", message: "cancelled", retry: "no"}});
+    await expect(rewrite).rejects.toMatchObject({wireError: {code: "CANCELLED"}});
+    peer.send({type: "response", id: 1, result: {workspace: "other-workspace"}});
+    await expect(open).resolves.toMatchObject({id: 1, result: {workspace: "other-workspace"}});
+    transport.close();
+  });
+
+  it("cancels the exact wire request", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
     peer.acknowledge();
@@ -2427,8 +2446,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_242, "slow.open"));
-    await transport.cancelRequest(4_242);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_242, "slow.open"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "slow.open" },
@@ -2457,8 +2478,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"));
-    await transport.cancelRequest(4_243);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "sync.commitCursor" },
@@ -2480,11 +2503,13 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
+    const cancel = new AbortController();
     const settlement = transport.sendRequest({
       ...request(4_244, "liveApplication.settle"),
       deadlineMs: 25,
-    });
-    await transport.cancelRequest(4_244);
+    }, undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "liveApplication.settle", deadlineMs: 25 },
       { type: "cancel", id: 1 },
@@ -3149,7 +3174,8 @@ describe("EngineClient", () => {
     const transport = client(peer, { maxBlobBytes: 6 });
     peer.acknowledge();
     await transport.ready();
-    const cancelled = transport.sendRequest(request(23, "blob.cancelled"));
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(23, "blob.cancelled"), undefined, undefined, cancel.signal);
     peer.send({
       type: "blobStart",
       requestId: 1,
@@ -3158,7 +3184,8 @@ describe("EngineClient", () => {
       sha256: null,
     });
     peer.sendRaw(blobChunkFrame(82, Buffer.from("abc"), false));
-    await transport.cancelRequest(23);
+    cancel.abort();
+    await nextImmediate();
     peer.send({
       type: "error",
       id: 1,

@@ -1,4 +1,5 @@
 import {
+  frontmatterValueFlowYaml,
   frontmatterValueYaml,
   leadingFrontmatter,
   loadMarkdownFrontmatter,
@@ -18,6 +19,10 @@ export type FrontmatterEntry = {
   sourceKey?: string;
   sourceValue?: string;
   rawValue?: unknown;
+  // A list of text, shown and edited as its items with commas between them.
+  list?: true;
+  // Why the value shows but can't be edited here.
+  readOnly?: string;
 };
 
 /** Frontmatter values and the text after the block. A document without a readable block is all body. */
@@ -62,17 +67,58 @@ export function displayFrontmatterValue(value: unknown): string {
   }
 }
 
+// A list's text splits back on commas and drops the spaces around each item,
+// so only items that come back the same can be edited as text.
+function listProblem(items: readonly unknown[]): string | null {
+  for (const item of items) {
+    if (typeof item !== "string") return "some items aren't text";
+    if (/[\r\n]/u.test(item)) return "an item has a line break";
+    if (item.includes(",")) return "an item has a comma";
+    if (item === "" || item !== item.trim()) return "an item is blank or starts or ends with a space";
+  }
+  return null;
+}
+
+const ELSEWHERE = "Change it in another app, or ask an agent.";
+
+function flowText(value: unknown): string {
+  try {
+    return frontmatterValueFlowYaml(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** A property's text on one line, and whether it edits as a list or not at all. */
+function propertyText(value: unknown): Pick<FrontmatterEntry, "value" | "list" | "readOnly"> {
+  if (Array.isArray(value)) {
+    const problem = listProblem(value);
+    return problem === null
+      ? { value: value.join(", "), list: true }
+      : { value: flowText(value), readOnly: `dohc can't edit this list because ${problem}. ${ELSEWHERE}` };
+  }
+  if (value !== null && typeof value === "object") {
+    return { value: flowText(value), readOnly: `dohc can't edit a value with named fields. ${ELSEWHERE}` };
+  }
+  return { value: displayFrontmatterValue(value) };
+}
+
+/** A list's text as its items: split on commas, trimmed, with blank items dropped. */
+export function listItems(text: string): string[] {
+  return text.split(",").map((item) => item.trim()).filter((item) => item !== "");
+}
+
 /** Entries in the order of `pairs`. An object would list integer-like keys first. */
 export function frontmatterEntriesFromPairs(
   pairs: Iterable<readonly [string, unknown]>,
 ): FrontmatterEntry[] {
   return Array.from(pairs, ([key, rawValue]) => {
-    const value = displayFrontmatterValue(rawValue);
+    const text = propertyText(rawValue);
     return {
       key,
-      value,
+      ...text,
       sourceKey: key,
-      sourceValue: value,
+      sourceValue: text.value,
       rawValue,
     };
   });

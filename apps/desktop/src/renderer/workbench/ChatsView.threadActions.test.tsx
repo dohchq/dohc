@@ -229,10 +229,10 @@ describe("ChatsView decisions", () => {
 describe("ChatsView plain posts", () => {
   it("renders a short post's mention as a chip in the visible body", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({
-      threads: [thread({ title: "Ask @agent to check the exports" })],
+      threads: [thread({ title: "Ask @Nova to check the exports" })],
     });
     bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [message({ body: "Ask @agent to check the exports" })],
+      messages: [message({ body: "Ask @Nova to check the exports" })],
     });
     renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
     await userEvent.click(await screen.findByTestId("chats-channel"));
