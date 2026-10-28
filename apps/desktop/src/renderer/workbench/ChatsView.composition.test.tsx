@@ -1,11 +1,11 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { settingsWithAgent } from "../../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import {
   NOW,
@@ -22,7 +22,7 @@ import {
 import { runnerProgram } from "./ChatsView";
 import { formatChatTime, formatClockDigits } from "../time";
 
-describe("ChatsView My agent", () => {
+describe("ChatsView agents' chats", () => {
   it("discovers an opted-in agent after creation while navigator polling is suspended", async () => {
     const listeners = new Set<(event: { workspaceId: string }) => void>();
     bridgeMock.onWorkspaceActivity.mockImplementation((callback: (event: { workspaceId: string }) => void) => {
@@ -67,7 +67,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
   });
 
-  it("renders under Agents, stays out of the group list, and uses the agent placeholder", async () => {
+  it("renders under Agents, stays out of the group list, and calls a chat with no Settings agent Your agent", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -93,7 +93,7 @@ describe("ChatsView My agent", () => {
     ]);
 
     await user.click(screen.getByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("My agent");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Your agent");
     expect(
       (screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).placeholder,
     ).toBe("Message your agent…");
@@ -126,7 +126,7 @@ describe("ChatsView My agent", () => {
         agents: [{ id: "default", name: "Nova", enabled: true }],
       },
       onSetupAgent,
-      userSettings: DEFAULT_USER_SETTINGS,
+      userSettings: settingsWithAgent({ name: "Nova" }),
       onSaveUserSettings: vi.fn(async () => undefined),
       workspacePath: "C:\\people\\ice\\work",
     });
@@ -141,10 +141,51 @@ describe("ChatsView My agent", () => {
     // The agent's screen says what runs it and what it reaches.
     const agentScreen = screen.getByTestId("chats-agent-screen");
     expect(agentScreen.dataset.state).toBe("ready");
-    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner on");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runs node agent.mjs");
     expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
     await user.click(screen.getByTestId("chats-agent-screen-manage"));
     expect(onSetupAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists each agent's chat in Settings order with its own name and hue, then removed agents' chats", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({ id: "chat-helper", name: "Helper", slug: "agent-helper", kind: "agent", agentId: "helper", unreadCount: 1 }),
+        channel({ id: "chat-scout", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout", unreadCount: 3 }),
+        channel({ id: "chat-default", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
+      ],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-scout", channelId: "chat-scout", title: "Check links" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ threadId: "thread-scout", body: "Check the links" })] });
+    const settings = settingsWithAgent({ name: "Nova" });
+    renderView(vi.fn(), vi.fn(), {
+      userSettings: { ...settings, agents: { ...settings.agents, scout: testAgent({ name: "Ranger", hue: "teal", enabled: false }) } },
+      onSaveUserSettings: vi.fn(async () => undefined),
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    const rows = screen.getAllByTestId("chats-my-agent");
+    expect(rows.map((row) => row.dataset.agentId)).toEqual(["default", "scout", "helper"]);
+    expect(screen.getAllByTestId("chats-my-agent-name").map((name) => name.textContent)).toEqual(["Nova", "Ranger", "Helper"]);
+    const mark = (row: HTMLElement, name: string) => row.querySelector(`[title="${name}"]`)!.className;
+    expect(mark(rows[0]!, "Nova")).toContain("border-agent");
+    expect(mark(rows[1]!, "Ranger")).toContain("text-hue-teal");
+    expect(mark(rows[2]!, "Helper")).toContain("border-agent");
+    // Each row says whether its own agent is set up, and its own unread count.
+    expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
+    expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
+    expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
+    expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
+
+    await user.click(rows[1]!);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Ranger");
+    expect(screen.getByTestId("chats-channel-agent-mark").className).toContain("text-hue-teal");
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Ranger · thread");
+    expect(screen.getByText("Ranger", { selector: "span.text-subtle" })).toBeTruthy();
   });
 
   it("names the program a runner command starts, with the whole command on hover", () => {

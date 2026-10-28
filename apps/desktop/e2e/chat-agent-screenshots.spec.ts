@@ -91,8 +91,8 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-manage-agent")).toBeVisible();
 
     // The agent's screen states what runs it.
-    await page.getByTestId("chats-my-agent").click();
-    await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
+    await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
     await expect(page.getByTestId("chats-agent-screen")).toBeVisible();
     await shoot(page, "agent-screen");
 
