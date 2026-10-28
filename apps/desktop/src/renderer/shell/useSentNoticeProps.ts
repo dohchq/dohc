@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
 import { isAutomationControlsTarget, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import type { ChatDispatchStoppedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -146,11 +147,11 @@ export function useSentNoticeProps(input: {
     [retriesStoppedRun, workspaceId, workspaces],
   );
   const rows = useMemo(
-    () => (sentNotices?.notices ?? []).filter(notice => !["sync-refusal", "markdown-write-held"].includes(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
+    () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
   const toast = useMemo(
-    () => (sentNotices?.toast && (!["sync-refusal", "markdown-write-held"].includes(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    () => (sentNotices?.toast && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
     [describe, sentNotices?.toast, workspaceId],
   );
 
