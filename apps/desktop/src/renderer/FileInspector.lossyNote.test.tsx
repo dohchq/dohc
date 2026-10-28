@@ -105,7 +105,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("dohc can't edit this document yet without changing parts it can't show.");
+    expect(notice.textContent).toContain("dohc can't edit this note yet without changing parts it can't show.");
     await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."));
     expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(true);
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
@@ -141,7 +141,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original."));
     expect(bridge.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "ws-1", objectId: "object-1", limit: 1 });
     expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: "ws-1", momentId: "moment-1" });
@@ -163,7 +163,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original."));
     expect(bridge.listFileChats).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "a.md" });
     expect(dialog.textContent).not.toContain("History keeps the original.");
@@ -176,7 +176,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
   });
@@ -188,7 +188,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
     await user.click(screen.getByTestId("lossy-note-edit-anyway-cancel"));
@@ -196,7 +196,7 @@ describe("a lossy note", () => {
     // Capture records the outside edit while the note stays open.
     bridge.readEngineMoment.mockResolvedValue({ moment: { afterText: LOSSY } });
     await user.click(screen.getByTestId("lossy-note-edit-anyway"));
-    const reopened = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const reopened = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(reopened.textContent).toContain("History keeps the original."));
   });
 
@@ -227,7 +227,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links.");
     expect(dialog.textContent).not.toContain("History");
   });

@@ -309,7 +309,7 @@ export function LossyNoteNotice(props: {
         <Lock aria-hidden size={12} className="shrink-0" />
         {props.held
           ? "dohc held a change to this note. Saving it would also change parts dohc can't show."
-          : "dohc can't edit this document yet without changing parts it can't show."}
+          : "dohc can't edit this note yet without changing parts it can't show."}
       </span>
       <span className="flex shrink-0 items-center gap-3">
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
@@ -329,7 +329,7 @@ export function LossyNoteNotice(props: {
       </span>
       {confirming && props.onEditAnyway ? (
         <ConfirmDialog
-          title="Edit this document anyway?"
+          title="Edit this note anyway?"
           intent="danger"
           confirmLabel="Edit anyway"
           testId="lossy-note-edit-anyway-dialog"
