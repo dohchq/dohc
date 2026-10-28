@@ -1973,7 +1973,6 @@ describe("chatDispatchService", () => {
       liveRunId: null,
       pendingCount: 1,
       paused: true,
-      pausedReason: "re-dispatch budget exceeded",
     });
     const messages = await fixture.chat.listMessages({
       workspaceId: WORKSPACE_ID,

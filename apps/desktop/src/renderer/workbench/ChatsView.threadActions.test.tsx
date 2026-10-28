@@ -421,7 +421,6 @@ describe("ChatsView dispatch state", () => {
         liveRunId: null,
         pendingCount: 3,
         paused: true,
-        pausedReason: "budget",
       })
       .mockResolvedValue({ liveRunId: null, pendingCount: 3, paused: false });
     renderView();
@@ -451,7 +450,6 @@ describe("ChatsView dispatch state", () => {
       liveRunId: null,
       pendingCount: 2,
       paused: true,
-      pausedReason: "budget",
     });
     renderView();
 

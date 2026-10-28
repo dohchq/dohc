@@ -5827,7 +5827,6 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  pausedReason: z.string().min(1).max(500).optional(),
 }).strict();
 export type ChatDispatchStateForThreadResult = z.infer<
   typeof ChatDispatchStateForThreadResult

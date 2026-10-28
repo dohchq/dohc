@@ -102,7 +102,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   const activity = vi.fn(async (_value: RegistryEntry) => { events.push("activity"); });
   const dispatch = {
     stopAgentRun: vi.fn<ChatDispatchService["stopAgentRun"]>(async () => true),
-    dispatchStateForThread: vi.fn<ChatDispatchService["dispatchStateForThread"]>(async () => ({ liveRunId: "run-1", pendingCount: 2, paused: true, pausedReason: "Failed" })),
+    dispatchStateForThread: vi.fn<ChatDispatchService["dispatchStateForThread"]>(async () => ({ liveRunId: "run-1", pendingCount: 2, paused: true })),
     resumeThreadDispatch: vi.fn<ChatDispatchService["resumeThreadDispatch"]>(async () => { events.push("resume"); }),
     runnerSelfTest: vi.fn<ChatDispatchService["runnerSelfTest"]>(async () => { events.push("self-test"); return { ok: true, detail: "Ready" }; }),
   };
@@ -417,7 +417,7 @@ describe("agent run IPC registrations", () => {
 
   it("requires capture for dispatch state and writable admission for resume", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", pendingCount: 2, paused: true, pausedReason: "Failed" });
+    await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", pendingCount: 2, paused: true });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
     expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1");
     h.events.length = 0;

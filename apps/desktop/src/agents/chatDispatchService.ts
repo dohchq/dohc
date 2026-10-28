@@ -217,7 +217,6 @@ interface ChatDispatchThreadState {
   liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
-  pausedReason?: string;
 }
 
 interface LiveRun {
@@ -1670,9 +1669,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
-      ...(pauseState?.paused && pauseState.reason
-        ? { pausedReason: pauseState.reason }
-        : {}),
     };
   }
 
