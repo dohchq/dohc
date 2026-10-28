@@ -256,8 +256,3 @@ export function resetLossyNoteCheckForTests(): void {
   checks.clear();
   verdicts.clear();
 }
-
-/** For tests that need a lossy note in an engine session. */
-export function rememberLossyNoteVerdictForTests(contentHash: string, lossy: boolean): void {
-  verdicts.set(contentHash, lossy);
-}
