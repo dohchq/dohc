@@ -137,6 +137,13 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
         assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
         assert!(dohc_engine_sync::list_refusal_notices(&store, WS).unwrap().iter()
             .any(|notice| notice.reason == "markdown-write-held"));
+        let owed = store.read_with(|conn|
+            dohc_engine_collab::markdown_write_obligations::pending_in(conn, WS)).unwrap();
+        let sync: Vec<_> = owed.iter().filter(|owed|
+            owed.kind == dohc_engine_collab::markdown_write_obligations::Kind::SyncProjection).collect();
+        assert_eq!(sync.len(), 1);
+        assert!(sync[0].held_checkpoint_sha256.is_some());
+        assert_eq!(sync[0].operation_id, format!("{PEER}:1"));
     }
     let mut record_events = Vec::new();
     while let Ok(event) = events.try_recv() {
