@@ -133,10 +133,17 @@ function rowId(row: Row): string | number | undefined {
   return row.sourceKey ?? row.added;
 }
 
-// Rows read from storage, then each pill added here that has no name it can
-// save, which storage doesn't hold.
+// Rows read from storage, in the order they show. Each pill added here that
+// storage doesn't hold yet keeps its place, so saving one pill never moves
+// another under the person typing.
 function withAdded(read: FrontmatterEntry[], shown: Row[]): Row[] {
-  return [...read, ...shown.filter((row) => row.sourceKey === undefined && propertyKey(row) === null)];
+  const rows: Row[] = inShownOrder(read, shown);
+  shown.forEach((row, index) => {
+    if (row.sourceKey === undefined && !read.some((entry) => entry.sourceKey === propertyKey(row))) {
+      rows.splice(Math.min(index, rows.length), 0, row);
+    }
+  });
+  return rows;
 }
 
 // The key a row saves under. A name left as it was read keeps that exact key,
@@ -173,15 +180,16 @@ function renamedKeys(
   return renamed;
 }
 
-// A live document's map adds a renamed key last. Rows keep the order they
-// show, so the row being renamed stays under the person typing. A key renamed
-// on another device takes the row its old key left; other new keys follow.
+// A live document's map adds a renamed key last, and a file adds a new key
+// last. Rows keep the order they show, so the row being named stays under the
+// person typing. A key renamed elsewhere takes the row its old key left; a
+// pill storage never held left no row. Other new keys follow.
 function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
   const rows = entries.map((entry) => {
     const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
     return held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
   });
-  const left = shown.flatMap((_, row) => (rows.includes(row) ? [] : [row]));
+  const left = shown.flatMap((candidate, row) => (rows.includes(row) || candidate.sourceKey === undefined ? [] : [row]));
   const added = rows.flatMap((row, index) => (row === -1 ? [index] : []));
   if (left.length === 1 && added.length === 1) rows[added[0]!] = left[0]!;
   return entries
@@ -276,7 +284,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     // This can apply after the person's next keystroke has changed the
     // document, so a live document's rows read the document as it is now.
     setEntries((shown) =>
-      withAdded(ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries), shown),
+      withAdded(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), shown),
     );
     setEditRefused(false);
   }, [sourceEntries, ydoc]);

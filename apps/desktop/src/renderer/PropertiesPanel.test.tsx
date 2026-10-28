@@ -121,6 +121,25 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it.each([false, true])("keeps a new property in its place when the one after it saves (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\nowner: Sam\nstatus: draft\n---\n\nBody\n";
+    const doc = markdownToYDoc(initialBody);
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <ControlledPropertiesPanel initialBody={initialBody} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.click(screen.getByTestId("property-add"));
+      await user.keyboard("lead");
+
+      const saved = shared
+        ? frontmatterMapValues(doc.getMap("frontmatter"))
+        : parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta;
+      expect(saved).toEqual({ owner: "Sam", status: "draft", lead: "" });
+      expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -1411,5 +1430,24 @@ describe("PropertiesPanel", () => {
     } finally {
       doc.destroy();
     }
+  });
+
+  it("keeps typing in the same property when another device renames one while a new property waits", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nowner: Sam\nstatus: draft\n---\n\nBody\n");
+    const peer = new Y.Doc();
+    try {
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.type(screen.getByLabelText("Property status value"), "!");
+      patchFrontmatter(peer, new Map([["lead", "Sam"]]), ["owner"], new Map([["owner", "lead"]]));
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer)));
+      await user.keyboard("?");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ lead: "Sam", status: "draft!?" });
+      expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+    } finally { doc.destroy(); peer.destroy(); }
   });
 });
