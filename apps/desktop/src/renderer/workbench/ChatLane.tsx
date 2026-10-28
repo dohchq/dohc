@@ -130,10 +130,10 @@ export function ChatLane(props: {
       // Read the watermark before content so a concurrent write cannot be
       // remembered as painted until its content has actually been loaded.
       // A run can start or end without a new message, so the dispatch is
-      // read on every pass.
+      // read on every pass. Without it the lane shows no Stop, not no chat.
       const [{ revision }, nextDispatch] = await Promise.all([
         bridge().getChatThreadRevision({ workspaceId, threadId: lane.id }),
-        agentDm ? bridge().chatDispatchStateForThread({ workspaceId, threadId: lane.id }) : null,
+        agentDm ? bridge().chatDispatchStateForThread({ workspaceId, threadId: lane.id }).catch(() => null) : null,
       ]);
       if (!isCurrent()) return;
       setDispatch(nextDispatch);
