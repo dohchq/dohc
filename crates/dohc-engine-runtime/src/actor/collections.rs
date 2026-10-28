@@ -2231,6 +2231,34 @@ fn collection_boundary_head(
     }
 }
 
+/// Returns false when the file has no snapshot.
+pub(super) fn synchronize_collection_index_from_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+) -> Result<bool, DomainError> {
+    let head = dohc_engine_domain::select_snapshot_by_path_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        path,
+    )?;
+    let Some(snapshot) = head.snapshot else {
+        return Ok(false);
+    };
+    let fields =
+        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&snapshot.text)
+            .map_or_else(|| serde_json::json!({}), |(fields, _)| fields);
+    synchronize_collection_frontmatter_index_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &fields,
+    )?;
+    Ok(true)
+}
+
 fn complete_collection_boundary(
     store: &mut EngineStore,
     owed: &dohc_engine_collab::markdown_write_obligations::Obligation,
@@ -2238,25 +2266,7 @@ fn complete_collection_boundary(
 ) -> Result<(), RuntimeError> {
     match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         if owed.kind == dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup {
-            let head = dohc_engine_domain::select_snapshot_by_path_in_tx(
-                tx,
-                &owed.key.workspace_id,
-                &owed.key.version_id,
-                &owed.path,
-            )?;
-            if let Some(snapshot) = head.snapshot {
-                let fields = dohc_engine_domain::collections::markdown_frontmatter_json_with_body(
-                    &snapshot.text,
-                )
-                .map_or_else(|| serde_json::json!({}), |(fields, _)| fields);
-                synchronize_collection_frontmatter_index_in_tx(
-                    tx,
-                    &owed.key.workspace_id,
-                    &owed.key.version_id,
-                    &owed.key.object_id,
-                    &fields,
-                )?;
-            }
+            synchronize_collection_index_from_head_in_tx(tx, &owed.key, &owed.path)?;
         }
         dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms)
             .map_err(RuntimeError::from)

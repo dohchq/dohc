@@ -2256,29 +2256,18 @@ pub(super) fn ydoc_record_update_on_store(
                 && actor_origin_id.as_deref() == Some("engine")
                 && attribution.is_none()
             {
-                let head =
-                    select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
-                        .map_err(|error| {
-                            CollabError::Storage(StorageError::persist_public(error))
-                        })?;
-                let fields = head
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| {
-                        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(
-                            &snapshot.text,
-                        )
-                        .map_or_else(|| serde_json::json!({}), |(fields, _)| fields)
-                    })
-                    .unwrap_or_else(|| serde_json::json!({}));
-                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
-                    tx,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                    &fields,
-                )
-                .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+                if !super::collections::synchronize_collection_index_from_head_in_tx(tx, key, path)
+                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?
+                {
+                    dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                        tx,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                        &serde_json::json!({}),
+                    )
+                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+                }
             }
             if !journal_local_append_in_tx(
                 tx,
