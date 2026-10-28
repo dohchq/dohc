@@ -66,6 +66,16 @@ let openRecoveryWarning:
     }) => void)
   | null = null;
 
+// Update buttons showing a restart under way. A person going back on a
+// restart this window stopped ends it, and the button offers it again.
+const restartStoppedListeners = new Set<() => void>();
+export function onRestartStopped(listener: () => void): () => void {
+  restartStoppedListeners.add(listener);
+  return () => {
+    restartStoppedListeners.delete(listener);
+  };
+}
+
 // The exit round this window is currently answering, so a late reply, a
 // dialog confirm, or a Go back speaks for the right round and no other.
 let activeRound: { id: number; kind: "quit" | "update" } | null = null;
@@ -613,6 +623,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // the person is staying, so the next close asks over the
                   // full list.
                   const round = closeWarning.round;
+                  if (closeWarning.kind === "update") for (const listener of restartStoppedListeners) listener();
                   setCloseWarning(null);
                   if (round !== undefined && activeRound?.id === round) {
                     rearmGuard();

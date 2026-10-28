@@ -70,6 +70,7 @@
     "desktop:dismiss-share-skips",
     "desktop:dismiss-stop-and-restore",
     "desktop:dismiss-try-in-version-review",
+    "desktop:download-update",
     "desktop:duplicate-workspace-file",
     "desktop:end-agent-run",
     "desktop:engine-ydoc-acknowledge-lineage-replacement",

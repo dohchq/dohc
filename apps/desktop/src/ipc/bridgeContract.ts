@@ -5963,6 +5963,12 @@ export const UpdateStateEvent = z.object({
   // A Linux .deb that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
+  // The step that failed, while its state stands; `message` says why. A new
+  // id is a new failure to report.
+  failure: z.object({
+    step: z.enum(["check", "download", "install"]),
+    id: z.number().int().positive(),
+  }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -6001,6 +6007,19 @@ export const UpdateCheckResult = z.object({
   state: UpdateStateEvent,
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
+
+// Starts the download a person chose. Progress and the result arrive as
+// update state.
+export const updateDownloadOperations = {
+  downloadUpdate: {
+    capabilityId: "device.update.download",
+    scope: "device",
+    channel: "desktop:download-update",
+    payload: z.object({}),
+    result: UpdateActionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
 
 // Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
@@ -7257,6 +7276,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,

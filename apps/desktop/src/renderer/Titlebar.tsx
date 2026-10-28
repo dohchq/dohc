@@ -83,6 +83,8 @@ export function Titlebar(props: {
   workspaceStatus?: ReactNode;
   onWorkspaceContextMenu?: () => void;
   agentActive?: boolean;
+  // The update button, just left of the layout toggles.
+  update?: ReactNode;
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
@@ -105,6 +107,10 @@ export function Titlebar(props: {
   const leftInset = isMac
     ? fullScreen ? "12px" : "88px"
     : "calc(env(titlebar-area-x, 0px) + 12px)";
+  const rightInset = isMac
+    ? "12px"
+    : "calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)))";
+  const hasRightGroup = props.update !== undefined || props.primarySidebar !== undefined || props.aboutSidebar !== undefined;
 
   return (
     <header
@@ -250,31 +256,42 @@ export function Titlebar(props: {
         </button>
       ) : null}
 
-      {props.primarySidebar || props.aboutSidebar ? (
+      {/* Ends 12px before quick-open, as the left group starts 12px after it. */}
+      {hasRightGroup ? (
         <div
-          data-testid="titlebar-layout-controls"
-          role="group"
-          aria-label="Layout controls"
-          className="titlebar-no-drag ml-auto flex shrink-0 items-center gap-0.5"
+          data-testid="titlebar-right-group"
+          className="ml-auto flex flex-1 items-center justify-end gap-2"
+          style={props.onQuickOpen ? { maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${rightInset} - 28px)` } : undefined}
         >
-          {props.primarySidebar ? (
-            <LayoutToggle
-              testId="titlebar-primary-sidebar"
-              label="Toggle primary sidebar"
-              pressed={props.primarySidebar.visible}
-              onClick={props.primarySidebar.onToggle}
-              Icon={PanelLeft}
-            />
-          ) : null}
-          {props.aboutSidebar ? (
-            <LayoutToggle
-              testId={desktopPins.titlebarAboutSidebar}
-              label="Toggle About"
-              pressed={props.aboutSidebar.visible}
-              onClick={props.aboutSidebar.onToggle}
-              Icon={PanelRight}
-              agentActive={props.agentActive}
-            />
+          {/* The button's own box: its width decides whether the label fits. */}
+          {props.update ? <div className="@container flex min-w-7 flex-1 justify-end">{props.update}</div> : null}
+          {props.primarySidebar || props.aboutSidebar ? (
+            <div
+              data-testid="titlebar-layout-controls"
+              role="group"
+              aria-label="Layout controls"
+              className="titlebar-no-drag flex shrink-0 items-center gap-0.5"
+            >
+              {props.primarySidebar ? (
+                <LayoutToggle
+                  testId="titlebar-primary-sidebar"
+                  label="Toggle primary sidebar"
+                  pressed={props.primarySidebar.visible}
+                  onClick={props.primarySidebar.onToggle}
+                  Icon={PanelLeft}
+                />
+              ) : null}
+              {props.aboutSidebar ? (
+                <LayoutToggle
+                  testId={desktopPins.titlebarAboutSidebar}
+                  label="Toggle About"
+                  pressed={props.aboutSidebar.visible}
+                  onClick={props.aboutSidebar.onToggle}
+                  Icon={PanelRight}
+                  agentActive={props.agentActive}
+                />
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -283,14 +300,8 @@ export function Titlebar(props: {
           macOS has no right-side controls. */}
       <div
         aria-hidden
-        className={`${
-          props.primarySidebar || props.aboutSidebar ? "ml-2" : "ml-auto"
-        } h-full shrink-0`}
-        style={{
-          width: isMac
-            ? 12
-            : "calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)))",
-        }}
+        className={`${hasRightGroup ? "ml-2" : "ml-auto"} h-full shrink-0`}
+        style={{ width: rightInset }}
       />
     </header>
   );

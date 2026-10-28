@@ -4,10 +4,11 @@ import { useRequestSequence } from "../useRequestSequence";
 import { CopyField } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
-import { AlertTriangle, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, X } from "lucide-react";
 import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -36,12 +37,12 @@ import {
 import { bridge } from "../bridge";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
-import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
-import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
+import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
+import { ShellErrorReporter } from "../shell/useShellError";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
@@ -180,10 +181,8 @@ export function SettingsDialog(props: {
     useState<WorkspaceSettingsResult | null>(null);
   const [saveState, setSaveState] = useState<SettingsSaveState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const { updateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed(() => setUpdateError(null));
+  const update = useDesktopUpdate(useContext(ShellErrorReporter));
+  const updateState = update.state;
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const workspaceWritesRef = useRef<{
     save: (patch: WorkspaceSettingsPatch) => Promise<void>;
@@ -531,52 +530,6 @@ export function SettingsDialog(props: {
       );
     }
   }, [props.onError, requestTrust, restrict]);
-
-  const checkForUpdates = useCallback(async () => {
-    setUpdateBusy("check");
-    setUpdateError(null);
-    try {
-      const result = await bridge().checkForUpdates();
-      acceptUpdateResult(result.state);
-      if (!result.checked) {
-        setUpdateError(
-          result.state.status === "error"
-            ? result.state.message
-            : "No update check was started.",
-        );
-      } else if (result.state.status === "error") {
-        setUpdateError(result.state.message);
-      }
-    } catch {
-      setUpdateError("Could not check for updates.");
-    } finally {
-      setUpdateBusy(null);
-    }
-  }, [acceptUpdateResult]);
-
-  const installUpdate = useCallback(async () => {
-    setUpdateBusy("install");
-    setUpdateError(null);
-    try {
-      // Through the guard: with set-aside drafts
-      // present the recovery dialog opens instead of the one-shot install.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      acceptUpdateResult(result.state);
-      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
-      if (!result.accepted) {
-        setUpdateError(
-          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
-        );
-      } else if (result.state.status === "error") {
-        setUpdateError(result.state.message);
-      }
-    } catch {
-      setUpdateError("Could not restart into the update.");
-    } finally {
-      setUpdateBusy(null);
-    }
-  }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
@@ -1163,7 +1116,7 @@ export function SettingsDialog(props: {
                 title="Updates"
                 description={
                   <span data-testid="desktop-updates-status" data-state={updateState?.status ?? "unknown"}>
-                    {updateError ?? updateState?.message ?? "Update status unavailable."}
+                    {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
                   </span>
                 }
                 aside={updateState?.installCommand ? (
@@ -1181,30 +1134,27 @@ export function SettingsDialog(props: {
                   {" · "}
                   <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
                 </span>
-                <button
-                  type="button"
-                  data-testid="check-updates-button"
-                  disabled={updateBusy !== null || updateState?.canCheck === false}
-                  onClick={() => void checkForUpdates()}
-                  className="flex h-8 shrink-0 items-center gap-2 rounded-lg border border-line px-3 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50"
-                >
-                  <RefreshCw size={12} aria-hidden />
-                  {updateBusy === "check" ? "Checking" : "Check"}
-                </button>
-                {/* Quiet until an update is ready: only then is Restart the next step. */}
-                <button
-                  type="button"
-                  data-testid="install-update-button"
-                  disabled={updateBusy !== null || updateState?.canInstall !== true}
-                  onClick={() => void installUpdate()}
-                  className={`h-8 shrink-0 rounded-lg px-3 text-[13px] transition-opacity disabled:opacity-50 ${
-                    updateState?.canInstall === true
-                      ? "bg-accent font-medium text-bg enabled:hover:opacity-90"
-                      : "border border-line text-subtle"
-                  }`}
-                >
-                  {updateBusy === "install" ? "Restarting" : "Restart"}
-                </button>
+                {/* One button for every step. It fills once the next step is
+                    the person's: Update, then Restart to update. */}
+                {update.step ? (
+                  <button
+                    type="button"
+                    data-testid="desktop-updates-step"
+                    disabled={update.step.action === null}
+                    onClick={() => {
+                      const action = update.step?.action;
+                      if (action) void update.run(action);
+                    }}
+                    className={`flex h-8 shrink-0 items-center gap-2 rounded-lg px-3 text-[13px] transition-opacity disabled:opacity-50 ${
+                      update.step.action === "download" || update.step.action === "install"
+                        ? "bg-accent font-medium text-bg enabled:hover:opacity-90"
+                        : "border border-line text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink"
+                    }`}
+                  >
+                    {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
+                    <UpdateStepLabel step={update.step} />
+                  </button>
+                ) : null}
               </SettingRow>
             </SettingsSection>
           </div>

@@ -90,6 +90,7 @@ import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   agentMentionCandidates,
+  listAgents,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -127,7 +128,7 @@ import { importSkipLines } from "./shell/importSkips";
 import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
-import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
+import { TitlebarUpdateButton, UpdateStepLabel, updateStatusLine, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import { readNewestMomentOrder, useHistoryPage } from "./shell/useHistoryPage";
@@ -191,7 +192,6 @@ import {
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
-import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
   IconButton,
   PrimaryButton,
@@ -919,6 +919,12 @@ export function DesktopWorkspaceShell(props: {
   const clearCollectionCopiesLeft = useCallback(() => clearKind("collection-copies-left"), [clearKind]);
   const collectionCopiesLeftNotice = useCollectionCopiesLeftNotice({ report: reportCollectionCopiesLeft, clear: clearCollectionCopiesLeft });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
+  // The updater's state, for the title bar, the stopped workspace, the
+  // palette, and the menus.
+  const desktopUpdate = useDesktopUpdate(reportShellFailure);
+  const clearUpdateFailure = useCallback(() => clearKind("update"), [clearKind]);
+  useUpdateFailureNotices(desktopUpdate, workspaceId, reportShellFailure, clearUpdateFailure);
+  const runDesktopUpdate = desktopUpdate.run;
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
   const clearSharingFocus = useCallback(() => setSharingFocus(null), []);
@@ -2883,12 +2889,13 @@ export function DesktopWorkspaceShell(props: {
   }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
+  const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings.settings) : [], [props.userSettings]);
   const chatEditors = useChatEditorTabs({
     workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => group.activeTab ? [group.activeTab] : []),
     enabled: captureAvailable,
-    agentName: agentSetup?.agentName,
+    agents: settingsAgents,
   });
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
@@ -3893,14 +3900,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const checkForDesktopUpdates = useCallback(
-    () => runUpdateCheck(reportShellError),
-    [reportShellError],
-  );
-  const installDesktopUpdate = useCallback(
-    () => runUpdateInstall(reportShellError),
-    [reportShellError],
-  );
 
   const moveTabIntoNewGroup = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {
@@ -4076,9 +4075,9 @@ export function DesktopWorkspaceShell(props: {
       } else if (command === "settings") {
         openSettings();
       } else if (command === "check-updates") {
-        void checkForDesktopUpdates();
+        void runDesktopUpdate("check");
       } else if (command === "install-update") {
-        void installDesktopUpdate();
+        void runDesktopUpdate("install");
       } else if (command === "toggle-theme") {
         toggleTheme();
       }
@@ -4087,8 +4086,7 @@ export function DesktopWorkspaceShell(props: {
       closeGroupAfterFlush,
       closeFileTab,
       closeOtherTabs,
-      checkForDesktopUpdates,
-      installDesktopUpdate,
+      runDesktopUpdate,
       openCloud,
       openHistoryView,
       openSettings,
@@ -4399,8 +4397,9 @@ export function DesktopWorkspaceShell(props: {
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
       activeDocumentShareable: activeSharePath !== null,
       pinnedApps,
+      updateStatus: desktopUpdate.state?.status ?? null,
     }),
-    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps, desktopUpdate.state?.status],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
@@ -4436,8 +4435,9 @@ export function DesktopWorkspaceShell(props: {
       "settings": () => openSettings(),
       "settings-appearance": () => openSettings("appearance"),
       "settings-agents": () => openSettings("agents"),
-      "check-updates": () => void checkForDesktopUpdates(),
-      "install-update": () => void installDesktopUpdate(),
+      "check-updates": () => void runDesktopUpdate("check"),
+      "download-update": () => void runDesktopUpdate("download"),
+      "install-update": () => void runDesktopUpdate("install"),
       "toggle-theme": toggleTheme,
       "zoom-in": () =>
         void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
@@ -4469,8 +4469,7 @@ export function DesktopWorkspaceShell(props: {
       mutateWb,
       openNewPage,
       requestExplorerFolder,
-      checkForDesktopUpdates,
-      installDesktopUpdate,
+      runDesktopUpdate,
       openCloud,
       openEditorGroupRight,
       openSettings,
@@ -4974,6 +4973,7 @@ export function DesktopWorkspaceShell(props: {
     openFile,
     openAutomation: openNoticeAutomation,
     openAutomationControls,
+    openChat: openChatsNavInTab,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -5257,20 +5257,7 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
-  // The updater's state, shown under Check for updates and followed live,
-  // so a download reaches "ready" without another click. The shell banner
-  // sits under this overlay, so an answer reported there would never be
-  // seen; a line that is always there also means the check moves nothing.
-  const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
-    useDesktopUpdateStateFeed();
-  const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
-  // One request at a time: the feed says "checking" only after main answers,
-  // so a second click before that would send the request twice.
-  const [storeUpdateCheckPending, setStoreUpdateCheckPending] = useState(false);
-  // One confirmation for every Restart: the stop state, the update notice,
-  // and the update toast. Restarting closes the app, so it is asked once.
-  const [restartPrompt, setRestartPrompt] = useState<"closed" | "open" | "restarting">("closed");
-  const openRestartPrompt = useCallback(() => setRestartPrompt("open"), []);
+  const storeUpdateState = desktopUpdate.state;
   const appVersion = storeUpdateState?.currentVersion
     ? storeUpdateState.channel
       ? `${storeUpdateState.currentVersion} (${storeUpdateState.channel})`
@@ -5299,6 +5286,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.command ? { command: error.command } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
@@ -5317,9 +5305,8 @@ export function DesktopWorkspaceShell(props: {
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
   const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
-  // A switch leaves the other workspace's answer and disclosure behind.
+  // A switch leaves the other workspace's disclosure behind.
   useEffect(() => {
-    setStoreUpdateCheckError(null);
     setStoreDetailsOpen(false);
   }, [workspaceId]);
   // A store this build could not migrate, or one a newer build migrated, is
@@ -5361,24 +5348,6 @@ export function DesktopWorkspaceShell(props: {
     setOpenShare(null);
     setLiveDocumentsWorkspaceId(null);
   }, [storeUpdateRequired]);
-  const checkForStoreUpdate = useCallback(async () => {
-    // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
-    // never repaint workspace B. The updater feed itself is app-wide; only
-    // this window's failure line is per workspace.
-    const askedFor = workspaceId;
-    setStoreUpdateCheckError(null);
-    setStoreUpdateCheckPending(true);
-    try {
-      const result = await bridge().checkForUpdates();
-      if (workspaceIdRef.current !== askedFor) return;
-      acceptStoreUpdateResult(result.state);
-    } catch {
-      if (workspaceIdRef.current !== askedFor) return;
-      setStoreUpdateCheckError("Could not check for updates.");
-    } finally {
-      setStoreUpdateCheckPending(false);
-    }
-  }, [acceptStoreUpdateResult, workspaceId]);
   // The live-delivery retry is main's own command, not a repaint: nothing
   // here decides that delivery recovered. Main reports that by pushing a new
   // status, so an accepted command needs no follow-up read. A refusal becomes
@@ -5579,6 +5548,7 @@ export function DesktopWorkspaceShell(props: {
       className="app-chrome relative flex h-screen flex-col bg-bg text-ink"
     >
       <ShellTitlebar
+        update={<TitlebarUpdateButton update={desktopUpdate} />}
         workspace={props.workspace}
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
@@ -5843,7 +5813,6 @@ export function DesktopWorkspaceShell(props: {
                 engineRebuildReturnFocusRef.current = returnFocus;
                 setEngineRebuild({ phase: "confirm", refusal });
               }}
-              onRestartToUpdate={openRestartPrompt}
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
@@ -6466,24 +6435,21 @@ export function DesktopWorkspaceShell(props: {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <PrimaryButton
-              autoFocus
-              disabled={
-                storeUpdateCheckPending ||
-                storeUpdateState?.status === "checking" ||
-                storeUpdateState?.canCheck === false
-              }
-              onClick={() => void checkForStoreUpdate()}
-            >
-              {storeUpdateCheckPending || storeUpdateState?.status === "checking"
-                ? "Checking"
-                : "Check for updates"}
-            </PrimaryButton>
-            {storeUpdateState?.canInstall ? (
-              <SecondaryButton onClick={openRestartPrompt}>
-                <RefreshCw size={12} aria-hidden />
-                Restart to update
-              </SecondaryButton>
+            {/* One button for every step: Check, Update, then Restart to update. */}
+            {desktopUpdate.step ? (
+              <PrimaryButton
+                autoFocus
+                data-testid="workspace-update-step"
+                disabled={desktopUpdate.step.action === null}
+                onClick={() => {
+                  const action = desktopUpdate.step?.action;
+                  if (action) void runDesktopUpdate(action);
+                }}
+                className="inline-flex items-center gap-1.5"
+              >
+                {desktopUpdate.step.Icon ? <desktopUpdate.step.Icon size={14} aria-hidden /> : null}
+                <UpdateStepLabel step={desktopUpdate.step} />
+              </PrimaryButton>
             ) : null}
             {props.onManageWorkspaces ? (
               <SecondaryButton onClick={manageWorkspaces}>
@@ -6496,7 +6462,7 @@ export function DesktopWorkspaceShell(props: {
             role="status"
             className="m-0 -mt-2 min-h-4 max-w-sm select-text cursor-text text-[12px] text-subtle"
           >
-            {storeUpdateCheckError ?? storeUpdateState?.message}
+            {storeUpdateState ? updateStatusLine(storeUpdateState) : null}
           </p>
           <button
             type="button"
@@ -6598,56 +6564,6 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
 
       {typingRecoveryConfirmation}
-      {restartPrompt !== "closed" ? (
-        <Overlay
-          onClose={() => {
-            if (restartPrompt === "open") setRestartPrompt("closed");
-          }}
-          panelProps={{
-            "data-testid": "restart-to-update-dialog",
-            role: "dialog",
-            "aria-modal": true,
-            "aria-labelledby": "restart-to-update-title",
-          }}
-        >
-          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
-            <div className="p-4">
-              <p id="restart-to-update-title" className="m-0 text-sm text-ink">
-                Restart dohc to apply the update?
-              </p>
-              <p className="mb-0 mt-2 text-xs text-muted">
-                {storeUpdateState?.version
-                  ? `Update ${storeUpdateState.version} is downloaded. `
-                  : ""}
-                dohc closes and opens again on the new version. Your files are
-                saved.
-              </p>
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <SecondaryButton
-                autoFocus
-                disabled={restartPrompt === "restarting"}
-                onClick={() => setRestartPrompt("closed")}
-              >
-                Not now
-              </SecondaryButton>
-              <PrimaryButton
-                data-testid="restart-to-update-confirm"
-                disabled={restartPrompt === "restarting"}
-                onClick={() => {
-                  setRestartPrompt("restarting");
-                  void installDesktopUpdate().finally(() =>
-                    setRestartPrompt("closed"),
-                  );
-                }}
-              >
-                {restartPrompt === "restarting" ? "Restarting" : "Restart now"}
-              </PrimaryButton>
-            </div>
-          </div>
-        </Overlay>
-      ) : null}
-
       {sentNoticeRetryDialog}
 
       {engineRebuild ? (
