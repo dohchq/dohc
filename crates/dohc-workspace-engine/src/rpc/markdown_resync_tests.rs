@@ -179,7 +179,7 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
     assert_eq!(std::fs::read(&file).unwrap(), source.as_bytes());
     assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), modified);
     let store = EngineStore::open_read_only(&db).unwrap();
-    assert_eq!(dohc_engine_collab::read_marker(&store, &key).unwrap().unwrap().last_settled_sha,
+    assert_eq!(dohc_engine_collab::read_last_settled_sha(&store, &key).unwrap(),
         Some(hex_sha256(source.as_bytes())));
     drop(store);
     drop(recovery_gate);
