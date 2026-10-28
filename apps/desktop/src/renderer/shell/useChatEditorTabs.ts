@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
+import type { SettingsAgent } from "../workbench/agentChat";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
 type ChatEditor = {
@@ -38,7 +39,8 @@ export function useChatEditorTabs(input: {
   paths: readonly string[];
   activePaths?: readonly string[];
   enabled: boolean;
-  agentName?: string;
+  // The agents in Settings, whose names agent chat tabs take.
+  agents: readonly SettingsAgent[];
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
@@ -199,7 +201,7 @@ export function useChatEditorTabs(input: {
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   const titles = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
-      [path, chatEditorTitle(entry.nav!, input.agentName)] as const),
-  ), [revision, input.agentName, input.workspaceId]);
+      [path, chatEditorTitle(entry.nav!, input.agents)] as const),
+  ), [revision, input.agents, input.workspaceId]);
   return { get, open, titles };
 }
