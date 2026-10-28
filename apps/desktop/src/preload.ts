@@ -30,6 +30,7 @@ import {
   systemPrivacySettingsOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
+  updateDownloadOperations,
   DesktopUserSettingsResult,
   AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
@@ -153,6 +154,7 @@ const bridge: DohcDesktopBridge = {
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(updateDownloadOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -529,7 +531,6 @@ const bridge: DohcDesktopBridge = {
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
-  downloadUpdate: () => invokeParsed(CHANNELS.downloadUpdate, UpdateActionResult),
   installUpdate: () => invokeParsed(CHANNELS.installUpdate, UpdateActionResult),
   onExitRound: (listener) => onEvent(CHANNELS.exitRound, ExitRoundMessage, listener),
   answerExitRound: async (payload) => {

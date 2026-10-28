@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./updatesIpc";
+import { updateDownloadOperations } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { createExitRounds, createQuitGuard, type ExitRoundMessage } from "../quitGuard";
 import { startAutoUpdates, publicUpdateState, type AutoUpdateController } from "../updates/electronUpdater";
@@ -17,7 +18,8 @@ class Updater extends EventEmitter {
 }
 
 type Event = { trusted: boolean };
-const channels = [CHANNELS.getUpdateState, CHANNELS.checkForUpdates, CHANNELS.downloadUpdate, CHANNELS.installUpdate];
+const DOWNLOAD = updateDownloadOperations.downloadUpdate.channel;
+const channels = [CHANNELS.getUpdateState, CHANNELS.checkForUpdates, DOWNLOAD, CHANNELS.installUpdate];
 const cleanup: Array<() => Promise<void>> = [];
 
 function harness() {
@@ -59,13 +61,19 @@ function harness() {
     currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return readController(); },
   });
-  registerUpdatesIpcHandlers<Event>({
-    registerHandler: (channel, handler) => {
-      if (handlers.has(channel)) throw new Error(`duplicate channel: ${channel}`);
-      handlers.set(channel, handler);
+  const registerHandler = (channel: string, handler: (event: Event, payload?: unknown) => unknown) => {
+    if (handlers.has(channel)) throw new Error(`duplicate channel: ${channel}`);
+    handlers.set(channel, handler);
+  };
+  const assertTrustedSender = (event: Event) => { if (!event.trusted) throw new Error("untrusted"); };
+  registerUpdatesIpcHandlers<Event, never>({
+    registerHandler,
+    boundary: {
+      handle: registerHandler,
+      assertTrustedSender,
+      withActiveWorkspace: () => { throw new Error("updates never need a workspace"); },
     },
-    assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
-    currentUpdateState, installUpdate,
+    assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return readController(); },
   });
   const invoke = (channel: string, payload?: unknown, trusted = true) => {
@@ -189,7 +197,7 @@ describe("registered updater IPC", () => {
     const { updater } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     updater.quitAndInstall.mockImplementation(() => {
@@ -215,7 +223,7 @@ describe("registered updater IPC", () => {
     const { updater } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
@@ -235,7 +243,7 @@ describe("registered updater IPC", () => {
     const { updater } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const first = h.invoke(CHANNELS.installUpdate);
@@ -252,7 +260,7 @@ describe("registered updater IPC", () => {
     const first = await h.start();
     first.updater.emit("checking-for-update");
     first.updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     first.updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
@@ -263,7 +271,7 @@ describe("registered updater IPC", () => {
       const second = await h.start();
       second.updater.emit("checking-for-update");
       second.updater.emit("update-available", { version: "1.2.5" });
-      h.invoke(CHANNELS.downloadUpdate);
+      h.invoke(DOWNLOAD, {});
       second.updater.emit("update-downloaded", { version: "1.2.5" });
       h.answer(requestId, false);
       await expect(result).resolves.toMatchObject({ accepted: true, state: { version: "1.2.4" } });
@@ -337,7 +345,7 @@ describe("registered updater IPC", () => {
     const { updater } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     updater.emit("update-downloaded", { version: "1.2.4" });
     updater.quitAndInstall.mockImplementationOnce(() => { throw new Error("restart failed"); });
     await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: false, state: { status: "ready" } });
@@ -352,7 +360,7 @@ describe("registered updater IPC", () => {
     const { updater, quitForStagedRestart } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    h.invoke(CHANNELS.downloadUpdate);
+    h.invoke(DOWNLOAD, {});
     updater.emit("update-downloaded", { version: "1.2.4" });
     await h.invoke(CHANNELS.installUpdate);
     h.quitGuard.hold();

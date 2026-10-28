@@ -7558,8 +7558,9 @@ function registerIpcHandlers(): void {
 
   workspaceEngineIpc.registerYDoc();
 
-  registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
+  registerUpdatesIpcHandlers({
     registerHandler: handleIpc,
+    boundary: operationBoundary,
     assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });

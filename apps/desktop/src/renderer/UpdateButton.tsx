@@ -115,7 +115,7 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
       });
     if (action === "download") {
       try {
-        acceptUpdateResult((await bridge().downloadUpdate()).state);
+        acceptUpdateResult((await bridge().downloadUpdate({})).state);
       } catch (error) {
         failed(error);
       }

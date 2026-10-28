@@ -6008,6 +6008,19 @@ export const UpdateCheckResult = z.object({
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 
+// Starts the download a person chose. Progress and the result arrive as
+// update state.
+export const updateDownloadOperations = {
+  downloadUpdate: {
+    capabilityId: "device.update.download",
+    scope: "device",
+    channel: "desktop:download-update",
+    payload: z.object({}),
+    result: UpdateActionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 // Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
 // validateUserWritePath refuses reserved paths). The clamp/cap constants are
@@ -7263,6 +7276,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
@@ -7569,9 +7583,6 @@ export interface DohcDesktopBridge
   // it cannot set feed URLs or mutate update channels.
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
-  // Starts the download a person chose. Progress and the result arrive as
-  // update state.
-  downloadUpdate(): Promise<UpdateActionResult>;
   installUpdate(): Promise<UpdateActionResult>;
   // Exit rounds: before a quit proceeds or an update installs, main asks
   // every workspace window whether set-aside drafts would be lost.
