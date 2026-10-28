@@ -1982,7 +1982,7 @@ describe("chatDispatchService", () => {
     expect(fixture.dispatchNotices).toEqual(noticeFails ? [] : [{ workspace: fixture.workspace, notice: {
       reason: "budget-paused", threadId: pending.threadId,
       channelId: (await fixture.chat.getThread({ workspaceId: WORKSPACE_ID, threadId: pending.threadId })).thread.channelId,
-      message: 'Your agent ran 10 times in 10 minutes in "This next run should pause once the bud…". Choose Resume there to continue.',
+      message: 'Agents ran 10 times in 10 minutes in "This next run should pause once the bud…". Choose Resume there to continue.',
     } }]);
     expect(fixture.errors).toEqual(noticeFails ? [noticeError] : []);
     expect(fixture.postedWorkspaces).toEqual([]);
@@ -2095,7 +2095,7 @@ describe("chatDispatchService", () => {
       expect(fixture.dispatchNotices).toEqual([{ workspace: fixture.workspace, notice: {
         reason: "budget-paused", threadId: conversation,
         channelId: (await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" })).id,
-        message: 'Your agent ran 10 times in 10 minutes in "Nova". Choose Resume there to continue.',
+        message: 'Agents ran 10 times in 10 minutes in "Nova". Choose Resume there to continue.',
       } }]);
     });
 
@@ -2106,7 +2106,7 @@ describe("chatDispatchService", () => {
       await askAgain(fixture);
 
       expect(fixture.dispatchNotices.map((entry) => entry.notice.message)).toEqual([
-        'Your agent ran 10 times in 10 minutes in "Nova the very thorough trip planning as…". Choose Resume there to continue.',
+        'Agents ran 10 times in 10 minutes in "Nova the very thorough trip planning as…". Choose Resume there to continue.',
       ]);
     });
   });
@@ -2132,7 +2132,7 @@ describe("chatDispatchService", () => {
 
     expect(fixture.dispatchNotices.map((entry) => entry.notice)).toEqual([{
       reason: "budget-paused", threadId: thread.id, channelId: group.id,
-      message: "Your agent ran 10 times in 10 minutes in #general. Choose Resume there to continue.",
+      message: "Agents ran 10 times in 10 minutes in #general. Choose Resume there to continue.",
     }]);
   });
 

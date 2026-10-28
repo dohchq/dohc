@@ -161,7 +161,7 @@ it.each([
   const h = setup();
   h.store.report("a", {
     reason: "budget-paused", threadId: thread.id, channelId: channel.id,
-    message: `Your agent ran 10 times in 10 minutes in ${place}. Choose Resume there to continue.`,
+    message: `Agents ran 10 times in 10 minutes in ${place}. Choose Resume there to continue.`,
   });
   const hook = h.mount();
   await act(async () => {});

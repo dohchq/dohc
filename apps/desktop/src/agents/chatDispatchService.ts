@@ -1180,7 +1180,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           options.onDispatchNotice?.(workspace, {
             reason: "budget-paused", threadId: candidate.threadId,
             ...(channelId ? { channelId } : {}),
-            message: `Your agent ran ${CHAT_DISPATCH_BUDGET_MAX} times in ${CHAT_DISPATCH_BUDGET_WINDOW_MS / 60_000} minutes in ${place}. Choose Resume there to continue.`,
+            message: `Agents ran ${CHAT_DISPATCH_BUDGET_MAX} times in ${CHAT_DISPATCH_BUDGET_WINDOW_MS / 60_000} minutes in ${place}. Choose Resume there to continue.`,
           });
         } catch (error) {
           reportError(error);
