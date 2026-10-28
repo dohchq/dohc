@@ -36,8 +36,6 @@ import { NoticeRow, NoticeTargetShape, RefusalCoordinate, type NoticeRef } from 
 import { relayRequest } from "../workspaces/relayRequest";
 import { isRefusalNoticeKind } from "./refusalNoticeKind";
 
-export { isRefusalNoticeKind };
-
 // The local file holds only this computer's notices, so it keeps fewer rows.
 const LOCAL_NOTICE_ROW_LIMIT = 500;
 const SERVER_OUTDATED_KIND = "server-outdated";
