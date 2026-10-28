@@ -171,7 +171,7 @@ it("keeps a written agent whose name only the spaces set apart from version 1's"
   await writeFile(path, JSON.stringify({ profile: { agentName: "Claude Code" }, agents: { writer } }));
   const read = await readUserSettingsFile(root);
   expect(Object.keys(read.settings.agents)).toEqual(["default"]);
-  expect(read.agentProblems).toEqual([{ id: "writer", name: "ClaudeCode", problem: "Another agent has this name." }]);
+  expect(read.agentProblems).toEqual([{ id: "writer", name: "ClaudeCode", hue: "olive", position: 1, problem: "Another agent has this name." }]);
   await writeUserSettingsFile(root, { ...read.settings, editor: { ...read.settings.editor, fontSize: 16 } }, read.settings);
   expect(JSON.parse(await readFile(path, "utf8")).agents.writer).toEqual(writer);
 });
@@ -184,7 +184,7 @@ it("leaves version 1's agent where it is when the file's own agents have no plac
 });
 
 describe("an agent entry dohc cannot use", () => {
-  it("turns off only that agent, and keeps its id, its name and what is wrong", async () => {
+  it("turns off only that agent, and keeps its id, its name, its place and what is wrong", async () => {
     const root = await createTestScratch("dohc-settings-agents-");
     await writeFile(join(root, USER_SETTINGS_FILE), JSON.stringify({
       ...DEFAULT_USER_SETTINGS,
@@ -200,11 +200,11 @@ describe("an agent entry dohc cannot use", () => {
     const read = await readUserSettingsFile(root);
     expect(Object.keys(read.settings.agents)).toEqual(["default"]);
     expect(read.agentProblems).toEqual([
-      { id: "agent-hue", name: "Atlas", problem: expect.stringMatching(/^hue: /) },
-      { id: "Agent B", name: "Bee", problem: "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash." },
-      { id: "agent-same", name: "nova", problem: "Another agent has this name." },
-      { id: "agent-list", problem: expect.any(String) },
-      { id: "dohc-mcp", name: "Mick", problem: "dohc-mcp stands for agents that give no name. Give this agent another id." },
+      { id: "agent-hue", name: "Atlas", position: 1, problem: expect.stringMatching(/^`hue` must be one of: /) },
+      { id: "Agent B", name: "Bee", hue: "olive", position: 2, problem: "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash." },
+      { id: "agent-same", name: "nova", hue: "olive", position: 3, problem: "Another agent has this name." },
+      { id: "agent-list", position: 4, problem: "This entry must be an object, like the other agents." },
+      { id: "dohc-mcp", name: "Mick", hue: "olive", position: 5, problem: "dohc-mcp stands for agents that give no name. Give this agent another id." },
     ]);
   });
 });

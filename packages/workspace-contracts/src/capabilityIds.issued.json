@@ -260,5 +260,6 @@
   "share.live.document.retry",
   "share.live.document.recovery.save",
   "workspace.name.suggest",
-  "agent.run.retry"
+  "agent.run.retry",
+  "settings.agents.order"
 ]

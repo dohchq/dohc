@@ -16,7 +16,7 @@ import {
 import { withAppPinned } from "../settings/pinnedApps";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
-  ensureUserSettingsFile, readCachedUserSettingsFile, reloadUserSettingsFile,
+  ensureUserSettingsFile, orderUserSettingsAgents, readCachedUserSettingsFile, reloadUserSettingsFile,
   replaceUserSettingsFile, updateUserSettingsFile, USER_SETTINGS_FILE, writeUserSettingsFile,
 } from "../settings/userSettingsStore";
 import {
@@ -205,6 +205,10 @@ export function createSettingsIpc<
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) =>
           withAppPinned(current, input, knownWorkspaceIds())));
+    },
+
+    orderAgents: async (input) => {
+      return saveUserSettings(() => orderUserSettingsAgents(stateDir(), input.order));
     },
 
     setAgentColor: async (input, { operation }) => {
