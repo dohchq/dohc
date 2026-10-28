@@ -310,7 +310,7 @@ export function VersionMenu(props: {
             : "dohc can't use that name. Choose another name.");
           return;
         }
-        props.onError(ipcErrorMessage(error, `Could not create ${trimmed}.`), error, () => {
+        props.onError(ipcErrorMessage(error, `Could not create the version ${trimmed}.`), error, () => {
           setMenuOpen(true);
           setNewName(trimmed);
           void performCreate(trimmed);
