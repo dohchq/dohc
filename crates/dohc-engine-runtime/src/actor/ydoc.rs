@@ -3285,23 +3285,17 @@ fn ydoc_settle_attempt_on_store(
                 expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: current_marker.lineage_claim_id,
             }.into());
         }
-        let reference = doc.markdown_source_reference();
-        let current_witness_sha = reference.as_ref()
-            .map(|reference| reference.source_sha256.as_str());
-        if current_witness_sha != witness_source_sha256.as_deref() {
-            return Err(CollabError::MarkdownReaderUnavailable.into());
-        }
-        let holds = markdown_write_safety::holds(&markdown_write_safety, current_witness_sha, current_sha.as_deref())
+        let holds = markdown_write_safety::holds(&markdown_write_safety, witness_source_sha256.as_deref(), current_sha.as_deref())
             && !markdown_write_safety::check_witness(doc, key, path, witness_resolver.as_deref())?;
         let adopted_owner = dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)?;
         let uses_consent = holds && conversion_consent.is_some_and(|consent| {
             if let Some(audit) = live_audit {
                 consent.permits_audited(key, current_marker.lineage_claim_id.as_deref(),
-                    audit.binding().restore_fence_generation, current_witness_sha, current_sha.as_deref())
+                    audit.binding().restore_fence_generation, witness_source_sha256.as_deref(), current_sha.as_deref())
             } else {
                 !adopted_owner && consent.permits(key, session_id,
                     current_marker.lineage_claim_id.as_deref(), restore_generation,
-                    current_witness_sha, current_sha.as_deref())
+                    witness_source_sha256.as_deref(), current_sha.as_deref())
             }
         });
         let mut obligation = WriteObligation {
