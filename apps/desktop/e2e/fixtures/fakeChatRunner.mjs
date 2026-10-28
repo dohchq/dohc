@@ -70,14 +70,21 @@ function tomlStrings(value) {
   return [...value.matchAll(/'([^']*)'|("(?:[^"\\]|\\.)*")/gu)].map((match) => match[1] ?? JSON.parse(match[2]));
 }
 
-// The dohc MCP server a Codex launch names, after checking the launch.
+// The dohc MCP server a Codex launch names, after checking the launch. The
+// run's permissions profile and folder trust follow the server's entries, and
+// on Windows so does the unelevated sandbox when no config chose one
+// (codexRunConfig.ts).
 function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode"];
+  const profile = [...config.keys()].find((key) => /^permissions\.dohc_run_[0-9a-f]{16}$/u.test(key));
+  const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", profile, "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
-  if (args.length !== 3 + 12 + 5 ||
-    !command || cwd !== dirname(command) ||
+  if (args.length !== 1 + 2 * keys.length + 5 ||
+    !command || !profile || cwd !== dirname(command) ||
+    config.get("default_permissions") !== `'${profile.slice("permissions.".length)}'` ||
+    (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-5)) !== JSON.stringify(["--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]) ||
