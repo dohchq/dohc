@@ -67,10 +67,15 @@ const TWO = derivedRecordId("claim-1/0");
 const DEADLINE_MS = 30_000;
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {
-  for (const close of cleanup.splice(0).reverse()) await close();
-  await closeTestStorages();
-});
+async function closeTestComputers() {
+  const failures: unknown[] = [];
+  for (const close of [...cleanup.splice(0).reverse(), closeTestStorages]) {
+    try {await close();} catch (error) {failures.push(error);}
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Automation test cleanup failed");
+}
+afterEach(closeTestComputers);
 
 // The relay's test seam: "Bearer test:<user>" is that user.
 const testActor: ResolveActor = (request, workspaceId) => {
@@ -94,15 +99,19 @@ async function computer(input: {
   let stderrTail = "";
   let teardownStarted = false;
   let exitStatus: {code: number | null; signal: NodeJS.Signals | null; duringTeardown: boolean} | undefined;
+  const diagnostic = () => `[automation engine] ${JSON.stringify({at: new Date().toISOString(), root: input.root, command: engine.path, exitStatus: exitStatus ?? null})}\n${stderrTail || "(no engine stderr)"}`;
   onTestFailed(() => {
-    console.error(`[automation engine] ${JSON.stringify({root: input.root, command: engine.path, exitStatus: exitStatus ?? null})}\n${stderrTail || "(no engine stderr)"}`);
+    console.error(diagnostic());
   });
   const client = await createEngineClient({
     env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig()}, privateLiveApplication: profile.nativeClient,
     command: engine.require(), authToken: randomBytes(32).toString("base64url"),
     protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
     onStderr: text => {stderrTail = (stderrTail + text).slice(-64 * 1024);},
-    onExit: (code, signal) => {exitStatus = {code, signal, duringTeardown: teardownStarted};},
+    onExit: (code, signal) => {
+      exitStatus = {code, signal, duringTeardown: teardownStarted};
+      if (!teardownStarted) console.error(diagnostic());
+    },
   });
   cleanup.push(async () => {teardownStarted = true; client.close(); await client.waitForExit();});
   let requestId = 0;
@@ -124,7 +133,7 @@ async function computer(input: {
   const replication = new ServiceOrdinaryReplication(
     { client: {sendRequest: async (request, signal) => {
       try {return await client.sendRequest(request, signal);}
-      catch (error) {throw new Error(`${request.method} on ${input.root}`, {cause: error});}
+      catch (error) {throw new Error(`${request.method} on ${input.root}\n${diagnostic()}`, {cause: error});}
     }}, workspace, workspaceId: WORKSPACE, nextRequestId, deadlineMs: DEADLINE_MS, signal: lifetime.signal, assertCurrent: () => undefined },
     { relay: { baseUrl: "https://relay.example.test", bearerToken: input.bearerToken }, identity: input.identity, maxPagesPerPull: 8 },
   );
@@ -152,6 +161,22 @@ async function computer(input: {
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
   };
 }
+
+it.skipIf(engine.missing)("closes remaining engines and removes storage after settlement cleanup fails", async () => {
+  const root = await tempRoot("automation-cleanup-failure");
+  const server = await computer({root, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: {kind: "claim"}});
+  const failure = new Error("Settlement cleanup failed");
+  cleanup.push(async () => {throw failure;});
+  try {
+    await expect(closeTestComputers()).rejects.toBe(failure);
+    await expect(readFile(join(root, "owner-ingress.json"), "utf8")).rejects.toMatchObject({code: "ENOENT"});
+    await server.client.waitForExit();
+  } finally {
+    server.client.close();
+    await server.client.waitForExit();
+    await closeTestStorages();
+  }
+});
 
 it.skipIf(engine.missing)("settles safe imported Markdown after body and field edits expire its witness", async () => {
   const root = await tempRoot("automation-witness-checker");
