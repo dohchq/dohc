@@ -20,8 +20,10 @@ type TitlebarPanelToggle = {
   onToggle: () => void;
 };
 
-// Shared by centered quick-open and the left group's available width.
-const QUICK_OPEN_WIDTH = "max(0px, min(20rem, 40vw, 100vw - 640px))";
+// Shared by centered quick-open and the left group's available width. Below
+// 1100px, where the names would start to cut, quick-open narrows to its icon
+// and shortcut; the header sets the width for both.
+const QUICK_OPEN_WIDTH = "var(--quick-open-width)";
 
 function LayoutToggle(props: {
   label: string;
@@ -115,7 +117,7 @@ export function Titlebar(props: {
   return (
     <header
       data-testid={desktopPins.titlebar}
-      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel"
+      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel [--quick-open-width:20rem] max-[1100px]:[--quick-open-width:5rem]"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}
@@ -152,7 +154,9 @@ export function Titlebar(props: {
               aria-expanded={switcherOpen}
               title={workspaceName(props.workspace)}
               onClick={() => setSwitcherOpen((open) => !open)}
-              className="titlebar-no-drag flex h-7 min-w-0 items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
+              // Each name keeps its padding and three letters with an
+              // ellipsis, or all of it when shorter.
+              className="titlebar-no-drag flex h-7 min-w-[calc-size(max-content,min(size,4rem))] items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
             >
               {/* Truncate the name before the version and the saved dot. */}
               <span data-testid="status-workspace" className="min-w-0 max-w-48 truncate">
@@ -160,9 +164,10 @@ export function Titlebar(props: {
               </span>
             </button>
             {/* The slash belongs to the version, so it shows only once the
-                picker has a version to name. */}
+                picker has a version to name. Its floor holds the slash, the
+                version's icons and three letters with an ellipsis. */}
             {props.version ? (
-              <span className="flex min-w-0 items-center gap-0.5 empty:hidden before:text-[13px] before:text-subtle before:content-['/']">
+              <span className="flex min-w-[calc-size(max-content,min(size,7.5rem))] items-center gap-0.5 empty:hidden before:text-[13px] before:text-subtle before:content-['/']">
                 {props.version}
               </span>
             ) : null}
@@ -246,13 +251,14 @@ export function Titlebar(props: {
         <button
           type="button"
           data-testid="titlebar-quick-open"
+          title="Go to…"
           onClick={props.onQuickOpen}
           style={{ width: QUICK_OPEN_WIDTH }}
           className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
-          <Search size={12} aria-hidden />
-          <span className="truncate">Go to…</span>
-          <kbd className="ml-auto font-sans text-[11px]">{quickOpenShortcut}</kbd>
+          <Search size={12} aria-hidden className="shrink-0" />
+          <span className="truncate max-[1100px]:sr-only">Go to…</span>
+          <kbd className="ml-auto whitespace-nowrap font-sans text-[11px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}
 
