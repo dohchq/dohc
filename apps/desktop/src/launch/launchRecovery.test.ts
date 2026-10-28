@@ -19,7 +19,7 @@ const updater = vi.hoisted(() => {
 });
 
 vi.mock("electron", () => electron);
-vi.mock("../updates/electronUpdater", () => ({ startAutoUpdates: updater.startAutoUpdates }));
+vi.mock("../updates/electronUpdater", () => ({ startAutoUpdates: updater.startAutoUpdates, installsOnQuit: () => true }));
 
 const { checkForUpdateBeforeMain } = await import("./launchRecovery");
 

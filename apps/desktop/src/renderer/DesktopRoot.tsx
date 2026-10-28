@@ -20,6 +20,7 @@ import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { ShellErrorReporter } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
+import { useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -34,14 +35,24 @@ const LazyStatesPage = lazy(() =>
   import("./dev/StatesPage").then((module) => ({ default: module.StatesPage })),
 );
 
+const NOOP = () => undefined;
+
 // The registry error has no workspace shell; it answers menu commands
 // itself and reports into its own notices.
 function RegistryErrorMenuCommands() {
   const reportFailure = useContext(ShellErrorReporter);
+  const update = useDesktopUpdate(reportFailure);
+  useUpdateFailureNotices(update, "", useCallback(
+    (failure: { title?: string; message: string; retry: () => void }) => reportFailure?.({
+      message: failure.title ? `${failure.title}. ${failure.message}` : failure.message,
+      retry: failure.retry,
+    }),
+    [reportFailure],
+  ), NOOP);
   useMenuCommandsWithoutWorkspace(useCallback(
     (message: string, cause: unknown) => reportFailure?.({ message, cause }),
     [reportFailure],
-  ));
+  ), update.run);
   return null;
 }
 

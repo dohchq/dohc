@@ -333,6 +333,7 @@ export const CHANNELS = {
   updateState: "desktop:update-state",
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
+  downloadUpdate: "desktop:download-update",
   installUpdate: "desktop:install-update",
   // Exit rounds: before a quit or an update install, main asks every
   // workspace renderer whether set-aside drafts would be lost. The request

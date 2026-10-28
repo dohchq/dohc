@@ -73,7 +73,7 @@ export function registerUpdatesIpcHandlers<Event>(dependencies: {
   registerHandler(channel: string, handler: (event: Event) => unknown): void;
   assertTrustedSender(event: Event): void;
   currentUpdateState(): UpdateStateEvent;
-  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates"> | null;
+  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates" | "downloadUpdate"> | null;
   installUpdate(): Promise<UpdateActionResult>;
 }): void {
   const { registerHandler, assertTrustedSender, currentUpdateState, installUpdate } = dependencies;
@@ -91,7 +91,14 @@ export function registerUpdatesIpcHandlers<Event>(dependencies: {
         state: currentUpdateState(),
       });
     }
-    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates());
+    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates(true));
+  });
+
+  registerHandler(CHANNELS.downloadUpdate, (event) => {
+    assertTrustedSender(event);
+    return UpdateActionResult.parse(
+      dependencies.autoUpdateController?.downloadUpdate() ?? { accepted: false, state: currentUpdateState() },
+    );
   });
 
   registerHandler(CHANNELS.installUpdate, async (event) => {

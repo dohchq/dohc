@@ -7,7 +7,7 @@ import {
   updateFeedOverride,
   type AutoUpdateController,
 } from "./electronUpdater";
-import { initialUpdateState, transition } from "./updateMachine";
+import { initialUpdateState, transition, type UpdateEvent } from "./updateMachine";
 import { deferred } from "../testing/deferred";
 import { UpdateStateEvent } from "../ipc/bridgeContract";
 
@@ -34,6 +34,7 @@ function fakeUpdater() {
     forceDevUpdateConfig: undefined as boolean | undefined,
     setFeedURL: vi.fn(),
     checkForUpdates: vi.fn(async () => undefined),
+    downloadUpdate: vi.fn(async (): Promise<unknown> => undefined),
     quitAndInstall: vi.fn(),
     on: vi.fn((eventName: string, listener: Listener) => {
       listeners.set(eventName, [...(listeners.get(eventName) ?? []), listener]);
@@ -103,7 +104,7 @@ describe("electron updater configuration", () => {
 
     expect(controller).not.toBeNull();
     expect(updater.setFeedURL).not.toHaveBeenCalled();
-    expect(updater.autoDownload).toBe(true);
+    expect(updater.autoDownload).toBe(false);
     expect(updater.autoInstallOnAppQuit).toBe(true);
     expect(updater.channel).toBe("latest");
     expect(updater.allowPrerelease).toBe(false);
@@ -149,8 +150,10 @@ describe("electron updater configuration", () => {
     const updater = fakeUpdater();
     const controller = await startWith(updater, { platform: "linux" });
     expect(updater.autoInstallOnAppQuit).toBe(false);
-    expect(updater.autoDownload).toBe(true);
+    expect(updater.autoDownload).toBe(false);
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
     expect((await controller!.installUpdate()).accepted).toBe(true);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
@@ -300,6 +303,8 @@ describe("electron updater actions", () => {
     });
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -322,12 +327,81 @@ describe("electron updater actions", () => {
 
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("download-progress", { percent: 150 });
 
     expect(controller!.publicState()).toMatchObject({
       status: "downloading",
       percent: 100,
     });
+  });
+
+  it("downloads only when a person asks, once", async () => {
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater))!;
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: false, state: { status: "idle" } });
+
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    expect(controller.publicState()).toMatchObject({ status: "available", version: "1.2.4", message: "dohc 1.2.4 is available." });
+    expect(updater.downloadUpdate).not.toHaveBeenCalled();
+    // Nothing a download did not start can install.
+    await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: false });
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(controller.publicState().status).toBe("available");
+
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: true, state: { status: "downloading" } });
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: false });
+    expect(updater.downloadUpdate).toHaveBeenCalledOnce();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(controller.publicState()).toMatchObject({ status: "ready", canInstall: true });
+    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("returns a failed download to Update, with the step that failed", async () => {
+    // The updater emits "error" and rejects; a rejection alone still ends the download.
+    for (const emits of [true, false]) {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      updater.downloadUpdate.mockImplementationOnce(async () => {
+        const error = new Error("sha512 checksum mismatch\nheaders");
+        if (emits) updater.emit("error", error);
+        throw error;
+      });
+      controller.downloadUpdate();
+      await vi.waitFor(() => expect(controller.publicState()).toMatchObject({
+        status: "available",
+        message: "sha512 checksum mismatch",
+        failure: { step: "download" },
+      }));
+      // Trying again clears the failure while it runs.
+      expect(controller.downloadUpdate().state).not.toHaveProperty("failure");
+    }
+  });
+
+  it("toasts a background check failure once, and every failure a person asked for", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, new Error("feed returned 500"));
+    const controller = (await startWith(updater))!;
+    await controller.checkForUpdates();
+    const first = controller.publicState().failure;
+    expect(first).toMatchObject({ step: "check" });
+    expect(controller.publicState().message).toBe("feed returned 500");
+    await controller.checkForUpdates();
+    expect(controller.publicState().failure).toEqual(first);
+    await controller.checkForUpdates(true);
+    const asked = controller.publicState().failure;
+    expect(asked?.id).toBeGreaterThan(first!.id);
+    failChecksWith(updater, new Error("feed returned 503"));
+    await controller.checkForUpdates();
+    expect(controller.publicState().failure?.id).toBeGreaterThan(asked!.id);
+    // Offline is not a failure to report.
+    failChecksWith(updater, new Error("net::ERR_INTERNET_DISCONNECTED"));
+    await controller.checkForUpdates();
+    expect(controller.publicState()).toMatchObject({ status: "offline" });
+    expect(controller.publicState()).not.toHaveProperty("failure");
   });
 
   it("reports quitAndInstall failures as rejected restart requests", async () => {
@@ -339,6 +413,8 @@ describe("electron updater actions", () => {
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -346,7 +422,8 @@ describe("electron updater actions", () => {
       state: {
         status: "ready",
         canInstall: true,
-        message: "Could not restart into the update.",
+        message: "quit failed",
+        failure: { step: "install" },
       },
     });
   });
@@ -360,6 +437,8 @@ describe("electron updater actions", () => {
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -367,7 +446,8 @@ describe("electron updater actions", () => {
       state: {
         status: "ready",
         canInstall: true,
-        message: "Could not restart into the update.",
+        message: "quit failed",
+        failure: { step: "install" },
       },
     });
   });
@@ -377,7 +457,7 @@ describe("electron updater actions", () => {
     const install = `sudo apt install '${deb}'`;
     // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
     for (const [error, message, installCommand] of [
-      ["Command pkexec exited with code 126", "The update did not install without your password. Choose Restart to try again.", undefined],
+      ["Command pkexec exited with code 126", "The update did not install without your password.", undefined],
       ["Command pkexec exited with code 127", "dohc did not get permission to install the update. Run this command in a terminal to install it.", install],
       ["Command sudo exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
       ["Command pkexec exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
@@ -386,6 +466,8 @@ describe("electron updater actions", () => {
       updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error(error)));
       const controller = await startWith(updater, { platform: "linux" });
       updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4", downloadedFile: deb });
+      controller!.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: deb });
 
       const result = await controller!.installUpdate();
@@ -403,10 +485,13 @@ describe("electron updater actions", () => {
       updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
       const controller = await startWith(updater, { platform });
       updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4", downloadedFile });
+      controller!.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
 
       const result = await controller!.installUpdate();
-      expect(result, platform).toMatchObject({ accepted: false, reason: "Could not restart into the update.", state: { message: "Could not restart into the update." } });
+      const cause = "Command pkexec exited with code 127";
+      expect(result, platform).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
       expect(result.state.installCommand, platform).toBeUndefined();
     }
   });
@@ -431,7 +516,9 @@ describe("electron updater actions", () => {
       const controller = (await startWith(updater))!;
       const onDownloading = vi.fn();
       const waiting = controller.awaitUpdate(bounds, onDownloading);
-      await vi.waitFor(() => expect(controller.state().status).toBe("available"));
+      // A build that cannot run downloads without asking.
+      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
+      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
       expect(onDownloading).toHaveBeenCalledWith("1.2.4");
       updater.emit("download-progress", { percent: 50 });
       updater.emit("update-downloaded", { version: "1.2.4" });
@@ -461,6 +548,8 @@ describe("electron updater actions", () => {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
       updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4" });
       await expect(controller.awaitUpdate(bounds)).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
@@ -471,6 +560,7 @@ describe("electron updater actions", () => {
       const controller = (await startWith(updater))!;
       updater.emit("checking-for-update");
       const waiting = controller.awaitUpdate(bounds);
+      updater.emit("update-available", { version: "1.2.4" });
       updater.emit("update-downloaded", { version: "1.2.4" });
       await expect(waiting).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
@@ -523,6 +613,13 @@ describe("electron updater actions", () => {
 });
 
 describe("publicUpdateState", () => {
+  const READY_EVENTS: UpdateEvent[] = [
+    { type: "check" },
+    { type: "available", version: "1.0.1" },
+    { type: "download" },
+    { type: "downloaded", version: "1.0.1" },
+  ];
+
   it("gates actions during an active check", () => {
     const checking = transition(initialUpdateState, { type: "check" });
     expect(
@@ -535,8 +632,7 @@ describe("publicUpdateState", () => {
   });
 
   it("enables install when an update is downloaded and ready", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
 
     expect(
       publicUpdateState(ready, {
@@ -556,8 +652,7 @@ describe("publicUpdateState", () => {
   // was interrupted — a recovery warning whose "Go back" had nothing to go
   // back to. The restart is not lost; it is finishable by quitting.
   it("keeps a staged restart offerable while blocking a new check", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
 
     expect(
       publicUpdateState(ready, {

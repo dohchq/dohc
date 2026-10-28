@@ -17,7 +17,7 @@ import {
 } from "../../workspaces/workspaceSettings";
 import { pushOverlay, removeOverlay } from "../overlayStack";
 import { Overlay } from "../Overlay";
-import type { ScheduleHostResult } from "../../ipc/bridgeContract";
+import type { ScheduleHostResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
 import { AGENTS_RESTRICTED_MESSAGE } from "../../agents/agentToolCatalog";
@@ -44,16 +44,25 @@ const idleUpdateState = {
   canCheck: true,
   canInstall: false,
 };
+const availableUpdateState = {
+  status: "available" as const,
+  message: "dohc 1.2.4 is available.",
+  currentVersion: "1.2.3",
+  channel: "latest" as const,
+  canCheck: false,
+  canInstall: false,
+  version: "1.2.4",
+};
 const readyUpdateState = {
   status: "ready" as const,
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to install it.",
   currentVersion: "1.2.3",
   channel: "latest" as const,
   canCheck: false,
   canInstall: true,
   version: "1.2.4",
 };
-type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
+type SettingsUpdateState = UpdateStateEvent;
 const getDefaultMcpConfig = async (_payload: { workspaceId: string }) => config;
 
 // The fake settings file. main merges each patch onto what is ON DISK, so the
@@ -125,14 +134,15 @@ const bridge = {
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
     state: SettingsUpdateState;
-  }> => {
+  }> => ({ checked: true, state: availableUpdateState })),
+  downloadUpdate: vi.fn(async (): Promise<{ accepted: boolean; state: SettingsUpdateState }> => {
     updateReady = true;
-    return { checked: true, state: readyUpdateState };
+    return { accepted: true, state: readyUpdateState };
   }),
   installUpdate: vi.fn(async (): Promise<{
     accepted: boolean;
     reason?: string;
-    state: SettingsUpdateState | (typeof readyUpdateState & { installCommand: string });
+    state: SettingsUpdateState;
   }> => ({
     accepted: updateReady,
     state: updateReady ? readyUpdateState : idleUpdateState,
@@ -602,7 +612,7 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     const updates = await screen.findByTestId("settings-row-desktop-updates");
-    const last = within(updates).getByTestId("install-update-button").parentElement!.lastElementChild!;
+    const last = within(updates).getByTestId("desktop-updates-step").parentElement!.lastElementChild!;
     expect(last.tagName).toBe("SPAN");
     expect(last.getAttribute("aria-hidden")).toBe("true");
     expect(last.className).toContain("size-6");
@@ -2242,84 +2252,98 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("desktop-updates-channel").textContent).toBe("latest");
   });
 
-  it("checks for updates and enables restart when an update is ready", async () => {
+  it("checks for updates, downloads only when asked, then restarts", async () => {
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
+    const step = () => screen.getByTestId("desktop-updates-step");
+    expect(step().textContent).toBe("Check for updates");
 
-    await user.click(screen.getByTestId("check-updates-button"));
+    await user.click(step());
+    await waitFor(() => expect(step().textContent).toBe("Update"));
+    expect(screen.getByTestId("desktop-updates-status").textContent).toBe("dohc 1.2.4 is available.");
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
 
-    await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
-        "ready",
-      ),
-    );
-    expect(bridge.checkForUpdates).toHaveBeenCalledOnce();
-    expect(screen.getByTestId("install-update-button").hasAttribute("disabled")).toBe(
-      false,
-    );
+    await user.click(step());
+    await waitFor(() => expect(step().textContent).toBe("Restart to update"));
+    expect(bridge.downloadUpdate).toHaveBeenCalledOnce();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+
+    await user.click(step());
+    await waitFor(() => expect(step().textContent).toBe("Restarting…"));
+    expect(bridge.installUpdate).toHaveBeenCalledOnce();
+    expect(step().hasAttribute("disabled")).toBe(true);
   });
 
-  it("shows update check failures and re-enables checking", async () => {
-    bridge.checkForUpdates.mockRejectedValueOnce(new Error("offline"));
-    const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
-    await screen.findByTestId("desktop-updates-status");
-
-    await user.click(screen.getByTestId("check-updates-button"));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
-        "Could not check for updates.",
-      ),
-    );
-    expect(screen.getByTestId("check-updates-button").hasAttribute("disabled")).toBe(
-      false,
-    );
-  });
-
-  it("shows rejected update checks returned by the main process", async () => {
+  it("shows a failed check in the status line and offers the check again", async () => {
     bridge.checkForUpdates.mockResolvedValueOnce({
-      checked: false,
-      state: idleUpdateState,
+      checked: true,
+      state: {
+        ...idleUpdateState,
+        status: "error",
+        message: "feed returned 500",
+        failure: { step: "check", id: 1 },
+      },
     });
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
-    await user.click(screen.getByTestId("check-updates-button"));
+    await user.click(screen.getByTestId("desktop-updates-step"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
-        "No update check was started.",
+      expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
+        "dohc could not check for updates. feed returned 500",
       ),
     );
+    const step = screen.getByTestId("desktop-updates-step");
+    expect(step.textContent).toBe("Check for updates");
+    expect(step.hasAttribute("disabled")).toBe(false);
   });
 
-  it("disables update actions while an update check is pending", async () => {
-    const pending = deferred<{ checked: boolean; state: typeof readyUpdateState }>();
+  it("reports a check that never reached the updater to the shell", async () => {
+    const offline = new Error("offline");
+    bridge.checkForUpdates.mockRejectedValueOnce(offline);
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
+    await screen.findByTestId("desktop-updates-status");
+
+    await user.click(screen.getByTestId("desktop-updates-step"));
+
+    await waitFor(() =>
+      expect(report).toHaveBeenCalledWith({
+        message: "dohc could not check for updates.",
+        cause: offline,
+        retry: expect.any(Function),
+      }),
+    );
+    expect(screen.getByTestId("desktop-updates-step").hasAttribute("disabled")).toBe(false);
+  });
+
+  it("disables the step while an update check is pending", async () => {
+    const pending = deferred<{ checked: boolean; state: SettingsUpdateState }>();
     bridge.checkForUpdates.mockImplementationOnce(() => pending.promise);
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
-    await user.click(screen.getByTestId("check-updates-button"));
+    await user.click(screen.getByTestId("desktop-updates-step"));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("check-updates-button").hasAttribute("disabled")).toBe(
-        true,
-      ),
-    );
-    expect(screen.getByTestId("install-update-button").hasAttribute("disabled")).toBe(
-      true,
-    );
+    await waitFor(() => expect(screen.getByTestId("desktop-updates-step").textContent).toBe("Checking…"));
+    expect(screen.getByTestId("desktop-updates-step").hasAttribute("disabled")).toBe(true);
 
-    pending.resolve({ checked: true, state: readyUpdateState });
+    pending.resolve({ checked: true, state: availableUpdateState });
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
-        "ready",
+        "available",
       ),
     );
+    expect(screen.getByTestId("desktop-updates-step").hasAttribute("disabled")).toBe(false);
   });
 
   it("updates desktop update status from the live update subscription", async () => {
@@ -2380,42 +2404,33 @@ describe("SettingsDialog", () => {
     );
   });
 
-  it("restarts into a ready update from settings", async () => {
-    updateReady = true;
-    const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
-        "ready",
-      ),
-    );
-
-    await user.click(screen.getByTestId("install-update-button"));
-
-    expect(bridge.installUpdate).toHaveBeenCalledOnce();
-  });
-
-  it("shows rejected restart requests returned by the main process", async () => {
+  it("reports a refused restart to the shell and offers the restart again", async () => {
     updateReady = true;
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
       state: readyUpdateState,
     });
+    const report = vi.fn<ReportShellFailure>();
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
     await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
-        "ready",
-      ),
+      expect(screen.getByTestId("desktop-updates-step").textContent).toBe("Restart to update"),
     );
 
-    await user.click(screen.getByTestId("install-update-button"));
+    await user.click(screen.getByTestId("desktop-updates-step"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
-        "Could not restart into the update.",
-      ),
+      expect(report).toHaveBeenCalledWith({
+        message: "dohc could not restart into update 1.2.4.",
+        cause: undefined,
+        retry: expect.any(Function),
+      }),
     );
+    expect(screen.getByTestId("desktop-updates-step").textContent).toBe("Restart to update");
   });
 
   it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
@@ -2425,20 +2440,32 @@ describe("SettingsDialog", () => {
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
       reason,
-      state: { ...readyUpdateState, message: reason, installCommand },
+      state: { ...readyUpdateState, message: reason, installCommand, failure: { step: "install", id: 1 } },
     });
+    const report = vi.fn<ReportShellFailure>();
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe("ready"),
     );
     expect(screen.queryByTestId("desktop-updates-install-command")).toBeNull();
 
-    await user.click(screen.getByTestId("install-update-button"));
+    await user.click(screen.getByTestId("desktop-updates-step"));
 
-    await waitFor(() => expect(screen.getByTestId("desktop-updates-status").textContent).toBe(reason));
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
+        `dohc could not restart into update 1.2.4. ${reason}`,
+      ),
+    );
     expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);
     expect(screen.getByTestId("desktop-updates-install-command-copy").getAttribute("aria-label")).toBe("Copy install command");
+    expect(screen.getByTestId("desktop-updates-step").textContent).toBe("Restart to update");
+    // Main reported it in the state; the shell's notices show it from there.
+    expect(report).not.toHaveBeenCalled();
   });
 
   it("persists the attachment location and hides the folder name for same-folder", async () => {

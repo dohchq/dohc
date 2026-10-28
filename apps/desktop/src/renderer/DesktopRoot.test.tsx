@@ -689,6 +689,8 @@ describe("registry read failure", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
       ...windowBridge(),
     });
     render(<DesktopRoot />);
@@ -1000,7 +1002,7 @@ describe("the window's title and menu commands", () => {
       }),
       closeThisWindow,
       checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
-        checked: false, state: { status: "error", message: "This build does not update itself." },
+        checked: true, state: { status: "error", message: "feed returned 500", canCheck: true, failure: { step: "check", id: 1 } },
       })),
       getWorkspaceRegistry: vi.fn(async () => {
         if (options.registryFails) throw new Error("dohc could not read dohc-workspaces.json.");
@@ -1055,7 +1057,7 @@ describe("the window's title and menu commands", () => {
     await waitFor(() => expect(root.listening()).toBe(true));
 
     root.send("check-updates");
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("No update check was started.");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not check for updates. feed returned 500");
 
     root.send("close-tab");
     expect(root.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);

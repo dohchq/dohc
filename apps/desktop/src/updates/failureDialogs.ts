@@ -1,4 +1,5 @@
 import type { Dialog } from "electron";
+import { installsOnQuit } from "./electronUpdater";
 import type { UpdateFailure } from "./updateAfterFailure";
 
 type MessageDialog = Pick<Dialog, "showMessageBox">;
@@ -45,8 +46,7 @@ export async function confirmRestartDialog(
   platform: NodeJS.Platform = process.platform,
 ): Promise<boolean> {
   const quits = failure === "startup" || failure === "unfinished-launch";
-  // A downloaded update also installs on quit (autoInstallOnAppQuit), except on Linux.
-  const onQuit = platform === "linux" ? "" : " If you quit, the update installs as dohc closes.";
+  const onQuit = installsOnQuit(platform) ? " If you quit, the update installs as dohc closes." : "";
   const { response } = await dialog.showMessageBox({
     type: "info",
     message: failure === "startup" ? `Update ${version} is downloaded.` : FAILURE_MESSAGES[failure],

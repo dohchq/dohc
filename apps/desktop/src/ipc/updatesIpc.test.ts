@@ -12,11 +12,12 @@ class Updater extends EventEmitter {
   autoInstallOnAppQuit = false;
   setFeedURL = vi.fn();
   checkForUpdates = vi.fn<() => Promise<unknown>>(async () => undefined);
+  downloadUpdate = vi.fn<() => Promise<unknown>>(async () => undefined);
   quitAndInstall = vi.fn<(silent?: boolean, forceRunAfter?: boolean) => void>();
 }
 
 type Event = { trusted: boolean };
-const channels = [CHANNELS.getUpdateState, CHANNELS.checkForUpdates, CHANNELS.installUpdate];
+const channels = [CHANNELS.getUpdateState, CHANNELS.checkForUpdates, CHANNELS.downloadUpdate, CHANNELS.installUpdate];
 const cleanup: Array<() => Promise<void>> = [];
 
 function harness() {
@@ -187,6 +188,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const { updater } = await h.start();
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     updater.quitAndInstall.mockImplementation(() => {
@@ -211,6 +214,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const { updater } = await h.start();
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
@@ -229,6 +234,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const { updater } = await h.start();
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const first = h.invoke(CHANNELS.installUpdate);
@@ -244,6 +251,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const first = await h.start();
     first.updater.emit("checking-for-update");
+    first.updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     first.updater.emit("update-downloaded", { version: "1.2.4" });
     h.setDecision(null);
     const result = h.invoke(CHANNELS.installUpdate);
@@ -253,6 +262,8 @@ describe("registered updater IPC", () => {
       // that was asked about 1.2.4 must not stage 1.2.5 unasked.
       const second = await h.start();
       second.updater.emit("checking-for-update");
+      second.updater.emit("update-available", { version: "1.2.5" });
+      h.invoke(CHANNELS.downloadUpdate);
       second.updater.emit("update-downloaded", { version: "1.2.5" });
       h.answer(requestId, false);
       await expect(result).resolves.toMatchObject({ accepted: true, state: { version: "1.2.4" } });
@@ -325,6 +336,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const { updater } = await h.start();
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     updater.emit("update-downloaded", { version: "1.2.4" });
     updater.quitAndInstall.mockImplementationOnce(() => { throw new Error("restart failed"); });
     await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: false, state: { status: "ready" } });
@@ -338,6 +351,8 @@ describe("registered updater IPC", () => {
     const h = harness();
     const { updater, quitForStagedRestart } = await h.start();
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    h.invoke(CHANNELS.downloadUpdate);
     updater.emit("update-downloaded", { version: "1.2.4" });
     await h.invoke(CHANNELS.installUpdate);
     h.quitGuard.hold();

@@ -522,7 +522,9 @@ Packaged desktop builds normally check GitHub Releases.
 `DOHC_UPDATE_URL` replaces that feed with an operator-selected generic update URL.
 Set it only in a launch environment you control, and use a trusted HTTPS endpoint.
 
-The app downloads available updates. On Windows and macOS it installs them on quit.
+The app checks for updates but downloads one only when the person selects Update
+at the top right of the window. When the download finishes, the button reads
+Restart to update. On Windows and macOS a downloaded update also installs on quit.
 On Linux an update installs only when the person selects Restart to update: the
 AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
 asks once for an administrator password. If `dpkg` reports missing dependencies,

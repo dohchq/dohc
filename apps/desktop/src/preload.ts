@@ -529,6 +529,7 @@ const bridge: DohcDesktopBridge = {
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
+  downloadUpdate: () => invokeParsed(CHANNELS.downloadUpdate, UpdateActionResult),
   installUpdate: () => invokeParsed(CHANNELS.installUpdate, UpdateActionResult),
   onExitRound: (listener) => onEvent(CHANNELS.exitRound, ExitRoundMessage, listener),
   answerExitRound: async (payload) => {

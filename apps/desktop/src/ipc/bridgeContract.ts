@@ -5963,6 +5963,12 @@ export const UpdateStateEvent = z.object({
   // A Linux .deb that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
+  // The step that failed, while its state stands; `message` says why. A new
+  // id is a new failure to report.
+  failure: z.object({
+    step: z.enum(["check", "download", "install"]),
+    id: z.number().int().positive(),
+  }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -7563,6 +7569,9 @@ export interface DohcDesktopBridge
   // it cannot set feed URLs or mutate update channels.
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
+  // Starts the download a person chose. Progress and the result arrive as
+  // update state.
+  downloadUpdate(): Promise<UpdateActionResult>;
   installUpdate(): Promise<UpdateActionResult>;
   // Exit rounds: before a quit proceeds or an update installs, main asks
   // every workspace window whether set-aside drafts would be lost.

@@ -21,10 +21,11 @@ export type UpdateState =
   | { status: "idle"; message: string }
   | { status: "checking"; message: string }
   | { status: "up-to-date"; message: string }
+  // Found, and waiting for the person to download it.
   | { status: "available"; version: string; message: string }
-  | { status: "downloading"; version: string; percent: number; message: string }
-  // deferred: the user chose to keep working; the update installs on quit.
-  | { status: "ready"; version: string; deferred: boolean; message: string }
+  // percent is absent until the updater reports progress.
+  | { status: "downloading"; version: string; percent?: number; message: string }
+  | { status: "ready"; version: string; message: string }
   | { status: "offline"; message: string }
   | { status: "error"; message: string };
 
@@ -48,9 +49,9 @@ export type UpdateEvent =
   | { type: "check" }
   | { type: "available"; version: string }
   | { type: "not-available" }
+  | { type: "download" }
   | { type: "progress"; percent: number }
   | { type: "downloaded"; version: string }
-  | { type: "defer" }
   | { type: "offline" }
   | { type: "error"; message: string };
 
@@ -64,21 +65,14 @@ const CHECKING: UpdateState = {
   message: "Checking for updates…",
 };
 
-function ready(version: string, deferred: boolean): UpdateState {
-  return {
-    status: "ready",
-    version,
-    deferred,
-    message: deferred
-      ? `Update ${version} will finish installing when you quit dohc.`
-      : `Update ${version} is ready. Restart dohc to apply it.`,
-  };
+function available(version: string): UpdateState {
+  return { status: "available", version, message: `dohc ${version} is available.` };
 }
 
 export function transition(state: UpdateState, event: UpdateEvent): UpdateState {
   switch (event.type) {
     case "check":
-      // Never interrupts an in-flight check/download or a downloaded update.
+      // Never interrupts an in-flight check/download or a found update.
       return state.status === "idle" ||
         state.status === "up-to-date" ||
         state.status === "error" ||
@@ -86,19 +80,17 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
         ? CHECKING
         : state;
     case "available":
-      return state.status === "checking"
-        ? {
-            status: "available",
-            version: event.version,
-            message: `Update ${event.version} is available. Downloading…`,
-          }
-        : state;
+      return state.status === "checking" ? available(event.version) : state;
     case "not-available":
       return state.status === "checking"
         ? { status: "up-to-date", message: "You're on the latest version." }
         : state;
+    case "download":
+      return state.status === "available"
+        ? { status: "downloading", version: state.version, message: `Downloading update ${state.version}…` }
+        : state;
     case "progress":
-      return state.status === "available" || state.status === "downloading"
+      return state.status === "downloading"
         ? {
             status: "downloading",
             version: state.version,
@@ -107,32 +99,17 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
           }
         : state;
     case "downloaded":
-      // Small or cached updates can skip available/progress entirely.
-      return state.status === "checking" ||
-        state.status === "available" ||
-        state.status === "downloading"
-        ? ready(event.version, false)
+      return state.status === "downloading"
+        ? { status: "ready", version: event.version, message: `Update ${event.version} is ready. Restart dohc to install it.` }
         : state;
-    case "defer":
-      return state.status === "ready" ? ready(state.version, true) : state;
     case "offline":
-      // A downloaded update survives going offline: installing it is local.
-      return state.status === "ready"
-        ? state
-        : {
-            // One-shot reality: the wiring checks once at startup, so the next
-            // check is the next launch (a "check" event still recovers here).
-            status: "offline",
-            message: "You're offline. dohc will check for updates the next time it starts.",
-          };
     case "error":
-      // A downloaded update still installs on restart or quit, so "ready"
-      // survives errors exactly like it survives going offline.
-      return state.status === "ready"
-        ? state
-        : {
-            status: "error",
-            message: `Update failed: ${event.message}. dohc keeps working and will check again the next time it starts.`,
-          };
+      // A downloaded update still installs: installing it is local. A failed
+      // download leaves the update to download again.
+      if (state.status === "ready") return state;
+      if (state.status === "downloading") return available(state.version);
+      return event.type === "offline"
+        ? { status: "offline", message: "You're offline. dohc checks for updates again later." }
+        : { status: "error", message: event.message };
   }
 }
