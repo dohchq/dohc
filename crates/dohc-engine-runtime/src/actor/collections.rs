@@ -2528,10 +2528,18 @@ mod collection_relation_cleanup_tests {
             Some(without_relation.as_str()),
             "the cleanup delta must retain the exact body in its source witness"
         );
-        assert!(
-            actual == SOURCE.as_bytes() || actual == without_relation.as_bytes(),
-            "cleanup changed the body (reopen_note={reopen_note}): {}",
-            String::from_utf8_lossy(&actual),
+        assert_eq!(
+            actual,
+            without_relation.as_bytes(),
+            "cleanup must reach disk (reopen_note={reopen_note})",
+        );
+        let snapshot = VersionedTextStore::new(&mut store)
+            .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.text, without_relation,
+            "cleanup must reach stored text (reopen_note={reopen_note})",
         );
     }
 
@@ -2541,7 +2549,7 @@ mod collection_relation_cleanup_tests {
         delete_lossy_fixture_target(&scratch, &mut store);
         reconcile_lossy_fixture(&mut store, &mut cache, scratch.path(), 8);
         assert_history_restore(
-            "history_restore_after_relation_cleanup_rewrite",
+            true,
             &scratch,
             &mut store,
             &mut cache,
@@ -2589,7 +2597,7 @@ mod collection_relation_cleanup_tests {
             REWRITTEN.as_bytes()
         );
         assert_history_restore(
-            "history_restore_of_lossy_version_over_rewritten_text",
+            false,
             &scratch,
             &mut store,
             &mut cache,
@@ -2646,7 +2654,7 @@ mod collection_relation_cleanup_tests {
     }
 
     fn assert_history_restore(
-        name: &str,
+        expect_exact: bool,
         scratch: &ScratchDir,
         store: &mut EngineStore,
         cache: &mut WriterDocCache,
@@ -2726,6 +2734,8 @@ mod collection_relation_cleanup_tests {
         });
         match result {
             Ok(write) => {
+                assert!(expect_exact, "restore over rewritten text must be refused");
+                assert_eq!(moment_count(store), before_count + 1);
                 let job = store
                     .load_materialization_job(&format!("authored-mat_{}", write.moment.moment_id))
                     .unwrap()
@@ -2748,9 +2758,10 @@ mod collection_relation_cleanup_tests {
                 assert_exact_lossy_restore(scratch, store);
                 settle_lossy_fixture(scratch, store, cache, None, 11);
                 assert_exact_lossy_restore(scratch, store);
-                eprintln!("RESTORE OUTCOME {name}: exact");
+                assert_eq!(moment_count(store), before_count + 1);
             }
             Err(error) => {
+                assert!(!expect_exact, "restore after cleanup must succeed: {error:?}");
                 let actual = std::fs::read(scratch.path().join(PACKING)).unwrap();
                 let snapshot = VersionedTextStore::new(store)
                     .read_text(WORKSPACE_ID, VERSION_ID, PACKING)
@@ -2774,7 +2785,6 @@ mod collection_relation_cleanup_tests {
                     "restore failed with {error:?} but changed state; disk: {}",
                     String::from_utf8_lossy(&actual),
                 );
-                eprintln!("RESTORE OUTCOME {name}: refused-unchanged ({error:?})");
             }
         }
     }

@@ -674,10 +674,10 @@ impl Ydoc {
         )
     }
 
-    /// Whether `source` rebuilds a document that projects
-    /// `canonical_projection`, under the importer's reading or the fold's.
-    /// With `reads_alike`, each text block must also read as its projection
-    /// does; see [`markdown_reads_alike`].
+    /// Whether `source` rebuilds `canonical_projection` under the source or
+    /// projection reading. Without `reads_alike`, also try the successor
+    /// reading and full reference links as desktop link marks. With it, each
+    /// text block must read as its projection does; see [`markdown_reads_alike`].
     fn source_reproduces(
         &self,
         source: &str,
@@ -4032,7 +4032,17 @@ fn ends_table(line: &str) -> bool {
         .or_else(|| rest.strip_prefix("1."))
         .or_else(|| rest.strip_prefix("1)"))
         .is_some_and(|after| after.starts_with([' ', '\t']));
-    let html = line.strip_prefix('<').is_some_and(|tag| {
+    rest.starts_with('>')
+        || rest.starts_with("```")
+        || rest.starts_with("~~~")
+        || heading
+        || thematic_break(rest)
+        || item
+        || paragraph_ending_html(line)
+}
+
+fn paragraph_ending_html(line: &str) -> bool {
+    line.strip_prefix('<').is_some_and(|tag| {
         ["script", "pre", "style", "textarea", "!--"]
             .iter()
             .any(|start| tag.starts_with(start))
@@ -4048,14 +4058,7 @@ fn ends_table(line: &str) -> bool {
                         || tag[end..].starts_with([' ', '>'])
                         || tag[end..].starts_with("/>"))
             }
-    });
-    rest.starts_with('>')
-        || rest.starts_with("```")
-        || rest.starts_with("~~~")
-        || heading
-        || thematic_break(rest)
-        || item
-        || html
+    })
 }
 
 fn parse_heading(line: &str) -> Option<(i64, String)> {
@@ -11638,16 +11641,7 @@ mod projection_tests {
                 txn,
                 4,
                 "the airline's bag rules",
-                Attrs::from([(
-                    "link".into(),
-                    json_to_any(&json!({
-                        "href": "https://example.com/bags",
-                        "target": "_blank",
-                        "rel": "noopener noreferrer nofollow",
-                        "class": null,
-                        "title": null,
-                    })),
-                )]),
+                reference_links::link_attributes("https://example.com/bags"),
             );
             let at = text.len(&*txn);
             text.insert_with_attributes(txn, at, ".", Attrs::new());
@@ -11679,6 +11673,7 @@ mod projection_tests {
     #[test]
     fn a_local_settle_keeps_undefined_reference_links_as_plain_text() {
         let source = "See [the airline's bag rules][bags].\n";
+        // Base-path guard: this source needs no reference-link pass.
         // marked emits plain text when no definition resolves the label.
         let desktop = Ydoc::wire();
         let body = desktop.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -11693,6 +11688,118 @@ mod projection_tests {
         assert_eq!(native.project_richdoc().unwrap(), canonical);
         assert_eq!(canonical, source.trim_end());
         assert_eq!(settled(&desktop, &canonical, source).as_deref(), Some(source));
+    }
+
+    fn assert_reference_link_pass_refused(source: &str) {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        let before = doc.encode_full_state();
+        assert!(!doc.resolve_reference_links(source), "{source:?}");
+        assert_eq!(doc.encode_full_state(), before, "a refused pass must not edit");
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_formatted_html_split() {
+        let source = "Sunscreen and a **spare** charger.\n</details>\n\n[bags]: https://e.com";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| {
+            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+            let text = paragraph.push_back(txn, XmlTextPrelim::new("Sunscreen and a "));
+            text.insert_with_attributes(
+                txn,
+                16,
+                "spare",
+                yrs::types::Attrs::from([("bold".into(), json_to_any(&json!({})))]),
+            );
+            text.insert_with_attributes(txn, 21, " charger.\n</details>", yrs::types::Attrs::new());
+            insert_md_paragraph(txn, &body, 1, "[bags]: https://e.com");
+        });
+        assert!(doc
+            .body_paragraph_runs()
+            .iter()
+            .flatten()
+            .any(|(_, bold, _)| *bold));
+        let before = doc.encode_full_state();
+        assert!(!doc.resolve_reference_links(source));
+        assert_eq!(doc.encode_full_state(), before);
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_math_definitions() {
+        assert_reference_link_pass_refused(
+            "$$\n\n[bags]: https://evil.example\n\n$$\n\nSee [x][bags].",
+        );
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_unexplained_brackets() {
+        for unsupported in [
+            "# See [r][bags]",
+            "- See [r][bags]",
+            "| item |\n|---|\n| [r][bags] |",
+            "See [bags].",
+            "See [bags][].",
+            "See [[r]][bags].",
+            "See [][bags].",
+            "See [r\nr][bags].",
+            "See [a][b][bags].",
+            "See [r][bags] and [bags].",
+            "See *[r][bags]*.",
+            "See _[r][bags]_.",
+            "See ![r][bags].",
+        ] {
+            for source in [
+                format!("{unsupported}\n\nSee [r][bags].\n\n[bags]: https://e.com"),
+                format!("See [r][bags].\n\n{unsupported}\n\n[bags]: https://e.com"),
+            ] {
+                assert_reference_link_pass_refused(&source);
+            }
+        }
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_false_html_interrupts() {
+        for tag in ["<br>", "</span>", "<DIV>", "</DETAILS>"] {
+            assert!(!paragraph_ending_html(tag));
+            let source = format!("word\n{tag}\n\nSee [r][bags].\n\n[bags]: https://e.com");
+            // Forge the split the old pass accepted, with a real link mark.
+            let doc = Ydoc::wire();
+            let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            doc.with_delta(|txn| {
+                insert_md_paragraph(txn, &body, 0, "word");
+                insert_md_paragraph(txn, &body, 1, tag);
+                let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+                let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
+                text.insert_with_attributes(
+                    txn,
+                    4,
+                    "r",
+                    reference_links::link_attributes("https://e.com"),
+                );
+                text.insert_with_attributes(txn, 5, ".", yrs::types::Attrs::new());
+                insert_md_paragraph(txn, &body, 3, "[bags]: https://e.com");
+            });
+            let canonical = witness_source(&doc, &source);
+            assert_eq!(settled(&doc, &canonical, &source), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_padded_labels() {
+        for (definition, reference) in [
+            ("bags ", "bags"),
+            (" bags", "bags"),
+            ("bags", "bags "),
+            ("bags", " bags"),
+            ("bags\t", "bags"),
+            ("bags", "\tbags"),
+        ] {
+            assert_reference_link_pass_refused(&format!(
+                "See [x][{reference}].\n\n[{definition}]: https://e.com"
+            ));
+        }
     }
 
     fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
