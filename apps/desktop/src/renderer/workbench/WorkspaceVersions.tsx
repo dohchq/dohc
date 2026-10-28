@@ -1269,7 +1269,7 @@ function ConflictResolver(props: {
         ) : (
           <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
         )}
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
           {conflict.path}
         </span>
         {!expanded && combined !== null ? (
@@ -1750,7 +1750,7 @@ export function VersionComparePage(props: {
                   ) : (
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                   )}
-                  <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
                     {file.path}
                   </span>
                   <span className="shrink-0 text-[11px] text-subtle">

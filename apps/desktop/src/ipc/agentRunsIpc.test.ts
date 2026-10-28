@@ -323,10 +323,10 @@ describe("agent run IPC registrations", () => {
     const release = deferred<void>();
     h.ensureOpen.mockImplementation(async () => { reached.resolve(); await release.promise; });
     h.records.mockResolvedValue({ message: {
-      workspaceId: "workspace-a", runId: "run-1", threadId: "thread-1", triggerMessageId: "message", command: "echo hi",
+      workspaceId: "workspace-a", runId: "run-1", threadId: "thread-1", triggerMessageId: "message", agentId: "default", command: "echo hi",
       startedAtMs: 0, endedAtMs: 0, exitCode: 0, logPath: "", failureReason: "internal", failureHandled: true,
     }, pending: {
-      workspaceId: "workspace-a", runId: "run-2", threadId: "thread-1", triggerMessageId: "pending", command: "echo later",
+      workspaceId: "workspace-a", runId: "run-2", threadId: "thread-1", triggerMessageId: "pending", agentId: "default", command: "echo later",
       startedAtMs: 1, logPath: "logs/run-2.txt", failureHandled: false,
     } });
     const pending = h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload);

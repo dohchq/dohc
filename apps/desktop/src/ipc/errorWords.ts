@@ -206,6 +206,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "newer-version": NEWER_DOHC,
     "*": null,
   },
+  // A file from another person that dohc could not prepare to open in
+  // another app. Its message is the system's own, for Copy details only.
+  MarkedCopyError: { "*": null },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {

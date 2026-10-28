@@ -18,7 +18,7 @@ const deliveredMessage: AutomationChatMessage = {
 
 function dependencies(overrides: Partial<AgentWakeDependencies> = {}) {
   return {
-    runnerReady: vi.fn(async () => true),
+    readyAgent: vi.fn(async () => ({ id: "codex", name: "Codex" })),
     agentChannelId: vi.fn(async () => "agent-channel"),
     threadExists: vi.fn(async () => false),
     start: vi.fn(async () => undefined),
@@ -30,12 +30,13 @@ function dependencies(overrides: Partial<AgentWakeDependencies> = {}) {
 }
 
 describe("waking a person's agent", () => {
-  it("starts the automation's thread in My agent, then queues its message as the trigger", async () => {
+  it("starts the automation's thread in the agent's chat, then queues its message as that agent's trigger", async () => {
     const wake = dependencies();
     await wakeAgent(wake, message);
+    expect(wake.agentChannelId).toHaveBeenCalledWith({ id: "codex", name: "Codex" });
     expect(wake.start).toHaveBeenCalledWith({ channelId: "agent-channel", message: deliveredMessage });
     expect(wake.send).not.toHaveBeenCalled();
-    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake" });
+    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake", agentId: "codex" });
     expect(wake.scan).toHaveBeenCalledOnce();
   });
 
@@ -53,7 +54,7 @@ describe("waking a person's agent", () => {
       send: vi.fn(async () => { throw new Error("idempotency-key-reuse-mismatch"); }),
     });
     await wakeAgent(wake, message);
-    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake" });
+    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake", agentId: "codex" });
   });
 
   it.each([false, true])("labels writer-supplied text as trigger data without changing it (existing thread: %s)", async (existing) => {
@@ -71,7 +72,7 @@ describe("waking a person's agent", () => {
   });
 
   it("fails before writing when no agent runner is set up", async () => {
-    const wake = dependencies({ runnerReady: vi.fn(async () => false) });
+    const wake = dependencies({ readyAgent: vi.fn(async () => null) });
     await expect(wakeAgent(wake, message)).rejects.toThrow(AUTOMATION_NO_RUNNER);
     expect(wake.start).not.toHaveBeenCalled();
     expect(wake.recordTrigger).not.toHaveBeenCalled();

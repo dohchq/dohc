@@ -490,6 +490,6 @@ export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: E
 }
 
 export const mentionRoster = [
-  { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Your agent", description: "your agent" },
+  { id: "agent:default", kind: "agent" as const, handle: "Nova", label: "Nova", description: "your agent" },
   { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
 ];

@@ -18,12 +18,12 @@ const ACCESS_OPTIONS: ReadonlyArray<{
   {
     value: "view",
     label: "View",
-    helper: "They can read what you selected.",
+    helper: "They can read only what you selected.",
   },
   {
     value: "edit",
     label: "Edit",
-    helper: "They can read what you selected and send you changes to accept.",
+    helper: "They can read only what you selected, and send you changes to accept.",
   },
 ];
 
@@ -134,9 +134,6 @@ export function EmailShareForm(props: {
             )}
           </div>
 
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            They can read only what you selected.
-          </p>
           {access === "edit" && props.target.kind === "paths" && (
             <p className="m-0 text-xs leading-relaxed text-muted">
               Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.

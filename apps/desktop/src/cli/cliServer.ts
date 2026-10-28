@@ -106,7 +106,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
-import type { ChatWrites } from "../workspaces/chatWrites";
+import type { ChatWrites, PersonWriter } from "../workspaces/chatWrites";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import type { AutomationRunRetry } from "../automations/automationNotices";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
@@ -389,8 +389,14 @@ export interface CliServerOptions {
   // an automation that woke the agent and the agent cannot start each other
   // forever.
   agentRunDepth(workspaceId: string): number;
-  // Whether a run dohc dispatched holds the workspace's run slot.
-  dispatchedAgentRun(workspaceId: string): boolean;
+  // The agent of a run dohc dispatched while it holds the workspace's run
+  // slot, or null.
+  dispatchedAgent(workspaceId: string): string | null;
+  // The engine's id for that run when dohc dispatched it as agent work, or
+  // null. The engine reads the run's agent from it, so a read moves only that
+  // agent's place, whatever the command line says. Without a run, reads are
+  // those of agents outside a run.
+  dispatchedRunId(workspaceId: string): string | null;
   agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
@@ -522,7 +528,7 @@ export const FILES_GROUP: CliGroup = {
 function groupForCli(channel: ChatChannelSummary): CliGroup {
   return {
     id: cliChannelId(channel.id),
-    name: channel.kind === "agent" ? "my-agent" : channel.name,
+    name: channel.kind === "agent" ? channel.slug : channel.name,
     slug: channel.slug,
     kind: cliGroupKind(channel.kind),
     ...(channel.purpose ? { purpose: channel.purpose } : {}),
@@ -692,15 +698,27 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
-// The name an agent writing through this socket claims: its handshake or
-// --agent name. A run dohc dispatched is one agent that gives no name, as its
-// file edits and replies are, so while it holds the slot no write claims one.
+// The agent writing through this socket: its handshake or --agent name. A
+// run dohc dispatched is its agent, by id, whatever name a write claims, so
+// the run's file edits and replies are one actor.
 function claimedAgentName(
   agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): string | undefined {
-  return options.dispatchedAgentRun(context.workspaceId) ? undefined : agent;
+  return options.dispatchedAgent(context.workspaceId) ?? agent;
+}
+
+// Who a chat write through this socket is. An agent's message during a run
+// dohc dispatched is that run's agent's.
+function cliChatWriter(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  agentName?: string,
+): PersonWriter {
+  const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
+  return { via: "cli", actor, ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}) };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
@@ -1152,6 +1170,7 @@ async function buildShowResult(
 async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
+  runId: string | null,
   threadId: string,
   messages: readonly ChatMessage[],
 ): Promise<void> {
@@ -1164,6 +1183,7 @@ async function markShownThreadRead(
         : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
+      ...(runId === null ? {} : { runId }),
       threadId,
       upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
     });
@@ -1971,10 +1991,9 @@ async function startFileChat(
     return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
   }
   let message: ChatMessage;
-  const agentName = claimedAgentName(input.agent, context, options);
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: { via: "cli", actor: "agent", ...(agentName ? { agentName } : {}) },
+      writer: cliChatWriter("agent", context, options, input.agent),
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -3174,7 +3193,10 @@ async function dispatchWorkspace(
       const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
-            (await context.store.listAgentUnreadThreads(context.workspaceId)).map(
+            (await context.store.listAgentUnreadThreads(
+              context.workspaceId,
+              options.dispatchedRunId(context.workspaceId) ?? undefined,
+            )).map(
               (thread) => thread.id,
             ),
           )
@@ -3242,10 +3264,16 @@ async function dispatchWorkspace(
       const loadedById = new Map(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
-      const unread = await context.store.listAgentUnreadThreads(context.workspaceId);
+      // Inside a run dohc dispatched, the inbox is that run's agent's unread
+      // work: its chat, and each message elsewhere that asked it. Outside a
+      // run, a self-connected agent reads every agent chat and the plain
+      // @agent mentions no dohc agent took.
+      const runId = options.dispatchedRunId(context.workspaceId);
+      const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
+      const unread = await context.store.listAgentUnreadThreads(context.workspaceId, runId ?? undefined);
       const agentChannelIds = new Set(
         channels
-          .filter(({ engine }) => engine.kind === "agent")
+          .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
           .map(({ engine }) => engine.id),
       );
       const inboxThreads = await Promise.all(
@@ -3272,16 +3300,20 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = await context.store.listMentionsForHandle(
-        context.workspaceId,
-        "agent",
-        { unreadByAgentOnly: true },
-      );
+      const mentionRows = runId !== null
+        ? await context.store.listAgentUnreadRequests(context.workspaceId, runId)
+        : await context.store.listMentionsForHandle(
+          context.workspaceId,
+          "agent",
+          { unreadByAgentOnly: true },
+        );
       const messageCache = new Map<string, ChatMessage[]>();
       const mentions: CliResultByVerb["inbox"]["mentions"] = [];
       for (const mention of mentionRows) {
         const thread = loadedById.get(mention.threadId);
         if (!thread) continue;
+        // A request in the run's agent's own chat is already in its threads.
+        if (runAgentId !== null && thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
         let messages = messageCache.get(thread.thread.id);
         if (!messages) {
           messages = await context.store.listMessages({
@@ -3327,6 +3359,7 @@ async function dispatchWorkspace(
         await markShownThreadRead(
           context,
           request.args.actor,
+          options.dispatchedRunId(context.workspaceId),
           target.thread.thread.id,
           messages,
         );
@@ -3344,7 +3377,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: { via: "cli", actor },
+        writer: cliChatWriter(actor, context, options),
         channelId: channel.engine.id,
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
@@ -3400,7 +3433,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const reply = {
-        writer: { via: "cli" as const, actor },
+        writer: cliChatWriter(actor, context, options),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -3434,8 +3467,10 @@ async function dispatchWorkspace(
       }
       if (actor === "agent") {
         try {
+          const runId = options.dispatchedRunId(context.workspaceId);
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
+            ...(runId === null ? {} : { runId }),
             threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });
@@ -3474,7 +3509,7 @@ async function dispatchWorkspace(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: { via: "cli", actor: writeActor(request.args.actor, context, options) },
+        writer: cliChatWriter(writeActor(request.args.actor, context, options), context, options),
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,

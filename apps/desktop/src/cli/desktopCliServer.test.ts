@@ -1,4 +1,4 @@
-import { getShareCopyDetails, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
@@ -36,9 +36,11 @@ import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityO
 import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
+import * as recovery from "../workspaces/workspaceDeleteRecovery";
 import { readMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import * as workspaceFileMoves from "../workspaces/workspaceFileMoves";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "../workspaces/workspaceLocalState";
 
 function deferred() {
   let release!: () => void;
@@ -113,6 +115,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
+    agentIdsNamedIn: async () => [],
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -130,7 +133,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false), agentRunWorkspace: vi.fn(() => undefined) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -929,6 +932,34 @@ describe("raw fileMove and fileDelete socket requests", () => {
     };
     return { ...f, root, invoke };
   }
+
+  it("tells an MCP mover that links were not updated when local state is not ready", async () => {
+    const f = await setup();
+    const engine = vi.spyOn(f.dependencies, "withEngineAdapter");
+    await writeFile(join(f.root, "old.md"), "original");
+    const save = recovery.saveRecoveryRecord;
+    const saving = vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => {
+      readLocalStateFrom({currentBinding: () => ({localStateReady: false}), localStateOpenAt: async () => ({current: () => true})});
+      return save(...args);
+    });
+    try {
+      const result = await moveWorkspacePath({root: f.root, home: "state", request: async input => {
+        const line = await handleCliRequestLine(JSON.stringify({...input, token: "a".repeat(64)}), "a".repeat(64), f.options());
+        const response = cliTransportResponseSchema.parse(JSON.parse(line));
+        if (!response.ok) throw new Error(response.error);
+        return response.result;
+      }}, {fromPath: "old.md", toPath: "new.md"}, "Client");
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(saving).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ok: true, fromPath: "old.md", toPath: "new.md", undo: {available: false, paths: [],
+        reason: "Rename finished. dohc could not save Undo information or update links to this file. Rename it back yourself."}});
+      const authored = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+      expect(authored).toMatchObject({author: {kind: "agent", agentId: "Client"}});
+      expect(await readMoveRecovery(f.root, authored.operationId)).toBeUndefined();
+      expect(await readFile(join(f.root, "new.md"), "utf8")).toBe("original");
+      expect(engine).not.toHaveBeenCalled();
+    } finally { await f.authorities.close(); }
+  });
 
   it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo after its workspace closes", async verb => {
     let drained: Promise<void> | undefined;

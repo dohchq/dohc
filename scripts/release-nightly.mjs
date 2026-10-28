@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { nextNightlyDay, utcMinute } from "./check-desktop-release-publication.mjs";
 import { RELEASE_LOCK, RELEASE_REPOSITORY, WORK_ROOT, macFileNames } from "./release-desktop-macos.mjs";
 import { LOCK_BUSY, heldLockOptions, underReleaseLock } from "./release-lock.mjs";
 import { repoRootFromScript } from "./resolve-desktop-release.mjs";
@@ -48,7 +49,6 @@ function read(run, command, args) {
 
 // gh --paginate with --jq prints one JSON value per line across every page.
 const jsonLines = text => text.split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
-const utcDay = time => new Date(time).toISOString().slice(0, 10);
 const short = sha => sha.slice(0, 9);
 // A dispatch names its channel, dry run and commit in the run's title, so the job finds its own run.
 export const runTitle = (commit, dryRun) => `Desktop Release nightly${dryRun ? " dry run" : ""} for ${commit}`;
@@ -58,13 +58,15 @@ export const verifiedNightly = requests => requests.findLast(({ request, status 
   request.nightly && request.full && request.scope === "all" && request.gates?.rust && request.gates?.js && status.state === "passed") ?? null;
 
 /**
- * Whether tonight's nightly should be dispatched. A skip that needs someone,
- * such as a verification failure, is reported; a quiet night is not.
+ * Whether tonight's nightly should be dispatched. Every skip that leaves main
+ * unpublished is reported; a quiet night, with main already published, is not.
  */
 export function nightlyDecision({ head, verifiedHead, lastNightly, now, dryRun = false }) {
   if (dryRun) return { kind: "dispatch" };
   if (lastNightly?.commit === head) return { kind: "skip", report: false, reason: `main is still at ${short(head)}, which ${lastNightly.tag} published.` };
-  if (lastNightly && utcDay(lastNightly.publishedAt) === utcDay(now)) return { kind: "skip", report: false, reason: `${lastNightly.tag} already published on ${utcDay(now)} (UTC), and one nightly publishes per UTC day.` };
+  if (lastNightly && nextNightlyDay(lastNightly.publishedAt) > now) {
+    return { kind: "skip", report: true, reason: `${lastNightly.tag} published at ${utcMinute(lastNightly.publishedAt)}, and one nightly publishes per nightly day, which starts at 18:00 UTC. main's head ${short(head)} stays unpublished until the next nightly, which can publish from ${utcMinute(nextNightlyDay(lastNightly.publishedAt))}.` };
+  }
   if (verifiedHead !== head) {
     return { kind: "skip", report: true, reason: `The Mac's nightly verification has not passed on main's head ${short(head)}${verifiedHead ? `; its last pass is ${short(verifiedHead)}` : ""}.` };
   }

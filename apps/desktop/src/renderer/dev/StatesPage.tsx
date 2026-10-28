@@ -915,11 +915,11 @@ const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 // The agent picked from the roster, in each state its offer says. The
 // specimen agent takes the default agent colour, not a chosen one.
 const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
-const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+const AGENT_DRAFT = "@Nova can you check funnel.csv against last week?";
 function agentOffer(state: AgentOfferState): AgentAddressedOffer {
   return {
     kind: "agent-addressed",
-    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    agent: { id: "agent:default", kind: "agent", handle: "Nova", label: "Nova" },
     presentation: { group: "states-agent", hue: null, self: false },
     state,
     working: state === "working",
@@ -1149,6 +1149,19 @@ const LONG_NOTICE = {
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
   copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
   onDismiss: noop,
 };
 
@@ -1774,6 +1787,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2193,9 +2207,35 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="unknown: no cause dohc can name">
           <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
         </Specimen>
-        <Specimen label="loading, then failed reads: words in Notices">
+        <Specimen label="History paused: the line heads the rows">
           <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }} paused expanded onToggle={noop}
+              onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="the first read: lines after 150 ms until it answers">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="while the workspace is read in: no deadline">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            </AboutSection>
+            <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+              <RetryRow testId="linked-chats-failed" onRetry={noop} />
+            </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
             <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
           </AboutPanelSpecimen>
@@ -2791,6 +2831,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <PropertiesPanel body={LONG_PILL} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a list: its items, with commas">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\ntags:\n  - kyoto\n  - food\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a list it can't edit: a lock, and why on hover or focus">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />
@@ -3076,7 +3126,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               room the end of its conversation keeps, so it gets that room. */}
           <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
             <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
-              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              value={`@Nova ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
               sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
               agentOffer={agentOffer("runs")} onSetUpAgent={noop}
               above={
@@ -3441,6 +3491,25 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
+  // Live editing beside the save state. It adds nothing while the server is
+  // named, a ring while dohc retries by itself, and a filled dot otherwise.
+  {
+    label: "server unreachable: live editing waits on it",
+    syncStatus: {
+      ...SYNCED_STATUS,
+      state: "sync-failed",
+      syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      ownerLiveDelivery: "retrying",
+    },
+    failedSaves: 0,
+  },
+  { label: "live editing retrying", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying" }, failedSaves: 0 },
+  {
+    label: "live editing paused for a reason",
+    syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying", ownerLiveDeliveryReason: "document-unavailable" },
+    failedSaves: 0,
+  },
+  { label: "live editing active", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "active" }, failedSaves: 0 },
 ];
 
 // `parts` renders only those parts, so a test renders only what it checks.

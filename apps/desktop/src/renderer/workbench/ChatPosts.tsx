@@ -21,8 +21,9 @@ import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { retainChatParser } from "./chatMarkdownWorker";
 import {
-  MentionText,
   MessageReactions,
   TOOLBAR_BUTTON,
   chatAuthorLabel,
@@ -32,6 +33,8 @@ import {
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
+
+const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
 // "4s", "1m 20s", "2h 5m".
 function formatRunDuration(ms: number): string {
@@ -479,6 +482,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
+  // Long messages parse in the chat's worker; start it before they need it.
+  useEffect(retainChatParser, []);
   const {
     nav,
     messages,
@@ -516,7 +521,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const openingTime = formatChatTime(openingMessage.createdAtMs);
-  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
+  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS;
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = openingMessage.authorKind === "agent";
@@ -561,7 +566,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const comment = node.message;
     const commentTime = formatChatTime(comment.createdAtMs);
     const commentDecision = decisionsByMessage.get(comment.id);
-    const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
+    const commentAttachments = attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS;
     const isAgent = comment.authorKind === "agent";
     const continues = previous !== undefined && previous.replies.length === 0 &&
       continuesRun(previous.message, comment);
@@ -666,18 +671,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {formatShortTime(comment.createdAtMs)}
             </time>
           </div>
-          <p
-            data-testid="chats-message-body"
-            className="mb-0 mt-px select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
-          >
-            <MentionText
-              body={comment.body}
-              candidates={mentionCandidates}
-              attachments={commentAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-            />
-          </p>
+          <ChatMarkdown
+            body={comment.body}
+            candidates={mentionCandidates}
+            attachments={commentAttachments}
+            testId="chats-message-body"
+            onOpenPath={props.onOpenPath}
+            className="mt-px"
+          />
           {commentAttachments.length > 0 ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {commentAttachments.map((attachment) => (
@@ -849,18 +850,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           </h1>
           {/* A plain post is its body; the title above repeats it for the
               heading only. */}
-          <p
-            data-testid="chats-message-body"
-            className="mb-0 mt-1 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
-          >
-            <MentionText
-              body={openingMessage.body}
-              candidates={mentionCandidates}
-              attachments={openingAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-            />
-          </p>
+          <ChatMarkdown
+            body={openingMessage.body}
+            candidates={mentionCandidates}
+            attachments={openingAttachments}
+            testId="chats-message-body"
+            onOpenPath={props.onOpenPath}
+            className="mt-1"
+          />
           {openingAttachments.length > 0 ? (
             <div
               data-testid="chats-message-attachments"

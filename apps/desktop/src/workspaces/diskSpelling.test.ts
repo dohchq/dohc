@@ -2,7 +2,7 @@ import * as fsPromises from "node:fs/promises";
 import { link, lstat, mkdir, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { diskSpelling, storedNameAmong } from "./diskSpelling";
+import { diskSpelling, lookAlikeSpelling, storedNameAmong } from "./diskSpelling";
 import { storedEntryPath } from "./storedEntryPath";
 import { createTestScratch } from "./testTemp";
 import { forceStoredNameListing } from "../testing/storedNameListing";
@@ -11,6 +11,26 @@ vi.mock("node:fs/promises", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:fs/promises")>(),
 }));
 afterEach(() => vi.restoreAllMocks());
+
+it("covers exactly the non-ASCII characters that normalize to one ASCII character", () => {
+  const derived = new Map<string, string>();
+  for (let code = 0x80; code <= 0x10ffff; code++) {
+    const character = String.fromCodePoint(code);
+    for (const form of ["NFC", "NFD"] as const) {
+      const normalized = character.normalize(form);
+      if (normalized.length === 1 && normalized.charCodeAt(0) <= 0x7f) {
+        derived.set(character, normalized);
+      }
+    }
+  }
+  const actual = new Map<string, string>();
+  for (let code = 0; code <= 0x7f; code++) {
+    const character = String.fromCodePoint(code);
+    const spelling = lookAlikeSpelling(character);
+    if (spelling !== character) actual.set(spelling, character);
+  }
+  expect(actual).toEqual(derived);
+});
 
 describe("storedNameAmong", () => {
   it("uses the exact listed name without inspecting other entries", async () => {
@@ -80,7 +100,7 @@ describe("diskSpelling", () => {
     const root = await createTestScratch("dohc-disk-spelling-");
     const file = join(root, leaf);
     await writeFile(file, "body");
-    const alternate = leaf.replaceAll(";", "\u037e").replaceAll("`", "\u1fef").replaceAll("K", "\u212a");
+    const alternate = lookAlikeSpelling(leaf);
     const swapped = leaf.replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
     const probes = [...new Set([swapped, alternate])].filter(name => name !== leaf).map(name => join(root, name));
     const original = fsPromises.lstat.bind(fsPromises);

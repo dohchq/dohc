@@ -122,6 +122,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       stopAutomationWakes: vi.fn(async () => { log.push("automation-wakes-stop"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
+      removeMarkedCopies: vi.fn(async () => { log.push("marked-copies-remove"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
       stopAgentIntegration: vi.fn(async () => { log.push("integration-stop"); }),
       flushReports: vi.fn(async () => { log.push("reports-flush"); }),
@@ -1104,6 +1105,21 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it("removes opened copies at quit and exits only once that finishes, even when it fails", async () => {
+    vi.useFakeTimers();
+    const removal = deferred();
+    const f = fixture((d) => { d.shutdown.removeMarkedCopies = vi.fn(() => removal.promise); });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    expect(f.dependencies.shutdown.removeMarkedCopies).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    removal.reject(new Error("a copy is still open"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("exits normally when sending reports fails", async () => {

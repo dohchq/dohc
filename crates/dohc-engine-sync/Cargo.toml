@@ -34,6 +34,8 @@ syn = { version = "2", features = ["full"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+# Builds a store as the build before agent ids left it.
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 
 [lints]
 workspace = true

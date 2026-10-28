@@ -111,6 +111,7 @@ import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
 import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { removeEarlierMarkedCopies, removeMarkedCopies, systemMarkedCopies } from "./workspaces/markedCopies";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceHeadingsIpcHandlers } from "./ipc/workspaceFilesIpc";
@@ -368,7 +369,6 @@ import {
 import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
-  resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -377,7 +377,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
-import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -430,6 +430,7 @@ import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
 import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
+import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
@@ -540,7 +541,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { firstAgent, firstAgentWithLaunch, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, firstAgent, firstAgentWithLaunch, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -902,12 +903,12 @@ function cloudLogin(): CloudLogin {
       allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
-        cipher: {
+        cipher: mayUseKeychain({ isPackaged: app.isPackaged, platform: process.platform, env: process.env }) ? {
           isAvailable: () => safeStorage.isEncryptionAvailable(),
           encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
           decrypt: (cipherText) =>
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
-        },
+        } : undefined,
       }),
     });
   }
@@ -2744,9 +2745,13 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentRunDepth(lease.state.activity),
     ),
-  dispatchedAgentRun: (workspaceId: string) =>
+  dispatchedAgent: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
-      workspaceActivity.dispatchedAgentRun(lease.state.activity),
+      workspaceActivity.dispatchedAgent(lease.state.activity),
+    ),
+  dispatchedRunId: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
   agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
@@ -3065,7 +3070,7 @@ const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createRec
 // derives it — the renderer never supplies identity. At alpha the desktop's
 // preferred local profile name. Email remains an auth/contact identifier and
 // is never reused as a public chat display name.
-let cachedAgentName: string | undefined;
+let cachedAgents: readonly Agent[] = [];
 let cachedPreferredName: string | undefined;
 function localUserDisplayName(): string {
   return cachedPreferredName ?? "You";
@@ -3571,30 +3576,8 @@ const chatDispatchService = createChatDispatchService({
   }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
-  readDispatchAgent: async () =>
-    firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings),
-  identityFor: (workspace, target) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      await warmCredentialCache();
-      lease.assertCurrent();
-      const registered = canonicalWorkspaceFor(lease);
-      const verifiedUserId = target
-        ? (
-            await chatRelayIdentityFor(
-              registered.workspaceId,
-              target,
-              linkedChatStoreFor(lease),
-            )
-          ).authorUserId
-        : resolveWorkspaceRelayAuthorId(registered, cachedCredentials);
-      const settings = (await readCachedUserSettingsFile(stateDir())).settings;
-      lease.assertCurrent();
-      return {
-        displayName: firstAgent(settings)?.name ?? "Agent",
-        ownerDisplayName: localUserDisplayName(),
-        ...(verifiedUserId ? { verifiedUserId } : {}),
-      };
-    }),
+  readDispatchAgents: async () =>
+    listAgents((await readCachedUserSettingsFile(stateDir())).settings),
   stateDir,
   appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
@@ -3733,6 +3716,7 @@ async function openWorkspaceActivityForOperation(
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
     reconcileLocalCollectionApps(canonicalWorkspace);
+    resumeLinkRewrites(canonicalWorkspace, operation.signal);
   }
   return result;
 }
@@ -3742,6 +3726,16 @@ async function openWorkspaceActivityForOperation(
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
   void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
     .catch(error => { if (!(error instanceof CollectionsRefusalError)) console.warn("[desktop] local Collection app reconciliation:", error); });
+}
+
+function resumeLinkRewrites(workspace: EngineWorkspace & {readOnly?: boolean; shareView?: unknown}, signal: AbortSignal): void {
+  if (workspace.readOnly || workspace.shareView !== undefined) return;
+  void resumeWorkspaceLinkRewrites(workspace, {workspaceId: workspace.workspaceId, signal,
+    history: {rewriteHistoryLinks: input => withEngineAdapter(workspace, adapter => adapter.rewriteHistoryLinks(input)).then(result => {
+      if (!result) throw new Error("The workspace engine is not running.");
+      return result;
+    })},
+  }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
 }
 
 function openWorkspaceActivityWith(
@@ -3882,8 +3876,14 @@ const automationScheduler = new AutomationScheduler({
 const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
+// The agent an automation wakes: the first agent, when dohc can start it.
+async function readyAgent(): Promise<{ id: string; name: string } | null> {
+  const agent = firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings);
+  return agent?.enabled ? { id: agent.id, name: agent.name } : null;
+}
+
 async function agentRunnerReady(): Promise<boolean> {
-  return firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
+  return (await readyAgent()) !== null;
 }
 
 async function wakeAutomationAgent(
@@ -3902,17 +3902,17 @@ async function wakeAutomationAgent(
       resolveAttachments: async () => [],
     };
     await wakeAgent({
-      runnerReady: agentRunnerReady,
-      agentChannelId: async () => {
+      readyAgent,
+      agentChannelId: async (agent) => {
         signal.throwIfAborted();
-        return (await place.store.ensureAgentChannel({ workspaceId })).id;
+        return (await place.store.ensureAgentChannel({ workspaceId, agentId: agent.id, name: agent.name })).id;
       },
       threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
       start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
       send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-      recordTrigger: ({ triggerMessageId, threadId }) => {
+      recordTrigger: ({ triggerMessageId, threadId, agentId }) => {
         signal.throwIfAborted();
-        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId });
+        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId, agentId });
       },
       scan: () => {
         signal.throwIfAborted();
@@ -4902,8 +4902,12 @@ const chatWrites = createChatWrites({
   currentCredentials: () => cachedCredentials,
   currentCredentialGeneration: () => credentialCacheGeneration,
   localUserDisplayName,
-  agentDisplayName: async () =>
-    firstAgent((await readCachedUserSettingsFile(stateDir())).settings)?.name ?? "Agent",
+  agentDisplayName: async (agentId) => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    return (agentId ? listAgents(settings).find(({ id }) => id === agentId) : firstAgent(settings))?.name ?? "Agent";
+  },
+  agentIdsNamedIn: async (body) =>
+    agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5229,8 +5233,17 @@ const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
+    // A window's reads that came before this open, such as its settings, read again.
+    notifyRenderer({workspaceId});
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => {
+      reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+      automationHosts.open(workspaceId);
+      void lease.state.collectionAutomations.workspaceOpened();
+    });
+    if (workspace) void withPhysicalWorkspaceOperation(workspaceId, async operation => {
+      resumeLinkRewrites(operation.workspace, operation.signal);
+    }).catch(error => console.warn("[desktop] link rewrite recovery:", error));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -5812,6 +5825,9 @@ function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
   else window.once("show", offer);
 }
 
+// Files from other people open as marked copies in this run's folder.
+const markedCopies = systemMarkedCopies(stateDir());
+
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,
@@ -5870,6 +5886,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      void removeEarlierMarkedCopies(markedCopies);
       // Start retention even when Off. Never wait for measurement on startup.
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
@@ -5887,7 +5904,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
-      cachedAgentName = firstAgent(settings)?.name;
+      cachedAgents = listAgents(settings);
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
       applyThemeMode(settings.appearance.themeMode);
       session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -5989,6 +6006,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopAutomationWakes: () => automationWakeConsumer.stop(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
+    removeMarkedCopies: () => removeMarkedCopies(markedCopies),
     settleYDocs: async () => {
       await settleYDocsAfterFileObservation(
       [flushTypingCheckpoints(), ...workspaceAuthorities.workspaceIds().map(workspaceId =>
@@ -6247,7 +6265,7 @@ function applyThemeMode(themeMode: ThemeMode): void {
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
   stateDir,
-  setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
+  setCachedNames: (preferredName, agents) => { cachedPreferredName = preferredName; cachedAgents = agents; },
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
@@ -6423,6 +6441,7 @@ function registerIpcHandlers(): void {
     app,
     dialog,
     shell,
+    markedCopies,
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
@@ -6449,7 +6468,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, agentName: (agentId) => cachedAgents.find(({ id }) => id === agentId)?.name, localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {

@@ -5,8 +5,11 @@ import { deferred } from "../../testing/deferred";
 import { CUSTOMIZE_TARGETS } from "../settings/customize";
 import { useAskAgent } from "./useAskAgent";
 
-const agentChannel = { id: "agent-channel", kind: "agent", name: "Agent" };
-const setup = { workspaceId: "ws-1", agentName: "Scout", runnerConfigured: true, runnerEnabled: true, agentRunActive: false };
+const agentChannel = { id: "agent-channel", kind: "agent", agentId: "scout", name: "Agent" };
+const setup = {
+  workspaceId: "ws-1", agentName: "Scout", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  agents: [{ id: "scout", name: "Scout", enabled: true }],
+};
 
 function stubBridge(channels: unknown[] = [agentChannel]) {
   const bridge = {
@@ -36,8 +39,8 @@ afterEach(() => {
 });
 
 describe("useAskAgent", () => {
-  it("opens the agent's chat with a request that names the file", async () => {
-    stubBridge();
+  it("opens the first agent's chat with a request that names the file", async () => {
+    stubBridge([{ id: "codex-channel", kind: "agent", agentId: "codex", name: "Codex" }, agentChannel]);
     const { result, input } = renderAskAgent();
     expect(result.current?.ready).toBe(true);
 

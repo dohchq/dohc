@@ -46,6 +46,7 @@ interface WorkspaceState {
   reactions: Map<string, ChatReaction>;
   contentRevisions: Map<string, number>;
   mentions: ChatMention[];
+  // Each reader's place in each thread, by agentReadKey.
   agentReads: Map<string, ChatAgentReadState>;
   humanReads: Map<string, number>;
   humanReadStates: Map<string, ChatThreadReadState>;
@@ -58,7 +59,6 @@ interface WorkspaceState {
   pauses: Map<string, ChatThreadPause>;
   // Each automation message's chain depth, which stays in the engine.
   chainDepths: Map<string, number>;
-  scanHighWaterMs: number;
 }
 
 type SeedChannelInput = {
@@ -108,6 +108,10 @@ function requiredString(object: ChatsJsonObject, key: string, code = "invalid-in
   if (typeof value !== "string") throw new Error(code);
   return value;
 }
+
+// The place agents outside a run share. No agent id is empty.
+const OUTSIDE_RUN_READER = "";
+const agentReadKey = (reader: string, threadId: string) => `${reader}\0${threadId}`;
 
 function optionalBoolean(object: ChatsJsonObject, key: string): boolean | undefined {
   const value = object[key];
@@ -498,6 +502,35 @@ function decodeCursor(params: ChatsJsonObject, binding: string): number {
   }
 }
 
+const DEFAULT_AGENT_ID = "default";
+// The settings file's agent id rule.
+const AGENT_ID_PATTERN = /^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/u;
+
+// The engine's slug for a chat whose slug another holds: the slug and a hash
+// of it and the chat's id. Agent chat slugs are short enough to keep whole.
+function collisionSlug(taken: ReadonlySet<string>, requested: string, identity: string): string {
+  for (let attempt = 0n; ; attempt += 1n) {
+    const hash = createHash("sha256").update(requested).update("\0").update(identity);
+    if (attempt > 0n) {
+      const bytes = Buffer.alloc(8);
+      bytes.writeBigUInt64BE(attempt);
+      hash.update("\0").update(bytes);
+    }
+    const candidate = `${requested}-${hash.digest("hex")}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+function dispatchKey(triggerMessageId: string, agentId: string): string {
+  return `${triggerMessageId}\0${agentId}`;
+}
+
+function compareDispatches(left: ChatDispatch, right: ChatDispatch): number {
+  return left.createdAtMs - right.createdAtMs ||
+    compareText(left.triggerMessageId, right.triggerMessageId) ||
+    compareText(left.agentId, right.agentId);
+}
+
 function page<T>(
   rows: readonly T[],
   params: ChatsJsonObject,
@@ -517,7 +550,7 @@ function allowedKeys(method: string): readonly string[] {
   switch (method) {
     case CHATS_METHOD.channelCreate:
       return ["channelId", "name", "kind", "type", "purpose", "folderPath", "nowMs"];
-    case CHATS_METHOD.channelEnsureAgent:
+    case CHATS_METHOD.channelEnsureAgent: return ["channelId", "agentId", "name", "nowMs"];
     case CHATS_METHOD.channelEnsureGeneral:
       return ["channelId", "nowMs"];
     case CHATS_METHOD.channelFindBySlug: return ["slug"];
@@ -530,7 +563,8 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
+        "authorAgentId", "namedAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -545,7 +579,8 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
+        "authorAgentId", "namedAgentIds", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -568,13 +603,15 @@ function allowedKeys(method: string): readonly string[] {
       return ["objectId", "pathHint", "pageLimit", "cursor"];
     case CHATS_METHOD.mentionsListForHandle:
       return ["handle", "unreadByAgentOnly", "pageLimit", "cursor"];
+    case CHATS_METHOD.agentReadListUnreadRequests:
     case CHATS_METHOD.agentReadListUnreadThreads:
+      return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
     case CHATS_METHOD.dispatchListAppQuitRecoveries:
       return ["pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
-      return ["threadId", "upTo", "expectedRevision"];
+      return ["runId", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
       return [
         "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
@@ -604,9 +641,8 @@ function allowedKeys(method: string): readonly string[] {
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.bookmarkMarkStale:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
-    case CHATS_METHOD.dispatchRecordEligibleTriggers: return ["verifiedUserId"];
     case CHATS_METHOD.dispatchEnqueue:
-      return ["triggerMessageId", "threadId", "nowMs"];
+      return ["triggerMessageId", "agentId", "threadId", "nowMs"];
     case CHATS_METHOD.dispatchClaimNextPending: return ["runId", "command", "logPath", "nowMs"];
     case CHATS_METHOD.dispatchListRunMessages: return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchRunIdForMessage: return ["messageId"];
@@ -616,7 +652,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchMarkFailureHandled:
       return ["runId"];
     case CHATS_METHOD.dispatchRecentCount: return ["threadId", "sinceMs"];
-    case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "reason"];
+    case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "agentId", "reason"];
     case CHATS_METHOD.dispatchRecordRunMessage: return ["messageId", "runId"];
     case CHATS_METHOD.dispatchSetThreadPaused: return ["threadId", "paused", "reason"];
     case CHATS_METHOD.dispatchRequeueFailedTrigger: return ["triggerMessageId", "runId"];
@@ -664,8 +700,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonClone(channel);
   }
 
-  readDispatch(workspace: string, triggerMessageId: string): ChatDispatch | undefined {
-    const dispatch = this.workspaces.get(workspace)?.dispatches.get(triggerMessageId);
+  readDispatch(
+    workspace: string,
+    triggerMessageId: string,
+    agentId = DEFAULT_AGENT_ID,
+  ): ChatDispatch | undefined {
+    const dispatch = this.workspaces.get(workspace)?.dispatches.get(dispatchKey(triggerMessageId, agentId));
     return dispatch === undefined ? undefined : jsonClone(dispatch);
   }
 
@@ -677,7 +717,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort(
         (left, right) =>
           left.updatedAtMs - right.updatedAtMs ||
-          compareText(left.triggerMessageId, right.triggerMessageId),
+          compareText(left.triggerMessageId, right.triggerMessageId) ||
+          compareText(left.agentId, right.agentId),
       );
     if (running.length === 0) return [];
 
@@ -691,8 +732,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run.exitCode = -1;
         run.failureReason = "reclaimed-crashed";
       }
+      if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
       if (dispatch.attemptCount < 2) {
-        if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
         dispatch.state = "pending";
         delete dispatch.runId;
         delete dispatch.failureReason;
@@ -725,7 +766,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.channelEnsureGeneral:
         return this.channelEnsure(state, workspace, params, "general", "channel");
       case CHATS_METHOD.channelEnsureAgent:
-        return this.channelEnsure(state, workspace, params, "My agent", "agent");
+        return this.agentChannelEnsure(state, workspace, params);
       case CHATS_METHOD.channelsList:
         return this.channelsList(state, workspace, params);
       case CHATS_METHOD.channelFindBySlug:
@@ -779,6 +820,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.fileMentions(state, workspace, params);
       case CHATS_METHOD.mentionsListForHandle:
         return this.mentionsList(state, workspace, params);
+      case CHATS_METHOD.agentReadListUnreadRequests:
+        return this.agentUnreadRequests(state, workspace, params);
       case CHATS_METHOD.agentReadListUnreadThreads:
         return this.agentUnreadThreads(state, workspace, params);
       case CHATS_METHOD.agentReadMarkThreadRead:
@@ -814,8 +857,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.bookmarkTransition(state, params, "stale");
       case CHATS_METHOD.dispatchEnqueue:
         return this.dispatchEnqueue(state, workspace, params);
-      case CHATS_METHOD.dispatchRecordEligibleTriggers:
-        return this.recordEligibleTriggers(state, workspace, params);
       case CHATS_METHOD.dispatchClaimNextPending:
         return this.claimNextPending(state, workspace, params);
       case CHATS_METHOD.dispatchListPending:
@@ -1078,6 +1119,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       type: channel.type,
       purpose: channel.purpose,
       ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
+      ...(channel.agentId !== undefined ? { agentId: channel.agentId } : {}),
       createdAtMs: channel.createdAtMs,
       updatedAtMs: channel.updatedAtMs,
     };
@@ -1147,7 +1189,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
     name: string,
-    kind: "channel" | "agent",
+    kind: "channel",
   ): JsonValue {
     const wantedSlug = slug(name);
     const existing = [...state.channels.values()].find(
@@ -1160,6 +1202,49 @@ export class ChatsLoopbackEngine implements EngineTransport {
       kind,
       ...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
     });
+  }
+
+  // The engine's rule: one chat per agent. The default agent's chat is "My
+  // agent"; another agent's chat takes the agent's name and a reserved slug.
+  private agentChannelEnsure(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const agentId = requiredString(params, "agentId", "invalid-input");
+    if (!AGENT_ID_PATTERN.test(agentId)) throw new Error("invalid-input");
+    const existing = [...state.channels.values()].find((channel) => channel.agentId === agentId);
+    if (existing) return jsonResult(this.channelJson(existing));
+    const isDefault = agentId === DEFAULT_AGENT_ID;
+    const name = isDefault
+      ? "My agent"
+      : normalizeNonempty(requiredString(params, "name", "invalid-channel-name"), "invalid-channel-name");
+    const channelSlug = isDefault ? "my-agent" : `my-agent-${agentId}`;
+    const channelId = requiredString(params, "channelId");
+    if (state.channels.has(channelId)) throw new Error("target-exists");
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    // A group an earlier build named like this chat keeps its name and moves
+    // to a slug no agent chat can have.
+    const group = [...state.channels.values()].find((channel) => channel.slug === channelSlug);
+    if (group) {
+      const taken = new Set([...state.channels.values()].map((channel) => channel.slug));
+      group.slug = collisionSlug(taken, channelSlug, group.channelId);
+    }
+    const channel: ChatChannel & { wireId: string | null } = {
+      workspaceId: workspace,
+      channelId,
+      name,
+      slug: channelSlug,
+      kind: "agent",
+      type: "posts",
+      purpose: "",
+      agentId,
+      createdAtMs: atMs,
+      updatedAtMs: atMs,
+      wireId: isDefault ? "channel_wire_agent_v1" : `channel_wire_agent_v1_${agentId}`,
+    };
+    state.channels.set(channelId, channel);
+    return jsonResult(this.channelJson(channel));
   }
 
   private channelsList(
@@ -1449,6 +1534,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
     if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
+    const authorAgentId = optionalString(params, "authorAgentId");
+    if (authorAgentId !== undefined && (authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
+      throw new Error("invalid-input");
+    }
+    const namedAgentIds = params.namedAgentIds ?? [];
+    if (
+      !Array.isArray(namedAgentIds) ||
+      namedAgentIds.some((agentId) => typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) ||
+      (namedAgentIds.length > 0 && authorKind !== "human")
+    ) {
+      throw new Error("invalid-input");
+    }
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1467,6 +1564,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       body,
       createdAtMs: atMs,
       ...(automation ? { automation } : {}),
+      ...(authorAgentId !== undefined ? { authorAgentId } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
@@ -1502,6 +1600,26 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     state.messages.set(messageId, message);
+    // The engine's rule: a person's message requests the agent whose chat
+    // holds it and each agent it names, in the message's own write.
+    if (authorKind === "human" && origin !== "cli") {
+      const thread = state.threads.get(threadId);
+      const chatAgent = thread?.channelId ? state.channels.get(thread.channelId)?.agentId : undefined;
+      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...(namedAgentIds as string[])]) {
+        const key = dispatchKey(messageId, agentId);
+        if (state.dispatches.has(key)) continue;
+        state.dispatches.set(key, {
+          workspaceId: workspace,
+          triggerMessageId: messageId,
+          agentId,
+          threadId,
+          state: "pending",
+          attemptCount: 0,
+          createdAtMs: atMs,
+          updatedAtMs: atMs,
+        });
+      }
+    }
     if (automation) state.chainDepths.set(messageId, (params.automation as { chainDepth: number }).chainDepth);
     const ids = state.threadMessages.get(threadId) ?? [];
     ids.push(messageId);
@@ -1864,9 +1982,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)
       .filter((mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId))
+      // A message that woke a dohc agent is that agent's work.
+      .filter((mention) =>
+        ![...state.dispatches.values()].some((dispatch) => dispatch.triggerMessageId === mention.messageId))
       .filter((mention) => {
         if (!unreadOnly) return true;
-        const read = state.agentReads.get(mention.threadId);
+        const read = state.agentReads.get(agentReadKey(OUTSIDE_RUN_READER, mention.threadId));
         return !read ||
           mention.createdAtMs > read.lastReadCreatedAtMs ||
           (
@@ -1879,11 +2000,57 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult({ mentions: result.values, nextCursor: result.nextCursor });
   }
 
+  // The engine's rule: a run names itself and reads as its agent while it
+  // runs. Without a run, the reads are those of agents outside a run.
+  private agentReader(state: WorkspaceState, runId: string | undefined): string {
+    if (runId === undefined) return OUTSIDE_RUN_READER;
+    const run = state.runs.get(runId);
+    if (!run || run.endedAtMs !== undefined) throw new Error("run-not-found");
+    return run.agentId;
+  }
+
+  // The engine's rule: each message with a request for the run's agent,
+  // beyond that agent's place in its thread, oldest first.
+  private agentUnreadRequests(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const runId = requiredString(params, "runId", "invalid-input");
+    const agentId = this.agentReader(state, runId);
+    const rows = [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.agentId === agentId)
+      .flatMap((dispatch) => {
+        const message = state.messages.get(dispatch.triggerMessageId);
+        return message && state.threads.has(message.threadId) ? [message] : [];
+      })
+      .filter((message) => {
+        const read = state.agentReads.get(agentReadKey(agentId, message.threadId));
+        return !read ||
+          message.createdAtMs > read.lastReadCreatedAtMs ||
+          (
+            message.createdAtMs === read.lastReadCreatedAtMs &&
+            compareText(message.id, read.lastReadMessageId) > 0
+          );
+      })
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
+      .map((message) => ({
+        threadId: message.threadId,
+        messageId: message.id,
+        authorKind: message.author.kind,
+        createdAtMs: message.createdAtMs,
+      }));
+    const result = page(rows, params, `${workspace}\0agentRequests\0${runId}`);
+    return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
+  }
+
   private agentUnreadThreads(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
+    const runId = optionalString(params, "runId");
+    const reader = this.agentReader(state, runId);
     const rows = [...state.threads.values()]
       .map((thread) => ({
         thread,
@@ -1891,7 +2058,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }))
       .filter((entry): entry is { thread: ChatThread; latest: ChatMessage } => {
         if (!entry.latest || entry.latest.author.kind !== "human") return false;
-        const read = state.agentReads.get(entry.thread.id);
+        const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
         return !read ||
           entry.latest.createdAtMs > read.lastReadCreatedAtMs ||
           (
@@ -1905,7 +2072,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           compareText(right.latest.id, left.latest.id),
       )
       .map((entry) => entry.thread);
-    const result = page(rows, params, `${workspace}\0agentUnread`);
+    const result = page(rows, params, `${workspace}\0agentUnread\0${runId ?? ""}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }
 
@@ -1914,6 +2081,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
+    const reader = this.agentReader(state, optionalString(params, "runId"));
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const upTo = strictObject(params.upTo ?? null, "upTo", ["createdAtMs", "messageId"]);
@@ -1921,7 +2089,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       createdAtMs: requiredSafeInteger(upTo, "createdAtMs", "invalid-read-cursor"),
       messageId: requiredString(upTo, "messageId", "invalid-read-cursor"),
     };
-    const prior = state.agentReads.get(threadId);
+    const prior = state.agentReads.get(agentReadKey(reader, threadId));
     const expected = optionalSafeInteger(params, "expectedRevision");
     if (expected !== undefined && expected !== (prior?.revision ?? 0)) {
       throw new Error("read-state-revision-mismatch");
@@ -1960,7 +2128,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           revision: 0,
           updatedAtMs: 0,
         };
-    state.agentReads.set(threadId, result);
+    state.agentReads.set(agentReadKey(reader, threadId), result);
     return jsonResult(result);
   }
 
@@ -2479,15 +2647,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
     params: ChatsJsonObject,
   ): JsonValue {
     const triggerMessageId = requiredString(params, "triggerMessageId");
+    const agentId = requiredString(params, "agentId", "invalid-input");
+    if (!AGENT_ID_PATTERN.test(agentId)) throw new Error("invalid-input");
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
-    if (state.dispatches.has(triggerMessageId)) {
+    const key = dispatchKey(triggerMessageId, agentId);
+    if (state.dispatches.has(key)) {
       return jsonResult({ enqueued: false });
     }
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
-    state.dispatches.set(triggerMessageId, {
+    state.dispatches.set(key, {
       workspaceId: workspace,
       triggerMessageId,
+      agentId,
       threadId,
       state: "pending",
       attemptCount: 0,
@@ -2495,50 +2667,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
       updatedAtMs: atMs,
     });
     return jsonResult({ enqueued: true });
-  }
-
-  private recordEligibleTriggers(
-    state: WorkspaceState,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): JsonValue {
-    const verified = optionalString(params, "verifiedUserId");
-    const atMs = this.tick();
-    let inserted = 0;
-    const messages = [...state.messages.values()].sort(
-      (left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id),
-    );
-    for (const message of messages) {
-      if (message.createdAtMs < Math.max(-1, state.scanHighWaterMs - 1)) continue;
-      const thread = state.threads.get(message.threadId);
-      const channel = thread?.channelId ? state.channels.get(thread.channelId) : undefined;
-      const mentionsAgent = state.mentions.some(
-        (mention) => mention.messageId === message.id && mention.handle === "agent",
-      );
-      const authoredByVerified =
-        message.authorUserId === undefined ||
-        (verified !== undefined && verified === message.authorUserId);
-      const eligible =
-        message.author.kind === "human" &&
-        message.origin !== "cli" &&
-        authoredByVerified &&
-        (channel?.kind === "agent" || mentionsAgent);
-      if (eligible && !state.dispatches.has(message.id)) {
-        state.dispatches.set(message.id, {
-          workspaceId: workspace,
-          triggerMessageId: message.id,
-          threadId: message.threadId,
-          state: "pending",
-          attemptCount: 0,
-          createdAtMs: message.createdAtMs,
-          updatedAtMs: atMs,
-        });
-        inserted += 1;
-      }
-      state.scanHighWaterMs = Math.max(state.scanHighWaterMs, message.createdAtMs);
-    }
-    // The ledger insert-if-absent is what keeps a retry's count at zero.
-    return jsonResult(inserted);
   }
 
   private claimNextPending(
@@ -2567,7 +2695,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
       .filter((row) => row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.triggerMessageId, right.triggerMessageId))[0];
+      .sort(compareDispatches)[0];
     if (!dispatch) return null;
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     dispatch.state = "running";
@@ -2575,7 +2703,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     dispatch.attemptCount += 1;
     dispatch.updatedAtMs = atMs;
     for (const other of state.dispatches.values()) {
-      if (other.threadId === dispatch.threadId && other.state === "pending") {
+      if (other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending") {
         other.state = "done";
         other.runId = runId;
         other.attemptCount += 1;
@@ -2585,6 +2713,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const run: ChatRun = {
       workspaceId: workspace,
       runId,
+      agentId: dispatch.agentId,
       threadId: dispatch.threadId,
       triggerMessageId: dispatch.triggerMessageId,
       command: optionalString(params, "command") ?? "",
@@ -2616,7 +2745,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const rows = [...state.dispatches.values()]
       .filter((dispatch) => dispatch.state === "pending")
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.triggerMessageId, right.triggerMessageId));
+      .sort(compareDispatches);
     const result = page(rows, params, `${workspace}\0dispatchPending`);
     return jsonResult({ dispatches: result.values, nextCursor: result.nextCursor });
   }
@@ -2631,7 +2760,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     for (const dispatch of state.dispatches.values()) {
       if (dispatch.state !== "running") continue;
       const runs = unended.filter((run) =>
-        run.runId === dispatch.runId && run.triggerMessageId === dispatch.triggerMessageId);
+        run.runId === dispatch.runId && run.triggerMessageId === dispatch.triggerMessageId &&
+        run.agentId === dispatch.agentId);
       if (runs.length !== 1) throw new Error("state-corrupt");
       claims.push({ dispatch, run: runs[0]!, chainDepth: this.runChainDepth(state, runs[0]!.runId) });
     }
@@ -2709,10 +2839,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
 
   private failPending(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const threadId = requiredString(params, "threadId");
+    const agentId = requiredString(params, "agentId", "invalid-input");
     const reason = normalizeNonempty(requiredString(params, "reason"), "invalid-input");
     let changed = 0;
     for (const dispatch of state.dispatches.values()) {
-      if (dispatch.threadId === threadId && dispatch.state === "pending") {
+      if (dispatch.threadId === threadId && dispatch.agentId === agentId && dispatch.state === "pending") {
         dispatch.state = "failed";
         dispatch.failureReason = reason;
         dispatch.updatedAtMs = this.tick();
@@ -2730,7 +2861,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const runId = requiredString(params, "runId");
     const run = state.runs.get(runId);
     if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
-    const dispatch = state.dispatches.get(run.triggerMessageId);
+    const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
     if (!dispatch || dispatch.runId !== runId || dispatch.state !== "running") {
       throw new Error("run-state-mismatch");
     }
@@ -2751,7 +2882,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const runId = requiredString(params, "runId");
     const run = state.runs.get(runId);
     if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
-    const dispatch = state.dispatches.get(run.triggerMessageId);
+    const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
     if (!dispatch || dispatch.runId !== runId || dispatch.state !== "running") {
       throw new Error("run-state-mismatch");
     }
@@ -2823,7 +2954,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const triggerMessageId = requiredString(params, "triggerMessageId");
     const runId = requiredString(params, "runId");
     const run = state.runs.get(runId);
-    const dispatch = state.dispatches.get(triggerMessageId);
+    const dispatch = run === undefined ? undefined : state.dispatches.get(dispatchKey(triggerMessageId, run.agentId));
     const applies =
       run?.workspaceId === workspace &&
       run.endedAtMs !== undefined &&
@@ -2841,7 +2972,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   // The engine's rule: an interrupted run's covered triggers go back to the
-  // queue with its first trigger, unless they have used their attempts.
+  // queue unless they have used their attempts, whether or not its first
+  // trigger goes back.
   private requeueCovered(state: WorkspaceState, runId: string, maxAttempts: number, atMs: number): void {
     for (const covered of state.dispatches.values()) {
       if (covered.runId !== runId || covered.state !== "done" || covered.attemptCount >= maxAttempts) continue;
@@ -2859,7 +2991,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const rows = [...state.runs.values()]
       .filter((run) => {
-        const dispatch = state.dispatches.get(run.triggerMessageId);
+        const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
         const recoverableFailure =
           (run.exitCode === APP_QUIT_EXIT_CODE && run.failureReason === "app-quit") ||
           run.failureReason === "app restart during run";
@@ -2874,7 +3006,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort((left, right) => left.startedAtMs - right.startedAtMs || compareText(left.runId, right.runId))
       .map((run) => ({
         run,
-        attemptCount: state.dispatches.get(run.triggerMessageId)?.attemptCount ?? 0,
+        attemptCount: state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
       }));
     const result = page(rows, params, `${workspace}\0appQuitRecoveries`);
     return jsonResult({ recoveries: result.values, nextCursor: result.nextCursor });
@@ -2930,7 +3062,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
         runLinks: new Map(),
         pauses: new Map(),
         chainDepths: new Map(),
-        scanHighWaterMs: -1,
       };
       this.workspaces.set(id, state);
     }

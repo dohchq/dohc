@@ -88,7 +88,7 @@ export async function buildRunnerThreadContext(
       group: channel
         ? {
             id: channel.id,
-            name: channel.kind === "agent" ? "my-agent" : channel.name,
+            name: channel.kind === "agent" ? channel.slug : channel.name,
             slug: channel.slug,
             kind: cliGroupKind(channel.kind),
           }
