@@ -49,11 +49,13 @@ impl ActorHandle {
             for obligation in pending {
                 let key = &obligation.key;
                 let marker = dohc_engine_collab::read_marker(store, key)?;
-                let checkpoint = if marker.is_some() {
-                    Some(store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))?
-                        .encode_full_state())
-                } else { None };
-                let head = VersionedTextStore::new(store).read_text(&workspace, &key.version_id, &obligation.path)?;
+                let head = store.read_with(|conn| conn.query_row(
+                    "SELECT object_id,blob_sha256,binary_sha256 FROM snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    params![workspace, key.version_id, obligation.path],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?)))
+                    .optional().map_err(dohc_engine_storage::StorageError::corrupt_public))?;
                 let restore = store.read_with(|conn| dohc_engine_collab::live_update_application::restore_generation(conn, key))?;
                 let resolver = cache.reader_resolver.as_ref().map(|resolver| Arc::as_ptr(resolver) as usize);
                 let materialized = if obligation.kind == Kind::WitnessRefresh {
@@ -62,8 +64,7 @@ impl ActorHandle {
                         .transpose()?
                 } else { None };
                 let fingerprint = hex_sha256(serde_json::json!({
-                    "checkpoint": checkpoint.as_deref().map(hex_sha256),
-                    "head": head.as_ref().map(|head| &head.blob_sha256),
+                    "head": head,
                     "marker": marker.map(|marker| (marker.lineage_claim_id, marker.path, marker.head_update_seq)),
                     "restore": restore, "resolver": resolver, "inputs": obligation.retry_inputs,
                     "refreshHead": obligation.settled_head_sha256,

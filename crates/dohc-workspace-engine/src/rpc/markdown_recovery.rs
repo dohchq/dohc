@@ -18,7 +18,8 @@ impl MarkdownRecovery {
         writes: crate::capture_sink::SelfWriteSuppression, events: EngineEvents) -> Self {
         let cancel = CancellationToken::new();
         let wake = open.actor.markdown_recovery_wake();
-        let task = tokio::spawn(run(Arc::downgrade(open), handle, sessions, leases, writes, events, cancel.clone()));
+        let task = tokio::spawn(run(Arc::downgrade(open), handle, sessions, leases, writes, events, cancel.clone(),
+            #[cfg(test)] None));
         wake.notify_one();
         Self { cancel, task: Some(task) }
     }
@@ -35,7 +36,9 @@ impl Drop for MarkdownRecovery {
 #[allow(clippy::too_many_arguments)]
 async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>, leases: LeaseRegistry,
-    writes: crate::capture_sink::SelfWriteSuppression, events: EngineEvents, cancel: CancellationToken) {
+    writes: crate::capture_sink::SelfWriteSuppression, events: EngineEvents, cancel: CancellationToken,
+    #[cfg(test)] passes: Option<tokio::sync::mpsc::UnboundedSender<Vec<dohc_engine_collab::DocKey>>>,
+) {
     let Some(initial) = open.upgrade() else { return; };
     let wake = initial.actor.markdown_recovery_wake();
     drop(initial);
@@ -43,6 +46,18 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
     loop {
         tokio::select! { biased; () = cancel.cancelled() => return, () = wake.notified() => {} }
         let Some(open) = open.upgrade() else { return; };
+        let candidates = match open.actor.markdown_recovery_candidates(open.workspace_id.clone()).await {
+            Ok(rows) => rows,
+            Err(error) => { eprintln!("engine: Markdown recovery scan retained: {error}"); continue; }
+        };
+        let present: HashSet<_> = candidates.iter().map(|row| row.obligation.order).collect();
+        attempted.retain(|order, _| present.contains(order));
+        if candidates.iter().all(|candidate| attempted.get(&candidate.obligation.order)
+            == Some(&candidate_fingerprint(candidate, &sessions, &handle, open.actor.markdown_recovery_epoch()))) {
+            #[cfg(test)]
+            if let Some(passes) = &passes { let _ = passes.send(Vec::new()); }
+            continue;
+        }
         let _capture = tokio::select! { biased;
             () = cancel.cancelled() => return,
             guard = open.capture_apply_gate.clone().lock_owned() => guard,
@@ -56,11 +71,12 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
             Ok(rows) => rows,
             Err(error) => { eprintln!("engine: Markdown recovery scan retained: {error}"); continue; }
         };
-        let present: HashSet<_> = candidates.iter().map(|row| row.obligation.order).collect();
-        attempted.retain(|order, _| present.contains(order));
+        #[cfg(test)]
+        let mut pass_attempts = Vec::new();
         let mut blocked = HashSet::new();
         for candidate in candidates {
             if cancel.is_cancelled() { return; }
+            let fingerprint = candidate_fingerprint(&candidate, &sessions, &handle, open.actor.markdown_recovery_epoch());
             let owed = candidate.obligation;
             let document = (owed.key.version_id.clone(), owed.key.object_id.clone());
             if blocked.contains(&document) { continue; }
@@ -70,11 +86,10 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
                 .map(|(id, session)| (id.clone(), session.path.clone(), session.content_kind,
                     session.lineage_claim_id.clone(), session.last_settled_sha.clone().or(session.open_head_sha.clone()),
                     session.restore_generation, session.conversion_consent.clone()));
-            let consent = active.as_ref().and_then(|row| row.6.as_ref())
-                .map(|grant| (Arc::as_ptr(grant) as usize, grant.is_consumed()));
-            let fingerprint = format!("{}:{}:{consent:?}", candidate.fingerprint, open.actor.markdown_recovery_epoch());
             if attempted.get(&owed.order) == Some(&fingerprint) { blocked.insert(document); continue; }
             attempted.insert(owed.order, fingerprint);
+            #[cfg(test)]
+            pass_attempts.push(owed.key.clone());
             let root_guard = match crate::capture_sink::CapturedRoot::bind(&open.root) {
                 Ok(guard) => Arc::new(guard),
                 Err(_) => { blocked.insert(document); continue; }
@@ -130,7 +145,20 @@ async fn run(open: Weak<OpenWorkspace>, handle: WorkspaceHandle,
                 }
             }
         }
+        #[cfg(test)]
+        if let Some(passes) = &passes { let _ = passes.send(pass_attempts); }
     }
+}
+
+fn candidate_fingerprint(candidate: &dohc_engine_runtime::MarkdownRecoveryCandidate,
+    sessions: &Mutex<HashMap<String, YdocSession>>, handle: &WorkspaceHandle, epoch: u64) -> String {
+    let owed = &candidate.obligation;
+    let consent = lock(sessions).values().find(|session|
+        session.workspace == *handle && session.key == owed.key
+        && session.lineage_claim_id.as_deref().unwrap_or("") == owed.lineage_claim_id)
+        .and_then(|session| session.conversion_consent.as_ref())
+        .map(|grant| (Arc::as_ptr(grant) as usize, grant.is_consumed()));
+    format!("{}:{epoch}:{consent:?}", candidate.fingerprint)
 }
 
 fn notify_sessions(sessions: &Mutex<HashMap<String, YdocSession>>, handle: &WorkspaceHandle,
