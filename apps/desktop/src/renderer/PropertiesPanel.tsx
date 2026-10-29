@@ -481,11 +481,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   const isEmpty = entries.length === 0;
   const duplicates = duplicateKeySet(entries);
-  // A duplicate or held name shows its flag in place of the saved value, so
-  // only Source still shows that value.
-  const showSource = props.onShowSource && (unshown || duplicates.size > 0 || heldRow !== -1)
-    ? props.onShowSource
-    : null;
+  // A duplicate or held name on a saved property shows its flag in place of
+  // the saved line, so only Source still shows that line.
+  const flagHidesSaved = entries.some((entry, index) =>
+    entry.sourceKey !== undefined && (index === heldRow || duplicates.has(entry.key.trim().toLowerCase())));
+  const showSource = props.onShowSource && (unshown || flagHidesSaved) ? props.onShowSource : null;
   if (readOnly && isEmpty && !showSource) return null;
 
   return (

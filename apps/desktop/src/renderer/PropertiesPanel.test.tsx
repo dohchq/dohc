@@ -1550,6 +1550,17 @@ describe("PropertiesPanel's Source button", () => {
     expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
+  it("offers no Source button when a held name is on a new pill, since nothing saved is hidden", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 2 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByLabelText("Property owner value")).toHaveProperty("value", "Sam");
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
   it("shows a note you can only view as pills with no +, no × and no edits", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
