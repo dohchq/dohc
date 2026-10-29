@@ -1537,6 +1537,54 @@ describe("sync relay handler", () => {
     expect(validate).toThrow(/effects do not match the ordered state transition/u);
   });
 
+  it("accepts a kept text write without an exact lineage", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = compactNoEffectResolvePayload();
+    const transition = payload.transition as {
+      current: Record<string, unknown>;
+      result: Record<string, unknown>;
+    };
+    transition.result = { ...transition.current, latestMomentId: "moment-write", updatedAtMs: 21 };
+    const shadow = { ...fixture.shadows[0], operation: "write", momentId: "moment-write" };
+    payload.effects = [{ kind: "write", momentId: "moment-write", payloadSha256: sha256(stableJsonStringify(shadow)) }];
+    const roots = referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    });
+    expect(roots).toContain(transition.current.blobSha256);
+    expect(new Set(roots)).toEqual(new Set([
+      transition.current.blobSha256,
+      (payload.transition as { incoming: { blobSha256: string } }).incoming.blobSha256,
+    ]));
+  });
+
+  it("accepts a kept text write over a peer deletion", async () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = compactNoEffectResolvePayload();
+    payload.paths = ["docs/a.md"];
+    const transition = payload.transition as Record<string, Record<string, unknown>>;
+    transition.incoming = { present: false, pathRef: 0 };
+    transition.result = { ...transition.current, latestMomentId: "moment-write", updatedAtMs: 21 };
+    const shadow = { ...fixture.shadows[0], operation: "write", momentId: "moment-write" };
+    payload.effects = [{ kind: "write", momentId: "moment-write", payloadSha256: sha256(stableJsonStringify(shadow)) }];
+    expect(new Set(referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    }))).toEqual(new Set([transition.current!.blobSha256]));
+    const h = handler(await testStorage());
+    await createWorkspace(h);
+    for (const [sha, bytes] of fixture.blobs) {
+      expect((await h(request("a", `/sync/workspace-a/blobs/${sha}`, {
+        method: "PUT", body: bytes,
+      }))).status).toBe(200);
+    }
+    const response = await h(request("a", "/sync/workspace-a/log", jsonBody({
+      originId: "origin-b", ops: [{ originSeq: 0, opKind: "conflict.resolve", payload, recordedAtMs: 21 }],
+    })));
+    expect(response.status).toBe(200);
+    const log = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    expect(log.ops).toHaveLength(1);
+    expect(log).toMatchObject({ ops: [{ payload }] });
+  });
+
   it.each([
     ["objectId", "another-object"],
     ["pathRef", 1],

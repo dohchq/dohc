@@ -169,8 +169,7 @@ fn incoming_text_snapshot(path: &str, text: &str) -> TextSnapshot {
     }
 }
 
-/// Keeping the current side of a conflict whose incoming side is binary writes
-/// nothing at all, so the live text head must survive byte for byte.
+/// Keeping text writes a shared head even when the incoming side is binary.
 #[test]
 fn keep_current_on_binary_incoming_keeps_the_live_head() {
     let (_scratch, mut store) = open_store();
@@ -197,7 +196,7 @@ fn keep_current_on_binary_incoming_keeps_the_live_head() {
         .expect("keeping the current side never touches the incoming bytes");
     assert_eq!(result.conflict.status, ConflictStatus::Resolved);
     assert_eq!(result.conflict.chosen_from, ConflictChoice::Current);
-    assert!(result.write.is_none() && result.delete.is_none() && result.binary_write.is_none());
+    assert!(result.write.is_some() && result.delete.is_none() && result.binary_write.is_none());
     assert_eq!(
         VersionedTextStore::new(&mut store)
             .read_text(WS, "main", "mixed.dat")
@@ -297,9 +296,9 @@ fn apply_merged_over_a_binary_base_writes_the_combined_text() {
     assert!(result.binary_write.is_none());
 }
 
-/// KeepCurrent with a binary BASE (both live sides text) writes nothing.
+/// A binary base does not prevent writing the kept text head.
 #[test]
-fn keep_current_with_binary_base_writes_nothing() {
+fn keep_current_with_binary_base_writes_the_kept_text() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "kcbase.dat", "current text");
     let sha = hydrate(&mut store, b"binary base for keep-current");
@@ -323,7 +322,7 @@ fn keep_current_with_binary_base_writes_nothing() {
         )
         .expect("a binary base does not block keeping the current side");
     assert_eq!(result.conflict.chosen_from, ConflictChoice::Current);
-    assert!(result.write.is_none() && result.delete.is_none() && result.binary_write.is_none());
+    assert!(result.write.is_some() && result.delete.is_none() && result.binary_write.is_none());
 }
 
 /// ApplyMerged must reject any binary side.

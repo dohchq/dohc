@@ -1365,6 +1365,7 @@ const versionResolveResultSchema = versionConflictsResultSchema;
 const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
+    outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),

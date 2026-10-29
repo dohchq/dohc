@@ -263,7 +263,7 @@ export interface CliVersionsPort {
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
@@ -2649,7 +2649,7 @@ async function dispatchWorkspace(
           return {
             ok: true as const,
             stream: {
-              group: { id: channel.id, name: channel.kind === "agent" ? "my-agent" : channel.name, kind: cliGroupKind(channel.kind) },
+              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
               ...page,
               items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
             },
