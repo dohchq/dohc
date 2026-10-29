@@ -567,8 +567,7 @@ impl EngineService {
                     .await?
             }
             "conflicts.open" => {
-                self.conflicts_open(&ctx, request.workspace, request.params)
-                    .await?
+                Box::pin(self.conflicts_open(&ctx, request.workspace, request.params)).await?
             }
             "conflicts.resolve" => {
                 Box::pin(self.conflicts_resolve(
@@ -1283,6 +1282,7 @@ mod tests {
         let bytes = future_size(|| service.dispatch(RequestContext::unbounded(), request()));
         let input_bytes =
             future_size(|| service.call_with_input(RequestContext::unbounded(), request(), None));
+        eprintln!("dispatch future: {bytes} bytes; call_with_input: {input_bytes} bytes");
         // InProcessTransport test callers carry dispatch state on the default thread stack.
         // The supervisor spawns request futures on the heap; growth still costs memory per request.
         assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
