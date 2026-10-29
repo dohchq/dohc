@@ -60,7 +60,7 @@ export type Notice = {
 
 // A workspace error the shell reported. `details` is the report Copy puts
 // on the clipboard; `seen` means its toast was closed and only the row in
-// Notices remains. `read` means its stored notice was read, so the row is too.
+// Notices remains. `read` means the row was read, not only its toast closed.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
   // Omitted for a failure. A warning needs the person, though nothing failed.

@@ -114,8 +114,8 @@ export interface ShellError {
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
-  // The stored notice was read, so its row is read too. Closing a toast alone
-  // leaves the row unread.
+  // The row was read: its stored notice was, or a step that `reads` it ran.
+  // Closing a toast alone leaves the row unread.
   read?: boolean;
 }
 
@@ -645,7 +645,7 @@ export function useShellError(workspaceId: string) {
     if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
     else if (target?.action?.reads) {
-      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true } : error)));
+      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true, read: true } : error)));
     }
     target?.action?.run();
   }, []);
