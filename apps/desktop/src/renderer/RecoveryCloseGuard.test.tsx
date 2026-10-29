@@ -551,6 +551,79 @@ describe("RecoveryCloseGuard", () => {
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway");
   });
 
+  // With two windows, a late draft in window B can stop the approved
+  // restart window A asked for. Going back in B takes the restart back from
+  // every window of the round, so A's button offers Restart to update again
+  // instead of showing "Restarting…" for a restart that is off.
+  it("goes back on an approved restart for every window when a late draft stopped this window's unload", async () => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    await user.click(await screen.findByTestId("recovery-close-goback"));
+    expect(main.answers(), "Go back after the round proceeded must tell main, or the window that asked keeps showing Restarting…").toContainEqual({ roundId: 1, decision: "cancel" });
+    // Main's retraction reaches this window too, which already stopped.
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
+  it("ends the restart in this window when main takes back the round that approved it", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 1, decision: "clear" }));
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    main.cancelled(3);
+    expect(stopped, "a stale round stops nothing").not.toHaveBeenCalled();
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting… after another window went back").toHaveBeenCalledOnce();
+  });
+
+  it("closes this window's warning about an approved restart another window went back on", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect((await screen.findByTestId("recovery-close-anyway")).textContent).toBe("Restart anyway");
+
+    main.cancelled(1);
+    await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
+  });
+
   // Dismissing the last at-risk draft from a round's warning removes the
   // dialog and its buttons. The round still owes main an answer.
   it("answers a held round clear when its warning empties by dismissal", async () => {
