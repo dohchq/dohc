@@ -548,10 +548,15 @@ fn verdict(row: &Candidate, verdict: &FirstOpenCandidateVerdict) -> Verdict {
 }
 
 /// The old guard refused these; the engine settles them exactly.
-const NEWLY_CHECKED: [&str; 17] = [
+const NEWLY_CHECKED: [&str; 22] = [
     "amp-fenced",
     "lt-fenced",
     "refdef-fenced",
+    "amp-indented",
+    "lt-indented",
+    "refdef-indented",
+    "refdef",
+    "reference-link",
     "refdef-inline",
     "amp-bare",
     "lt-bare",
@@ -578,7 +583,7 @@ const NEWLY_REFUSED: [&str; 7] = [
     "image-leading",
 ];
 /// Both refuse these.
-const STILL_REFUSED: [&str; 21] = [
+const STILL_REFUSED: [&str; 16] = [
     "corpus:docs/reference/usage-and-error-reports.md",
     "corpus:vendor/yrs-0.27.3/README.md",
     "corpus:vendor/notify-8.2.0/README.md",
@@ -589,16 +594,11 @@ const STILL_REFUSED: [&str; 21] = [
     "corpus:services/share-web/README.md",
     "corpus:tools/perf-profiling/README.md",
     "autolink",
-    "amp-indented",
-    "lt-indented",
-    "refdef-indented",
     "amp-inline",
     "lt-inline",
     "amp-entity",
-    "refdef",
     "mixed-technical",
     "trailing-whitespace",
-    "reference-link",
     "gt-inline-code",
 ];
 
@@ -725,8 +725,8 @@ const PARITY: [(&str, Parity); 22] = [
     ("fence-tilde-setext", Parity::Reading),
     ("fence-tilde-table", Parity::Reading),
     ("fence-backtick-setext", Parity::Agrees),
-    ("reference-link", Parity::Reading),
-    ("refdef", Parity::Reading),
+    ("reference-link", Parity::Agrees),
+    ("refdef", Parity::Agrees),
     ("emphasis-underscore", Parity::Reading),
     ("emphasis-star", Parity::Agrees),
     ("gt-text", Parity::Agrees),
