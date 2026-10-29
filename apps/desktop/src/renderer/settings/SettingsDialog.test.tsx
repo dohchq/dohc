@@ -561,13 +561,14 @@ describe("SettingsDialog", () => {
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
     const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
-    // Unchanged, the reset's place is held by an empty box nobody can reach.
-    expect(slots()).toEqual(["DIV.control", "SPAN:hidden.24"]);
+    // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
+    expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
 
+    // Reset takes that place, and the stepper keeps the right edge.
     await user.click(larger);
     await waitFor(() => expect(within(row).getByRole("button", { name: "Reset" })).toBeTruthy());
-    expect(slots()).toEqual(["DIV.control", "BUTTON.24"]);
+    expect(slots()).toEqual(["BUTTON.24", "DIV.control"]);
     // The dot hangs outside the title's line, so the title does not move either.
     expect(within(row).getByTitle("Modified").className).toContain("absolute");
     // A second quick click still lands on +.
@@ -606,16 +607,6 @@ describe("SettingsDialog", () => {
     await user.unhover(zoomIn);
     expect(within(row).queryByRole("tooltip")).toBeNull();
     expect(zoomIn.getAttribute("aria-describedby")).toBeNull();
-  });
-
-  it("keeps the reset's place on a row that cannot reset, so controls share a right edge", async () => {
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
-
-    const updates = await screen.findByTestId("settings-row-desktop-updates");
-    const last = within(updates).getByTestId("desktop-updates-step").parentElement!.lastElementChild!;
-    expect(last.tagName).toBe("SPAN");
-    expect(last.getAttribute("aria-hidden")).toBe("true");
-    expect(last.className).toContain("size-6");
   });
 
   it("closes a stepper's tooltip with the first Escape and Settings with the next", async () => {

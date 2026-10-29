@@ -127,11 +127,10 @@ export function CloudAccountRow(props: {
         {({ show: _show, ...target }) => (
           <SecondaryButton
             {...target}
-            size="compact"
             data-testid="cloud-disconnect"
             disabled={busy}
             onClick={() => void disconnect()}
-            className="flex items-center gap-1.5"
+            className="flex items-center gap-2"
           >
             <LogOut size={12} aria-hidden />
             {busy ? "Disconnecting…" : "Disconnect"}
@@ -139,13 +138,13 @@ export function CloudAccountRow(props: {
         )}
       </Explained>
       {props.onDelete ? (
-        // The compact secondary recipe in the danger color: it ends the account.
+        // The secondary recipe in the danger color: it ends the account.
         <button
           type="button"
           data-testid="cloud-delete-account"
           disabled={busy}
           onClick={() => props.onDelete?.({ email: props.email, server })}
-          className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] text-danger hover:bg-hover dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
+          className="flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line px-3 text-[13px] text-danger hover:bg-hover dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
         >
           <Trash2 size={12} aria-hidden />
           Delete account…

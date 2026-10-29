@@ -169,7 +169,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   const labels = useMemo(() => state.kind === "options" ? pointLabels(state.options.points, emails) : new Map<number, string>(), [state, emails]);
   return <Overlay onClose={onClose} panelProps={{role: "dialog", "aria-modal": true, "aria-labelledby": "owner-restore-title", "data-testid": "owner-restore-dialog",
     className: "dohc-elevated dohc-pop-in w-[min(760px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"}}>
-    <h2 id="owner-restore-title" className="m-0 text-sm font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? "File restored" : "Restore shared file"}</h2>
+    <h2 id="owner-restore-title" className="m-0 text-base font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? "File restored" : "Restore shared file"}</h2>
     <p className="break-all font-mono text-[12px] text-muted">{path}</p>
     {/* While the choices load, the lines show it and the status words are for the screen reader. */}
     <div role="status" aria-live="polite">{busy ? <p className={state.kind === "loading" ? "sr-only" : "text-[12px] text-muted"}>{state.kind === "loading" ? "Loading restore choices…" : "Preparing the restore…"}</p> : null}</div>

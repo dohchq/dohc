@@ -114,7 +114,7 @@ export function FieldsDialog(props: {
         className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
-          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Fields</h2>
+          <h2 className="m-0 flex-1 text-base font-semibold text-ink">Fields</h2>
           <IconButton aria-label="Close" title="Close" onClick={props.onClose}>
             <X size={14} aria-hidden />
           </IconButton>
@@ -150,7 +150,6 @@ export function FieldsDialog(props: {
                     Cancel
                   </SecondaryButton>
                   <PrimaryButton
-                    className="px-3 py-1.5 text-xs"
                     disabled={pending}
                     onClick={() => void saveEdit(field.name)}
                   >

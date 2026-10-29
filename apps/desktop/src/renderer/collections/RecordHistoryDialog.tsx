@@ -360,7 +360,7 @@ export function RecordHistoryDialog(props: {
       }}
     >
       <div className="flex items-center justify-between gap-3">
-        <h2 className="m-0 flex min-w-0 items-center gap-2 text-sm font-semibold">
+        <h2 className="m-0 flex min-w-0 items-center gap-2 text-base font-semibold">
           <HistoryIcon size={16} strokeWidth={1.9} aria-hidden className="shrink-0" />
           <span className="truncate">History · {props.recordName}</span>
         </h2>

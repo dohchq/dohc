@@ -42,7 +42,7 @@ function Archive(props: Props) {
     finally { locked.current = false; if (alive.current && request.current === token) setBusy(false); }
   }
   return <Overlay onClose={busy ? undefined : props.onClose}><section role="dialog" aria-modal="true" aria-labelledby="archive-collection-title" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink">
-    <h2 id="archive-collection-title" className="m-0 text-sm font-semibold">Archive {props.name}?</h2>
+    <h2 id="archive-collection-title" className="m-0 text-base font-semibold">Archive {props.name}?</h2>
     <p className="m-0 text-[13px] text-muted">Apps will stop reading and changing this Collection. Records and files stay saved.</p>
     <p className="m-0 text-[13px] text-muted">Restore it from Archived collections to use it again.</p>
     <div className="min-h-0 overflow-auto">

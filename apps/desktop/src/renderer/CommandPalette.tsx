@@ -132,7 +132,7 @@ export function CommandPalette(props: {
           ref={listRef}
           role="listbox"
           aria-label="Commands"
-          className="m-0 max-h-72 list-none overflow-y-auto p-1.5"
+          className="m-0 max-h-72 list-none overflow-y-auto p-1"
         >
           {matches.length === 0 ? (
             <li className="px-3 py-2.5 text-xs text-subtle">No matching commands</li>
@@ -142,7 +142,7 @@ export function CommandPalette(props: {
                 <button
                   type="button"
                   onClick={() => runCommand(command)}
-                  className={`flex h-8 w-full items-center rounded-md px-2.5 text-left text-[13px] transition-colors duration-75 ${
+                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                     // Keyboard selection stays stronger than hover.
                     index === selected
                       ? "bg-selected text-ink"

@@ -47,7 +47,7 @@ export function SettingsNav(props: {
   return (
     <aside
       data-testid="settings-sidebar"
-      className="flex w-56 shrink-0 flex-col border-r border-line bg-panel-2 px-2 py-3.5 max-[720px]:w-full max-[720px]:border-b max-[720px]:border-r-0"
+      className="flex w-56 shrink-0 flex-col border-r border-line bg-panel-2 px-1 py-3 max-[720px]:w-full max-[720px]:border-b max-[720px]:border-r-0"
     >
       <div className="flex h-6 items-center gap-2 px-2 max-[720px]:pr-10">
         <h2 id="settings-title" className="m-0 text-sm font-semibold text-ink">
@@ -55,11 +55,11 @@ export function SettingsNav(props: {
         </h2>
         {props.status}
       </div>
-      <div className="relative mb-3 mt-2.5">
+      <div className="relative my-2">
         <Search
           size={14}
           aria-hidden
-          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle"
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-subtle"
         />
         <input
           spellCheck={false}
@@ -68,7 +68,7 @@ export function SettingsNav(props: {
           value={props.query}
           onChange={(event) => props.onQuery(event.target.value)}
           placeholder="Search"
-          className="h-[30px] w-full rounded-md border border-line bg-bg pl-[30px] pr-2.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+          className="h-8 w-full rounded-md border border-line bg-bg pl-7 pr-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
         />
       </div>
       <select
@@ -91,7 +91,7 @@ export function SettingsNav(props: {
           <div
             data-testid="settings-row-current-workspace"
             title={props.workspacePath}
-            className="mt-3.5 flex h-6 shrink-0 items-center gap-1.5 px-2 text-[11px] text-subtle first:mt-0"
+            className="mt-4 flex h-6 shrink-0 items-center gap-2 px-2 text-[12px] font-medium text-subtle first:mt-0"
           >
             <Folder size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             <span className="min-w-0 truncate">{workspaceName({ rootPath: props.workspacePath })}</span>
@@ -99,7 +99,7 @@ export function SettingsNav(props: {
         ) : null}
         {workspace.map(item)}
         {advanced.length > 0 && advanced.length < props.sections.length ? (
-          <div aria-hidden className="mx-2 mb-2.5 mt-3.5 h-px shrink-0 bg-line" />
+          <div aria-hidden className="mx-2 my-2 h-px shrink-0 bg-line" />
         ) : null}
         {advanced.map(item)}
       </nav>

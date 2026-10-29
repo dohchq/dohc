@@ -54,6 +54,7 @@ import {
   ColorControl,
   HueControl,
   SettingRow,
+  SettingsSection,
   StepperControl,
   SwitchControl,
   TextControl,
@@ -598,166 +599,173 @@ export function SettingsDialog(props: {
       case "appearance":
         return (
           <div data-testid={settingsSectionPin("appearance")}>
-            <SettingRow
-              title="Theme"
-              modified={isModified(
-                userSettings.appearance.themeMode,
-                DEFAULT_USER_SETTINGS.appearance.themeMode,
-              )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  appearance: {
-                    ...userSettings.appearance,
-                    themeMode: DEFAULT_USER_SETTINGS.appearance.themeMode,
-                  },
-                })
-              }
-              testId="settings-row-theme"
-            >
-              <ThemeControl
-                value={userSettings.appearance.themeMode}
-                onChange={(themeMode) =>
+            <SettingsSection title="App">
+              <SettingRow
+                title="Theme"
+                modified={isModified(
+                  userSettings.appearance.themeMode,
+                  DEFAULT_USER_SETTINGS.appearance.themeMode,
+                )}
+                onReset={() =>
                   void saveUserSettings({
                     ...userSettings,
-                    appearance: { ...userSettings.appearance, themeMode },
+                    appearance: {
+                      ...userSettings.appearance,
+                      themeMode: DEFAULT_USER_SETTINGS.appearance.themeMode,
+                    },
                   })
                 }
-              />
-            </SettingRow>
-            <SettingRow
-              title="Zoom"
-              modified={zoomModified}
-              onReset={() => void stepZoomSetting("reset")}
-              testId="settings-row-zoom"
-            >
-              <StepperControl
-                setting="zoom"
-                value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
-                decrease={{
-                  label: "Zoom out",
-                  keys: shortcutKeys("zoom-out", shortcutPlatform),
-                  disabled: userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL,
-                  onClick: () => void stepZoomSetting("out"),
-                }}
-                reset={{
-                  label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
-                  to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
-                  keys: shortcutKeys("zoom-reset", shortcutPlatform),
-                  onClick: () => {
-                    if (zoomModified) void stepZoomSetting("reset");
-                  },
-                }}
-                increase={{
-                  label: "Zoom in",
-                  keys: shortcutKeys("zoom-in", shortcutPlatform),
-                  disabled: userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL,
-                  onClick: () => void stepZoomSetting("in"),
-                }}
-              />
-            </SettingRow>
-            <SettingRow
-              title="Accent color"
-              modified={userSettings.appearance.accentColor !== null}
-              onReset={() => void saveAppearance({ accentColor: null })}
-              testId="settings-row-accent"
-            >
-              <ColorControl
-                label="Accent color"
-                value={userSettings.appearance.accentColor ??
-                  palette[document.documentElement.dataset.theme === "dark" ? "dark" : "light"].accent}
-                onChange={(accentColor) => void saveAppearance({ accentColor })}
-              />
-            </SettingRow>
-            <SettingRow
-              title="Your color"
-              modified={userSettings.appearance.yourColor !== null}
-              onReset={() => void saveAppearance({ yourColor: null })}
-              testId="settings-row-your-color"
-              {...customizeRow("settings-row-your-color")}
-            >
-              <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
-              <HueControl
-                label="Your color"
-                shape="person"
-                value={userSettings.appearance.yourColor}
-                onChange={(yourColor) => void saveAppearance({ yourColor })}
-              />
-            </SettingRow>
-            <SettingRow
-              title="Editor font"
-              modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
-              onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
-              testId="settings-row-editor-font"
-              {...customizeRow("settings-row-editor-font")}
-            >
-              <SegmentedControl
-                label="Editor font"
-                value={userSettings.editor.fontFamily}
-                options={[
-                  { value: "sans", label: "Sans" },
-                  { value: "serif", label: "Serif" },
-                  { value: "mono", label: "Mono" },
-                  // A font installed on this computer that the file names.
-                  ...((EDITOR_FONTS as readonly string[]).includes(userSettings.editor.fontFamily)
-                    ? []
-                    : [{ value: userSettings.editor.fontFamily, label: userSettings.editor.fontFamily }]),
-                ]}
-                onChange={(fontFamily) => void saveEditor({ fontFamily })}
-              />
-            </SettingRow>
-            <SettingRow
-              title="Editor text size"
-              modified={editorSizeModified}
-              onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
-              testId="settings-row-editor-size"
-            >
-              <StepperControl
-                setting="editor text size"
-                value={`${userSettings.editor.fontSize}px`}
-                decrease={{
-                  label: "Smaller editor text",
-                  disabled: userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE,
-                  onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 }),
-                }}
-                reset={{
-                  label: `Reset to ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
-                  to: `${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
-                  onClick: () => {
-                    if (editorSizeModified) void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
-                  },
-                }}
-                increase={{
-                  label: "Larger editor text",
-                  disabled: userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE,
-                  onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 }),
-                }}
-              />
-            </SettingRow>
-            <SettingRow
-              title="Sidebar"
-              modified={
-                isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
-                isModified(userSettings.sidebar.hidden, DEFAULT_SIDEBAR_SETTINGS.hidden)
-              }
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  sidebar: {
-                    ...userSettings.sidebar,
-                    order: DEFAULT_SIDEBAR_SETTINGS.order,
-                    hidden: DEFAULT_SIDEBAR_SETTINGS.hidden,
-                  },
-                })
-              }
-              testId="settings-row-sidebar"
-              {...customizeRow("settings-row-sidebar")}
-            >
-              <SidebarViewsControl
-                sidebar={userSettings.sidebar}
-                onChange={(sidebar) => void saveUserSettings({ ...userSettings, sidebar })}
-              />
-            </SettingRow>
+                testId="settings-row-theme"
+              >
+                <ThemeControl
+                  value={userSettings.appearance.themeMode}
+                  onChange={(themeMode) =>
+                    void saveUserSettings({
+                      ...userSettings,
+                      appearance: { ...userSettings.appearance, themeMode },
+                    })
+                  }
+                />
+              </SettingRow>
+              <SettingRow
+                title="Zoom"
+                modified={zoomModified}
+                onReset={() => void stepZoomSetting("reset")}
+                testId="settings-row-zoom"
+              >
+                <StepperControl
+                  setting="zoom"
+                  value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
+                  decrease={{
+                    label: "Zoom out",
+                    keys: shortcutKeys("zoom-out", shortcutPlatform),
+                    disabled: userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL,
+                    onClick: () => void stepZoomSetting("out"),
+                  }}
+                  reset={{
+                    label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
+                    to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
+                    keys: shortcutKeys("zoom-reset", shortcutPlatform),
+                    onClick: () => {
+                      if (zoomModified) void stepZoomSetting("reset");
+                    },
+                  }}
+                  increase={{
+                    label: "Zoom in",
+                    keys: shortcutKeys("zoom-in", shortcutPlatform),
+                    disabled: userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL,
+                    onClick: () => void stepZoomSetting("in"),
+                  }}
+                />
+              </SettingRow>
+              <SettingRow
+                title="Accent color"
+                modified={userSettings.appearance.accentColor !== null}
+                onReset={() => void saveAppearance({ accentColor: null })}
+                testId="settings-row-accent"
+              >
+                <ColorControl
+                  label="Accent color"
+                  value={userSettings.appearance.accentColor ??
+                    palette[document.documentElement.dataset.theme === "dark" ? "dark" : "light"].accent}
+                  onChange={(accentColor) => void saveAppearance({ accentColor })}
+                />
+              </SettingRow>
+              <SettingRow
+                title="Sidebar"
+                top
+                modified={
+                  isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
+                  isModified(userSettings.sidebar.hidden, DEFAULT_SIDEBAR_SETTINGS.hidden)
+                }
+                onReset={() =>
+                  void saveUserSettings({
+                    ...userSettings,
+                    sidebar: {
+                      ...userSettings.sidebar,
+                      order: DEFAULT_SIDEBAR_SETTINGS.order,
+                      hidden: DEFAULT_SIDEBAR_SETTINGS.hidden,
+                    },
+                  })
+                }
+                testId="settings-row-sidebar"
+                {...customizeRow("settings-row-sidebar")}
+              >
+                <SidebarViewsControl
+                  sidebar={userSettings.sidebar}
+                  onChange={(sidebar) => void saveUserSettings({ ...userSettings, sidebar })}
+                />
+              </SettingRow>
+            </SettingsSection>
+            <SettingsSection title="You">
+              <SettingRow
+                title="Your color"
+                modified={userSettings.appearance.yourColor !== null}
+                onReset={() => void saveAppearance({ yourColor: null })}
+                testId="settings-row-your-color"
+                {...customizeRow("settings-row-your-color")}
+              >
+                <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
+                <HueControl
+                  label="Your color"
+                  shape="person"
+                  value={userSettings.appearance.yourColor}
+                  onChange={(yourColor) => void saveAppearance({ yourColor })}
+                />
+              </SettingRow>
+            </SettingsSection>
+            <SettingsSection title="Editor">
+              <SettingRow
+                title="Editor font"
+                modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
+                onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
+                testId="settings-row-editor-font"
+                {...customizeRow("settings-row-editor-font")}
+              >
+                <SegmentedControl
+                  label="Editor font"
+                  value={userSettings.editor.fontFamily}
+                  options={[
+                    { value: "sans", label: "Sans" },
+                    { value: "serif", label: "Serif" },
+                    { value: "mono", label: "Mono" },
+                    // A font installed on this computer that the file names.
+                    ...((EDITOR_FONTS as readonly string[]).includes(userSettings.editor.fontFamily)
+                      ? []
+                      : [{ value: userSettings.editor.fontFamily, label: userSettings.editor.fontFamily }]),
+                  ]}
+                  onChange={(fontFamily) => void saveEditor({ fontFamily })}
+                />
+              </SettingRow>
+              <SettingRow
+                title="Editor text size"
+                modified={editorSizeModified}
+                onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
+                testId="settings-row-editor-size"
+              >
+                <StepperControl
+                  setting="editor text size"
+                  value={`${userSettings.editor.fontSize}px`}
+                  decrease={{
+                    label: "Smaller editor text",
+                    disabled: userSettings.editor.fontSize <= MIN_EDITOR_FONT_SIZE,
+                    onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize - 1 }),
+                  }}
+                  reset={{
+                    label: `Reset to ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+                    to: `${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
+                    onClick: () => {
+                      if (editorSizeModified) void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
+                    },
+                  }}
+                  increase={{
+                    label: "Larger editor text",
+                    disabled: userSettings.editor.fontSize >= MAX_EDITOR_FONT_SIZE,
+                    onClick: () => void saveEditor({ fontSize: userSettings.editor.fontSize + 1 }),
+                  }}
+                />
+              </SettingRow>
+            </SettingsSection>
           </div>
         );
       case "keyboard":
@@ -792,346 +800,363 @@ export function SettingsDialog(props: {
       case "cloud":
         return (
           <div data-testid={settingsSectionPin("cloud")}>
-            {props.cloud ? (
-              <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} />
-            ) : null}
-            {!props.sharedView && props.onOpenLiveDocuments ? (
-              <SettingRow
-                title="Live documents"
-                description="Documents this workspace is editing live. Stopping one keeps the file and its history."
-                testId="settings-row-live-documents"
-              >
-                <button
-                  type="button"
-                  aria-label="Open live documents"
-                  onClick={props.onOpenLiveDocuments}
-                  className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90"
+            <SettingsSection>
+              {props.cloud ? (
+                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} />
+              ) : null}
+              {!props.sharedView && props.onOpenLiveDocuments ? (
+                <SettingRow
+                  title="Live documents"
+                  description="Documents this workspace is editing live. Stopping one keeps the file and its history."
+                  testId="settings-row-live-documents"
                 >
-                  Open
-                </button>
-              </SettingRow>
-            ) : null}
+                  <button
+                    type="button"
+                    aria-label="Open live documents"
+                    onClick={props.onOpenLiveDocuments}
+                    className="h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90"
+                  >
+                    Open
+                  </button>
+                </SettingRow>
+              ) : null}
+            </SettingsSection>
           </div>
         );
       case "workbench":
         return (
           <div data-testid={settingsSectionPin("workbench")}>
-            <SettingRow
-              title="App previews"
-              modified={isModified(
-                workspaceSettings.sites.defaultPreviewMode,
-                DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-              )}
-              onReset={() =>
-                void saveWorkspaceSettings({
-                  sites: {
-                    defaultPreviewMode:
-                      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
-                  },
-                })
-              }
-              testId="settings-row-site-preview-mode"
-            >
-              <select
-                aria-label="Default app preview mode"
-                data-testid="site-preview-mode-select"
-                value={workspaceSettings.sites.defaultPreviewMode}
-                onChange={(event) =>
+            <SettingsSection>
+              <SettingRow
+                title="App previews"
+                modified={isModified(
+                  workspaceSettings.sites.defaultPreviewMode,
+                  DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+                )}
+                onReset={() =>
                   void saveWorkspaceSettings({
                     sites: {
-                      defaultPreviewMode: event.target
-                        .value as WorkspaceSettings["sites"]["defaultPreviewMode"],
+                      defaultPreviewMode:
+                        DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
                     },
                   })
                 }
-                className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+                testId="settings-row-site-preview-mode"
               >
-                {WORKSPACE_PREVIEW_MODES.map((mode) => (
-                  <option key={mode} value={mode}>
-                    {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </SettingRow>
+                <select
+                  aria-label="Default app preview mode"
+                  data-testid="site-preview-mode-select"
+                  value={workspaceSettings.sites.defaultPreviewMode}
+                  onChange={(event) =>
+                    void saveWorkspaceSettings({
+                      sites: {
+                        defaultPreviewMode: event.target
+                          .value as WorkspaceSettings["sites"]["defaultPreviewMode"],
+                      },
+                    })
+                  }
+                  className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+                >
+                  {WORKSPACE_PREVIEW_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
+                    </option>
+                  ))}
+                </select>
+              </SettingRow>
+            </SettingsSection>
           </div>
         );
       case "files":
         return (
           <div data-testid={settingsSectionPin("files")}>
-            <SettingRow
-              title="Attachments"
-              modified={isModified(
-                workspaceSettings.files.attachmentLocation,
-                DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
-              )}
-              onReset={() =>
-                void saveWorkspaceSettings({
-                  files: {
-                    attachmentLocation:
-                      DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
-                  },
-                })
-              }
-              testId="settings-row-attachment-location"
-            >
-              <select
-                aria-label="Attachment location"
-                data-testid="attachment-location-select"
-                value={workspaceSettings.files.attachmentLocation}
-                onChange={(event) =>
-                  void saveWorkspaceSettings({
-                    files: {
-                      attachmentLocation: event.target
-                        .value as WorkspaceSettings["files"]["attachmentLocation"],
-                    },
-                  })
-                }
-                className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
-              >
-                <option value="per-document">
-                  {`In a folder next to the document (${
-                    workspaceSettings.files.attachmentFolderName || "assets"
-                  }/)`}
-                </option>
-                <option value="global-folder">
-                  In one folder at the workspace root
-                </option>
-                <option value="same-folder">Next to the document</option>
-              </select>
-            </SettingRow>
-            {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
+            <SettingsSection>
               <SettingRow
-                title="Attachment folder name"
+                title="Attachments"
                 modified={isModified(
-                  workspaceSettings.files.attachmentFolderName,
-                  DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                  workspaceSettings.files.attachmentLocation,
+                  DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
                 )}
                 onReset={() =>
                   void saveWorkspaceSettings({
                     files: {
-                      attachmentFolderName:
-                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                      attachmentLocation:
+                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
                     },
                   })
                 }
-                testId="settings-row-attachment-folder"
+                testId="settings-row-attachment-location"
               >
-                <TextControl
-                  label="Attachment folder name"
-                  value={workspaceSettings.files.attachmentFolderName}
-                  placeholder="assets"
-                  testId="attachment-folder-input"
-                  maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
-                  onChange={(attachmentFolderName) =>
+                <select
+                  aria-label="Attachment location"
+                  data-testid="attachment-location-select"
+                  value={workspaceSettings.files.attachmentLocation}
+                  onChange={(event) =>
                     void saveWorkspaceSettings({
                       files: {
-                        // mergeWorkspaceSettings re-parses and throws past the
-                        // schema bound, and this is a plain change handler — an
-                        // over-long value must be clamped, not thrown. `maxLength`
-                        // already stops typing and pasting; this is the belt to
-                        // its braces (a longer value can only arrive if the two
-                        // ever drift).
-                        attachmentFolderName: attachmentFolderName.slice(
-                          0,
-                          ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-                        ),
+                        attachmentLocation: event.target
+                          .value as WorkspaceSettings["files"]["attachmentLocation"],
                       },
                     })
                   }
-                />
+                  // As wide as its longest option, which names the folder.
+                  className="h-8 max-w-full rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+                >
+                  <option value="per-document">
+                    {`In a folder next to the document (${
+                      workspaceSettings.files.attachmentFolderName || "assets"
+                    }/)`}
+                  </option>
+                  <option value="global-folder">
+                    In one folder at the workspace root
+                  </option>
+                  <option value="same-folder">Next to the document</option>
+                </select>
               </SettingRow>
-            ) : null}
+              {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
+                <SettingRow
+                  title="Attachment folder name"
+                  modified={isModified(
+                    workspaceSettings.files.attachmentFolderName,
+                    DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                  )}
+                  onReset={() =>
+                    void saveWorkspaceSettings({
+                      files: {
+                        attachmentFolderName:
+                          DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                      },
+                    })
+                  }
+                  testId="settings-row-attachment-folder"
+                >
+                  <TextControl
+                    label="Attachment folder name"
+                    value={workspaceSettings.files.attachmentFolderName}
+                    placeholder="assets"
+                    testId="attachment-folder-input"
+                    maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
+                    onChange={(attachmentFolderName) =>
+                      void saveWorkspaceSettings({
+                        files: {
+                          // mergeWorkspaceSettings re-parses and throws past the
+                          // schema bound, and this is a plain change handler — an
+                          // over-long value must be clamped, not thrown. `maxLength`
+                          // already stops typing and pasting; this is the belt to
+                          // its braces (a longer value can only arrive if the two
+                          // ever drift).
+                          attachmentFolderName: attachmentFolderName.slice(
+                            0,
+                            ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+                          ),
+                        },
+                      })
+                    }
+                  />
+                </SettingRow>
+              ) : null}
+            </SettingsSection>
           </div>
         );
       case "privacy":
         return (
           <div data-testid={settingsSectionPin("privacy")}>
-            {!props.sharedView ? (
+            <SettingsSection title="This workspace">
+              {!props.sharedView ? (
+                <SettingRow
+                  title="Workspace trust"
+                  description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer."
+                  testId="settings-row-workspace-trust"
+                >
+                  <div className="shrink-0 whitespace-nowrap">
+                    <SegmentedControl
+                      label="Workspace trust"
+                      testId="workspace-trust-control"
+                      value={workspaceTrust.trusted ? "trusted" : "restricted"}
+                      options={[
+                        { value: "trusted", label: "Trusted" },
+                        { value: "restricted", label: "Restricted Mode" },
+                      ]}
+                      disabled={workspaceTrust.trusted === null || workspaceTrust.asking}
+                      onChange={(value) => void changeWorkspaceTrust(value)}
+                    />
+                  </div>
+                </SettingRow>
+              ) : null}
               <SettingRow
-                title="Workspace trust"
-                description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer."
-                testId="settings-row-workspace-trust"
-              >
-                <div className="shrink-0 whitespace-nowrap">
-                  <SegmentedControl
-                    label="Workspace trust"
-                    testId="workspace-trust-control"
-                    value={workspaceTrust.trusted ? "trusted" : "restricted"}
-                    options={[
-                      { value: "trusted", label: "Trusted" },
-                      { value: "restricted", label: "Restricted Mode" },
-                    ]}
-                    disabled={workspaceTrust.trusted === null || workspaceTrust.asking}
-                    onChange={(value) => void changeWorkspaceTrust(value)}
-                  />
-                </div>
-              </SettingRow>
-            ) : null}
-            <SettingRow
-              title="Confirm external links"
-              description="Ask before dohc opens a link in another app."
-              modified={isModified(
-                workspaceSettings.privacy.confirmExternalLinks,
-                DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
-              )}
-              onReset={() =>
-                void saveWorkspaceSettings({
-                  privacy: {
-                    confirmExternalLinks:
-                      DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
-                  },
-                })
-              }
-            >
-              <SwitchControl
-                label="Confirm external links"
-                checked={workspaceSettings.privacy.confirmExternalLinks}
-                onChange={(confirmExternalLinks) =>
-                  void saveWorkspaceSettings({ privacy: { confirmExternalLinks } })
+                title="Confirm external links"
+                description="Ask before dohc opens a link in another app."
+                modified={isModified(
+                  workspaceSettings.privacy.confirmExternalLinks,
+                  DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
+                )}
+                onReset={() =>
+                  void saveWorkspaceSettings({
+                    privacy: {
+                      confirmExternalLinks:
+                        DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
+                    },
+                  })
                 }
+              >
+                <SwitchControl
+                  label="Confirm external links"
+                  checked={workspaceSettings.privacy.confirmExternalLinks}
+                  onChange={(confirmExternalLinks) =>
+                    void saveWorkspaceSettings({ privacy: { confirmExternalLinks } })
+                  }
+                />
+              </SettingRow>
+            </SettingsSection>
+            <SettingsSection title="Reports">
+              <ReportsSettings
+                privacy={userSettings.privacy}
+                onChange={(privacy) => void saveUserSettings({ ...userSettings, privacy })}
+                onError={props.onError}
               />
-            </SettingRow>
-            <ReportsSettings
-              privacy={userSettings.privacy}
-              onChange={(privacy) => void saveUserSettings({ ...userSettings, privacy })}
-              onError={props.onError}
-            />
+            </SettingsSection>
             <UsageRecordSettings onError={props.onError} />
           </div>
         );
       case "advanced":
         return (
           <div data-testid={settingsSectionPin("advanced")}>
-            <ScheduleHostRow
-              workspaceId={props.workspaceId}
-              {...(props.onError ? { onError: props.onError } : {})}
-            />
-            <SettingRow
-              title="Settings file"
-              description="Changes apply when you save the file."
-              testId="settings-row-settings-file"
-              aside={askAgentAside()}
-            >
-              {settingsFilePath ? (
-                <code
-                  title={settingsFilePath}
-                  className="max-w-70 select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
+            <SettingsSection>
+              <ScheduleHostRow
+                workspaceId={props.workspaceId}
+                {...(props.onError ? { onError: props.onError } : {})}
+              />
+              <SettingRow
+                title="Settings file"
+                description="Changes apply when you save the file."
+                testId="settings-row-settings-file"
+                aside={askAgentAside()}
+              >
+                {settingsFilePath ? (
+                  <code
+                    title={settingsFilePath}
+                    className="max-w-70 select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
+                  >
+                    {settingsFilePath}
+                  </code>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="Open settings file"
+                  onClick={() => void openSettingsFile()}
+                  className="h-8 shrink-0 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
-                  {settingsFilePath}
-                </code>
-              ) : null}
-              <button
-                type="button"
-                aria-label="Open settings file"
-                onClick={() => void openSettingsFile()}
-                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  Open
+                </button>
+              </SettingRow>
+              <SettingRow
+                title="Reset user settings"
+                description="Restore local user settings for this desktop install to defaults."
+                modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
+                testId="settings-row-reset-user"
               >
-                Open
-              </button>
-            </SettingRow>
-            <SettingRow
-              title="Reset user settings"
-              description="Restore local user settings for this desktop install to defaults."
-              modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
-              testId="settings-row-reset-user"
-            >
-              <button
-                type="button"
-                onClick={() => void resetUserSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                <button
+                  type="button"
+                  onClick={() => void resetUserSettings()}
+                  className="h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  Reset user
+                </button>
+              </SettingRow>
+              <SettingRow
+                title="Reset workspace settings"
+                description="Restore local settings for this workspace without touching workspace content."
+                modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
+                testId="settings-row-reset-workspace"
               >
-                Reset user
-              </button>
-            </SettingRow>
-            <SettingRow
-              title="Reset workspace settings"
-              description="Restore local settings for this workspace without touching workspace content."
-              modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
-              testId="settings-row-reset-workspace"
-            >
-              <button
-                type="button"
-                onClick={() => void resetWorkspaceSettings()}
-                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                Reset workspace
-              </button>
-            </SettingRow>
+                <button
+                  type="button"
+                  onClick={() => void resetWorkspaceSettings()}
+                  className="h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  Reset workspace
+                </button>
+              </SettingRow>
+            </SettingsSection>
           </div>
         );
       case "general":
       default:
         return (
           <div data-testid={settingsSectionPin("general")}>
-            <SettingRow
-              title="Your name"
-              modified={isModified(
-                userSettings.profile.preferredName,
-                DEFAULT_USER_SETTINGS.profile.preferredName,
-              )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  profile: { ...userSettings.profile, preferredName: undefined },
-                })
-              }
-              testId="settings-row-preferred-name"
-            >
-              <PreferredNameControl
-                value={userSettings.profile.preferredName}
-                onChange={async (preferredName) => {
-                  await saveUserSettings({
+            <SettingsSection title="Profile">
+              <SettingRow
+                title="Your name"
+                modified={isModified(
+                  userSettings.profile.preferredName,
+                  DEFAULT_USER_SETTINGS.profile.preferredName,
+                )}
+                onReset={() =>
+                  void saveUserSettings({
                     ...userSettings,
-                    profile: { ...userSettings.profile, preferredName },
-                  });
-                }}
-                testIdPrefix="general-preferred-name"
-              />
-            </SettingRow>
-            <SettingRow
-              title="Updates"
-              description={
-                <span data-testid="desktop-updates-status" data-state={updateState?.status ?? "unknown"}>
-                  {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
-                </span>
-              }
-              aside={updateState?.installCommand ? (
-                <CopyField label="Copy install command" copiedLabel="Install command copied"
-                  copyTestId="desktop-updates-install-command-copy" getText={() => updateState.installCommand ?? null}>
-                  <code data-testid="desktop-updates-install-command" title={updateState.installCommand}>
-                    {updateState.installCommand}
-                  </code>
-                </CopyField>
-              ) : undefined}
-              testId="settings-row-desktop-updates"
-            >
-              <span className="mr-1 shrink-0 font-mono text-[11px] text-subtle">
-                <span data-testid="desktop-updates-version">{updateState?.currentVersion ?? "unknown"}</span>
-                {" · "}
-                <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
-              </span>
-              {/* One button for every step. It fills once the next step is
-                  the person's: Update, then Restart to update. */}
-              {update.step ? (
-                <button
-                  type="button"
-                  data-testid="desktop-updates-step"
-                  disabled={update.step.action === null}
-                  onClick={() => {
-                    const action = update.step?.action;
-                    if (action) void update.run(action);
+                    profile: { ...userSettings.profile, preferredName: undefined },
+                  })
+                }
+                testId="settings-row-preferred-name"
+              >
+                <PreferredNameControl
+                  value={userSettings.profile.preferredName}
+                  onChange={async (preferredName) => {
+                    await saveUserSettings({
+                      ...userSettings,
+                      profile: { ...userSettings.profile, preferredName },
+                    });
                   }}
-                  className={`flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] transition-opacity disabled:opacity-50 ${
-                    update.step.action === "download" || update.step.action === "install"
-                      ? "bg-accent font-semibold text-bg enabled:hover:opacity-90"
-                      : "border border-line text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink"
-                  }`}
-                >
-                  {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
-                  <UpdateStepLabel step={update.step} />
-                </button>
-              ) : null}
-            </SettingRow>
+                  testIdPrefix="general-preferred-name"
+                />
+              </SettingRow>
+            </SettingsSection>
+            <SettingsSection title="App">
+              <SettingRow
+                title="Updates"
+                description={
+                  <span data-testid="desktop-updates-status" data-state={updateState?.status ?? "unknown"}>
+                    {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
+                  </span>
+                }
+                aside={updateState?.installCommand ? (
+                  <CopyField label="Copy install command" copiedLabel="Install command copied"
+                    copyTestId="desktop-updates-install-command-copy" getText={() => updateState.installCommand ?? null}>
+                    <code data-testid="desktop-updates-install-command" title={updateState.installCommand}>
+                      {updateState.installCommand}
+                    </code>
+                  </CopyField>
+                ) : undefined}
+                testId="settings-row-desktop-updates"
+              >
+                <span className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
+                  <span data-testid="desktop-updates-version">{updateState?.currentVersion ?? "unknown"}</span>
+                  {" · "}
+                  <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
+                </span>
+                {/* One button for every step. It fills once the next step is
+                    the person's: Update, then Restart to update. */}
+                {update.step ? (
+                  <button
+                    type="button"
+                    data-testid="desktop-updates-step"
+                    disabled={update.step.action === null}
+                    onClick={() => {
+                      const action = update.step?.action;
+                      if (action) void update.run(action);
+                    }}
+                    className={`flex h-8 shrink-0 items-center gap-2 rounded-lg px-3 text-[13px] transition-opacity disabled:opacity-50 ${
+                      update.step.action === "download" || update.step.action === "install"
+                        ? "bg-accent font-medium text-bg enabled:hover:opacity-90"
+                        : "border border-line text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink"
+                    }`}
+                  >
+                    {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
+                    <UpdateStepLabel step={update.step} />
+                  </button>
+                ) : null}
+              </SettingRow>
+            </SettingsSection>
           </div>
         );
     }
@@ -1165,7 +1190,7 @@ export function SettingsDialog(props: {
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {warnings.length > 0 ? (
-          <div className="flex shrink-0 flex-col gap-1 border-b border-line bg-panel py-2 pl-8 pr-12 max-[720px]:px-4">
+          <div className="flex shrink-0 flex-col gap-1 border-b border-line bg-panel px-12 py-2 max-[720px]:px-4">
             {warnings.map((warning, index) => (
               <div
                 key={`${index}-${warning}`}
@@ -1179,20 +1204,18 @@ export function SettingsDialog(props: {
           </div>
         ) : null}
 
-        {/* The right padding keeps the first row clear of the close button. */}
-        <section className="min-h-0 flex-1 overflow-auto pt-7 pb-[calc(var(--dohc-toast-room,0px)+1.75rem)] pl-8 pr-12 scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
-          <div className="max-w-[640px]">
-            {/* Only Sharing matched: no section's heading stands over its results. */}
-            <h3
-              // The Agents page shows its own title.
-              hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
-              className="sr-only"
-            >
-              {activeMeta.label}
-            </h3>
-            {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
-            {renderSection()}
-          </div>
+        {/* The right padding keeps the title clear of the close button. */}
+        <section className="min-h-0 flex-1 overflow-auto px-12 pt-10 pb-[calc(var(--dohc-toast-room,0px)+3rem)] scroll-pb-[var(--dohc-toast-room,0px)] max-[720px]:px-4 max-[720px]:pt-4 max-[720px]:pb-[calc(var(--dohc-toast-room,0px)+1rem)]">
+          {/* Only Sharing matched: no section's heading stands over its results. */}
+          <h3
+            // The Agents page shows its own title.
+            hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
+            className="m-0 mb-6 text-base font-semibold text-ink"
+          >
+            {activeMeta.label}
+          </h3>
+          {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
+          {renderSection()}
         </section>
       </main>
 

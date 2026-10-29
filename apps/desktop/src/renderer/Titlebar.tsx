@@ -203,7 +203,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onSwitchWorkspace?.(candidate);
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       {candidate.workspaceId === props.workspace?.workspaceId ? (
                         <Check size={12} aria-hidden />
@@ -226,7 +226,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onManageWorkspaces?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Manage workspaces…</span>
@@ -242,7 +242,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onOpenShare?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Open a share…</span>

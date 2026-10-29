@@ -209,7 +209,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | Dense secondary text | `text-[12px] text-muted` |
 | Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
 | Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
-| Panel and dialog titles | `text-sm font-semibold text-ink` |
+| Page and dialog titles | `text-base font-semibold text-ink` |
+| Panel titles, and section headings on a page | `text-sm font-semibold text-ink` |
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
 | Code and Markdown source | `font-mono` |
 
@@ -243,11 +244,66 @@ Use the classes in `styles.css` instead of writing shadows:
 
 Flat panels get borders, not shadows.
 
+### Spacing
+
+Space shows what belongs together. Take it from one scale and use it the same way on every screen.
+
+The scale is 4, 8, 12, 16, 20, 24, 32, 40, and 48 px. In Tailwind these are `1`, `2`, `3`, `4`, `5`, `6`, `8`, `10`, and `12`.
+
+- Take every gap, margin, and padding between things from the scale.
+- Do not use half steps such as `gap-2.5` or `mt-0.5`, or arbitrary values such as `px-[7px]`, between things.
+- Inside one control, follow its recipe. The recipes for inputs, kbd chips, pills, and segmented controls keep their own small values.
+
+Closeness:
+
+- Put things that belong together closer than things that do not.
+- Make each level of grouping at least twice the gap of the level inside it. Rows in a list touch, and their height sets the rhythm.
+- Put a heading closer to what it labels than to what comes before it.
+- Separate sections with space, not a rule. Keep a rule only where it marks an edge you can drag, a band that scrolls, or the rows inside a card.
+
+One left edge:
+
+- In a column, start text, icons, headings, and fields at one left edge.
+- In a panel, that edge is 12 px from the panel's side. Headers and section labels use `px-3`. A list uses `px-1`, and its rows use `px-2`.
+- Let hover and selected fills hang outside the edge. Do not indent a row's text to make room for its fill.
+- A section label starts on the edge. Its collapse chevron follows the label.
+- A tree's first chevron starts on the edge. Each level indents so a child's icon starts where its parent's name starts.
+
+Alignment:
+
+- Put a label on the first line of its control, not at the middle of a control that wraps.
+- Buttons side by side share one height and one text size.
+
+Position:
+
+- Anchor a page-like surface at a fixed top. Do not center it vertically, because content that loads later moves it.
+- Center only a short message that stands alone, such as an empty panel.
+
+| Part | Spacing |
+| --- | --- |
+| Row in a panel, tree, or menu | `h-7` (28 px), `gap-2` between icon and label |
+| Row in a picker or on a page | `h-8` (32 px), `gap-2` |
+| Panel header | `h-9` (36 px), `px-3`, the same height as the tab strip |
+| Panel content | Starts 8 px under the header |
+| Section in a panel | `mt-4` (16 px) before it, except the first. Its label row is `h-6 px-3`, and the first row follows directly. |
+| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. |
+| Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. |
+| Card | `p-3`, with `gap-2` inside |
+| Popover | `p-3`. A menu's frame is `p-1`, because its rows bring their own `px-2`. |
+| Dialog | `p-6` and `gap-6` between its parts. The title uses the page and dialog title role; its one-line description follows with `gap-1`. A section label sits 8 px over its fields. The buttons end the dialog, right-aligned, `gap-2` apart. No header or footer band. |
+| Dialog with a preview | The title, fields, and buttons form the left column, `p-6`. The preview fills the right column from top to bottom on `bg-panel-2`, `p-6`. |
+| Dialog that scrolls | Only a body that scrolls gets bands: header and footer `px-6 py-4` with a rule, body `p-6`. |
+| Settings page | `px-12 pt-10`, as wide as the page column. The page title is 24 px over the first section. |
+| Settings section | `SettingsSection`: a heading in the panel title role, 8 px over a card. Sections sit 32 px apart. A page with one group has one card and no heading. |
+| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size; in a narrow pane they wrap under the name and stay on the right edge. Reset appears left of them only when the value differs from its default. A row that can reset keeps Reset's place, so the controls never move or wrap when it appears. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
+| Empty state | `EmptyState`: `gap-4 px-6`. Do not build your own. |
+| Toast and Notices row | `px-3 py-2`, `gap-2` |
+
 ### Recipes
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
+List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
@@ -260,7 +316,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
 It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.
 
-Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-5` and `dohc-elevated`.
+Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-6` and `dohc-elevated`.
 
 Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
 While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
