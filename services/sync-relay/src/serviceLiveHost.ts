@@ -604,7 +604,10 @@ export async function startServiceLiveHost(options: {
       }
       const quarantined = head.state === "quarantined";
       if (quarantined ? head.retryDeliveryId !== null : !kept.retrying && head.entry?.deliveryId === kept.headDeliveryId) {
-        await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});
+        // An ended grant keeps the refusal its queue recorded. One that never
+        // reached the engine records it now, so retirement can keep the edit.
+        await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason, ...(quarantined ? {} :
+          {refusal: {deliveryId: kept.headDeliveryId, key: `quarantined:${kept.headDeliveryId}`}})});
         // An ended grant can freeze the queue at its seed; only the engine can say.
         head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);
       } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return undefined;}

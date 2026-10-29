@@ -5860,6 +5860,7 @@ fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
     assert_eq!(count(&store, deferred), 1, "parking keeps it");
     let released = release_activation(
         &mut store,
+        &mut WriterDocCache::new(),
         &RetirementScope {
             namespace: "relay",
             workspace_id: "ws",

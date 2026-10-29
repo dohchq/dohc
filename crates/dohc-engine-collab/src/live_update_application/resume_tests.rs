@@ -430,3 +430,96 @@ fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     settle_as(&mut f, Some(seed), "successor").unwrap();
     assert!(!attribution_unavailable(&f), "a predecessor's refusal its chain already covered");
 }
+
+/// Sol's N1 on round 2: the relay refused the owner's edit X, the owner saved
+/// the copy, and retirement kept X with its bytes. Settled at B and released
+/// with nothing Carried, the Y.Doc returns to accepted state at B, so Resume
+/// captures from that state with no seed and nothing delivers X again. The
+/// kept entry keeps X's bytes, and the reopened outbox keeps no refusal.
+#[test]
+fn resume_starts_from_the_accepted_state_after_a_kept_refusal() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+    native_tail_apply(
+        &mut f,
+        covered.update.clone(),
+        covered.delivery_id.clone(),
+        3,
+    );
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(&mut f, &covered);
+    let refused = native_tail_edit(&mut f, "# Refused\n", 12);
+    let outbox = refuse_head(&mut f, &refused.delivery_id, "delivery-conflict");
+    let owner_outbox::OwnerOutboxPageResult::Page(copy) =
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 1 << 20).unwrap()
+    else {
+        panic!("the owner's copy reads the queue");
+    };
+    let header: Value = serde_json::from_slice(&copy.bytes).unwrap();
+    assert_eq!(
+        (
+            header["state"].as_str(),
+            header["pendingEntryCount"].as_i64()
+        ),
+        (Some("quarantined"), Some(1))
+    );
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![refused.delivery_id.clone()],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    host_document(&mut f, true, true);
+    retire_settled(&mut f, Some(covered), "retired").unwrap();
+    let file = moment_text(&f, "retired");
+    assert!(
+        file.contains("Covered") && !file.contains("Refused"),
+        "{file}"
+    );
+    let text = |f: &Fixture| local_doc(f).project(ContentKind::Richdoc).unwrap().content;
+    assert!(
+        text(&f).contains("Refused"),
+        "the Y.Doc holds X until the release"
+    );
+    release_parked(&mut f);
+    assert!(manifest(&f, "adoption").is_empty(), "nothing Carried");
+    let local = text(&f);
+    assert!(
+        local.contains("Covered") && !local.contains("Refused"),
+        "{local}"
+    );
+    converged(&f, "retired", 3);
+    importable(&mut f);
+    returned(&mut f);
+    let id = successor(&mut f);
+    assert_eq!(f.cut.source_moment_id, "retired");
+    f.adopt().unwrap();
+    assert!(succession_row(&f, &id).3, "the successor is current");
+    assert!(
+        seeds(&f).is_empty(),
+        "its local state is accepted state at B"
+    );
+    assert_eq!(
+        query_rows(
+            &f,
+            "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE pending=1"
+        ),
+        query_rows(&f, "SELECT 0"),
+        "nothing delivers X again"
+    );
+    assert_eq!(quarantine_state(&f, &outbox), ("active".to_owned(), 0));
+    assert_eq!(
+        query_rows(
+            &f,
+            &format!(
+                "SELECT terminal_reason FROM owner_ydoc_outbox_entries WHERE delivery_id='{}'",
+                refused.delivery_id
+            )
+        ),
+        query_rows(&f, "SELECT 'retirement-kept'")
+    );
+    assert_eq!(entry_update(&f, &refused.delivery_id), refused.update);
+}

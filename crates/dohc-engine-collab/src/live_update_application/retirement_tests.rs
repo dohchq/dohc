@@ -686,6 +686,60 @@ fn a_kept_refusal_retires_with_its_bytes() {
     ));
 }
 
+/// Opus's N1 on round 2: the engine never heard the relay's refusal, so the
+/// queue was still active at Stop. Stop's quarantine records the refusal of
+/// its head, as delivery does, and after the copy retirement keeps the edit.
+/// A quarantine with no refusal recorded leaves nothing to keep it by, and
+/// every pass fails.
+#[test]
+fn a_refusal_recorded_at_stop_retires_with_its_bytes() {
+    for recorded in [true, false] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let entry = native_tail_edit(&mut f, "# Refused\n", 11);
+        let outbox = outbox_of(&f, &entry.delivery_id);
+        let input = owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "delivery-conflict".into(),
+            observed_binding: None,
+        };
+        if recorded {
+            let refusal = owner_outbox::OwnerOutboxRefusal {
+                delivery_id: entry.delivery_id.clone(),
+                key: format!("quarantined:{}", entry.delivery_id),
+            };
+            owner_outbox::record_refusal(&mut f.store, "workspace", input, refusal, 5).unwrap();
+        } else {
+            owner_outbox::quarantine(&mut f.store, "workspace", input, 5).unwrap();
+        }
+        assert_eq!(
+            quarantine_state(&f, &outbox),
+            ("quarantined".to_owned(), i64::from(recorded))
+        );
+        let absent = JournalEvidence {
+            receipts: vec![],
+            absent: vec![entry.delivery_id.clone()],
+        };
+        if !recorded {
+            for _ in 0..2 {
+                assert!(matches!(
+                    reconcile(&mut f, 10, None, Some(&absent)),
+                    Err(ApplicationError::Conflict)
+                ));
+            }
+            continue;
+        }
+        for journal in [Some(&absent), None] {
+            assert!(matches!(
+                reconcile(&mut f, 10, None, journal).unwrap(),
+                Reconciliation::Reconciled { .. }
+            ));
+        }
+        assert_eq!(native_entries(&f)[0].5.as_deref(), Some("retirement-kept"));
+        assert_eq!(entry_update(&f, &entry.delivery_id), entry.update);
+    }
+}
+
 /// A seed the relay refused and nothing applied is abandoned once, whatever
 /// the refusal. Its captured state stays for the owner's recovery.
 #[test]
@@ -1246,7 +1300,15 @@ fn host_document(f: &mut Fixture, departed: bool, parked: bool) {
 
 fn release_through(f: &mut Fixture, through: i64) -> Result<Release, ApplicationError> {
     let key = retirement_key(f, through);
-    release_activation(&mut f.store, &retirement_scope(), &key, &retirement_host(), 30, &NoFaults)
+    release_activation(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &retirement_scope(),
+        &key,
+        &retirement_host(),
+        30,
+        &NoFaults,
+    )
 }
 
 /// The retirement form of settlement, projecting the accepted prefix when

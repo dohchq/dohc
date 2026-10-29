@@ -1693,6 +1693,7 @@ impl Request {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     release_activation(
                         store,
+                        cache,
                         &scope.scope(&workspace_id),
                         &key,
                         &coordinate,

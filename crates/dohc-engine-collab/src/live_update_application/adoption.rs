@@ -2021,6 +2021,16 @@ fn require_succession(
     })
 }
 
+/// The quarantines a relay refusal leaves, the reasons the relay keeps an
+/// owner's refused edits for. Restore and binding quarantines recover only
+/// through enrollment.
+const RELAY_REFUSALS: [&str; 4] = [
+    "provenance-refused",
+    "delivery-conflict",
+    "capacity-refused",
+    "invalid-update",
+];
+
 /// Whether a retirement kept one of the outbox's refused entries, after the
 /// relay's journal proved it absent.
 fn retirement_kept(tx: &Transaction<'_>, outbox_id: &str) -> Result<bool, ApplicationError> {
@@ -2041,8 +2051,7 @@ pub(crate) const SUCCESSION_RETIRED: &str = "succession-retired";
 /// What a successor's adoption does to the outbox at its binding.
 #[derive(Debug, PartialEq, Eq)]
 enum CurrentOutbox {
-    /// Reopen the one a seed's provenance refusal or an earlier succession
-    /// quarantined.
+    /// Reopen the one a relay refusal or an earlier succession quarantined.
     Reopen(String),
     /// Open it beside the outboxes the chain left at earlier bindings of this
     /// restore generation, so the successor's own deliveries have one.
@@ -2187,9 +2196,9 @@ fn retained_outbox_coverage(
             {
                 true
             }
-            ("quarantined", reason)
+            ("quarantined", Some(reason))
                 if drained
-                    && reason != Some(SUCCESSION_RETIRED)
+                    && RELAY_REFUSALS.contains(&reason)
                     && observed
                         .as_ref()
                         .is_none_or(|observed| *observed == binding) =>
@@ -2515,6 +2524,13 @@ fn reopen_outbox(tx: &Transaction<'_>, outbox_id: &str) -> Result<(), Applicatio
     if reopened != 1 {
         return Err(ApplicationError::Conflict);
     }
+    // Every refusal recorded here was of a head its predecessor's retirement
+    // ended, so none can name this successor's work.
+    tx.execute(
+        "DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+        [outbox_id],
+    )
+    .map_err(write_sql)?;
     Ok(())
 }
 

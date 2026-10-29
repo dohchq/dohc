@@ -1474,6 +1474,31 @@ it("ends a Try again Stop left outstanding, and keeps the stopped document until
   expect(k.engine("ydoc.ownerOutbox.quarantine")).toHaveLength(1);
 });
 
+// Proves: a refusal the server kept whose quarantine never reached the
+// engine, its queue still active, is recorded at Stop as the refusal of its
+// head, so once its owner confirms a copy the retirement keeps the edit and
+// releases.
+it("records a refusal the engine never heard at Stop, and releases after the recovery copy", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.state = "active";
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(k.engine("ydoc.ownerOutbox.quarantine")).toEqual([expect.objectContaining({workspace: "attached-handle", params: {outboxId: "kept-outbox",
+    reason: "invalid-update", refusal: {deliveryId: "refused", key: "quarantined:refused"}}})]);
+  expect(o.keptOutbox).toMatchObject({state: "quarantined", retryDeliveryId: null});
+  expect(o.calls(sent)).not.toContain("liveApplication.reconcileActivation");
+  o.engine.unproven = ["refused"];
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  expect(o.calls(sent)).toContain("liveApplication.releaseActivation");
+  expect(k.row()).toBeNull();
+  expect(k.engine("ydoc.ownerOutbox.quarantine")).toHaveLength(1);
+});
+
 // Proves: once a stopped document's departure ended every Try again, later
 // passes that only wait for its owner's recovery copy read none of its queues
 // again. Its return, then a second Stop, scans them once more.

@@ -1259,17 +1259,35 @@ fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
     assert_eq!(rows(&f, &SUCCESSION_WRITES), written, "a replay adds no activation and no seed");
 }
 
-/// Sol's B1, its limits: a successor reopens only a provenance refusal's
+/// Sol's B1, its limits: a successor reopens only a relay refusal's
 /// quarantine, at its exact binding, with nothing pending and a seed
-/// strictly abandoned. Every other quarantine refuses the succession with no
-/// writes.
+/// strictly abandoned. A restore or binding quarantine, like every other
+/// damage, refuses the succession with no writes.
 #[test]
 fn a_successor_reopens_no_other_quarantine() {
+    for reason in ["delivery-conflict", "capacity-refused", "invalid-update"] {
+        let mut f = quarantined_seed_released().0;
+        successor(&mut f);
+        write(
+            &mut f,
+            &format!("UPDATE owner_ydoc_outboxes SET quarantine_reason='{reason}'"),
+        );
+        f.adopt()
+            .unwrap_or_else(|error| panic!("{reason}: {error:?}"));
+        assert_eq!(
+            query_rows(
+                &f,
+                "SELECT state,quarantine_reason FROM owner_ydoc_outboxes"
+            ),
+            query_rows(&f, "SELECT 'active',NULL"),
+            "{reason}"
+        );
+    }
     let cases: [(&str, &str); 8] = [
-        ("delivery conflict", "UPDATE owner_ydoc_outboxes SET quarantine_reason='delivery-conflict'"),
         ("selectors", "UPDATE owner_ydoc_outboxes SET selector_paths_json='[\"owner.md\",\"other.md\"]'"),
         ("restore", "UPDATE owner_ydoc_outboxes SET quarantine_reason='restore-fenced'"),
         ("binding", "UPDATE owner_ydoc_outboxes SET quarantine_reason='stale-binding'"),
+        ("binding changed", "UPDATE owner_ydoc_outboxes SET quarantine_reason='binding-changed'"),
         (
             "conflicting observed binding",
             "UPDATE owner_ydoc_outboxes SET observed_binding_json=json_object('workspaceId','workspace',
