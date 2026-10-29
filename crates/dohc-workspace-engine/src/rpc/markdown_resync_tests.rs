@@ -165,7 +165,8 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
         .await
         .unwrap_err();
     assert_eq!(failed.code, ErrorCode::Internal);
-    // The reader treats a mismatched reply as a crash, and the engine retries a crash once.
+    // The reader reports a mismatched reply as a crash. By design, the engine retries a crashed
+    // witness check once before it refuses, so the failed settle makes two checks.
     assert_eq!(
         failed_reader.dispatch_count(),
         checks_before_settle + 2,
