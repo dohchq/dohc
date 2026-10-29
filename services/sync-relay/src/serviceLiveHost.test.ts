@@ -16,6 +16,8 @@ import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import type {StorageContext} from "./storage/context.js";
 import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement.js";
+import {ServiceHostRetirementConflict, type ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment.js";
+import {preparedStop} from "./liveTickets.test-helper.js";
 import {ServiceActivationStore} from "./storage/serviceActivation.js";
 import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
@@ -503,14 +505,15 @@ it("gives several unfinished targets in one workspace one catch-up pull a pass",
 });
 
 const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+type DrainLimits = {maxEntriesPerDrain?: number; maxBytesPerDrain?: number};
+const sha256 =(bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-// `maxApplications` is the settlement bound, which pages a retirement's applications.
+// `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number} = {}) {
+  maxApplications?: number; limits?: DrainLimits} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -573,7 +576,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
   await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
     ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
-    ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {})});
+    ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {}), ...options.limits});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.maxApplications) Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: options.maxApplications}});
@@ -615,11 +618,51 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // once it settled through what it applied, unless `releasePending` names another reason. Native capture returns
   // `capture`, as a test sets for a successor, which adopts at its predecessor's boundary; `adoption` is what the
   // engine last adopted. `generation` is the restore generation the document's application binding has, once a
-  // restore moved it past its queues'.
+  // restore moved it past its queues'. `prepared` is the activation whose local appends a Stop's preparation blocks,
+  // until its release, its retirement's reconciliation, or the end of the connection; `releaseFailure` fails each release.
   const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; reconciledThrough?: number; unproven: string[]; journals: unknown[];
     unpushed: number; releasePending?: string; capture: NativeOwnerActivation; adoption: {activationId: string; throughCursor: number | null};
-    generation?: number; abandonableSeed?: boolean} =
+    generation?: number; abandonableSeed?: boolean; prepared?: Record<string, unknown>; releaseFailure?: Error} =
     {capture, unproven: [], journals: [], unpushed: 0, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
+  // The activation's own native queue, which delivery reads through its owner state once `outboxId` names it. Its entries
+  // wait in order. A refused head quarantines it until a Try again names that head in `retryDeliveryId`, and acknowledging
+  // that head resumes it. The engine never receives an acknowledgement of an entry `loseAcks` names, so the entry stays
+  // queued, as when the relay accepted it and its receipt never reached the engine.
+  type NativeEntry = {sequence: number; deliveryId: string; update: Buffer};
+  const NATIVE = "native-outbox";
+  const native: {outboxId: string | null; binding?: unknown; entries: NativeEntry[]; nextSequence: number; state: "active" | "quarantined";
+    retryDeliveryId: string | null; loseAcks: Set<string>} = {outboxId: null, entries: [], nextSequence: 1, state: "active", retryDeliveryId: null, loseAcks: new Set()};
+  const nativeBytes = () => native.entries.reduce((sum, entry) => sum + entry.update.length, 0);
+  // One page of the native queue's snapshot, as the engine reads it: each part whole, entries in order after the header.
+  const nativePage = (params: Record<string, unknown>) => {
+    const header = {outboxId: NATIVE, binding: native.binding, baseUpdateDigest: document.lineageClaimId, baseByteLength: 1, state: native.state,
+      pendingBytes: nativeBytes(), pendingEntryCount: native.entries.length, nextSequence: native.nextSequence, oldestEntryAtMs: native.entries.length ? 1 : null,
+      quarantineReason: native.state === "quarantined" ? "invalid-update" : null, observedBinding: null, retryDeliveryId: native.retryDeliveryId};
+    const snapshot = sha256(Buffer.from(JSON.stringify(header))), cursor = (part: string, sequence = 0) => ({snapshot, part, sequence, offset: 0});
+    const requested = (params.cursor as ReturnType<typeof cursor> | undefined) ?? cursor("header");
+    if (requested.snapshot !== snapshot) return {kind: "readChanged"};
+    const first = native.entries[0], at = native.entries.findIndex(entry => entry.sequence === requested.sequence);
+    const entry = native.entries[at], following = native.entries[at + 1];
+    const live = {firstEntryCursor: first ? cursor("entryHeader", first.sequence) : null, frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null};
+    if (requested.part !== "header" && requested.part !== "base" && !entry) return {kind: "readChanged"};
+    const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, ...live})), cursor("base")] as const
+      : requested.part === "base" ? [Buffer.from([1]), live.firstEntryCursor] as const
+      : requested.part === "entryHeader" ? [Buffer.from(JSON.stringify({sequence: entry!.sequence, appendKey: `append-${entry!.deliveryId}`, deliveryId: entry!.deliveryId,
+        updateDigest: sha256(entry!.update), byteLength: entry!.update.length, createdAtMs: 1})), cursor("update", entry!.sequence)] as const
+      : [entry!.update, following ? cursor("entryHeader", following.sequence) : null] as const;
+    return {kind: "page", ...requested, totalBytes: bytes.length, digest: sha256(bytes), bytesBase64: bytes.toString("base64"), nextCursor};
+  };
+  // The bytes delivery reads for the queue's head now: its header, entry header and update pages.
+  const nativeHeadBytes = () => {
+    let read = 0, cursor: unknown;
+    for (let page = 0; page < 3; page++) {
+      const answer = nativePage(cursor === undefined ? {} : {cursor}) as {bytesBase64: string; nextCursor: {part: string} | null};
+      read += answer.bytesBase64.length;
+      // Delivery skips the base part.
+      cursor = page === 0 ? {...answer.nextCursor, part: "entryHeader", sequence: native.entries[0]!.sequence} : answer.nextCursor;
+    }
+    return read;
+  };
   const ownerBoundary = () => {
     const tip = JSON.parse(String(raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json));
     if (!tip) return {terminalReceipt: null, eventCount: 0, historyEvidenceDigest: initialAcceptedHistoryDigest(f.history.namespace, document)};
@@ -739,8 +782,26 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           registrations.live = ++registrations.next;
           return reply({registrationId: registrations.live});
         case "liveApplication.ownerState": return reply({adoptionId: engine.adoption.activationId, expectedLocalSequence: 2,
-          throughCursor: engine.adoption.throughCursor, outboxId: null, pendingBytes: 0, outboxState: "active", retryDeliveryId: null});
+          throughCursor: engine.adoption.throughCursor, outboxId: native.outboxId, pendingBytes: native.outboxId ? nativeBytes() : 0,
+          outboxState: native.state, retryDeliveryId: native.retryDeliveryId});
+        // As the engine's, a preparation needs every queue of the activation to hold nothing deliverable and no Try again.
+        case "liveApplication.prepareRetirement": {
+          if (Object.keys(request.params).join() !== "objectId,activationId,lineageClaimId,restoreFenceGeneration") throw new Error("INVALID_PARAMS: invalid-retirement-preparation");
+          const deliverable = native.entries.length > 0 && (native.state === "active" || native.retryDeliveryId !== null);
+          const granted = native.retryDeliveryId !== null || [keptOutbox, ...keptOutboxes.values()].some(queue => queue && queue.retryDeliveryId !== null);
+          if (deliverable || granted) return reply({status: "pending", reason: deliverable ? "native-pending" : "retry-outstanding"});
+          engine.prepared = {...request.params};
+          return reply({status: "prepared"});
+        }
+        case "liveApplication.releaseRetirementPreparation": {
+          if (engine.releaseFailure) throw engine.releaseFailure;
+          const released = JSON.stringify(engine.prepared) === JSON.stringify(request.params);
+          if (released) engine.prepared = undefined;
+          return reply({released});
+        }
         case "liveApplication.reconcileActivation": {
+          // Its retirement began, which ends the block.
+          engine.prepared = undefined;
           if (engine.refusal) throw engine.refusal;
           if (request.params.journal) {engine.journals.push(request.params.journal); engine.unproven = [];}
           if (engine.unproven.length) return reply({status: "pending", reason: "delivery", deliveries: engine.unproven});
@@ -782,9 +843,26 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
-        case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
-        case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
+        case "ydoc.ownerOutbox.retry":
+          if (request.params.outboxId === NATIVE) {native.retryDeliveryId = native.entries[0]!.deliveryId; return reply({retryDeliveryId: native.retryDeliveryId});}
+          outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
+        case "ydoc.ownerOutbox.quarantine": {
+          if (request.params.outboxId === NATIVE) {native.state = "quarantined"; native.retryDeliveryId = null; return reply({});}
+          const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});
+        }
+        case "ydoc.ownerOutbox.acknowledge": {
+          const head = native.entries[0], receipts = request.params.receipts as {deliveryId: string}[];
+          if (request.params.outboxId !== NATIVE || !head || receipts.length !== 1 || receipts[0]!.deliveryId !== head.deliveryId ||
+            (native.state === "quarantined" && native.retryDeliveryId !== head.deliveryId)) {
+            throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-outbox-receipt-mismatch", retry: "no"} as never);
+          }
+          if (native.loseAcks.has(head.deliveryId)) throw new Error("Acknowledgement lost.");
+          native.entries.shift();
+          if (native.state === "quarantined") {native.state = "active"; native.retryDeliveryId = null;}
+          return reply({acknowledged: 1, pendingBytes: nativeBytes(), oldestEntryAtMs: native.entries.length ? 1 : null});
+        }
         case "ydoc.ownerOutbox.readPending": {
+          if (request.params.outboxId === NATIVE) return reply(nativePage(request.params));
           if (!request.workspace?.startsWith("recovery-")) {
             const currentFailure = recoveryFaults.failCurrentRead;
             if (currentFailure) {recoveryFaults.failCurrentRead = undefined; throw currentFailure;}
@@ -865,11 +943,25 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     return () => f.storage.commitLiveUpdateJournal({host: coordinate, actor, expectedAuthority: live.authority,
       metadata: {deliveryId: `edit-${value}`, updateDigest: sha256(updateBytes), binding: live.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 5});
   };
+  // Owner edits the native session appended to its queue in order, each on the state before it.
+  const nativeEdits = (...values: string[]) => {
+    const read = f.storage.readLiveUpdateJournalCut({document});
+    if (read.kind !== "cut") throw new Error("Missing live journal.");
+    const doc = new Y.Doc();
+    for (const bytes of [read.cut.checkpoint.bytes, ...read.cut.suffix.map(row => row.bytes)]) Y.applyUpdate(doc, bytes);
+    for (const value of values) {
+      const vector = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("edit", value);
+      native.entries.push({sequence: native.nextSequence++, deliveryId: `edit-${value}`, update: Buffer.from(Y.encodeStateAsUpdate(doc, vector))});
+    }
+    doc.destroy();
+    native.outboxId = NATIVE;
+  };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
   return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, engine, membership, keptOutbox, keptOutboxes, recoveryStores, recoveryFaults,
+    native, nativeEdits, nativeHeadBytes,
     spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
@@ -1068,12 +1160,15 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 
 // An empty host whose sibling document activates for real. The other document
 // counts as loaded but never activates, so only its unload reaches the engine.
-async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number} = {}) {
+// Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
+async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
+  limits?: DrainLimits} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
-  const activate = ServiceActivationDriver.prototype.activate, loaded = ServiceActivationDriver.prototype.loaded;
+  const activate = ServiceActivationDriver.prototype.activate, loaded = ServiceActivationDriver.prototype.loaded, passes = {deliver: true};
   vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    if (!passes.deliver && args[0].path === sibling.path) return Promise.resolve({kind: "pending" as const, reason: "paused"});
     return args[0].path === other.path ? Promise.resolve({kind: "pending" as const, reason: "held"}) : activate.apply(this, args);
   });
   vi.spyOn(ServiceActivationDriver.prototype, "loaded").mockImplementation(function (this: ServiceActivationDriver, target) {
@@ -1085,7 +1180,7 @@ async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPe
   const detach = {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}};
   // The workspace's pulls so far, for waiting on the next one.
   const pullCount = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
-  return {...o, sibling, other, attach, detach, pullCount, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
+  return {...o, sibling, other, attach, detach, pullCount, passes, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
     async nextPull() {const seen = pullCount(); await vi.waitFor(() => expect(pullCount()).toBeGreaterThan(seen + 1));}};
 }
 const stay = {departing: []};
@@ -1329,8 +1424,8 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // An empty host with the document shared with Edit, enrolled and ready.
-async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8} = {}) {
-  const o = await emptyServiceHost({frameChanges, maxApplications});
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications, limits});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
@@ -1341,7 +1436,7 @@ async function enrolledServiceHost({freshRegistrations = false, frameChanges = f
   return {...o, binding: binding.binding, calls,
     // The owner's Stop, which fences the document at once.
     stop() {
-      expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+      expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
         enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({enabled: false, retired: true});
     },
     depart: (host = o.host) => host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]})};
@@ -1635,7 +1730,7 @@ it("keeps retiring a document resumed while its retirement on a refused seed wai
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   // Stop again: the document departs, and the retirement completes with the copy still asked for.
-  o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 50, guard() {}});
+  preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 50, guard() {}});
   await o.depart();
   await vi.waitFor(() => expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull());
   expect(k.row()).toMatchObject({copied: false});
@@ -2244,7 +2339,7 @@ it.each([false, true])("retires a never-adopted activation only once its documen
   const o = await emptyServiceHost({adopted: false});
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+  expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({enabled: false, retired: true});
   // Its replica lists it departed, so it has not parked.
   o.replies.commit = {departed: [o.sibling.objectId]};
@@ -2529,7 +2624,7 @@ it.each([false, true])("records an adoption whose reply was lost before Stop dur
   let ownersWhenLost: unknown, cutsWhenLost = 0;
   adopt.mockImplementationOnce(async (...args: unknown[]) => {
     await adopted(...args);
-    expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+    expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
       enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true});
     ownersWhenLost = o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get();
     cutsWhenLost = cuts.mock.calls.length;
@@ -2587,7 +2682,7 @@ it("records a successor's adoption at its predecessor's boundary whose reply was
   const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
   adopt.mockImplementationOnce(async (...args: unknown[]) => {
     await adopted(...args);
-    expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+    expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
       enabled: false, retire: true, nowMs: 50, guard() {}})).toMatchObject({retired: true});
     throw new Error("Adoption reply lost.");
   });
@@ -4064,7 +4159,7 @@ it("retires a stopped document whose idle unload went unanswered without sending
   o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
   o.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
-  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+  expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({enabled: false, retired: true});
   await o.host.update({workspaces: o.workspaces, documents: [o.other], departing: [o.sibling]});
   await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
@@ -4117,4 +4212,210 @@ it("keeps pulling a fully dormant workspace and pulls again before a reopened do
   expect(before("sync.pullHosted")).toBeLessThan(before("sync.commitCursor"));
   const order = (method: string) => send.mock.invocationCallOrder.filter((_, index) => o.methods()[index] === method).at(-1)!;
   expect(captured).toBeLessThan(order("liveApplication.register"));
+});
+
+// The owner's Stop through the running host, as the route asks it: the host
+// delivers and prepares the document, then `fence` runs the relay's Stop.
+const hostStop = (o: Awaited<ReturnType<typeof enrolledServiceHost>>, signal?: AbortSignal,
+  fence = (prepared?: ServiceHostRetirementPreparation) => o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner",
+    path: o.sibling.path, enabled: false, retire: true, nowMs: 20, guard() {}, ...(prepared ? {prepared} : {})})) =>
+  o.host.stop({workspaceId: "workspace", objectId: "object"}, fence, signal);
+// The document's own native queue holding `d`, which the relay refused, and
+// `e` behind it, with the refusal the server keeps for its owner. Passes
+// leave its delivery to the test.
+function refusedNative(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const identity = o.workspace.hostedReplication!.identity, queue = {workspaceId: "workspace", identity, outboxId: "native-outbox"};
+  Object.assign(o.native, {binding: o.binding, state: "quarantined"});
+  o.f.storage.recordServiceKeptEdits({identity, outboxId: "native-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "edit-d",
+    refusalKey: "refusal-d", nowMs: 1});
+  o.nativeEdits("d", "e");
+  return {
+    row: () => o.f.storage.readServiceKeptEdits(queue),
+    async grant() {await expect(o.host.retryKeptEdits(o.f.storage.readServiceKeptEdits(queue)!, () => {})).resolves.toBe("granted");},
+  };
+}
+// The live journal's cursors for a delivery.
+const journaled = (o: Awaited<ReturnType<typeof enrolledServiceHost>>, deliveryId: string) =>
+  o.raw.prepare("SELECT journal_cursor FROM sync_relay_live_update_journal WHERE delivery_id=? ORDER BY journal_cursor").all(deliveryId).map(row => Number(row.journal_cursor));
+const engineParams = (o: Awaited<ReturnType<typeof enrolledServiceHost>>, method: string) =>
+  o.ownerCalls().filter(([called]) => called === method).map(([, params]) => params);
+const prepared = (o: Awaited<ReturnType<typeof enrolledServiceHost>>) =>
+  ({objectId: "object", activationId: ACTIVATION, lineageClaimId: o.document.lineageClaimId, restoreFenceGeneration: o.binding.restoreFenceGeneration});
+// Nothing fenced: no retirement opened and the document's admission stays open.
+const stillLive = (o: Awaited<ReturnType<typeof enrolledServiceHost>>) => {
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(true);
+  expect(o.f.storage.readServiceHostEnrollment("workspace", o.sibling.path)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+};
+
+// Proves: Stop waits while the engine still holds an edit for the relay, even
+// one the relay accepted whose acknowledgement was lost, and keeps the
+// owner's Try again. It fences and blocks nothing. Once a drain replays that
+// edit and delivers the one behind it, the next Stop prepares the activation
+// and retires through both. Stopping again replays that retirement.
+it("waits to stop while a granted edit's acknowledgement is lost, then retires through it and the edit behind it", async () => {
+  const o = await enrolledServiceHost(), n = refusedNative(o);
+  await n.grant();
+  o.native.loseAcks.add("edit-d");
+  await expect(o.host.drain(o.document)).rejects.toThrow("Acknowledgement lost.");
+  expect(journaled(o, "edit-d")).toHaveLength(1);
+  await expect(hostStop(o)).resolves.toBe("waiting");
+  expect(o.native.entries.map(entry => entry.deliveryId)).toEqual(["edit-d", "edit-e"]);
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+  expect(n.row()).toMatchObject({retrying: true});
+  expect(o.native).toMatchObject({state: "quarantined", retryDeliveryId: "edit-d"});
+  // The replay acknowledges `d` with the receipt the relay kept, then delivers `e`.
+  o.native.loseAcks.clear();
+  await o.host.drain(o.document);
+  expect(o.native.entries).toEqual([]);
+  const [d] = journaled(o, "edit-d"), [e] = journaled(o, "edit-e");
+  expect(journaled(o, "edit-d")).toEqual([d]);
+  expect(e).toBeGreaterThan(d!);
+  await expect(hostStop(o)).resolves.toMatchObject({enabled: false, retired: true, acceptedCursor: e});
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, acceptedThrough: e});
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o), prepared(o)]);
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
+  await expect(hostStop(o)).resolves.toMatchObject({retired: true, acceptedCursor: e});
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(2);
+});
+
+// Proves: a drain budget that ends between a granted edit and the edit behind
+// it leaves Stop waiting, and Stop still waits once the next drain forgot the
+// kept row because the queue delivers again but lost the later edit's
+// acknowledgement. Stop retires through both once that edit is delivered.
+it.each([
+  ["one entry", {maxEntriesPerDrain: 1}],
+  ["bytes for one entry", {maxBytesPerDrain: 1600}],
+] as [string, DrainLimits][])("waits to stop while a drain budget of %s leaves the edit behind a granted one", async (_budget, limits) => {
+  const o = await enrolledServiceHost({limits}), n = refusedNative(o);
+  await n.grant();
+  if (limits.maxBytesPerDrain) expect(o.nativeHeadBytes()).toBeLessThanOrEqual(limits.maxBytesPerDrain);
+  // Stop's own drain delivers `d` and leaves `e`.
+  await expect(hostStop(o)).resolves.toBe("waiting");
+  expect(journaled(o, "edit-d")).toHaveLength(1);
+  expect(journaled(o, "edit-e")).toEqual([]);
+  expect(o.native).toMatchObject({state: "active", retryDeliveryId: null});
+  expect(o.native.entries.map(entry => entry.deliveryId)).toEqual(["edit-e"]);
+  stillLive(o);
+  expect(n.row()).toMatchObject({retrying: true});
+  o.native.loseAcks.add("edit-e");
+  await expect(o.host.drain(o.document)).rejects.toThrow("Acknowledgement lost.");
+  expect(n.row()).toBeNull();
+  await expect(hostStop(o)).resolves.toBe("waiting");
+  stillLive(o);
+  expect(o.engine.prepared).toBeUndefined();
+  o.native.loseAcks.clear();
+  const [e] = journaled(o, "edit-e");
+  await expect(hostStop(o)).resolves.toMatchObject({retired: true, acceptedCursor: e});
+  expect(journaled(o, "edit-e")).toEqual([e]);
+  expect(o.native.entries).toEqual([]);
+});
+
+// Proves: a kept row that still says retrying does not hold Stop back once
+// the engine's queue holds nothing and no Try again.
+it("stops a document whose kept row still says retrying once its native queue is empty", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const identity = o.workspace.hostedReplication!.identity, queue = {workspaceId: "workspace", identity, outboxId: "native-outbox"};
+  Object.assign(o.native, {binding: o.binding, outboxId: "native-outbox"});
+  o.f.storage.recordServiceKeptEdits({identity, outboxId: "native-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "edit-d",
+    refusalKey: "refusal-d", nowMs: 1});
+  expect(o.f.storage.markServiceKeptEditsRetrying(o.f.storage.readServiceKeptEdits(queue)!)).toBe(true);
+  await expect(hostStop(o)).resolves.toMatchObject({retired: true});
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
+  expect(o.engine.prepared).toEqual(prepared(o));
+});
+
+// Proves: a preparation belongs to the connection that made it. A connection
+// replaced while the engine prepares fails the fence inside its transaction,
+// the block ends, and the old host prepares nothing again.
+it("fails the fence and ends the block when the host connection is replaced during preparation", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o);
+  await parked.entered.promise;
+  expect(o.f.storage.registerLiveHost({...o.host.coordinate, connectionId: "replacement", updatedAtMs: Date.now(), guard: o.f.storage.captureStanding()}).ok).toBe(true);
+  parked.release.resolve();
+  await expect(stopping).rejects.toThrow("retired");
+  expect(o.engine.prepared).toBeUndefined();
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  stillLive(o);
+  await expect(hostStop(o)).rejects.toThrow("retired");
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(1);
+});
+
+// Proves: a host that closes while the engine prepares fences nothing, and
+// ends the block before it stops.
+it("fences nothing and ends the block when the host closes during preparation", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o);
+  await parked.entered.promise;
+  const closing = o.host.close();
+  parked.release.resolve();
+  await expect(stopping).rejects.toThrow();
+  await closing;
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+});
+
+// Proves: a cancelled Stop releases the block and leaves admission open, and
+// a later Stop prepares again and retires.
+it("releases the block and keeps the document live when Stop is cancelled during preparation", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const cancel = new AbortController(), parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o, cancel.signal);
+  await parked.entered.promise;
+  cancel.abort();
+  parked.release.resolve();
+  await expect(stopping).rejects.toThrow();
+  expect(o.engine.prepared).toBeUndefined();
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  stillLive(o);
+  expect(o.host.invalidated.aborted).toBe(false);
+  await expect(hostStop(o)).resolves.toMatchObject({retired: true});
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(2);
+});
+
+// Proves: a relay failure after the engine prepared releases the block, and
+// a release that fails ends the host's connection, which ends the block.
+it("releases the block when the fence fails after preparation, and closes the host when the release fails", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const failing = (): never => {throw new Error("Relay storage failed.");};
+  await expect(hostStop(o, undefined, failing)).rejects.toThrow("Relay storage failed.");
+  expect(o.engine.prepared).toBeUndefined();
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  stillLive(o);
+  expect(o.host.invalidated.aborted).toBe(false);
+  o.engine.releaseFailure = new Error("Release reply lost.");
+  await expect(hostStop(o, undefined, failing)).rejects.toThrow("Relay storage failed.");
+  await vi.waitFor(() => expect(o.host.invalidated.aborted).toBe(true));
+  stillLive(o);
+});
+
+// Proves: a restore that moved the document's generation while the engine
+// prepared fails the fence as a restore conflict and ends the block.
+it("fails the fence and ends the block when the restore generation changes during preparation", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o);
+  await parked.entered.promise;
+  o.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1 WHERE object_id='object'").run();
+  parked.release.resolve();
+  await expect(stopping).rejects.toBeInstanceOf(ServiceHostRetirementConflict);
+  expect(o.engine.prepared).toBeUndefined();
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  stillLive(o);
 });

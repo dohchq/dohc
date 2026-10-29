@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { openSyncRelayStorage, type OpenSyncRelayStorageOptions } from "./storage.js";
+import { openSyncRelayStorage, type OpenSyncRelayStorageOptions, type SyncRelayStorage } from "./storage.js";
+import type { SetServiceHostEnrollmentEnabledInput } from "./storage/serviceHostEnrollment.js";
 import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
 
@@ -27,6 +28,16 @@ export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, 
     .run(namespace, activationId, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
       JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId, completed ? "{}" : null);
   return activationId;
+}
+/**
+ * The owner's Stop as a running service host fences it once its engine
+ * prepared the document's activation, for tests of what follows Stop. The
+ * host's own preparation is tested in `serviceLiveHost.test.ts`.
+ */
+export function preparedStop(storage: SyncRelayStorage, input: SetServiceHostEnrollmentEnabledInput) {
+  const objectId = input.objectId ?? storage.readServiceHostEnrollment(input.workspaceId, input.path)?.objectId;
+  const candidate = objectId === undefined ? null : storage.retirableServiceActivation({workspaceId: input.workspaceId, objectId});
+  return storage.setServiceHostEnrollmentEnabled({...input, ...(candidate ? {prepared: {...candidate, assertCurrent() {}}} : {})});
 }
 export const audience = "https://share.example.test";
 export const key = new Uint8Array(32).fill(13);

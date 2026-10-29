@@ -495,6 +495,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
   }
+  retirableServiceActivation(document: {workspaceId: string; objectId: string}) {
+    return serviceActivationRetirementStorage.retirableServiceActivation(this, document);
+  }
   retirementJournalEvidence(retirement: ServiceActivationRetirement, deliveryIds: readonly string[]) {
     return serviceActivationRetirementStorage.retirementJournalEvidence(this, retirement, deliveryIds);
   }

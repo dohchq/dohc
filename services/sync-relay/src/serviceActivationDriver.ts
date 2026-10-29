@@ -24,6 +24,7 @@ import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {ServiceHostedHold,ServiceHostedPullPage} from "./serviceHostedReplication";
 import type {ServiceKeptEditsIdentity} from "./storage/serviceKeptEdits";
+import type {RetirableServiceActivation} from "./storage/serviceActivationRetirement";
 
 const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
@@ -402,6 +403,28 @@ export class ServiceActivationDriver {
       delivery=this.#delivery.recordDepartedApplication({...input,binding:delivery.binding},ack);
     }
     return {kind:"reconciled",registrationId,tip:delivery.tip};
+  }
+  /**
+   * Asks the engine, through the workspace `handle`, to refuse new local edits
+   * of the activation once nothing of it waits for delivery or holds a Try
+   * again. False while something does; nothing is blocked then. The block
+   * ends at its release, once the engine begins the activation's retirement,
+   * or with this connection.
+   */
+  async prepareRetirement(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal):Promise<boolean>{
+    const o=this.options;
+    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.prepareRetirement",params:{objectId,...activation}},signal);
+    const reply=answer(response.result,{prepared:[],pending:["reason"]});
+    if(reply.status==="pending" && reply.reason!=="native-pending" && reply.reason!=="retry-outstanding")throw new Error("Invalid live retirement response.");
+    return reply.status==="prepared";
+  }
+  /** Ends the block `prepareRetirement` set, if it stands. */
+  async releaseRetirementPreparation(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal){
+    const o=this.options;
+    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.releaseRetirementPreparation",params:{objectId,...activation}},signal);
+    if(typeof configRecord(response.result,["released"]).released!=="boolean")throw new Error("Invalid live retirement response.");
   }
   /**
    * Moves the document's open retirement as far as it can. The engine proves

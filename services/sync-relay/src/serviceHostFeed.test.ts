@@ -1,6 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {sha256Hex} from "@dohc/workspace-core/hash";
-import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, preparedStop, retainServiceActivation, scope} from "./liveTickets.test-helper";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -416,7 +416,7 @@ it("settles a moved or replaced document's work without taking back its old loca
 it("keeps a retiring document out of hosted reads and writes while its sibling stays readable", async () => {
   const f = await fixture(); f.enroll("docs/b.md");
   const activationId = retainServiceActivation(f.raw, namespace, true);
-  const stop = f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 20, guard() {}});
+  const stop = preparedStop(f.storage, {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 20, guard() {}});
   expect(stop?.acceptedCursor).toBe(0);
   f.enroll("docs/a.md");
   expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({enabled: true, retired: false});

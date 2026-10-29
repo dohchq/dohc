@@ -4,7 +4,8 @@ import type {ServerResponse} from "node:http";
 import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {afterEach, expect, it, vi} from "vitest";
 import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "./liveTickets.test-helper";
-import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement";
+import {readServiceActivationRetirement, type RetirableServiceActivation} from "./storage/serviceActivationRetirement";
+import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
@@ -35,7 +36,7 @@ async function fixture() {
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   // The documents the session host blocked until their owner tries again.
-  const blocked = new Map<string, ServiceActivationBlock>();
+  const blocked = new Map<string, ServiceActivationBlock>(), pending = new Set<string>(), prepared: RetirableServiceActivation[] = [];
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
@@ -48,6 +49,15 @@ async function fixture() {
         return f.storage.markServiceKeptEditsRetrying(kept) ? "granted" : "changed";
       }),
       copied: vi.fn(async (_kept: ServiceKeptEdits) => {})},
+    // The documents whose native edits the host has not delivered yet. Stop fences only once none is pending.
+    // Otherwise it prepares the activation Stop retires, as `prepared` records, unless `running` is false.
+    pending, prepared, running: true,
+    async stop<T>(document: {workspaceId: string; objectId: string}, fence: (preparation?: ServiceHostRetirementPreparation) => T): Promise<T | "waiting"> {
+      if (pending.has(document.objectId)) return "waiting";
+      const candidate = host.running ? f.storage.retirableServiceActivation(document) : null;
+      if (candidate) prepared.push(candidate);
+      return fence(candidate ? {...candidate, assertCurrent() {}} : undefined);
+    },
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
@@ -840,6 +850,68 @@ it("compares the restore generation before retirement and accepts a repeat", asy
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, retired: false});
   expect((await request(binding.restoreFenceGeneration)).status).toBe(200);
   expect((await request(binding.restoreFenceGeneration)).status).toBe(200);
+});
+
+// Proves: while the service host still holds an edit the relay has not
+// admitted, Stop answers waiting and fences nothing: no retirement opens and
+// the document stays live. Once the edit is delivered, Stop retires through it.
+it("waits to stop a hosted document until its pending edit is delivered, then retires with it", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  retainServiceActivation(f.raw, namespace, true);
+  const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
+  const stop = () => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
+  f.host.pending.add(binding.objectId);
+  const waiting = await stop();
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toMatchObject({ok: false, code: "edits-pending"});
+  expect(retirement()).toBeNull();
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
+  // The host delivers the edit while admission is open.
+  const cursor = Number(f.raw.prepare(`INSERT INTO sync_relay_live_update_journal
+    (delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
+    restore_fence_generation,principal_kind,principal_id,accepting_host_epoch,received_at_ms,update_bytes,
+    relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,canonical_version,first_seen_deletes_json)
+    VALUES ('pending-edit',?,?,'main',?,?,?,'["docs"]',7,'owner','owner-1',1,1,x'01',?,1,?,1,2,'[]') RETURNING journal_cursor`)
+    .get("c".repeat(64), scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.currentPath, namespace, "d".repeat(64))!.journal_cursor);
+  f.host.pending.delete(binding.objectId);
+  const stopped = await stop();
+  expect(await stopped.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: cursor});
+  expect(retirement()).toMatchObject({objectId: binding.objectId, acceptedThrough: cursor});
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
+});
+
+// Proves: a Stop whose reply was lost is done in the relay's durable state.
+// Reading it reports the document retired, and a second Stop replays that
+// retirement at its fence without preparing again.
+it("reports a Stop whose reply was lost as done and replays it without preparing again", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const stop = () => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
+  await stop();
+  expect(f.host.prepared).toEqual([{activationId, lineageClaimId: binding.lineageClaimId, restoreFenceGeneration: binding.restoreFenceGeneration}]);
+  expect((await (await f.handle(f.request("GET"))).json()).documents).toEqual([]);
+  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
+    {path: binding.currentPath, objectId: binding.objectId, status: "retired"}]);
+  const fence = readServiceActivationRetirement(f.storage as StorageContext, enrolled)!;
+  const replayed = await stop();
+  expect(replayed.status).toBe(200);
+  expect(await replayed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "retired", acceptedCursor: fence.acceptedThrough});
+  expect(f.host.prepared).toHaveLength(1);
+  expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toEqual(fence);
+});
+
+// Proves: with no running host to deliver its edits, Stop of a document with a
+// retained activation waits and fences nothing.
+it("waits to stop a retained activation that no running host can prepare", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  f.host.running = false;
+  retainServiceActivation(f.raw, namespace, true);
+  const waiting = await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true}));
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toEqual({ok: false, code: "edits-pending", error: "Live editing didn't stop. Recent edits haven't reached the server yet."});
+  expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
 });
 
 it("retires an unenrolled desktop without a generation and resolves a moved target by object",async () => {

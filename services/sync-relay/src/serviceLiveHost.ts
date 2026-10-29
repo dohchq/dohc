@@ -29,6 +29,7 @@ import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSett
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
+import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
@@ -1421,6 +1422,50 @@ export async function startServiceLiveHost(options: {
         });
         if (outcome === "granted") await wake(kept.binding, callerSignal);
         return outcome;
+      },
+      /**
+       * Runs `fence`, the relay's Stop of a hosted document, once the engine
+       * holds nothing of it that waits for delivery or a Try again, and refuses
+       * new local edits of the activation Stop retires. In the document's work
+       * it drains the document within its budgets, then prepares that
+       * activation for this connection. `waiting` while edits or a Try again
+       * remain, with nothing blocked or fenced. With no activation to retire, as
+       * after a first Stop, or none this host holds, `fence` runs unprepared,
+       * and the relay refuses an activation that needs a preparation. The block
+       * ends unless the fence recorded that activation's retirement.
+       */
+      async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
+        callerSignal?: AbortSignal): Promise<T | "waiting"> {
+        check();
+        const candidate = storage.retirableServiceActivation(document), attached = checked(document.workspaceId), driver = activation;
+        if (!candidate || hostedKey(document) === undefined || !attached || !driver) return fence();
+        // A dormant document reloads, so its queues can drain.
+        try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
+        const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});
+        const current = () => {check(); if (checked(document.workspaceId) !== attached) throw new Error("Service host workspace attachment changed.");};
+        // A release that fails ends this connection, which ends the block.
+        const release = () => driver.releaseRetirementPreparation(attached.handle, document.objectId, candidate, signal).catch(abort);
+        const fenced = () => {
+          try {return storage.serviceActivationRetirement(document)?.activationId === candidate.activationId;}
+          catch {abort(); return true;}
+        };
+        try {
+          return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(value), joined, async () => {
+            current();
+            // The engine's preparation, not this drain, decides whether edits remain.
+            try {await driver.consumer(value).consumer.drain(value, joined);}
+            catch {joined.throwIfAborted(); current();}
+            // Until the engine answers, a preparation may stand.
+            let blocked = true;
+            try {
+              blocked = await driver.prepareRetirement(attached.handle, document.objectId, candidate, joined);
+              if (!blocked) return "waiting" as const;
+              return fence({...candidate, assertCurrent() {joined.throwIfAborted(); current();}});
+            } finally {
+              if (blocked && !fenced()) await release();
+            }
+          }));
+        } finally {changes?.notify(value);}
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {
