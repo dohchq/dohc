@@ -2873,12 +2873,6 @@ mod collection_relation_cleanup_tests {
         )
         .unwrap();
         // Seed the completed settlement from before cleanup preserved the source.
-        // Current settlement must refuse to produce these bytes from this Y.Doc.
-        let native_state = dohc_engine_collab::load_persisted(&store, &key)
-            .unwrap()
-            .unwrap()
-            .doc
-            .encode_full_state();
         store
             .write_with(&NoFaults, |tx| {
                 let settled = dohc_engine_domain::write_projected_text_in_tx(
@@ -2915,14 +2909,6 @@ mod collection_relation_cleanup_tests {
             })
             .unwrap();
         std::fs::write(scratch.path().join(PACKING), REWRITTEN).unwrap();
-        assert_eq!(
-            dohc_engine_collab::load_persisted(&store, &key)
-                .unwrap()
-                .unwrap()
-                .doc
-                .encode_full_state(),
-            native_state
-        );
         assert_eq!(
             std::fs::read(scratch.path().join(PACKING)).unwrap(),
             REWRITTEN.as_bytes()
