@@ -16,7 +16,7 @@ import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
-import { ComposerNotice } from "./ChatsControls";
+import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
 
@@ -391,6 +391,10 @@ export function ChatLane(props: {
           ) : null}
         </div>
       ) : null}
+      <DispatchAnnouncement
+        testId="chats-lane-dispatch-announcement"
+        text={dispatch && liveRunId !== null ? dispatchAnnouncement(true, dispatch.pendingCount) : ""}
+      />
       <ChatMessageList
         testIdPrefix="chats-lane"
         messages={messages}
