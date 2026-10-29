@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -28,11 +29,8 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
     );
-    await Promise.allSettled(document.getAnimations()
-      .filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)))
-      .map((animation) => animation.finished));
   }, theme);
-
+  await waitForVisibleAnimations(page);
 }
 
 async function shoot(page: Page, name: string): Promise<void> {

@@ -2,6 +2,7 @@ import { activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -27,10 +28,8 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     document.documentElement.setAttribute("data-theme", value);
     void getComputedStyle(document.body).backgroundColor;
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    await Promise.allSettled(document.getAnimations()
-      .filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)))
-      .map((animation) => animation.finished));
   }, theme);
+  await waitForVisibleAnimations(page);
 }
 
 async function shoot(page: Page, name: string): Promise<void> {
@@ -87,6 +86,22 @@ test("@ui-audit Customize files, the Apps view, and Settings from Customize…",
     dialog = await openCustomize(page, "tasks", "Tasks");
     await expect(dialog.getByText("tasks/automations.yaml")).toBeVisible();
     await shoot(page, "customize-without-automations");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // A database-backed Collection.
+    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Registrations");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const collection = page.getByRole("region", { name: "Registrations", exact: true });
+    const manage = collection.getByLabel("Manage Collection", { exact: true });
+    if (!await manage.evaluate((element) => element.closest("details")?.open)) await manage.click();
+    await collection.getByRole("button", { name: "Customize…", exact: true }).click();
+    dialog = page.getByRole("dialog", { name: "Customize Registrations" });
+    await expect(dialog.getByText(/automations\.yaml$/)).toBeVisible();
+    await shoot(page, "customize-database");
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
