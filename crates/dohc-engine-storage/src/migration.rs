@@ -3428,7 +3428,32 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE parent_message_id IS NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 73,
+        id: "v2-live-empty-settlements",
+        sql: V2_LIVE_EMPTY_SETTLEMENTS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+/// The projection an empty live settlement committed, per lineage. The relay
+/// accepts no empty settlement, so nothing is published, but a conflicted
+/// file write can still restore the lineage's own head.
+const V2_LIVE_EMPTY_SETTLEMENTS_DDL: &str = "\
+CREATE TABLE live_empty_settlements (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    moment_id TEXT NOT NULL,
+    markdown_digest TEXT NOT NULL CHECK (length(markdown_digest)=64 AND markdown_digest NOT GLOB '*[^0-9a-f]*'),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence BETWEEN 0 AND 9007199254740991),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id, moment_id) REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
+) STRICT;
+";
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
 /// head for it: New File's empty file, before capture records it. A moment
@@ -4594,6 +4619,10 @@ mod tests {
             (
                 "v2-chat-stream-order",
                 "ed7263ecdfa09bd3eba5c1177a3f9df1be700e864d8903a3547af9f60e5853c6",
+            ),
+            (
+                "v2-live-empty-settlements",
+                "1b47033552ab4428186ee7f9a38abd29838950156a209534421709f10ffeca96",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

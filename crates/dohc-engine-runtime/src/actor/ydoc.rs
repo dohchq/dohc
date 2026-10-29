@@ -2787,7 +2787,8 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    // A settlement covering no accepted edit still projects, but records nothing.
+    // A settlement covering no accepted edit still projects, but publishes
+    // nothing. Only its projection is kept locally, for a restore.
     let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
     let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
     let projection = if use_reader {
@@ -3242,6 +3243,10 @@ pub(super) fn ydoc_settle_on_store(
                 now_ms,
             )
             .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        } else if let Some(audit) = live_audit {
+            audit
+                .record_empty_in_tx(tx, &result.moment.moment_id, &result.snapshot.blob_sha256)
+                .map_err(settlement_audit_error)?;
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.

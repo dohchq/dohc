@@ -2892,6 +2892,137 @@ async fn the_handover_settle_refuses_an_unfolded_file_change() {
     supervisor.close_all().unwrap();
 }
 
+/// An outside write lands while the handover settle writes the owner's
+/// accepted edit, so its materialization conflicts. Once the file holds its
+/// earlier bytes again, the next settle writes the edit, and also any edit
+/// accepted meanwhile. A head that this lineage's empty settle didn't write
+/// is never restored.
+#[derive(Clone, Copy, PartialEq)]
+enum AfterConflict {
+    Nothing,
+    AnotherEditAccepted,
+    RecordOfOtherLineage,
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_recovers_after_its_file_is_restored() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::Nothing).await;
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_recovers_after_another_edit_is_accepted() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::AnotherEditAccepted).await;
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_restores_only_its_own_lineages_head() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::RecordOfOtherLineage).await;
+}
+
+async fn empty_handover_settle_after_its_file_is_restored(after: AfterConflict) {
+    use dohc_engine_storage::FaultInjector;
+    let mut f = Fixture::with_source(0, true);
+    let root = f.root.path().to_owned();
+    let path = root.join(&f.binding.current_path);
+    let before = std::fs::read(&path).unwrap();
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let settle = |receipt: LiveUpdateReceipt, faults: Arc<dyn FaultInjector>| {
+        handle.settle(
+            Some(receipt),
+            100,
+            root.clone(),
+            30,
+            faults,
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+    };
+    let rival = Arc::new(PrefixRival {
+        path: path.clone(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    assert_eq!(
+        settle(receipt.clone(), rival).await.err().unwrap().code(),
+        "conflict-stale-target"
+    );
+    assert_eq!(f.file(), "rival survives");
+    assert_eq!(
+        settle(receipt.clone(), Arc::new(NoFaults))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        "conflict-stale-target"
+    );
+    assert_eq!(f.file(), "rival survives");
+    let receipt = match after {
+        AfterConflict::Nothing => receipt,
+        AfterConflict::AnotherEditAccepted => {
+            f.record(
+                &actor,
+                f.doc.richdoc_append_paragraph("Edit after the conflict."),
+                "after-conflict",
+                50,
+            )
+            .await;
+            f.accept_pending(&actor, &handle, 8).await
+        }
+        AfterConflict::RecordOfOtherLineage => {
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE live_empty_settlements SET lineage_claim_id=?1",
+                        ["0".repeat(64)],
+                    )
+                    .unwrap();
+                    Ok::<_, dohc_engine_storage::StorageError>(())
+                })
+                .unwrap();
+            receipt
+        }
+    };
+    std::fs::write(&path, &before).unwrap();
+    if after == AfterConflict::RecordOfOtherLineage {
+        assert_eq!(
+            settle(receipt, Arc::new(NoFaults))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            "conflict-stale-target"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    } else {
+        let recovered = settle(receipt, Arc::new(NoFaults)).await.unwrap();
+        assert!(recovered.materialized);
+        assert_eq!(
+            f.file(),
+            f.doc.project(ContentKind::Richdoc).unwrap().content
+        );
+        let recorded = after == AfterConflict::AnotherEditAccepted;
+        assert_eq!(recovered.settlement_id.is_some(), recorded);
+        assert_eq!(
+            recorded_settlements(&f.store),
+            if recorded { (1, 1) } else { (0, 0) }
+        );
+    }
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
 #[tokio::test]
 async fn the_settlement_after_an_empty_one_starts_at_an_unchanged_handover_across_a_reload() {
     the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, true, false)

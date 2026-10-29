@@ -8,7 +8,8 @@ pub(super) mod restore;
 #[serde(rename_all = "camelCase")]
 pub struct LiveSettlementResult {
     /// Absent when nothing was accepted since the owner's handover or the
-    /// first baseline: such a settlement is neither recorded nor published.
+    /// first baseline: such a settlement is not published, and only its
+    /// projection is kept locally.
     pub settlement_id: Option<String>,
     pub previous_cursor: i64,
     pub terminal_cursor: i64,
@@ -68,12 +69,23 @@ fn audit_error(error: ApplicationError) -> ApplicationError {
 }
 
 impl LiveSettlementAudit {
-    /// A compensated filesystem marker can be restored only for this retained projection.
+    /// A compensated filesystem marker can be restored only for this retained
+    /// projection: the lineage's latest recorded settlement, or else its
+    /// latest empty one.
     pub fn covers_projection_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
+    ) -> Result<bool, ApplicationError> {
+        self.saved_projection_in(conn, moment, markdown, true)
+    }
+    fn saved_projection_in(
+        &self,
+        conn: &Connection,
+        moment: &str,
+        markdown: &str,
+        empty: bool,
     ) -> Result<bool, ApplicationError> {
         if let Some(restore) = &self.restore {
             return restore
@@ -97,8 +109,8 @@ impl LiveSettlementAudit {
         {
             return Err(StorageError::StateCorrupt { source: None }.into());
         }
-        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
+        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM (SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 UNION ALL SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,-1 FROM live_empty_settlements WHERE ?6 AND relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5) ORDER BY terminal_cursor DESC LIMIT 1",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,empty],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
         let Some((saved_moment, saved_markdown, sequence, binding)) = saved else {
             return Ok(false);
         };
@@ -137,14 +149,14 @@ impl LiveSettlementAudit {
         if self.replay_anchor.is_some() {
             return Ok(true);
         }
-        self.covers_projection_in(conn, moment, markdown)
+        self.saved_projection_in(conn, moment, markdown, false)
     }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
     }
     /// The settlement covers no accepted edit. It still projects the file,
-    /// but nothing is recorded or published: the relay accepts only a
-    /// settlement whose interval holds an accepted edit.
+    /// but it is not published: the relay accepts only a settlement whose
+    /// interval holds an accepted edit. Only its projection is kept locally.
     pub fn is_empty(&self) -> bool {
         self.empty
     }
@@ -167,6 +179,23 @@ impl LiveSettlementAudit {
         let b = &self.binding;
         store.read_with(|conn| conn.query_row("SELECT settlement_id FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND moment_id=?7 AND markdown_digest=?8",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,moment,markdown],|row| row.get(0))).map_err(StorageError::persist_public)
+    }
+    /// An empty settlement publishes nothing, but its lineage keeps the
+    /// projection it committed, so a conflicted file write can be restored.
+    pub fn record_empty_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        moment: &str,
+        markdown: &str,
+    ) -> Result<(), ApplicationError> {
+        if !self.empty {
+            return Err(StorageError::StateCorrupt { source: None }.into());
+        }
+        let b = &self.binding;
+        let binding = serde_json::to_string(b).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT OR REPLACE INTO live_empty_settlements(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,moment_id,markdown_digest,local_ydoc_sequence,binding_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,moment,markdown,self.sequence,binding]).map_err(StorageError::persist_public)?;
+        Ok(())
     }
     pub fn permits_absent_bootstrap(&self, moment: &str, digest: &str) -> bool {
         self.first && moment == self.bootstrap_moment && digest == self.bootstrap_digest

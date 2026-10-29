@@ -109,6 +109,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "live_empty_settlements",
     "live_settlement_publication_states",
     "live_settlement_publication_admissions",
     "live_settlement_attribution_unavailable",
