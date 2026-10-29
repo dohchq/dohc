@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { SyncedDeletionRevivalError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
@@ -17,6 +18,32 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("drops a late History refusal from the previous workspace", () => {
+    const { result, rerender } = renderHook(({ workspaceId }) => useShellError(workspaceId), {
+      initialProps: { workspaceId: "before" },
+    });
+    const oldReport = result.current.reportShellError;
+    rerender({ workspaceId: "after" });
+    act(() => oldReport("Could not restore this file.", new SyncedDeletionRevivalError("old.txt")));
+    expect(result.current.shellErrors).toEqual([]);
+    act(() => result.current.reportShellError("Could not restore this file.", new SyncedDeletionRevivalError("current.txt")));
+    expect(result.current.shellErrors[0]!.title).toContain("current.txt");
+  });
+  it("keeps a History deletion refusal in the toast and Notices when the toast closes", () => {
+    const { result } = renderHook(() => useShellError("guard-history"));
+    const retry = vi.fn();
+    act(() => result.current.reportShellError("Could not restore this file.",
+      new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+    expect(notice.message).toBe("Copy its text from its History into a file with a new name.");
+    expect(notice.details).toContainEqual(["Reason", "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them."]);
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBeNull();
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true, message: notice.message });
+  });
+
   it("toasts each copy once, restores its row on restart, and clears it on open", () => {
     const open = vi.fn();
     const copies = [["n.md", "n (kept copy).md", "copy-n-1"]] as const;

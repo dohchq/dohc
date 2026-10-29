@@ -667,7 +667,7 @@ mod tests {
         // The last migration creates an index of this name, so on this store it fails.
         Connection::open(&source)
             .unwrap()
-            .execute_batch("CREATE TABLE idx_chat_threads_channel_lane_created (planted INTEGER)")
+            .execute_batch("CREATE TABLE replication_log_conflict_resolution (planted INTEGER)")
             .unwrap();
         let before = contents(&store);
         let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();

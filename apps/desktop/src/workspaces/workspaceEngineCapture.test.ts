@@ -44,6 +44,7 @@ import {
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
+  type Event,
   VERSIONED_METHOD,
   type JsonValue,
   type Request,
@@ -66,6 +67,7 @@ import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery"
 import { createRelaySyncEngine } from "./relaySyncEngine";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
+import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -2062,6 +2064,79 @@ describe("workspaceEngineCapture batch capture", () => {
     engine.beginShutdown();
     await engine.stop();
     expect(discardUnsentState).not.toHaveBeenCalled();
+  });
+
+  it.each(["event", "health poll", "open"])("reports an outside write to an open note through the %s", async source => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes/a.md", "seed");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed" });
+    const sessions = mockLiveSessions(loopback);
+    const live = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let paths: string[] = [];
+    const store = new Proxy(live, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => ({ running: true, degraded: false, terminal: false, deferredWrites: paths });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const changedOutside = vi.fn();
+    const engine = capture(root, {
+      store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        doc.getText("plainText").insert(0, "seed");
+        return { doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => undefined, close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    let emit: (event: Event) => void = () => {};
+    const unsubscribe = bridgeWriteDeferred({ onEvent(handler) { emit = handler; return () => { emit = () => {}; }; } },
+      (workspaceId, path) => { if (workspaceId === WORKSPACE_ID) engine.noteWriteDeferred(path); });
+    const deferredEvent = (payload: JsonValue) => emit({ seq: 1, sessionGeneration: 1, name: CAPTURE_WRITE_DEFERRED_EVENT, payload });
+    try {
+      engine.start();
+      await engine.flush();
+      // Held before the session existed: its wake reached no session.
+      if (source === "open") paths = ["notes/a.md"];
+      const session = await engine.openYDocSession({ path: "notes/a.md", onRemoteUpdate: () => undefined, onChangedOutside: changedOutside });
+      await vi.advanceTimersByTimeAsync(0);
+      if (source !== "open") {
+        deferredEvent({ workspaceId: "other", path: "notes/a.md" });
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: "closed.md" });
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: 1 });
+        deferredEvent(null);
+        expect(changedOutside).not.toHaveBeenCalled();
+      }
+      if (source === "event") {
+        deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+        await vi.advanceTimersByTimeAsync(0);
+      } else if (source === "health poll") {
+        paths = ["notes/a.md"];
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS - 1);
+        expect(changedOutside).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await engine.flush();
+      }
+      expect(changedOutside).toHaveBeenCalledExactlyOnceWith(false);
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+      expect(changedOutside).toHaveBeenCalledOnce();
+      paths = [];
+      await session.close();
+      changedOutside.mockClear();
+      deferredEvent({ workspaceId: WORKSPACE_ID, path: "notes/a.md" });
+      expect(changedOutside).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+      await engine.stop();
+      await live.close();
+      vi.useRealTimers();
+    }
   });
 
   // #2463 in a synced workspace. A replicated release succeeds over a save

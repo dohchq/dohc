@@ -129,6 +129,8 @@ export type ReportShellFailure = (failure: {
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
 export function useShellError(workspaceId: string) {
+  const currentWorkspace = useRef(workspaceId);
+  currentWorkspace.current = workspaceId;
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
   const shellErrorsRef = useRef(shellErrors);
   shellErrorsRef.current = shellErrors;
@@ -154,6 +156,7 @@ export function useShellError(workspaceId: string) {
   // replace it files one without a toast.
   const push = useCallback(
     (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
+      if (currentWorkspace.current !== workspaceId) return;
       nextId.current += 1;
       const id = `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -185,13 +188,11 @@ export function useShellError(workspaceId: string) {
         ];
       });
     },
-    [],
+    [workspaceId],
   );
   // The step a macOS privacy refusal offers: the pane where a person allows
   // dohc the folder. A pane macOS would not open files its own notice, in the
   // workspace that asked.
-  const currentWorkspace = useRef(workspaceId);
-  currentWorkspace.current = workspaceId;
   const privacySettingsAction = useMemo<NonNullable<ShellError["action"]>>(() => {
     const run = (): void => {
       const owner = currentWorkspace.current;
@@ -323,7 +324,7 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
       identity?: string,
     ) => {
-      const { cause, title, words } = readError(error);
+      const { cause, title, words, canRetry, details: explanation } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
       const details: ReadonlyArray<ErrorDetailField> = partial ? [
         ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
@@ -331,7 +332,7 @@ export function useShellError(workspaceId: string) {
         ["Record ID", partial.retry.recordId],
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : cause ? [["Cause", cause]] : [];
+      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])];
       push({
         ...(title ? { title } : {}),
         message: title && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
@@ -339,7 +340,7 @@ export function useShellError(workspaceId: string) {
           ? `record:${partial.retry.recordId}`
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
-        retry,
+        retry: canRetry === false ? null : retry,
         ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
