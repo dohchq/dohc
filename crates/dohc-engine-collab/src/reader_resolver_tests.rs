@@ -308,7 +308,10 @@ fn fake_resolver(fault: &str) -> (dohc_engine_testkit::ScratchDir, ReaderResolve
     let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &identity.to_string())
         .replace("MODE", "\"normal\"")
-        .replace("const fault = r.currentPath;", &format!("const fault = '{fault}';"));
+        .replace(
+            "const fault = r.currentPath;",
+            &format!("const fault = '{fault}';"),
+        );
     let bundle = scratch.path().join("fake.cjs");
     fs::write(&bundle, &script).unwrap();
     let mut manifest = identity;
