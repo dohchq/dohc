@@ -240,6 +240,7 @@ import {
   createQuitGuard,
   type ExitKind,
 } from "./quitGuard";
+import { createVersionRounds } from "./versionRounds";
 import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
 import { linuxTrayShown } from "./window/linuxTrayShown";
@@ -5004,6 +5005,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   localUserDisplayName,
   localPersonId: localUserId,
   notifyRenderer,
+  notifyNoticesChanged,
+  // Created after the windows, so read when a version change runs.
+  versionRound: (workspaceId, change, announce) => versionRounds.run(workspaceId, change, announce),
   syncSharedChannelsForChatTarget,
   chatDispatchService,
   rememberPendingCliRunMessageLink,
@@ -5196,6 +5200,7 @@ const desktopEngine = createDesktopEngine({
   recordEngineProblem: (error, stage) => recordCrash({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
+  noteWriteDeferred: (workspaceId, path) => activity.engineCaptureFor(workspaceId)?.noteWriteDeferred(path),
   launchMarks, desktopMarks, logLaunchMarksOnce,
   noteNoAtomicPlacement: (workspaceId) => {
     try {
@@ -6141,6 +6146,18 @@ const exitRounds = createExitRounds<BrowserWindow>({
   },
 });
 
+// Version rounds: before the CLI or MCP changes a workspace's versions, the
+// workspace windows showing it save their open edits (versionRounds.ts).
+const versionRounds = createVersionRounds<BrowserWindow>({
+  windowsShowing: (workspaceId) => desktopWindows.workspaceWindows.answering()
+    .filter((window) => rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
+  windowId: (window) => window.webContents.id,
+  isGone: (window) => window.isDestroyed() || window.webContents.isCrashed(),
+  send: (window, message) => {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.versionRound, message);
+  },
+});
+
 const quitGuard = createQuitGuard({
   ask: () => {
     const round = exitRounds.begin("quit");
@@ -6320,7 +6337,7 @@ function registerIpcHandlers(): void {
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, BrowserWindow,
     rememberChromeTheme, titleBarOverlayOptions,
-    stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
+    stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds, versionRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
   });
   windowIpc.registerReload();

@@ -48,6 +48,9 @@ import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { versionConflictForIpc } from "../ipc/engineHistoryIpc";
+import { workspaceVersionForIpc } from "../ipc/workspaceVersionsIpc";
+import type { createVersionRounds } from "../versionRounds";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
@@ -99,7 +102,8 @@ interface DesktopCliServerDependencies<State> {
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
       | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
-      | "listVersions" | "writeAuthoredFile"
+      | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
+      | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
     > | null;
     queueCloudSync(workspaceId: string): void;
@@ -138,6 +142,9 @@ interface DesktopCliServerDependencies<State> {
   localUserDisplayName(): string;
   localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
+  notifyNoticesChanged(): void;
+  /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
+  versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
     workspaceId: string,
     target?: ChatRelayIdentityTarget,
@@ -427,18 +434,21 @@ export function createDesktopCliServer<State>(
               });
           return { path: live.path, markdown };
         },
-        edit: ({ path, edit, origin }) =>
+        edit: ({ path, edit, origin, allowLossySourceSha256 }) =>
           liveDocuments.editDocument({
+            ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
             workspaceId: workspace.workspaceId,
             path,
             origin,
             assertEditable: async (resolved) => {
-              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+              const source = await lossyNoteText(workspace.rootPath, resolved);
+              if (source !== null && createHash("sha256").update(source).digest("hex") !== allowLossySourceSha256) {
                 throw new Error(lossyNoteRefusal(resolved));
               }
             },
-            change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
+            change: (state, { keepBlocks, headSha256 }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, headSha256,
+                ...(allowLossySourceSha256 ? {} : { refuseLossy: path }) }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
@@ -487,6 +497,73 @@ export function createDesktopCliServer<State>(
       ...(sharedViewOf(workspace.workspaceId)
         ? {}
         : {
+            versions: {
+              list: async () => {
+                const snapshot = await capture.listVersions();
+                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+              },
+              compare: async (versionId, afterPath) => {
+                // Unreadable rules hide every file, as the desktop's History does.
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const admitted = historyPathAdmission(policy);
+                // A page continues after its last path, which can be a hidden
+                // file. Continue after the last shown file instead, and read
+                // past pages that show none.
+                let after = afterPath;
+                for (;;) {
+                  const page = await capture.compareVersions(versionId, after === undefined ? {} : { afterPath: after });
+                  const files = page.files
+                    .filter(file => !file.protected && admitted(file.path))
+                    .map(({ protected: _protected, ...file }) => file);
+                  if (page.nextAfterPath === null) return { files, nextAfterPath: null };
+                  if (files.length > 0) return { files, nextAfterPath: files[files.length - 1]!.path };
+                  after = page.nextAfterPath;
+                }
+              },
+              conflicts: async (afterConflictId) => {
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const page = await capture.listOpenConflictsPage(afterConflictId);
+                const admitted = historyPathAdmission(policy);
+                // After a rename, a side can sit at another path than its conflict.
+                const shown = (conflict: (typeof page.conflicts)[number]) =>
+                  [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                return {
+                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  nextAfterConflictId: page.nextAfterConflictId,
+                };
+              },
+              // Each change tells the windows what changed, as the versions
+              // IPC handlers do for the window's own changes. Each closes the
+              // editors' documents before it can fail, so a failed change
+              // still has the windows reopen on whichever version is active.
+              create: name => dependencies.versionRound(workspace.workspaceId, async () => {
+                const snapshot = await capture.createVersion(name);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                const created = snapshot.versions.find(version => version.id === snapshot.activeVersionId)!;
+                return { id: created.id, name: created.name };
+              }, { done: created => ({ activeVersionId: created.id }), failed: {} }),
+              switch: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
+                const switched = await capture.switchVersion(versionId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return switched;
+              }, { done: switched => ({ activeVersionId: switched.activeVersionId }), failed: {} }),
+              merge: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
+                const merged = await capture.mergeVersionIntoMain(versionId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return merged;
+              }, { done: () => ({}), failed: {} }),
+              resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
+                await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }
+                  : resolution.keep === "current" ? { kind: "keep-current" } : { kind: "apply-incoming" });
+                // As the window's resolve does: the other computer hears of it
+                // promptly, and Notices drops a resolved sync conflict.
+                activity.queueCloudSync(workspace.workspaceId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                dependencies.notifyNoticesChanged();
+              }, { done: () => ({}), failed: {} }),
+            },
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),

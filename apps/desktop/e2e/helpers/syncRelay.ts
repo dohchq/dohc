@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
@@ -95,6 +96,8 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
               DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin,
               DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin).host,
+              // The self-host image gives the live host a Markdown reader. Without one it holds every lossy rewrite.
+              DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
               ...input.editLinks.trustEnv,
             }
           : {}),

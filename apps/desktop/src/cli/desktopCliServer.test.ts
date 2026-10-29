@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -79,6 +79,12 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     deleteRetainedCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["deleteRetainedCopies"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
       async () => ({ versions: [], activeVersionId: "main" })), ...historyPageFields,
+    compareVersions: vi.fn<Capture["compareVersions"]>(async () => ({ files: [], nextAfterPath: null })),
+    listOpenConflictsPage: vi.fn<Capture["listOpenConflictsPage"]>(async () => ({ conflicts: [], nextAfterConflictId: null })),
+    createVersion: vi.fn<Capture["createVersion"]>(async name => ({ versions: [{ id: "created", workspaceId: "workspace", kind: "named", name, createdAtMs: 1, forkPoint: { versionId: "main" } }], activeVersionId: "created" })),
+    switchVersion: vi.fn<Capture["switchVersion"]>(async versionId => ({ activeVersionId: versionId, changedFileCount: 2 })),
+    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0 })),
+    resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
@@ -155,6 +161,8 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     localUserDisplayName: () => "Local name",
     localPersonId: () => "person-local",
     notifyRenderer: vi.fn(),
+    notifyNoticesChanged: vi.fn(),
+    versionRound: (_workspaceId, change) => change(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
     chatDispatchService: { scanWorkspace: vi.fn(async () => undefined) },
     rememberPendingCliRunMessageLink: vi.fn(),
@@ -407,6 +415,199 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("shows versions, a comparison and open conflicts to the CLI and the MCP, only for files History tracks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-versions-"));
+    try {
+      await mkdir(join(root, ".dohc"));
+      await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');
+      const f = fixture(root);
+      const version = (id: string, name: string, kind: "main" | "named") => ({
+        id, workspaceId: "workspace", kind, name, createdAtMs: 10, ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+      f.capture.listVersions.mockResolvedValue({ versions: [version("main", "Main", "main"), version("draft", "Draft", "named")], activeVersionId: "draft" });
+      // Each engine page continues after its last path, shown or hidden.
+      const pages: Record<string, Awaited<ReturnType<Capture["compareVersions"]>>> = {
+        first: { files: [
+          { path: "keys.env", status: "modified", protected: true },
+          { path: "notes.md", status: "modified", currentText: "old", incomingText: "new" },
+          { path: "private/journal.md", status: "added", incomingText: "dear diary" },
+        ], nextAfterPath: "private/journal.md" },
+        "notes.md": { files: [
+          { path: "private/journal.md", status: "added", incomingText: "dear diary" },
+          { path: "private/later.md", status: "added", incomingText: "later" },
+        ], nextAfterPath: "private/later.md" },
+        "private/later.md": { files: [{ path: "zeta.md", status: "added", incomingText: "z" }], nextAfterPath: null },
+      };
+      f.capture.compareVersions.mockImplementation(async (_id, options) => pages[options?.afterPath ?? "first"]!);
+      const side = (path: string, text: string) => ({ exists: true, path, contentKind: "text" as const, text });
+      const conflict = (id: string, path: string, incomingPath = path) => ({
+        id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
+        base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+      // c3's incoming side sits at a path History does not track.
+      f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
+        conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
+      await f.create().startDesktopCliServer();
+      const token = "a".repeat(64);
+      const send = async (request: CliRequestWithoutToken) => {
+        const response = cliTransportResponseSchema.parse(JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())) as unknown);
+        if (!response.ok) throw new Error(response.error);
+        return response.result;
+      };
+      const cli = (...argv: string[]) => executeCli({ argv, cwd: root, env: {}, request: send });
+      // The MCP's dohc_list_versions, dohc_compare_version and dohc_list_version_conflicts send these as the agent.
+      const mcp = (verb: "versionList" | "versionCompare" | "versionConflicts", args: Record<string, unknown> = {}) =>
+        send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
+
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
+        versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
+
+      // Untracked and secret files are left out, and the next page starts
+      // after the last file shown, never after a hidden one.
+      expect((await cli("version", "compare", "Draft")).stdout).toBe("modified · notes.md\nMore files; use --after notes.md\n");
+      expect(await mcp("versionCompare", { version: "draft" })).toEqual({ ok: true, version: { id: "draft", name: "Draft" },
+        files: [{ path: "notes.md", status: "modified", currentText: "old", incomingText: "new" }], nextAfterPath: "notes.md" });
+      // A page with no file to show is read past.
+      expect((await cli("version", "compare", "Draft", "--after", "notes.md")).stdout).toBe("added · zeta.md\n");
+      expect(f.capture.compareVersions).toHaveBeenLastCalledWith("draft", { afterPath: "private/later.md" });
+      expect(await mcp("versionCompare", { version: "Draft", afterPath: "notes.md" })).toEqual({ ok: true, version: { id: "draft", name: "Draft" },
+        files: [{ path: "zeta.md", status: "added", incomingText: "z" }], nextAfterPath: null });
+      expect((await cli("version", "compare", "Draft", "--json")).stdout).not.toMatch(/private\/|keys\.env/);
+      expect(await cli("version", "compare", "Later")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: No version is called Later. Run dohc version list to see them.\n" });
+      expect(await mcp("versionCompare", { version: "Main" })).toEqual({ ok: false, reason: "Versions compare with Main. Name another version." });
+
+      expect((await cli("version", "conflicts")).stdout).toBe("c1 · merge · notes.md\n");
+      expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
+        conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
+      expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
+
+      // Unreadable rules hide every file, so the answer names the rules file.
+      await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
+      expect(await mcp("versionCompare", { version: "Draft" })).toEqual({ ok: false, status: "policy-unreadable", unreadable: [".dohc/files.toml"],
+        reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
+      expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+
+      // A shared view keeps no versions of its own.
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      expect(await mcp("versionList")).toEqual({ ok: false, reason: "Versions belong to the owning workspace. Open it to continue." });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates, switches, merges and resolves versions for the CLI and the MCP, after the windows save their edits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-version-writes-"));
+    try {
+      await mkdir(join(root, ".dohc"));
+      await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');
+      const f = fixture(root);
+      // The round as main runs it, recording what each change tells the windows.
+      const rounds: Array<{ workspaceId: string; told: { activeVersionId?: string } | null }> = [];
+      f.dependencies.versionRound = async (workspaceId, change, announce) => {
+        try {
+          const result = await change();
+          rounds.push({ workspaceId, told: announce.done(result) });
+          return result;
+        } catch (error) {
+          rounds.push({ workspaceId, told: announce.failed ?? null });
+          throw error;
+        }
+      };
+      const version = (id: string, name: string, kind: "main" | "named", forkedFrom = "main") => ({
+        id, workspaceId: "workspace", kind, name, createdAtMs: 10, ...(kind === "named" ? { forkPoint: { versionId: forkedFrom } } : {}) });
+      f.capture.listVersions.mockResolvedValue({ activeVersionId: "main",
+        versions: [version("main", "Main", "main"), version("draft", "Draft", "named"), version("nested", "Nested", "named", "draft")] });
+      const text = (path: string, value: string) => ({ exists: true, path, contentKind: "text" as const, text: value });
+      const binary = (path: string) => ({ exists: true, path, contentKind: "binary" as const, sha256: "a".repeat(64), byteLength: 5 });
+      const conflict = (id: string, path: string, side: typeof text | typeof binary = text) => ({
+        id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
+        base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+      const open = { conflicts: [conflict("c1", "notes.md"), conflict("c2", "logo.png", binary), conflict("c3", "private/journal.md")],
+        nextAfterConflictId: null };
+      f.capture.listOpenConflictsPage.mockResolvedValue(open);
+      await f.create().startDesktopCliServer();
+      const token = "a".repeat(64);
+      const send = async (request: CliRequestWithoutToken) => {
+        const response = cliTransportResponseSchema.parse(JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())) as unknown);
+        if (!response.ok) throw new Error(response.error);
+        return response.result;
+      };
+      const cli = (...argv: string[]) => executeCli({ argv, cwd: root, env: {}, request: send });
+      const mcp = (verb: "versionCreate" | "versionSwitch" | "versionMerge" | "versionResolve", args: Record<string, unknown>) =>
+        send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
+
+      expect((await cli("version", "create", "Ideas")).stdout).toBe("Created and switched to Ideas · created\n");
+      expect(f.capture.createVersion).toHaveBeenCalledWith("Ideas");
+      expect(rounds.at(-1)).toEqual({ workspaceId: "workspace", told: { activeVersionId: "created" } });
+      f.capture.createVersion.mockRejectedValueOnce(new VersionedTextStoreError("version-name-conflict", "version-name-conflict"));
+      expect(await mcp("versionCreate", { name: "Draft" })).toEqual({ ok: false, reason: "Another version is called Draft. Choose another name." });
+      // Each change closes the editors' documents before it can fail, so a
+      // failed one tells the windows to look again.
+      expect(rounds.at(-1)!.told).toEqual({});
+
+      expect((await cli("version", "switch", "Draft")).stdout).toBe("Switched to Draft · 2 files changed\n");
+      expect(f.capture.switchVersion).toHaveBeenCalledWith("draft");
+      expect(rounds.at(-1)!.told).toEqual({ activeVersionId: "draft" });
+      // The active version needs no switch, and the windows hear nothing.
+      const roundsBefore = rounds.length;
+      expect(await mcp("versionSwitch", { version: "main" })).toEqual({ ok: true, version: { id: "main", name: "Main" }, changedFileCount: 0 });
+      expect(rounds).toHaveLength(roundsBefore);
+      f.capture.switchVersion.mockRejectedValueOnce(new Error("The engine stopped."));
+      expect(await mcp("versionSwitch", { version: "Draft" })).toEqual({ ok: false, reason: "The engine stopped." });
+      expect(rounds.at(-1)!.told).toEqual({});
+
+      expect(await mcp("versionMerge", { version: "Main" })).toEqual({ ok: false, reason: "Versions merge into Main. Name another version." });
+      expect(await mcp("versionMerge", { version: "Nested" })).toEqual({ ok: false, reason: "Only versions made from Main can merge into Main." });
+      expect(await mcp("versionMerge", { version: "Later" })).toEqual({ ok: false, reason: "No version is called Later. Run dohc version list to see them." });
+      expect(f.capture.mergeVersionIntoMain).not.toHaveBeenCalled();
+      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3 });
+      // The merge prints the conflicts it left, except the one at a path History does not track.
+      expect((await cli("version", "merge", "Draft")).stdout)
+        .toBe("Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n");
+      expect(rounds.at(-1)!.told).toEqual({});
+      f.capture.mergeVersionIntoMain.mockRejectedValueOnce(new Error("The engine stopped."));
+      expect(await mcp("versionMerge", { version: "Draft" })).toEqual({ ok: false, reason: "The engine stopped." });
+      expect(rounds.at(-1)!.told).toEqual({});
+
+      expect(await mcp("versionResolve", { conflictId: "c3", resolution: { keep: "current" } })).toEqual({ ok: false,
+        reason: "No open conflict has the ID c3. Run dohc version conflicts to see them." });
+      expect(await mcp("versionResolve", { conflictId: "c2", resolution: { keep: "combined", text: "both" } })).toEqual({ ok: false,
+        reason: "This conflict is between binary files, so it takes no combined text. Keep current or incoming." });
+      expect(f.capture.resolveConflict).not.toHaveBeenCalled();
+      await cli("version", "resolve", "c2", "--keep", "incoming");
+      expect(f.capture.resolveConflict).toHaveBeenLastCalledWith("c2", { kind: "apply-incoming" });
+      // The answer lists the conflicts still open.
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(open).mockResolvedValueOnce({ conflicts: [conflict("c2", "logo.png", binary)], nextAfterConflictId: null });
+      expect((await cli("version", "resolve", "c1", "--text", "mine and theirs")).stdout).toBe("c2 · merge · logo.png · binary\n");
+      expect(f.capture.resolveConflict).toHaveBeenLastCalledWith("c1", { kind: "apply-merged", text: "mine and theirs" });
+      expect(f.dependencies.notifyNoticesChanged).toHaveBeenCalled();
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+      f.capture.resolveConflict.mockRejectedValueOnce(new Error("The engine stopped."));
+      expect(await mcp("versionResolve", { conflictId: "c1", resolution: { keep: "current" } })).toEqual({ ok: false, reason: "The engine stopped." });
+      expect(rounds.at(-1)!.told).toEqual({});
+
+      // A window that can't save its edits stops the change, and its reason reaches the caller.
+      f.dependencies.versionRound = async () => { throw new Error("A Collection write failed. Try again."); };
+      await f.create().startDesktopCliServer();
+      expect(await cli("version", "switch", "Draft")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: A Collection write failed. Try again.\n" });
+
+      // A shared view keeps no versions of its own.
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      expect(await mcp("versionCreate", { name: "Ideas" })).toEqual({ ok: false, reason: "Versions belong to the owning workspace. Open it to continue." });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses the registered workspace for collection reads and forwards history cursors exactly", async () => {
     const f = fixture();
     const query = { records: [], nextCursor: null };
@@ -563,6 +764,47 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("uses the authoritative head for an edited witness and forwards explicit consent with an absent head", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-consent-"));
+    const source = "# Readme\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const doc = markdownToYDoc(source);
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    Y.applyUpdate(doc, documentEditUpdate(Y.encodeStateAsUpdate(doc), { replacement: "Unsettled tail." }, { keepBlocks: true })!);
+    try {
+      await writeFile(join(root, "readme.md"), source);
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      const edit = { path: "readme.md", edit: { find: "Editable.", replacement: "Changed." }, origin };
+      await context.documents!.edit(edit);
+      const [guarded] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      const state = Y.encodeStateAsUpdate(doc);
+      for (const headSha256 of [null, sha(source)]) {
+        await expect(guarded.change(state, { keepBlocks: true, headSha256 })).rejects.toThrow("parts it can't show");
+      }
+      const converted = await guarded.change(state, { keepBlocks: true, headSha256: sha("converted head") });
+      expect(converted).toBeInstanceOf(Uint8Array);
+
+      await context.documents!.edit({ ...edit, allowLossySourceSha256: sha(source) });
+      const [consented] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[1]!;
+      expect(consented.allowLossySourceSha256).toBe(sha(source));
+      await expect(consented.assertEditable("readme.md")).resolves.toBeUndefined();
+      const update = await consented.change(state, { keepBlocks: true, headSha256: null });
+      Y.applyUpdate(doc, update!);
+      expect(yDocToMarkdown(doc)).toContain("Changed.");
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(source);
+
+      await writeFile(join(root, "readme.md"), source.replace("Hidden.", "Another source."));
+      await expect(consented.assertEditable("readme.md")).rejects.toThrow("parts it can't show");
+    } finally {
+      doc.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("hands a document edit to the live sessions as an update against their state", async () => {
     const f = fixture();
     const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
@@ -572,10 +814,10 @@ describe("desktop CLI workspace context", () => {
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
-    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true }))!);
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!);
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
     // A refusal from the projection reaches the caller.
-    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true, headSha256: null }))
       .rejects.toThrow("not in the document");
   });
 

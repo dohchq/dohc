@@ -3430,6 +3430,19 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 73,
+        id: "v2-replication-conflict-resolution-index",
+        sql: "CREATE INDEX replication_log_conflict_resolution ON replication_log(workspace_id) \
+              WHERE op_kind='conflict.resolve';",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 74,
+        id: "v2-markdown-write-obligations",
+        sql: include_str!("markdown_write_obligations.sql"),
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 75,
         id: "v2-live-empty-settlements",
         sql: V2_LIVE_EMPTY_SETTLEMENTS_DDL,
         sets_user_version: None,
@@ -4622,6 +4635,14 @@ mod tests {
                 "ed7263ecdfa09bd3eba5c1177a3f9df1be700e864d8903a3547af9f60e5853c6",
             ),
             (
+                "v2-replication-conflict-resolution-index",
+                "a852c0240ab994a1d67c8bd86002832ad3cd76b85459b532a38f06855a6a7856",
+            ),
+            (
+                "v2-markdown-write-obligations",
+                "a7fb96fd3388bf2f997e45ecec7ec16da0dabf23d19c0ab69921f31213cdca14",
+            ),
+            (
                 "v2-live-empty-settlements",
                 "b4fa8a3c0e71194cd96dd067afd4b867d77ea0691719878388c7d7938335977b",
             ),
@@ -5443,6 +5464,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(documents, 0, "documents leave with their replica");
+    }
+
+    #[test]
+    fn conflict_resolution_index_upgrades_existing_log_without_changing_rows() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-replication-conflict-resolution-index");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO replication_log VALUES ('ws','peer',1,'ydoc.update','{}',1,1,'applied'),
+             ('ws','peer',2,'moment.append','{}',2,1,'applied'),
+             ('ws','peer',3,'conflict.resolve','{}',3,1,'applied');",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT payload_json FROM replication_log
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve' AND apply_disposition='applied'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("replication_log_conflict_resolution"),
+            "{plan}"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replication_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 3);
+        let resolutions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM replication_log INDEXED BY replication_log_conflict_resolution
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolutions, 1);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
     }
 
     #[test]
@@ -6659,6 +6725,7 @@ mod tests {
         let ctx = MigrationContext::current(1_000);
         let mut conn = open_bare(&dir.join("engine.db"));
         let before = migration_index("v2-agent-ids");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 71);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch(
             "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
@@ -8356,6 +8423,107 @@ mod tests {
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    #[test]
+    fn markdown_write_obligations_upgrade_keeps_retry_and_refresh_debt_separate_from_dismissal() {
+        let dir = tempdir();
+        let path = dir.join("markdown-obligations.db");
+        let ctx = MigrationContext::current(1);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-markdown-write-obligations");
+        assert_eq!(
+            BASELINE_MIGRATIONS[before - 1].id,
+            "v2-replication-conflict-resolution-index"
+        );
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 74);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES('w','main');
+            INSERT INTO versions(workspace_id,version_id,name,kind,created_at_ms) VALUES('w','main','Main','main',1);")
+            .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied {
+                newly_applied: (BASELINE_MIGRATIONS.len() - before) as u32
+            }
+        );
+        conn.execute_batch("INSERT INTO markdown_write_obligations
+            (workspace_id,version_id,object_id,lineage_claim_id,operation_id,kind,path,retry_inputs_json,
+             held_checkpoint_sha256,held_head_sha256,created_at_ms,updated_at_ms)
+            VALUES('w','main','note','claim','audited','audited-settle','note.md',
+             '{\"terminalCursor\":7,\"headUpdateSeq\":12}', 'checkpoint',NULL,2,2);
+            INSERT INTO markdown_write_obligation_notice_dismissals
+             SELECT obligation_order,'checkpoint',NULL FROM markdown_write_obligations;
+            INSERT INTO markdown_write_obligations
+            (workspace_id,version_id,object_id,lineage_claim_id,operation_id,kind,path,retry_inputs_json,
+             source_sha256,settled_head_sha256,created_at_ms,updated_at_ms)
+            VALUES('w','main','note','claim','session','witness-refresh','note.md','{}','source','converted',3,3);")
+            .unwrap();
+        drop(conn);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations WHERE completed=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT json_extract(retry_inputs_json,'$.headUpdateSeq')
+            FROM markdown_write_obligations WHERE kind='audited-settle'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            12
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT source_sha256,settled_head_sha256
+            FROM markdown_write_obligations WHERE kind='witness-refresh'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("source".to_owned(), "converted".to_owned())
+        );
+        conn.execute(
+            "DELETE FROM markdown_write_obligation_notice_dismissals",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations WHERE completed=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='w' AND version_id='main'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM markdown_write_obligations",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
         );
     }
 

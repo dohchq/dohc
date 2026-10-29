@@ -220,6 +220,27 @@
     ],
     "chatLinks": [
       "chat.read"
+    ],
+    "versionList": [
+      "version.list"
+    ],
+    "versionCompare": [
+      "version.compare"
+    ],
+    "versionConflicts": [
+      "version.conflicts.list"
+    ],
+    "versionCreate": [
+      "version.create"
+    ],
+    "versionSwitch": [
+      "version.switch"
+    ],
+    "versionMerge": [
+      "version.merge"
+    ],
+    "versionResolve": [
+      "version.conflict.resolve"
     ]
   },
   "public": {
@@ -293,6 +314,13 @@
     "app undo-responses": "app.responses.undo",
     "history list": "history.list",
     "history show": "history.read",
+    "version list": "version.list",
+    "version compare": "version.compare",
+    "version conflicts": "version.conflicts.list",
+    "version create": "version.create",
+    "version switch": "version.switch",
+    "version merge": "version.merge",
+    "version resolve": "version.conflict.resolve",
     "automation list": "automation.list",
     "automation switch": "automation.switch",
     "automation buttons": "automation.buttons.inspect",

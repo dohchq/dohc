@@ -386,6 +386,7 @@ async fn settle(fixture: &Fixture, opened: &YdocOpenState, append: &YdocAppend, 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+            None,
         )
         .await
         .expect("settle the typing")

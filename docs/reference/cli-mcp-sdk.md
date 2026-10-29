@@ -165,6 +165,78 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
+### `dohc_list_versions`
+
+List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId } | { ok: false, reason }`.
+
+### `dohc_compare_version`
+
+Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `version`: `string`. Required.
+- `afterPath`: `string`
+
+Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_list_version_conflicts`
+
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `afterConflictId`: `string`
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_create_version`
+
+Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `name`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name } } | { ok: false, reason }`.
+
+### `dohc_switch_version`
+
+Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, changedFileCount } | { ok: false, reason }`.
+
+### `dohc_merge_version`
+
+Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_resolve_version_conflict`
+
+Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `conflictId`: `string`. Required.
+- `resolution`: `{ keep: "current" | "incoming" } | { keep: "combined", text: string }`. Required.
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
 ### `dohc_list_changes`
 
 List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.
@@ -180,11 +252,11 @@ Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine"
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
 
-Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.
+Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.
 
 No arguments.
 
-Returns `{ ok: true, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
+Returns `{ ok: true, outsideWriteCopies?, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
 
 ### `dohc_save_kept_copy`
 
@@ -302,10 +374,11 @@ Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
 
 ### `dohc_edit_document`
 
-Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
+Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
 
 Changes the workspace, so a shared view does not offer it.
 
+- `allowLossySourceSha256`: `string`
 - `path`: `string`. Required.
 - `find`: `string`
 - `replacement`: `string`. Required.
@@ -796,7 +869,7 @@ dohc document edit <path> [-] [options]
 
 Replace matching text or append Markdown through the live document.
 
-Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
+Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
 
 - `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
 - `--agent <name>`: Record this agent name with the change.
@@ -1747,6 +1820,99 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+
+### `dohc version`
+
+Read and change the workspace's versions and their open conflicts.
+
+Versions belong to the owning workspace. A change first saves the edits open in dohc, or refuses when dohc can't.
+
+#### `dohc version list`
+
+```sh
+dohc version list [options]
+```
+
+List the versions and which one is active.
+
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId }`.
+
+#### `dohc version compare`
+
+```sh
+dohc version compare <version> [options]
+```
+
+List the files that differ between Main and a version.
+
+Name a version by its name or ID, as version list prints them. With --json, print both sides' text.
+
+- `--after <path>`: Continue after this path from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath }`.
+
+#### `dohc version conflicts`
+
+```sh
+dohc version conflicts [options]
+```
+
+List open conflicts from merges and from sync.
+
+With --json, print each conflict's sides.
+
+- `--after <conflict>`: Continue after this conflict ID from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+
+#### `dohc version create`
+
+```sh
+dohc version create <name> [options]
+```
+
+Create a version from the active one and switch to it.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name } }`.
+
+#### `dohc version switch`
+
+```sh
+dohc version switch <version> [options]
+```
+
+Switch the workspace folder to a version.
+
+Name a version by its name or ID, as version list prints them.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, changedFileCount }`.
+
+#### `dohc version merge`
+
+```sh
+dohc version merge <version> [options]
+```
+
+Merge a version into Main.
+
+Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+
+#### `dohc version resolve`
+
+```sh
+dohc version resolve <conflict> [-] [options]
+```
+
+Resolve an open conflict.
+
+Use - to read the combined text from stdin. Give exactly one of --keep, --text or -. In a merge, current is Main and incoming is the version. In sync, current is this computer.
+
+- `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
+- `--text <text>`: Replace both sides with this combined text.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
 
 ### `dohc automation`
 

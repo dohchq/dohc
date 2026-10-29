@@ -3,6 +3,7 @@ import {
   parseLiveUpdateIdentifier,
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
+import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
 
 export interface CommittedSettlement {
   /** Null when nothing was accepted since the owner's handover or the first baseline, so nothing was recorded or published. */
@@ -17,9 +18,31 @@ export interface CommittedSettlement {
   collectionReconcileRequired: boolean;
 }
 
-export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
+export type PendingSettlement = {kind: "pending"; reason: "markdown-write-held" | "markdown-witness-check-pending"};
+export type SettlementOutcome = CommittedSettlement | PendingSettlement;
+
+export function settlementPending(value: SettlementOutcome): value is PendingSettlement {
+  return "kind" in value && value.kind === "pending";
+}
+
+export async function settlementResponse(operation: Promise<{result: unknown}>, terminal: LiveUpdateReceipt | null): Promise<SettlementOutcome> {
+  try { return settlementResult((await operation).result, terminal); }
+  catch (error) {
+    if (error instanceof EngineRequestError && error.wireError &&
+      (error.wireError.message === "markdown-write-held" || error.wireError.message === "markdown-witness-check-pending")) {
+      return {kind: "pending", reason: error.wireError.message};
+    }
+    throw error;
+  }
+}
+
+export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): SettlementOutcome {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native settlement response.");
   const response = value as Record<string, unknown>;
+  if (Object.keys(response).sort().join() === "reason,status" && response.status === "pending" &&
+    (response.reason === "markdown-write-held" || response.reason === "markdown-witness-check-pending")) {
+    return {kind: "pending", reason: response.reason};
+  }
   if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");
   const row = response.settlement as Record<string, unknown>;
   if (Object.keys(row).sort().join() !== "applicationCount,collectionReconcileRequired,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");

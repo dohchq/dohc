@@ -26,6 +26,7 @@ import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveComm
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
+import {settlementPending} from "./liveSettlement.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
@@ -690,7 +691,11 @@ export async function startServiceLiveHost(options: {
           if (document) {
             if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
             const {consumer} = activation!.consumer(document);
-            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            if (settleTarget) {
+              const settled = await consumer.settle(document, operation);
+              if (settlementPending(settled)) return settled.reason;
+              if (!settled.materialized) return "Settlement has not reached the file.";
+            }
             const more = await publish(operation);
             if (more) return more;
           }
@@ -735,7 +740,11 @@ export async function startServiceLiveHost(options: {
           if (!lost) {
             if (!quiet()) return undefined;
             const {consumer} = activation!.consumer(document);
-            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            if (settleTarget) {
+              const settled = await consumer.settle(document, operation);
+              if (settlementPending(settled)) return settled.reason;
+              if (!settled.materialized) return "Settlement has not reached the file.";
+            }
             // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
             if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
             if (!quiet()) return undefined;

@@ -11,7 +11,10 @@ const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn }));
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllEnvs(); });
 
-it.each([false, true])("forwards explicit sync config (%s) and uses the native grace twice when EOF and TERM are ignored", async enabled => {
+it.each([
+  [false, undefined], [true, undefined],
+  [true, { node: process.execPath, bundle: "trusted-reader.cjs", manifest: "trusted-manifest.json" }],
+] as const)("forwards explicit sync (%s) and reader (%j) config and uses the native grace twice when EOF and TERM are ignored", async (enabled, reader) => {
   vi.useFakeTimers();
   vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "untrusted-inherited-reader");
   const child = Object.assign(new EventEmitter(), {
@@ -32,7 +35,7 @@ it.each([false, true])("forwards explicit sync config (%s) and uses the native g
   const limits = { maxPayloadBytes: 4096, maxPendingBytes: 8192, closeTimeoutMs: 1 } as Parameters<typeof startDeviceNativeTransport>[0]["limits"];
   const sync = enabled ? {policy: {maxClientVectorBytes: 1024, maxHostVectorBytes: 4096,
     maxOutputBytes: 1_000_000, maxReadBytes: 10_000_000}, workingReserveBytes: 16_777_216} : undefined;
-  const config = { engineExecutable: process.execPath, workspaces: [], ingress: {}, maxQueuedBytes: 100_000, sync,
+  const config = { engineExecutable: process.execPath, workspaces: [], ingress: {}, maxQueuedBytes: 100_000, sync, reader,
     shutdownGraceMs: 1000 } as unknown as DeviceLiveHostConfig;
   const transport = startDeviceNativeTransport({ ws, limits, config, stop() {}, start: {
     type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
@@ -41,7 +44,8 @@ it.each([false, true])("forwards explicit sync config (%s) and uses the native g
   } });
   await ready;
   const options = spawn.mock.calls[0]![2];
-  expect(options.env.DOHC_ENGINE_READER_CONFIG).toBeUndefined();
+  if (reader) expect(options.env.DOHC_ENGINE_READER_CONFIG).toBe(JSON.stringify(reader));
+  else expect(options.env.DOHC_ENGINE_READER_CONFIG).toBeUndefined();
   const saved = JSON.parse(readFileSync(options.env.DOHC_ENGINE_LIVE_HOST_CONFIG, "utf8"));
   expect(saved.sync).toEqual(sync);
   const closed = transport.close();

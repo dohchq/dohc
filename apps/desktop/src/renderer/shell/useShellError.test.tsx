@@ -5,18 +5,126 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { SyncedDeletionRevivalError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 const strict = ({ children }: { children: ReactNode }) => (
   <StrictMode>{children}</StrictMode>
 );
 
 describe("useShellError", () => {
+  it("drops a late History refusal from the previous workspace", () => {
+    const { result, rerender } = renderHook(({ workspaceId }) => useShellError(workspaceId), {
+      initialProps: { workspaceId: "before" },
+    });
+    const oldReport = result.current.reportShellError;
+    rerender({ workspaceId: "after" });
+    act(() => oldReport("Could not restore this file.", new SyncedDeletionRevivalError("old.txt")));
+    expect(result.current.shellErrors).toEqual([]);
+    act(() => result.current.reportShellError("Could not restore this file.", new SyncedDeletionRevivalError("current.txt")));
+    expect(result.current.shellErrors[0]!.title).toContain("current.txt");
+  });
+  it("keeps a History deletion refusal in the toast and Notices when the toast closes", () => {
+    const { result } = renderHook(() => useShellError("guard-history"));
+    const retry = vi.fn();
+    act(() => result.current.reportShellError("Could not restore this file.",
+      new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+    expect(notice.message).toBe("Copy its text from its History into a file with a new name.");
+    expect(notice.details).toContainEqual(["Reason", "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them."]);
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBeNull();
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true, message: notice.message });
+  });
+
+  it("toasts each copy once, restores its row on restart, and clears it on open", () => {
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"]] as const;
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies(copies, open));
+    const row = first.result.current.shellErrors[0]!;
+    expect(row).toMatchObject({ title: "Kept a copy of n.md", seen: false, retry: null,
+      message: "It changed outside dohc. That change is now in n (kept copy).md.", action: { label: "Open copy", ends: true } });
+    first.unmount();
+    const second = renderHook(() => useShellError("ws-a"));
+    act(() => second.result.current.showOutsideCopies(copies, open));
+    expect(second.result.current.shellErrors[0]).toMatchObject({ seen: true });
+    act(() => second.result.current.runShellErrorAction(second.result.current.shellErrors[0]!.id));
+    expect(open).toHaveBeenCalledWith("n (kept copy).md");
+    expect(second.result.current.shellErrors).toHaveLength(0);
+    second.unmount();
+    const third = renderHook(() => useShellError("ws-a"));
+    act(() => third.result.current.showOutsideCopies(copies, open));
+    expect(third.result.current.shellErrors).toHaveLength(0);
+  });
+
+  it("does not toast an older copy again when a newer copy disappears", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const first = ["n.md", "n (kept copy).md", "copy-n-1"] as const;
+    const second = ["n.md", "n (kept copy 2).md", "copy-n-2"] as const;
+    act(() => result.current.showOutsideCopies([first], open));
+    act(() => result.current.showOutsideCopies([first, second], open));
+    act(() => result.current.showOutsideCopies([first], open));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true });
+    expect(result.current.shellErrors[0]!.message).toContain(first[1]);
+  });
+
+  it("toasts a new receipt that reuses an older copy's file name", () => {
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "old"]], vi.fn()));
+    first.unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "new"]], vi.fn()));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.seen).toBe(false);
+  });
+
+  it("keeps one row per original, replaces it with the newest copy, and remembers dismissal", () => {
+    const { result, unmount } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"], ["m.md", "m (kept copy).md", "copy-m-1"]] as const;
+    act(() => result.current.showOutsideCopies(copies, open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    act(() => result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    const row = result.current.shellErrors.find(row => row.identity === "outside-copy:n.md")!;
+    expect(row.message).toContain("n (kept copy 2).md");
+    expect(row.seen).toBe(false);
+    act(() => result.current.dismissShellError(row.id));
+    unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.title).toBe("Kept a copy of m.md");
+  });
+
+  it("renders and stores nothing again when a status repeats its copies", () => {
+    let renders = 0;
+    const { result } = renderHook(() => { renders += 1; return useShellError("ws-a"); });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    // Each status answer carries a new array, so each call builds its own.
+    const repeat = (copies: () => (readonly [string, string, string])[]) => {
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      const rows = result.current.shellErrors, rendered = renders, writes = setItem.mock.calls.length;
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      expect(result.current.shellErrors).toBe(rows);
+      expect(renders).toBe(rendered);
+      expect(setItem).toHaveBeenCalledTimes(writes);
+    };
+    repeat(() => []);
+    repeat(() => [["n.md", "n (kept copy).md", "copy-n-1"]]);
+    setItem.mockRestore();
+  });
+
   it("keeps a held source error in Notices with the repair words and retry", async () => {
     const capture = { deferredWrites: [], running: true, settled: true, degraded: false, heldFiles: [{
       workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
@@ -208,37 +316,78 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
-  it("opens the current file for a terminal binding refusal instead of retrying sync", () => {
+  it("opens the current file for a terminal binding refusal instead of retrying sync, and reads it", () => {
     const retry = vi.fn();
     const open = vi.fn();
+    const read = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "This file's name, location, or sharing changed before this save arrived. Open the file to continue.";
     const notice = { noticeId: "renamed-save", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "dohc skipped an earlier save",
       body: reason, detail: reason, target: { path: "renamed.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
-    act(() => result.current.showSyncRefusals([notice], retry, open));
+    act(() => result.current.showSyncRefusals([notice], retry, open, undefined, read));
     expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open" } });
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(open).toHaveBeenCalledWith("renamed.md");
+    expect(read).toHaveBeenCalledWith("renamed-save");
     expect(retry).not.toHaveBeenCalled();
     expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
   });
 
-  it("opens History when author names did not sync, instead of retrying sync", () => {
+  it("shows a held local save as a warning whose Open note reads it", () => {
+    const retry = vi.fn();
+    const open = vi.fn();
+    const read = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.", target: { path: "note.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open, undefined, read));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: notice.title, message: notice.body, tone: "warning",
+      retry: null, action: { label: "Open note" } });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(open).toHaveBeenCalledWith("note.md");
+    expect(read).toHaveBeenCalledWith("held-save");
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("keeps a held notice read when its persisted mark arrives, then removes the completed hold", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show.", target: { path: "note.md" }, createdAtMs: 1,
+      readAtMs: null, postedHere: true };
+    const retry = vi.fn();
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: false, read: false });
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]?.seen).toBe(true);
+    act(() => result.current.showSyncRefusals([], retry));
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("opens History when author names did not sync, instead of retrying sync, and reads it", () => {
     const retry = vi.fn();
     const openHistory = vi.fn();
+    const read = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "dohc could not verify who changed this file. The file will share without author names.";
     const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
       body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.", detail: `${reason}\nWorkspace: ws-a`,
       target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
-    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
+    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory, read));
     expect(result.current.shellErrors[0]).toMatchObject({
       title: notice.title, message: notice.body, tone: "warning", retry: null, action: { label: "Open History" },
     });
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(openHistory).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledWith("unattributed");
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
     expect(retry).not.toHaveBeenCalled();
   });
 

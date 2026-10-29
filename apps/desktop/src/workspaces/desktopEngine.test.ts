@@ -153,7 +153,7 @@ function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
     recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
     collectionAutomations: { current: (id) => rows.has(id) ? states.get(id)?.collectionAutomations : undefined },
-    notifyRenderer: vi.fn(), noteNoAtomicPlacement: vi.fn(),
+    notifyRenderer: vi.fn(), noteNoAtomicPlacement: vi.fn(), noteWriteDeferred: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
@@ -754,6 +754,19 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
+  it("refreshes Notices when local Markdown recovery changes its held obligations", async () => {
+    const f = fixture();
+    const changed = vi.fn();
+    f.dependencies.onRefusalsChanged = changed;
+    try {
+      await f.engine.start();
+      f.client.emit("sync.refusalsChanged", {workspaceId: "workspace"});
+      expect(changed).toHaveBeenCalledOnce();
+      f.client.emit("ydoc.remoteUpdate", {sessionId: "editor", resyncRequired: true});
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { await f.close(); }
+  });
+
   it("keeps the composed session and relay owners through a real daemon restart", async () => {
     const f = fixture(); const relaunched = deferred();
     await f.addWorkspace("workspace");
@@ -932,6 +945,8 @@ describe("desktop engine composed sessions and events", () => {
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
+      f.client.emit("capture.writeDeferred", { workspaceId: "workspace", path: "notes.md" });
+      expect(f.dependencies.noteWriteDeferred).toHaveBeenCalledExactlyOnceWith("workspace", "notes.md");
       expect(collection.failuresChanged).toHaveBeenCalledOnce();
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");

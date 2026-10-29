@@ -165,6 +165,35 @@ function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA
   return { props, release, stopAndRestore, undoStopAndRestore, shell: () => shell };
 }
 
+it("reports a synced deletion refusal while keeping successful Stop files undoable", async () => {
+  const words = "Bringing it back could stop sync. Copy its text from its History into a file with a new name.";
+  const f = fixture([{status: "restored", restored: [{path: "ok.md", restoredMomentId: "ok"}],
+    review: [{path: "trip.md", reason: "restore-refused", detail: words, refusal: "synced-deletion"}], runsUndone: 0, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  await screen.findByText(/Bringing it back could stop sync\./);
+  expect(f.props.onError).toHaveBeenCalledWith(words, expect.objectContaining({path: "trip.md", restore: true}), null, expect.stringContaining("trip.md"));
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  await waitFor(() => expect(f.undoStopAndRestore).toHaveBeenCalled());
+  expect(f.undoStopAndRestore.mock.calls[0]![0].restoredMomentIds).toEqual(["ok"]);
+});
+
+it("reports a synced deletion refusal in Undo and retains only the refused receipt", async () => {
+  const words = "Bringing it back could stop sync. Copy its text from its History into a file with a new name.";
+  const f = fixture([{status: "restored", restored: [{path: "trip.md", restoredMomentId: "trip"}, {path: "ok.md", restoredMomentId: "ok"}],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null}]);
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null, files: [
+    {kind: "refused", momentId: "trip", detail: words, refusal: "synced-deletion"},
+    {kind: "restored", momentId: "ok", receipt: {path: "ok.md", restoredMomentId: "undo-ok"}},
+  ]});
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  await screen.findByText(/Bringing it back could stop sync\./);
+  expect(f.props.onError).toHaveBeenCalledWith(words, expect.objectContaining({path: "trip.md", restore: true}), null, expect.stringContaining("trip.md"));
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target).map(file => file.restoredMomentId)).toEqual(["trip"]);
+});
+
 it("recovers unfinished runs after relaunch and opens Try again from the Notice", async () => {
   const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 1, runsLeft: 0,
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false,

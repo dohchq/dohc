@@ -476,6 +476,8 @@ function makeBaseBridge(
     setTitlebarTheme: vi.fn(async () => undefined),
     onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
+    onVersionRound: vi.fn(() => () => {}),
+    answerVersionRound: vi.fn(async () => undefined),
     onChatDispatchNotices: vi.fn(() => () => {}),
     onScheduleHostChanged: vi.fn(() => () => {}),
     readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),

@@ -1,4 +1,6 @@
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
+import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
+import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
@@ -96,6 +98,7 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
+import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
@@ -505,6 +508,7 @@ export interface WorkspaceEngineCapture {
   beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
+  noteWriteDeferred(path: string): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
   observeFileEvents(events: readonly WatcherEvent[]): void;
@@ -582,9 +586,11 @@ export interface WorkspaceEngineCapture {
   // with the version binding, so a switch cannot land between them.
   openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
+    allowLossySourceSha256?: string;
     path: string;
     assertRecordWritable?: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
@@ -667,7 +673,7 @@ export interface WorkspaceEngineCapture {
   // Files dohc moved aside while saving because another program changed them
   // meanwhile. Each waits at a hidden name until saveKeptCopy moves it to a
   // visible copy beside its file.
-  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
+  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   // Old versions of files kept on a drive that cannot tell dohc whether a
   // program still has one open. dohc never deletes them itself; these list
@@ -857,6 +863,7 @@ export interface WorkspaceEngineCaptureOptions {
   // moment. Sticky: the drive does not change while the workspace is open.
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
@@ -1832,6 +1839,25 @@ export function createWorkspaceEngineCapture(
     }
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
+  const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
+  let lastOutsideCopies: [string, string, string][] | null = null;
+  let reportedOutsideCopies: string | null = null;
+  const reportOutsideWriteCopies = async () => {
+    let readError: string | null = null;
+    const failed = (error: unknown) => {
+      readError ??= `${join(rootPath, ".dohc/local/outside-write-copies")}\n${errorMessage(error)}`;
+    };
+    try { lastOutsideCopies = await outsideCopies.list(failed); }
+    catch (error) { failed(error); }
+    const serialized = JSON.stringify([lastOutsideCopies, readError]);
+    if (serialized !== reportedOutsideCopies) {
+      try {
+        options.onOutsideWriteCopies?.(lastOutsideCopies, readError);
+        reportedOutsideCopies = serialized;
+      } catch (error) { onError("outside copy notices", error); }
+    }
+    return lastOutsideCopies;
+  };
 
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
@@ -2330,6 +2356,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function openRestartSafeRustYDocSession(input: {
+    allowLossySourceSha256?: string;
     versionId: string;
     path: string;
     contentKind?: YdocContentKind;
@@ -2338,6 +2365,7 @@ export function createWorkspaceEngineCapture(
     onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
@@ -2726,6 +2754,8 @@ export function createWorkspaceEngineCapture(
             });
           };
           const providerOpened = await openProvider({
+            ...(generation === 1 && input.allowLossySourceSha256
+              ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -2756,6 +2786,9 @@ export function createWorkspaceEngineCapture(
               recordedStateVector = Y.encodeStateVector(recordedDoc);
               updatesCounted += 1;
               input.onRemoteUpdate(update);
+            },
+            onHeadChanged: head => {
+              if (!closed && current === opened) input.onHeadChanged?.(head);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
               const editorVisible = refusedEditorVisible;
@@ -3490,6 +3523,10 @@ export function createWorkspaceEngineCapture(
             assertCurrent();
             return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
           },
+          onSettlementWanted: (handler: () => void) => {
+            assertCurrent();
+            return owner.onSettlementWanted(() => {if (current === captured && !closed) handler();});
+          },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
           resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },
@@ -3512,6 +3549,7 @@ export function createWorkspaceEngineCapture(
         // operation's next line records it here.
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
+      get headSha256() { return current?.headSha256; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -3924,7 +3962,9 @@ export function createWorkspaceEngineCapture(
     // physical write across settle windows and makes reconciliation
     // idempotent.
     if (disk.kind === "binary") {
-      if (current?.contentKind === "binary" && current.sha256 === disk.sha256) return false;
+      if (current?.contentKind === "binary" && current.sha256 === disk.sha256) {
+        return false;
+      }
       // A tracked text file whose bytes stop round-tripping as UTF-8 keeps its
       // object identity; the moment says so honestly instead of pretending it
       // was an ordinary update (the pre-WS-G1 path retired the file here).
@@ -4010,6 +4050,68 @@ export function createWorkspaceEngineCapture(
     operations: readonly MaterializeOperation[],
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<void> {
+    let context: Promise<{ engine: Awaited<ReturnType<typeof engineStore>>; versionId: string }> | undefined;
+    const lookupContext = () => context ??= engineStore().then(async engine => ({
+      engine, versionId: await activeVersionIdOf(engine),
+    }));
+    let writeObjects: Promise<Map<string, string>> | undefined;
+    const resolveWriteObjects = () => writeObjects ??= (async () => {
+      const { engine, versionId } = await lookupContext();
+      const objects = new Map<string, string>();
+      let targets: { path: string }[] = [];
+      let bytes = 2; // JSON array brackets.
+      async function resolve() {
+        const { results } = await engine.resolveFiles({ workspaceId, versionId, targets });
+        results.forEach((result, index) => {
+          if (result.status === "found") objects.set(targets[index]!.path, result.objectId);
+        });
+        targets = [];
+        bytes = 2;
+      }
+      for (const operation of operations) {
+        if (operation.kind === "delete" || (operation.kind === "write" && operation.protected)) continue;
+        const target = { path: operation.path };
+        const size = Buffer.byteLength(JSON.stringify(target));
+        if (targets.length && (targets.length === MAX_FILE_RESOLVE_TARGETS || bytes + 1 + size > MAX_FILE_RESOLVE_BYTES)) await resolve();
+        targets.push(target);
+        bytes += size + (targets.length > 1 ? 1 : 0);
+      }
+      if (targets.length) await resolve();
+      return objects;
+    })();
+    let deleteObjects: Promise<Map<string, string>> | undefined;
+    const resolveDeleteObjects = () => deleteObjects ??= (async () => {
+      const { engine, versionId } = await lookupContext();
+      const pending = new Set(operations.filter(operation => operation.kind === "delete" && !operation.protected).map(operation => operation.path));
+      const objects = new Map<string, string>();
+      let beforeMomentOrder: number | undefined;
+      // Deleted paths have no head. Share one newest-first scan, with no
+      // fixed History window, and stop once every path has an identity.
+      do {
+        const page = await engine.listMoments({ workspaceId, versionId, limit: 100, beforeMomentOrder });
+        for (const row of page.moments) {
+          if (pending.delete(row.path)) objects.set(row.path, row.objectId);
+        }
+        if (!pending.size) break;
+        beforeMomentOrder = page.nextBeforeMomentOrder ?? undefined;
+      } while (beforeMomentOrder !== undefined);
+      return objects;
+    })();
+    async function isRecorded(operation: MaterializeOperation, path: string, sha256: string) {
+      const objects = await (operation.kind === "delete" ? resolveDeleteObjects() : resolveWriteObjects());
+      const objectId = objects.get(path);
+      if (objectId === undefined) return false;
+      const { engine } = await lookupContext();
+      let beforeMomentOrder: number | undefined;
+      do {
+        const page = await engine.listMoments({ workspaceId, objectId, limit: 100, beforeMomentOrder });
+        for (const row of page.moments) {
+          if (row.path === path && row.operation !== "delete" && row.sha256 === sha256) return true;
+        }
+        beforeMomentOrder = page.nextBeforeMomentOrder ?? undefined;
+      } while (beforeMomentOrder !== undefined);
+      return false;
+    }
     for (const operation of operations) {
       assertEngineWritablePath(operation.path, policy, {
         ...(operation.kind !== "write-binary" && operation.protected ? { protected: true } : {}),
@@ -4019,7 +4121,15 @@ export function createWorkspaceEngineCapture(
         operation.kind === "delete"
           ? registerExpectedEngineEvents([{ path: operation.path }])
           : () => undefined;
+      let copied = false;
       try {
+        // Protected materialization has its own secret policy and recovery.
+        if (operation.kind === "write-binary" || !operation.protected) {
+          copied = await outsideCopies.beforeWrite(operation.path,
+            operation.kind === "delete" ? null : operation.kind === "write" ? Buffer.from(operation.text) : operation.bytes,
+            path => assertEngineWritablePath(path, policy),
+            (path, sha256) => isRecorded(operation, path, sha256));
+        }
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
         } else if (operation.kind === "write-binary") {
@@ -4029,10 +4139,13 @@ export function createWorkspaceEngineCapture(
         }
       } catch (error) {
         cancel();
+        if (error instanceof OutsideWriteCopyError) throw error;
         throw new Error(
           `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
           { cause: error },
         );
+      } finally {
+        if (copied) await reportOutsideWriteCopies();
       }
     }
   }
@@ -4310,6 +4423,7 @@ export function createWorkspaceEngineCapture(
         if (status?.noAtomicPlacement) options.onAtomicPlacementUnavailable?.();
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
+          await reportOutsideWriteCopies();
           options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
           options.onHeldFiles?.(status.heldFiles);
@@ -4482,8 +4596,8 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
-        // Set by the capture health poll while capture holds a change made
-        // outside dohc to this file. The session keeps it until it closes.
+        // Set by capture events or the health poll while capture holds an
+        // outside change to this file. The session keeps it until it closes.
         let changedOutside = false;
         // Capture keeps a note's unsaved text in History when it records an
         // outside version, but has no such copy for a drawing's strokes. A
@@ -4741,6 +4855,7 @@ export function createWorkspaceEngineCapture(
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
+          ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -4776,6 +4891,7 @@ export function createWorkspaceEngineCapture(
             if (!localAcknowledgement) noteUpdate();
             input.onRemoteUpdate(update);
           },
+          onHeadChanged: input.onHeadChanged,
           onLineageReplaced: (update, recoveredPaths) => {
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);
@@ -5802,6 +5918,14 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
+        // An outside write capture held before this entry existed woke no
+        // session, so read the held paths once instead of waiting for the poll.
+        // Before start(), the first poll reads them.
+        if (daemonCaptureHealthTimer !== null) void engine.watcherStatus?.().then((status) => {
+          if (!stopped && !shuttingDown && status?.deferredWrites.includes(input.path) && liveYDocSessions.get(input.path) === liveEntry) {
+            liveEntry.changedOutside();
+          }
+        }).catch(() => undefined);
         // The editor's first save state, decided before it can show Saved.
         //
         // A document can open over an outside edit: write nothing and report
@@ -5883,6 +6007,7 @@ export function createWorkspaceEngineCapture(
             return session.artifactAssets ?? [];
           },
           path: session.path,
+          get headSha256() { return session.headSha256; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,
@@ -5947,6 +6072,10 @@ export function createWorkspaceEngineCapture(
   return {
     start() {
       pollDaemonCaptureHealth();
+    },
+
+    noteWriteDeferred(path) {
+      if (!stopped && !shuttingDown) liveYDocSessions.get(path)?.changedOutside();
     },
 
     observeFileEvents(events) {
@@ -6782,7 +6911,9 @@ export function createWorkspaceEngineCapture(
     },
 
     async listKeptCopies() {
-      return await (await engineStore()).listKeptCopies();
+      const native = await (await engineStore()).listKeptCopies();
+      const outsideWriteCopies = await reportOutsideWriteCopies();
+      return { ...native, ...(outsideWriteCopies === null ? {} : { outsideWriteCopies }) };
     },
 
     async saveKeptCopy(id) {
@@ -6801,6 +6932,12 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
+        // The engine refuses to resolve a file an open document holds, so
+        // vacate live sessions first, as a merge does.
+        await settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before resolving a conflict",
+        );
         await engine.flushCapture?.();
         const result = await engine.resolveTextConflict({
           workspaceId,
@@ -6812,12 +6949,11 @@ export function createWorkspaceEngineCapture(
             correlationId: `conflict-${conflictId}`,
           },
         });
-        // Materialize only when the resolution changed the active version's
-        // state (keep-current writes nothing; a resolution into a version
-        // that is not on disk changes nothing visible).
+        // A kept moment changes the shared head while retaining the disk bytes.
+        // Only materialize a choice that changes the active version's content.
         const activeVersionId = await activeVersionIdOf(engine);
         if (result.conflict.targetVersionId === activeVersionId) {
-          if (result.write) {
+          if (result.write && resolution.kind !== "keep-current") {
             await materialize(
               [await materializeWriteForSnapshot(engine, result.write.snapshot)],
               policy,
@@ -7278,6 +7414,9 @@ export function createWorkspaceEngineCapture(
             if (code === "recovery-unavailable") throw new RestoreLocalChangesError(path, "dohc could not remove this file. Check folder access, then try again.");
             if (code === "file-locked") throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
             if (code?.startsWith("materialize-")) throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
+          }
+          if (error instanceof DaemonRefusalError && error.message === "synced-deletion-revival-refused") {
+            throw new SyncedDeletionRevivalError(path, { cause: error }, true);
           }
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }

@@ -66,7 +66,7 @@ describe("usage record bridge", () => {
     const { store, record, counted, call } = setup();
     await store.load();
     store.recordSuccess({ capabilityId: "version.create", door: "renderer" });
-    store.recordSuccess({ capabilityId: "version.create", door: "cli" });
+    store.recordSuccess({ capabilityId: "version.create", door: "automation" });
     store.recordSuccess({ capabilityId: "version.create", door: "renderer" });
     record.mockClear();
     const read = await call("readUsageRecord", {}) as Extract<UsageRecordResult, { status: "readable" }>;
@@ -74,8 +74,8 @@ describe("usage record bridge", () => {
     expect(read.rows.map(row => row.capabilityId)).toEqual([...USAGE_ACTION_IDS]);
     expect(read.rows.find(row => row.capabilityId === "version.create")).toEqual({
       capabilityId: "version.create", label: "Create a workspace version", lastUsed: "2026-10-07",
-      doors: { renderer: { count: 2, counted: true }, cli: { count: 1, counted: false },
-        mcp: { count: 0, counted: false }, automation: { count: 0, counted: false } },
+      doors: { renderer: { count: 2, counted: true }, cli: { count: 0, counted: true },
+        mcp: { count: 0, counted: true }, automation: { count: 1, counted: false } },
     });
     // The other doors this build does not count stay marked, never a plain zero.
     expect(read.rows.find(row => row.capabilityId === "chat.post")!.doors).toMatchObject({

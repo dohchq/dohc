@@ -1399,6 +1399,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
+  outsideWriteCopyReadError: z.string().nullable().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Old versions of files the engine keeps on a drive that cannot tell it
   // whether a program still has one open, so it never deletes them: how
@@ -5291,7 +5293,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     review: z.array(z.discriminatedUnion("reason", [
       z.object({ path: PATH_STRING, reason: z.literal("changed-since"), changedBy: z.string().optional() }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
-      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000), refusal: z.literal("synced-deletion").optional() }).strict(),
       // History's rules could not be read, so restoring the file was refused.
       z.object({ path: PATH_STRING, reason: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
     ])),
@@ -5362,7 +5364,7 @@ export const UndoStopAndRestoreResult = z.object({
     z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),
       receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
     }).strict(),
-    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000), refusal: z.literal("synced-deletion").optional() }).strict(),
     z.object({ momentId: OPAQUE_ID, kind: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
   ])),
 }).strict();
@@ -5943,6 +5945,30 @@ export const ExitRoundAnswerPayload = z.object({
 });
 export type ExitRoundAnswerPayload = z.infer<typeof ExitRoundAnswerPayload>;
 
+// One version round message from main. Before the CLI or MCP changes a
+// workspace's versions, `begin` asks each window showing it to save its open
+// edits and hold new Collection writes, as the window does before its own
+// version change. `end` closes the round. With `changed`, the change ran, and
+// the window moves its editors and history to `activeVersionId`, or asks
+// which version is active when it is absent.
+export const VersionRoundMessage = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("begin"), roundId: z.number().int().positive(), workspaceId: z.string().min(1) }),
+  z.object({
+    kind: z.literal("end"),
+    roundId: z.number().int().positive(),
+    changed: z.boolean(),
+    activeVersionId: z.string().min(1).optional(),
+  }),
+]);
+export type VersionRoundMessage = z.infer<typeof VersionRoundMessage>;
+// Ready once the window saved its edits and holds new ones, or the reason it
+// couldn't, in a person's words.
+export const VersionRoundAnswerPayload = z.discriminatedUnion("ready", [
+  z.object({ roundId: z.number().int().positive(), ready: z.literal(true) }),
+  z.object({ roundId: z.number().int().positive(), ready: z.literal(false), reason: z.string().min(1).max(1000) }),
+]);
+export type VersionRoundAnswerPayload = z.infer<typeof VersionRoundAnswerPayload>;
+
 export const UpdateCheckResult = z.object({
   checked: z.boolean(),
   state: UpdateStateEvent,
@@ -6505,7 +6531,10 @@ export const AutomationControlsTargetShape = z.object({
   path: codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS),
   run: NOTICE_TARGET_FIELD,
 }).refine(isNoticeTarget);
-export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export const RefusalCoordinate = z.union([
+  z.object({ originId: z.string(), originSeq: z.number().int() }),
+  z.object({ obligationOrder: z.number().int().positive(), checkpointSha256: z.string(), headSha256: z.string().nullable() }),
+]);
 export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
@@ -6867,6 +6896,7 @@ const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
 });
 
 export const OpenEngineYDocSessionPayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   sessionId: ENGINE_YDOC_SESSION_ID,
   path: PATH_STRING,
@@ -6889,6 +6919,7 @@ export const engineYDocAdmissionOperations = {
 } satisfies OperationTable;
 
 export const RetryEngineYDocSavePayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
   // Save it again, on a document whose file was deleted outside dohc: main
@@ -6921,6 +6952,7 @@ export const engineYDocSaveOperations = {
 } satisfies OperationTable;
 
 export const OpenEngineYDocSessionResult = z.object({
+  headSha256: z.string().nullable().optional(),
   available: z.boolean(),
   captureHeld: z.boolean().optional(),
   // A close released the file, but capture has not recorded the version
@@ -7085,6 +7117,7 @@ export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  headSha256: z.string().min(1).nullable().optional(),
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
@@ -7547,6 +7580,10 @@ export interface DohcDesktopBridge
   // round id it was asked under.
   onExitRound(listener: (message: ExitRoundMessage) => void): () => void;
   answerExitRound(payload: ExitRoundAnswerPayload): Promise<void>;
+  // Version rounds: before the CLI or MCP changes this workspace's versions,
+  // main asks the window to save its open edits, then says what changed.
+  onVersionRound(listener: (message: VersionRoundMessage) => void): () => void;
+  answerVersionRound(payload: VersionRoundAnswerPayload): Promise<void>;
   // A late draft vetoes an approved exit's unload; the renderer tells main
   // the approval is off, and resumes the quit once the user confirms.
   holdQuit(): Promise<void>;

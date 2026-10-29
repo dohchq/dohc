@@ -157,7 +157,8 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
 - A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.

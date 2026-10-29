@@ -1,5 +1,6 @@
 import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
+import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
@@ -55,6 +56,7 @@ import {
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -220,6 +222,7 @@ import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare, type Op
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
+import { useVersionRounds } from "./shell/useVersionRounds";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
@@ -895,6 +898,7 @@ export function DesktopWorkspaceShell(props: {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showOutsideCopies,
     showCaptureRecoveries,
     showCaptureHolds,
     showDirectWriteNotice,
@@ -2290,6 +2294,7 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  useVersionRounds(workspaceId, beginLineageOperation, onVersionWorkspaceStateChanged);
   // The Explorer selects these paths once their rows render. The newest
   // request wins, so a slow import cannot take the selection back.
   const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; paths: readonly string[] } | null>(null);
@@ -3108,6 +3113,7 @@ export function DesktopWorkspaceShell(props: {
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
+      if (readError(error).refusal === "synced-deletion") error = new SyncedDeletionRevivalError(path, { cause: error }, true);
       const { words } = readError(error);
       if (words && isRestorePolicyRefusal(error)) {
         reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
@@ -5273,6 +5279,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
+        ...(error.read ? { read: true } : {}),
       })),
     [shellErrors, reportFacts],
   );
@@ -5402,19 +5409,24 @@ export function DesktopWorkspaceShell(props: {
       clearIdentity("file-observation");
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
-  useEffect(() => {
-    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView]);
-  const hideWorkspaceError = useCallback((id: string) => {
-    hideShellError(id);
-    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+  // Reading a refusal's row stores its read mark. Closing its toast alone
+  // doesn't, so an unread one toasts again the next time dohc starts.
+  const readWorkspaceError = useCallback((id: string) => {
+    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
     if (!refusal) return;
     const askedFor = workspaceId;
     void props.sentNotices!.read([refusal]).catch(error => {
       if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
     });
-  }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
+  }, [props.sentNotices, workspaceId, reportShellError]);
+  useEffect(() => {
+    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
+  // The notes whose change dohc holds, for their band.
+  const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
+    notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
+  [props.sentNotices?.notices, workspaceId]);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
@@ -5449,6 +5461,24 @@ export function DesktopWorkspaceShell(props: {
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
+  useEffect(() => {
+    if (syncStatus?.outsideWriteCopies === undefined) return;
+    showOutsideCopies(syncStatus.outsideWriteCopies, openFile);
+  }, [syncStatus?.outsideWriteCopies, showOutsideCopies, openFile]);
+  const shownCopyReadError = useRef<string | null>(null);
+  useEffect(() => {
+    if (syncStatus?.outsideWriteCopyReadError === undefined) return;
+    const error = syncStatus.outsideWriteCopyReadError;
+    if (error === shownCopyReadError.current) return;
+    shownCopyReadError.current = error;
+    const identity = "outside-copy-records";
+    if (error === null) { clearIdentity(identity); return; }
+    reportShellFailure({
+      identity, kind: "outside-copy-read", title: "dohc could not list every kept copy",
+      message: "To find a copy that isn't listed, look beside its file for (kept copy) in the name.",
+      details: [["Cause", error]], retry: () => void refreshKeptCopies(),
+    });
+  }, [syncStatus?.outsideWriteCopyReadError, reportShellFailure, clearIdentity, refreshKeptCopies]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -5495,7 +5525,7 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
-      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
       if (refusal) {
         const askedFor = workspaceId;
         void props.sentNotices!.dismiss(refusal).catch(error => {
@@ -5553,6 +5583,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
             clearError={clearIdentity}
+            onConflictError={reportShellError}
             {...(shareView
               ? {}
               : {
@@ -5790,7 +5821,8 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
-              onHideWorkspaceError={hideWorkspaceError}
+              onHideWorkspaceError={hideShellError}
+              onReadWorkspaceError={readWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}
@@ -6235,6 +6267,7 @@ export function DesktopWorkspaceShell(props: {
                 onEditorReady={onEditorReady}
                 workspaceId={workspaceId}
                 path={tabPath}
+                changeHeld={heldNotes.has(tabPath)}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, and share-mount pulls all
                 // re-read the open file (every counter only ever increases).
@@ -6743,6 +6776,7 @@ export function DesktopWorkspaceShell(props: {
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
+          onError={reportShellError}
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}

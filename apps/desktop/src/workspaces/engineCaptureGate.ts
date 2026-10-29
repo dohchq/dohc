@@ -41,6 +41,7 @@ export function captureForWorkspace(
       onCaptureOutcome: hooks.onCaptureOutcome,
       onAtomicPlacementUnavailable: hooks.onAtomicPlacementUnavailable,
       onKeptFiles: hooks.onKeptFiles,
+      onOutsideWriteCopies: hooks.onOutsideWriteCopies,
       onRetainedCopies: hooks.onRetainedCopies,
       onHeldFiles: hooks.onHeldFiles,
       onRecoveryUnavailable: hooks.onRecoveryUnavailable,

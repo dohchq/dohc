@@ -25,6 +25,11 @@ function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
+  return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+    ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
+}
+
 function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
   const local = preview.workspaces.map((workspace) => lineSafe(workspace.name));
   return [
@@ -421,6 +426,37 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!undo.ok) return undo.reason;
       return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
         ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
+    }
+    case "versionList": {
+      const list = result as CliResultByVerb["versionList"];
+      if (!list.ok) return list.reason;
+      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+    }
+    case "versionCompare": {
+      const compare = result as CliResultByVerb["versionCompare"];
+      if (!compare.ok) return compare.reason;
+      return [...compare.files.map(file => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`),
+        ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : [])].join("\n");
+    }
+    case "versionConflicts":
+    case "versionResolve": {
+      const page = result as CliResultByVerb["versionConflicts"];
+      if (!page.ok) return page.reason;
+      return conflictLines(page).join("\n");
+    }
+    case "versionCreate": {
+      const created = result as CliResultByVerb["versionCreate"];
+      return created.ok ? `Created and switched to ${lineSafe(created.version.name)} · ${created.version.id}` : created.reason;
+    }
+    case "versionSwitch": {
+      const switched = result as CliResultByVerb["versionSwitch"];
+      return switched.ok ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed` : switched.reason;
+    }
+    case "versionMerge": {
+      const merge = result as CliResultByVerb["versionMerge"];
+      if (!merge.ok) return merge.reason;
+      return [`Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
+        ...conflictLines(merge)].join("\n");
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);

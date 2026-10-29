@@ -1,13 +1,14 @@
 import { parseHostEpoch } from "@dohc/live-session-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { restoreDirectWrites } from "./stopAndRestore";
+import { engineMomentDetailForIpc } from "../ipc/engineHistoryIpc";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { HostedLogClientClosedError, startServerProxy, type HostedLogResponseBarrier } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
 import { once } from "node:events";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -636,6 +637,88 @@ it.skipIf(engine.missing)(
     }
   },
   240_000,
+);
+
+it.skipIf(engine.missing)(
+  "kept text resolution without lineage: edit over peer deletion",
+  async () => {
+    const workspaceId = "text-keep-deletion";
+    const path = "trip.txt";
+    const initial = "Trip destination: undecided\n";
+    const textB = "Trip destination: Tokyo\n";
+    const later = `${textB}continued on B\n`;
+    const rootA = await createTestScratch("dohc-text-keep-delete-a-");
+    const rootB = await createTestScratch("dohc-text-keep-delete-b-");
+    const relayRoot = await createTestScratch("dohc-text-keep-delete-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    const inspect = async (daemon: LiveDaemonCapture, root: string) => {
+      const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
+      const moments = (await daemon.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path === path);
+      return { text: await readFile(join(root, path), "utf8").catch(error => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }), rows, history: await Promise.all(moments.map(async moment => ({
+        summary: moment, detail: await daemon.capture.readMoment(moment.id),
+      }))) };
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await writeAndCapture(daemonA, rootA, path, initial);
+      await pushUntilDrained(daemonA.relay);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(daemonB, rootB, path, initial);
+      const before = (await daemonA.capture.listMoments({ limit: 100 })).moments.length;
+      await rm(join(rootA, path));
+      daemonA.capture.observeFileEvents([{ path, operation: "delete" }]);
+      await waitForPathMoments(daemonA.capture, path, before + 1);
+      await writeAndCapture(daemonB, rootB, path, textB);
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const rowsA = (await daemonA.capture.listOpenConflictsPage()).conflicts;
+      const rowsB = (await daemonB.capture.listOpenConflictsPage()).conflicts;
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.id).toBe(rowsB[0]!.id);
+      expect(rowsA[0]).toMatchObject({ current: { exists: false }, incoming: { text: textB } });
+      expect(rowsB[0]).toMatchObject({ current: { text: textB }, incoming: { exists: false } });
+      await daemonB.capture.resolveConflict(rowsB[0]!.id, { kind: "keep-current" });
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const keptA = await inspect(daemonA, rootA);
+      const keptB = await inspect(daemonB, rootB);
+      console.log("deletion after keep", JSON.stringify({ A: keptA, B: keptB }));
+      expect(keptA.text).toBeNull();
+      expect(keptA.rows).toHaveLength(2);
+      expect(keptB.text).toBe(textB);
+      expect(keptB.rows).toHaveLength(0);
+      await writeAndCapture(daemonB, rootB, path, later);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const laterA = await inspect(daemonA, rootA);
+      const laterB = await inspect(daemonB, rootB);
+      console.log("deletion after later edit", JSON.stringify({ A: laterA, B: laterB }));
+      expect(laterA.text).toBeNull();
+      expect(laterA.rows.length).toBeGreaterThanOrEqual(2);
+      expect(laterA.rows.some(row => row.incoming.text === later)).toBe(true);
+      expect(laterB.text).toBe(later);
+      expect(laterB.rows).toHaveLength(0);
+      expect(await daemonA.refusalNotices()).toMatchObject({ notices: [] });
+      expect(await daemonB.refusalNotices()).toMatchObject({ notices: [] });
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  90_000,
 );
 
 it.skipIf(engine.missing).each([
@@ -1757,6 +1840,98 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
   90_000,
 );
 
+it.skipIf(engine.missing).each([
+  "one device keeps",
+  "both keep",
+  "keep and incoming",
+  "same merged text",
+] as const)(
+  "kept text resolution without lineage: %s",
+  async (scenario) => {
+    const workspaceId = `text-keep-${scenario.replaceAll(" ", "-")}`;
+    const path = "notes/shared.txt";
+    const initial = "Trip destination: undecided\n";
+    const textA = "Trip destination: Manila\n";
+    const textB = "Trip destination: Tokyo\n";
+    const merged = "Trip destination: together\n";
+    const rootA = await createTestScratch("dohc-text-keep-a-");
+    const rootB = await createTestScratch("dohc-text-keep-b-");
+    const relayRoot = await createTestScratch("dohc-text-keep-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await writeAndCapture(daemonA, rootA, path, initial);
+      await pushUntilDrained(daemonA.relay);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pull(daemonB);
+      expect(await readFile(join(rootB, path), "utf8")).toBe(initial);
+      // No editor or sync runs between these independent file saves.
+      await writeAndCapture(daemonA, rootA, path, textA);
+      await writeAndCapture(daemonB, rootB, path, textB);
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const rowsA = (await daemonA.capture.listOpenConflictsPage()).conflicts;
+      const rowsB = (await daemonB.capture.listOpenConflictsPage()).conflicts;
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.id).toBe(rowsB[0]!.id);
+      expect(rowsA[0]).toMatchObject({ current: { text: textA }, incoming: { text: textB } });
+      expect(rowsB[0]).toMatchObject({ current: { text: textB }, incoming: { text: textA } });
+      const id = rowsA[0]!.id;
+      if (scenario === "one device keeps") {
+        const modified = (await stat(join(rootB, path))).mtimeMs;
+        await daemonB.capture.resolveConflict(id, { kind: "keep-current" });
+        expect((await stat(join(rootB, path))).mtimeMs).toBe(modified);
+      } else if (scenario === "same merged text") {
+        await daemonA.capture.resolveConflict(id, { kind: "apply-merged", text: merged });
+        await daemonB.capture.resolveConflict(id, { kind: "apply-merged", text: merged });
+      } else {
+        await daemonA.capture.resolveConflict(id, { kind: "keep-current" });
+        await daemonB.capture.resolveConflict(id, { kind: scenario === "both keep" ? "keep-current" : "apply-incoming" });
+      }
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      if (scenario === "both keep") {
+        for (const [daemon, root, current, incoming] of [
+          [daemonA, rootA, textA, textB], [daemonB, rootB, textB, textA],
+        ] as const) {
+          expect(await readFile(join(root, path), "utf8")).toBe(current);
+          const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ current: { text: current }, incoming: { text: incoming } });
+        }
+      } else {
+        const chosen = scenario === "one device keeps" ? textB : scenario === "same merged text" ? merged : textA;
+        for (const [daemon, root] of [[daemonA, rootA], [daemonB, rootB]] as const) {
+          expect(await readFile(join(root, path), "utf8")).toBe(chosen);
+          expect(await daemon.capture.countOpenConflicts()).toBe(0);
+        }
+        await writeAndCapture(daemonA, rootA, path, `${chosen}continued on A\n`);
+        await pushUntilDrained(daemonA.relay);
+        await pullAndExpect(daemonB, rootB, path, `${chosen}continued on A\n`);
+        await writeAndCapture(daemonB, rootB, path, `${chosen}continued on B\n`);
+        await pushUntilDrained(daemonB.relay);
+        await pullAndExpect(daemonA, rootA, path, `${chosen}continued on B\n`);
+        expect(await daemonA.capture.countOpenConflicts()).toBe(0);
+        expect(await daemonB.capture.countOpenConflicts()).toBe(0);
+      }
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  90_000,
+);
+
 it.skipIf(engine.missing)(
   "preserves edits made on A while B reviews a seed conflict and converges without retries",
   async () => {
@@ -2391,6 +2566,230 @@ async function openEditor(daemon: Pick<LiveDaemonCapture, "capture">, path: stri
   Y.applyUpdate(doc, session.initialUpdate);
   return { session, doc };
 }
+
+it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
+  "refuses synced deletion revival in fresh %s and keeps unrelated notes syncing both ways",
+  async scenario => {
+    const workspaceId = `deletion-revival-${scenario}`;
+    const path = "trip.txt";
+    const rootA = await createTestScratch("dohc-guard-a-");
+    const rootB = await createTestScratch("dohc-guard-b-");
+    const relayRoot = await createTestScratch("dohc-guard-relay-");
+    const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+    const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
+    let a: LiveDaemonCapture | null = null;
+    let b: LiveDaemonCapture | null = null;
+    const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+    const rounds = async () => {
+      for (let i = 0; i < 3; i++) {
+        await pushUntilDrained(a!.relay);
+        await pushUntilDrained(b!.relay);
+        await pull(a!);
+        await pull(b!);
+      }
+    };
+    try {
+      a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
+      await a.relay.claim();
+      await writeAndCapture(a, rootA, path, "Paris\n");
+      await writeAndCapture(a, rootA, "packing.md", "Packing: initial\n");
+      await writeAndCapture(a, rootA, "budget.md", "Budget: initial\n");
+      await pushUntilDrained(a.relay);
+      b = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: connection});
+      await rounds();
+      expect(await readFile(join(rootB, "packing.md"), "utf8")).toBe("Packing: initial\n");
+      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: initial\n");
+      for (const device of [b, a]) {
+        const editor = await openEditor(device, path);
+        await editor.session.close();
+        await rounds();
+      }
+      // Both devices have opened the same exact editor lineage before going offline.
+      const lineages = new Set<string>();
+      for (const device of [a, b]) {
+        const editor = await openEditor(device, path);
+        expect(shown(editor)).toBe("Paris\n");
+        expect(editor.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
+        lineages.add(editor.session.lineageClaimId!);
+        await editor.session.close();
+      }
+      expect(lineages.size).toBe(1);
+      const beforeDelete = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path).length;
+      await rm(join(rootA, path));
+      a.capture.observeFileEvents([{path, operation: "delete"}]);
+      const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
+      expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
+      const editor = await openEditor(b, path);
+      try { await typeAtEnd(editor, "Tokyo\n"); }
+      finally { await editor.session.close(); }
+      expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
+      await rounds();
+      const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+      expect(reviewB).toMatchObject({current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}});
+      await b.capture.resolveConflict(reviewB.id, {kind: scenario === "H2b" ? "apply-incoming" : "keep-current"});
+      await rounds();
+      if (scenario === "H2b") {
+        const deleted = (await b.capture.listMoments({limit: 100})).moments.find(row => row.path === path && row.operation === "delete")!;
+        expect(deleted).toBeDefined();
+        await expect(b.capture.restoreFileToBeforeMoment(deleted.id, {kind: "human", humanId: "guard-person"}))
+          .rejects.toMatchObject({name: "SyncedDeletionRevivalError"});
+        await expect(readFile(join(rootB, path))).rejects.toMatchObject({code: "ENOENT"});
+      } else {
+        const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewA).toMatchObject({current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}});
+        await expect(a.capture.resolveConflict(reviewA.id, {kind: "apply-incoming"}))
+          .rejects.toMatchObject({message: "synced-deletion-revival-refused"});
+      }
+      await expect(readFile(join(rootA, path))).rejects.toMatchObject({code: "ENOENT"});
+      await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
+      await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
+      await rounds();
+      expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
+      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
+      expect(await pull(a)).toMatchObject({fetched: 0});
+      expect(await pull(b)).toMatchObject({fetched: 0});
+    } finally {
+      await Promise.allSettled([b?.close(), a?.close()]);
+      await relay.stop();
+    }
+  }, 90_000,
+);
+
+it.skipIf(engine.missing)(
+  "settles the synced deletion copy workaround with either both-deleted choice",
+  async () => {
+    for (const choice of ["keep-current", "apply-incoming"] as const) {
+      const workspaceId = `deletion-workaround-${choice}`;
+      const path = "trip.txt";
+      const copyPath = "trip copy.txt";
+      const bEditedAgainstARemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
+      const aRemovedAgainstBKeptEdit = {path, current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}};
+      const bEditedAgainstAKeptRemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
+      const aBothDeletedReview = {path, current: {exists: false}, incoming: {exists: false}};
+      const rootA = await createTestScratch("dohc-guard-a-");
+      const rootB = await createTestScratch("dohc-guard-b-");
+      const relayRoot = await createTestScratch("dohc-guard-relay-");
+      const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+      const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
+      let a: LiveDaemonCapture | null = null;
+      let b: LiveDaemonCapture | null = null;
+      const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+      type ExpectedRow = {path: string; current: {exists: boolean}; incoming: {exists: boolean}};
+      const rounds = async (expectedA: ExpectedRow[] = [], expectedB: ExpectedRow[] = []) => {
+        for (let i = 0; i < 3; i++) {
+          await pushUntilDrained(a!.relay);
+          await pushUntilDrained(b!.relay);
+          await pull(a!);
+          await pull(b!);
+          expect(await a!.refusalNotices()).toEqual({notices: []});
+          expect(await b!.refusalNotices()).toEqual({notices: []});
+          for (const [machine, device, expected] of [["A", a!, expectedA], ["B", b!, expectedB]] as const) {
+            const page = await device.capture.listOpenConflictsPage();
+            expect(page.conflicts, `${machine}: only the expected conflict rows after round ${i + 1}`).toMatchObject(expected);
+            expect(page.nextAfterConflictId).toBeNull();
+          }
+        }
+      };
+      try {
+        a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
+        await a.relay.claim();
+        await writeAndCapture(a, rootA, path, "Paris\n");
+        await writeAndCapture(a, rootA, "packing.md", "Packing: initial\n");
+        await writeAndCapture(a, rootA, "budget.md", "Budget: initial\n");
+        await pushUntilDrained(a.relay);
+        b = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: connection});
+        await rounds();
+        expect(await readFile(join(rootB, "packing.md"), "utf8")).toBe("Packing: initial\n");
+        expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: initial\n");
+        for (const device of [b, a]) {
+          const editor = await openEditor(device, path);
+          await editor.session.close();
+          await rounds();
+        }
+        // Both devices have opened the same exact editor lineage before going offline.
+        const lineages = new Set<string>();
+        for (const device of [a, b]) {
+          const editor = await openEditor(device, path);
+          expect(shown(editor)).toBe("Paris\n");
+          expect(editor.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
+          lineages.add(editor.session.lineageClaimId!);
+          await editor.session.close();
+        }
+        expect(lineages.size).toBe(1);
+        const beforeDelete = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path).length;
+        await rm(join(rootA, path));
+        a.capture.observeFileEvents([{path, operation: "delete"}]);
+        const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
+        expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
+        const editor = await openEditor(b, path);
+        try { await typeAtEnd(editor, "Tokyo\n"); }
+        finally { await editor.session.close(); }
+        expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
+        await rounds([], [bEditedAgainstARemoval]);
+        const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewB).toMatchObject(bEditedAgainstARemoval);
+        await b.capture.resolveConflict(reviewB.id, {kind: "keep-current"});
+        await rounds([aRemovedAgainstBKeptEdit]);
+        const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewA).toMatchObject(aRemovedAgainstBKeptEdit);
+        await a.capture.resolveConflict(reviewA.id, {kind: "keep-current"});
+        expect(await a.capture.countOpenConflicts()).toBe(0);
+        let copied: string | null = null;
+        const history = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path);
+        for (const row of history) {
+          const detail = await a.capture.readMoment(row.id);
+          if (!detail || detail.protected) continue;
+          const ipcMoment = engineMomentDetailForIpc(detail, {
+            agent: () => undefined, person: () => undefined, automation: () => null,
+            named: author => author.userId, presentations: () => [],
+          });
+          if (ipcMoment.afterText === "Paris\nTokyo\n") {
+            copied = ipcMoment.afterText;
+            break;
+          }
+        }
+        expect(copied, "A's History still exposes B's text through readEngineMoment after Keep").toBe("Paris\nTokyo\n");
+        if (copied === null) throw new Error("B's text is missing from A's History after Keep");
+        await writeAndCapture(a, rootA, copyPath, copied);
+        await rounds([], [bEditedAgainstAKeptRemoval]);
+        expect(await readFile(join(rootB, copyPath), "utf8")).toBe(copied);
+        const removalB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(removalB).toMatchObject(bEditedAgainstAKeptRemoval);
+        await b.capture.resolveConflict(removalB.id, {kind: "apply-incoming"});
+        await rounds([aBothDeletedReview]);
+        const absentA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(absentA).toMatchObject(aBothDeletedReview);
+        await a.capture.resolveConflict(absentA.id, {kind: choice});
+        await rounds();
+        for (const [device, text] of [[b, "B later\n"], [a, "A later\n"]] as const) {
+          const editor = await openEditor(device, copyPath);
+          try { await typeAtEnd(editor, text); }
+          finally { await editor.session.close(); }
+          await rounds();
+          for (const otherRoot of [rootA, rootB]) {
+            expect(await readFile(join(otherRoot, copyPath), "utf8")).toContain(text);
+          }
+        }
+        await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
+        await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
+        await rounds();
+        expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
+        expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
+        for (const [device, root] of [[a, rootA], [b, rootB]] as const) {
+          expect((await device.capture.listOpenConflictsPage()).conflicts).toEqual([]);
+          expect(await device.capture.countOpenConflicts()).toBe(0);
+          expect(await readFile(join(root, copyPath), "utf8")).toBe(`${copied}B later\nA later\n`);
+          await expect(readFile(join(root, path))).rejects.toMatchObject({code: "ENOENT"});
+        }
+        expect(await pull(a)).toMatchObject({fetched: 0});
+        expect(await pull(b)).toMatchObject({fetched: 0});
+      } finally {
+        await Promise.allSettled([b?.close(), a?.close()]);
+        await relay.stop();
+      }
+    }
+  }, 180_000,
+);
 
 async function typeAtEnd(editor: OpenEditor, text: string): Promise<void> {
   const typed = editor.doc.getText("plainText");

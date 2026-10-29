@@ -30,6 +30,8 @@ import {
   joinedChannelLabel,
   ComposerModeBar,
   ComposerNotice,
+  DispatchAnnouncement,
+  dispatchAnnouncement,
   type ShareReadFailure,
 } from "./ChatsControls";
 import {
@@ -4191,6 +4193,8 @@ export function ChatsView(props: {
     const threadJoined = joinedFor(nav.channel);
     const threadBookmark = bookmarkFor("thread", nav.thread.id);
     const threadBookmarkKey = `thread:${nav.thread.id}`;
+    const computerPausedStrip = computerDispatchPaused && dispatchState !== null &&
+      dispatchState.pendingCount > 0 && liveRunId === null;
     return (
       <div
         data-testid="chats-thread-view"
@@ -4258,7 +4262,7 @@ export function ChatsView(props: {
             </>
           }
         />
-        {computerDispatchPaused && dispatchState && dispatchState.pendingCount > 0 && liveRunId === null ? (
+        {computerPausedStrip ? (
           <div
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
@@ -4313,6 +4317,14 @@ export function ChatsView(props: {
               : `${dispatchState.pendingCount} queued`}
           </div>
         ) : null}
+        <DispatchAnnouncement
+          testId="chats-dispatch-announcement"
+          text={computerPausedStrip
+            ? "Agent replies paused on this computer"
+            : dispatchState?.paused
+              ? "Agent replies paused"
+              : dispatchAnnouncement(liveRunId !== null, dispatchState?.pendingCount ?? 0)}
+        />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             data-testid="chats-thread-column"

@@ -19,7 +19,7 @@ export type DocumentProjectionRequest =
   | { kind: "read-settled"; markdown: string }
   // `refuseLossy` names the note, which refuses here if it is a lossy note
   // (CONTEXT.md): this is the turn that would change it.
-  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean; refuseLossy?: string }
+  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean; refuseLossy?: string; headSha256?: string | null }
   | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
   // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
   // the verdict by `digest`, the SHA-256 of the text.
@@ -75,7 +75,7 @@ export function runDocumentProjection(
     case "read-settled":
       return settledDocumentMarkdown(request.markdown);
     case "edit":
-      if (request.refuseLossy !== undefined && isLossyDocumentState(request.state)) {
+      if (request.refuseLossy !== undefined && (request.headSha256 === undefined || isLossyDocumentState(request.state, request.headSha256))) {
         throw new Error(lossyNoteRefusal(request.refuseLossy));
       }
       return documentEditUpdate(request.state, request.edit, {

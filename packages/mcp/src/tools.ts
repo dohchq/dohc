@@ -36,6 +36,7 @@ import {
   type CliResultByVerb,
   type CliStreamPosition,
   type CliVerb,
+  type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
@@ -94,6 +95,13 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_list_versions: ["version.list"],
+  dohc_compare_version: ["version.compare"],
+  dohc_list_version_conflicts: ["version.conflicts.list"],
+  dohc_create_version: ["version.create"],
+  dohc_switch_version: ["version.switch"],
+  dohc_merge_version: ["version.merge"],
+  dohc_resolve_version_conflict: ["version.conflict.resolve"],
   dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
@@ -1940,6 +1948,31 @@ export async function undoOperation(ctx: ToolContext, args: { operationId: strin
   return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
 }
 
+// The versions menu's reads. Owner workspace only; files History does not
+// track and secret files are left out.
+export async function listVersions(ctx: ToolContext) {
+  return requestCli(ctx, "versionList", {});
+}
+export async function compareVersion(ctx: ToolContext, args: { version: string; afterPath?: string }) {
+  return requestCli(ctx, "versionCompare", args);
+}
+export async function listVersionConflicts(ctx: ToolContext, args: { afterConflictId?: string }) {
+  return requestCli(ctx, "versionConflicts", args);
+}
+// The versions menu's changes. Each first saves the edits open in dohc.
+export async function createVersion(ctx: ToolContext, args: { name: string }) {
+  return requestCli(ctx, "versionCreate", args);
+}
+export async function switchVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionSwitch", args);
+}
+export async function mergeVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionMerge", args);
+}
+export async function resolveVersionConflict(ctx: ToolContext, args: { conflictId: string; resolution: VersionResolution }) {
+  return requestCli(ctx, "versionResolve", args);
+}
+
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Share copy details require the owning workspace." };
   const parsed = ShareCopyInput.safeParse(input);
@@ -2362,12 +2395,13 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string; requestId?: string },
+  args: { path: string; find?: string; replacement: string; requestId?: string; allowLossySourceSha256?: string },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentEdit", {
+    ...(args.allowLossySourceSha256 ? { allowLossySourceSha256: args.allowLossySourceSha256 } : {}),
     path: resolved.normalized,
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,

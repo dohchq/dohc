@@ -941,6 +941,29 @@ struct Registration {
     binding: LiveObjectBinding,
     live: bool,
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn initialize_adopted_history_for_test(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let baseline =
+        get_binary_blob(tx, &binding.lineage_claim_id)?.ok_or(ApplicationError::Corrupt)?;
+    let held = Registration {
+        workspace_id: binding.workspace_id.clone(),
+        namespace: namespace.into(),
+        coordinate: ApplicationHostCoordinate {
+            host_id: "test-host".into(),
+            host_epoch: 1,
+            instance_id: "test-instance".into(),
+            connection_id: "test-connection".into(),
+        },
+        binding: binding.clone(),
+        live: true,
+    };
+    accepted_history::initialize(tx, &held, &baseline)
+}
 /// One trusted delivery owner for an engine workspace. Never deserialize this
 /// from an event. The production caller authenticates registration and namespace.
 pub struct ApplicationOwner {
@@ -1386,6 +1409,34 @@ pub fn apply_committed(
         i64,
     ) -> Result<(), ApplicationError>,
 ) -> Result<ApplicationResult, ApplicationError> {
+    apply_committed_with_settlement_limit(
+        store,
+        cache,
+        handle,
+        event,
+        faults,
+        working_reserve_bytes,
+        None,
+        follow_up,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_committed_with_settlement_limit(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    handle: &ApplicationHandle,
+    event: AdmittedLiveUpdate,
+    faults: &dyn FaultInjector,
+    working_reserve_bytes: usize,
+    max_applications: Option<usize>,
+    follow_up: impl FnOnce(
+        &Transaction<'_>,
+        &str,
+        &LiveObjectBinding,
+        i64,
+    ) -> Result<(), ApplicationError>,
+) -> Result<ApplicationResult, ApplicationError> {
     event.validate()?;
     let held = handle
         .registration
@@ -1502,6 +1553,28 @@ pub fn apply_committed(
             // is truncated.
             if let Some(shared) = shared {
                 authors.push(crate::author_coverage::shared_json(&shared)?);
+            }
+            if let Some(max) = max_applications {
+                let owed_audits = crate::markdown_write_obligations::pending_in(tx, &key.workspace_id)?
+                    .into_iter().filter(|owed| owed.key == key && owed.kind == crate::markdown_write_obligations::Kind::AuditedSettle)
+                    .map(|owed| serde_json::from_value::<crate::markdown_write_obligations::AuditedRetry>(owed.retry_inputs)
+                        .map_err(|_| ApplicationError::Corrupt))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if owed_audits.iter().any(|retry| retry.namespace == held.namespace
+                    && retry.binding.lineage_claim_id == b.lineage_claim_id
+                    && retry.binding.restore_fence_generation == b.restore_fence_generation) {
+                    let count: i64 = tx.query_row("SELECT COUNT(*) FROM live_device_update_applications a \
+                        WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 \
+                        AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.journal_cursor>COALESCE(\
+                          (SELECT MAX(terminal_cursor) FROM live_device_settlements WHERE relay_database_namespace=?1 \
+                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),\
+                          (SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 \
+                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),0)",
+                        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0)).map_err(read_sql)?;
+                    if usize::try_from(count).map_err(|_| ApplicationError::Corrupt)? >= max {
+                        return Ok(ApplicationResult::Pending(ApplicationPending::SettlementRequired));
+                    }
+                }
             }
             match if authors.is_empty() { Ok(()) } else {
                 crate::author_coverage::admit_accepted_in(tx, &key, &authors)

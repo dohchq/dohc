@@ -29,7 +29,9 @@ import {
   type CliShowMessage,
   type CliShowThreadResult,
   type CliStreamPosition,
+  type VersionResolution,
 } from "@dohc/cli/protocol";
+import { versionNameRefusal } from "../ipc/errorWords";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
@@ -227,6 +229,7 @@ export interface CliCollectionsPort {
 export interface CliDocumentsPort {
   read(path: string): Promise<{ path: string; markdown: string }>;
   edit(input: {
+    allowLossySourceSha256?: string;
     path: string;
     edit: DocumentEdit;
     origin: LiveDocumentEditOrigin;
@@ -240,11 +243,28 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<Extract<CliResultByVerb[Verb], { ok: true }>, "ok">;
+
+// The versions menu's reads, for the owning workspace. Compare and conflict
+// pages leave out secret-backed files and paths the workspace's rules don't
+// track, as History does.
+export interface CliVersionsPort {
+  list(): Promise<CliVersionPage<"versionList">>;
+  compare(versionId: string, afterPath?: string): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
+  conflicts(afterConflictId?: string): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
+  // The versions menu's changes. Each first has the windows showing the
+  // workspace save their open edits, and throws their reason when one can't.
+  create(name: string): Promise<{ id: string; name: string }>;
+  switch(versionId: string): Promise<{ changedFileCount: number }>;
+  merge(versionId: string): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
+  resolve(conflictId: string, resolution: VersionResolution): Promise<void>;
+}
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
@@ -300,12 +320,12 @@ export interface CliButtonsPort {
 export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
 export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
 
-function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
+function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "History is hidden") {
   return {
     ok: false as const,
     status: "policy-unreadable" as const,
     unreadable: refusal.unreadable,
-    reason: `History is hidden because dohc can't read ${refusal.unreadable.join(" and ")}`,
+    reason: `${hidden} because dohc can't read ${refusal.unreadable.join(" and ")}`,
   };
 }
 
@@ -351,7 +371,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
-  // Absent in a shared view, which keeps no copies of its own.
+  // Absent in a shared view, which keeps no copies or versions of its own.
+  versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
@@ -2629,7 +2650,7 @@ async function dispatchWorkspace(
           return {
             ok: true as const,
             stream: {
-              group: { id: channel.id, name: channel.kind === "agent" ? "my-agent" : channel.name, kind: cliGroupKind(channel.kind) },
+              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
               ...page,
               items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
             },
@@ -3103,6 +3124,95 @@ async function dispatchWorkspace(
       }
     }
 
+    case "versionList":
+    case "versionCompare":
+    case "versionConflicts":
+    case "versionCreate":
+    case "versionSwitch":
+    case "versionMerge":
+    case "versionResolve": {
+      const versions = context.versions;
+      if (!versions || (await callerPaths(context, request.args.cwd)).shared) {
+        return { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." };
+      }
+      // A version as version list names it: by its name, then by its ID.
+      const named = async (name: string) => {
+        const { versions: all, activeVersionId } = await versions.list();
+        const version = all.find(candidate => candidate.name === name) ?? all.find(candidate => candidate.id === name);
+        return { version, activeVersionId };
+      };
+      const unknown = (name: string) => ({ ok: false as const, reason: `No version is called ${name}. Run dohc version list to see them.` });
+      try {
+        switch (request.verb) {
+          case "versionList":
+            return { ok: true as const, ...(await versions.list()) };
+          case "versionConflicts": {
+            const page = await versions.conflicts(request.args.afterConflictId);
+            return "status" in page ? historyPolicyUnreadable(page, "Conflicts are hidden") : { ok: true as const, ...page };
+          }
+          case "versionCompare": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            if (version.kind === "main") return { ok: false as const, reason: "Versions compare with Main. Name another version." };
+            const page = await versions.compare(version.id, request.args.afterPath);
+            if ("status" in page) return historyPolicyUnreadable(page, "Version files are hidden");
+            return { ok: true as const, version: { id: version.id, name: version.name }, ...page };
+          }
+          case "versionCreate": {
+            const name = request.args.name;
+            try {
+              return { ok: true as const, version: await versions.create(name) };
+            } catch (error) {
+              // The menu's name field says the same.
+              const refusal = versionNameRefusal(error);
+              if (refusal === "taken") return { ok: false as const, reason: `Another version is called ${name}. Choose another name.` };
+              if (refusal === "invalid") return { ok: false as const, reason: "dohc can't use that name. Choose another name." };
+              return pathFreeFailure(error, `dohc could not create the version ${name}.`);
+            }
+          }
+          case "versionSwitch": {
+            const { version, activeVersionId } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            const changed = version.id === activeVersionId ? { changedFileCount: 0 } : await versions.switch(version.id);
+            return { ok: true as const, version: { id: version.id, name: version.name }, changedFileCount: changed.changedFileCount };
+          }
+          case "versionMerge": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            if (version.kind === "main") return { ok: false as const, reason: "Versions merge into Main. Name another version." };
+            if (!version.canMergeIntoMain) return { ok: false as const, reason: "Only versions made from Main can merge into Main." };
+            const merged = await versions.merge(version.id);
+            const page = await versions.conflicts();
+            if ("status" in page) return historyPolicyUnreadable(page, "The merge ran, and its conflicts are hidden");
+            return { ok: true as const, version: { id: version.id, name: version.name }, ...merged, ...page };
+          }
+          case "versionResolve": {
+            const { conflictId, resolution } = request.args;
+            // Only a conflict version conflicts shows can be resolved, so a
+            // hidden file's conflict reads as no conflict at all.
+            let conflict: CliVersionPage<"versionConflicts">["conflicts"][number] | undefined;
+            let after: string | undefined;
+            do {
+              const page = await versions.conflicts(after);
+              if ("status" in page) return historyPolicyUnreadable(page, "Conflicts are hidden");
+              conflict = page.conflicts.find(candidate => candidate.conflictId === conflictId);
+              after = page.nextAfterConflictId ?? undefined;
+            } while (!conflict && after !== undefined);
+            if (!conflict) return { ok: false as const, reason: `No open conflict has the ID ${conflictId}. Run dohc version conflicts to see them.` };
+            if (resolution.keep === "combined" && conflict.contentKind === "binary") {
+              return { ok: false as const, reason: "This conflict is between binary files, so it takes no combined text. Keep current or incoming." };
+            }
+            await versions.resolve(conflictId, resolution);
+            const remaining = await versions.conflicts();
+            return "status" in remaining ? historyPolicyUnreadable(remaining, "Conflicts are hidden") : { ok: true as const, ...remaining };
+          }
+        }
+      } catch (error) {
+        return pathFreeFailure(error, request.verb === "versionList" || request.verb === "versionCompare" || request.verb === "versionConflicts"
+          ? "dohc could not read the workspace's versions." : "dohc could not change the workspace's versions.");
+      }
+    }
+
     case "keptCopies": {
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
@@ -3209,6 +3319,7 @@ async function dispatchWorkspace(
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
         try {
           const outcome = await documents.edit({
+            ...(request.args.allowLossySourceSha256 ? { allowLossySourceSha256: request.args.allowLossySourceSha256 } : {}),
             path,
             edit: { find, replacement },
             origin: documentEditOrigin(agent, context, options),
@@ -3225,7 +3336,7 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit, completion);
+       return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null, request.args.allowLossySourceSha256 ?? null], edit, completion);
     }
 
     case "documentCreate": {
