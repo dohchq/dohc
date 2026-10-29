@@ -275,13 +275,13 @@ fn markdown_hold_winning_lineage_equal_text_needs_no_recovery_copy() {
 }
 
 struct Fixture {
-    scratch: ScratchDir,
     db: std::path::PathBuf,
     store: EngineStore,
     cache: WriterDocCache,
     doc: Ydoc,
     key: DocKey,
     claim: String,
+    scratch: ScratchDir,
 }
 
 impl Fixture {
