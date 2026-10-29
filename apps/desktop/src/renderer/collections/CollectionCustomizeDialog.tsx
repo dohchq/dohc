@@ -41,7 +41,7 @@ export function CollectionCustomizeDialog(props: {
         aria-modal="true"
         aria-labelledby="collection-customize-title"
         data-testid="collection-customize"
-        className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-5"
+        className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-6"
       >
         <div className="flex items-center gap-2">
           <h2 id="collection-customize-title" className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink">
@@ -51,7 +51,7 @@ export function CollectionCustomizeDialog(props: {
             <X size={14} aria-hidden />
           </IconButton>
         </div>
-        <dl className="m-0 mt-4 flex flex-col gap-3">
+        <dl className="m-0 mt-6 flex flex-col gap-3">
           {props.files.map((file) => {
             const name = file.path.split("/").at(-1) ?? file.path;
             return (
