@@ -174,6 +174,27 @@ it("keeps a handover's edits queued until its empty settle reaches the file", as
   expect(f.outboxAcks).toEqual([]);
 });
 
+// Proves: a held handover settle applies nothing and asks for no further pass,
+// stays held across a new consumer, and finishes once its owner wants the
+// settlement, as after consenting to the held write.
+it("keeps a handover's edits queued while its empty settle is held, then settles it once its owner wants it", async () => {
+  const f = fixture({prefix: 7, adoptionCursor: 7});
+  settlementRequired(f, () => false, {failure: new EngineRequestError(7,
+    {code: "CONFLICT", message: "markdown-write-held", retry: "no"})});
+  expect(await f.consumer.drain(document)).toEqual({kind: "pending",reason: "markdown-write-held",continueDrain: false});
+  expect(await f.consumer.settle(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  const restarted = f.reconnect();
+  expect(await restarted.drain(document)).toEqual({kind: "pending",reason: "markdown-write-held",continueDrain: false});
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+  expect(f.client.sendLiveApplication).not.toHaveBeenCalled();
+  expect(f.retained).toEqual(f.ownerEntries);
+  const settled = settlementRequired(f, () => false);
+  expect(await restarted.settleWanted(document)).toMatchObject({terminalCursor: 8, materialized: true});
+  expect(settled).toEqual([receipt(7), receipt(8)]);
+  expect(f.outboxAcks).toEqual([receipt(8)]);
+  expect(f.retained).toEqual([]);
+});
+
 it("retries the handover settle after a lost response before draining any edits", async () => {
   const f = fixture({prefix: 7, adoptionCursor: 7});
   settlementRequired(f, () => false, {failure: new Error("response lost")});

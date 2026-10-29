@@ -1169,7 +1169,7 @@ test("@self-host-activation-typing typing continues through self-host activation
     const refused = noticedRefusals(ownerTemp.rootPath, workspaceId);
     expect(refused.filter(row => row.reason !== "ordinary update has no native live admission")).toEqual([]);
     expect((await ownerNotices()).filter(notice => notice.kind === "sync-refusal" && !notice.refusalCoordinates?.every(coordinate =>
-      refused.some(row => row.originId === coordinate.originId && row.originSeq === coordinate.originSeq)))).toEqual([]);
+      "originId" in coordinate && refused.some(row => row.originId === coordinate.originId && row.originSeq === coordinate.originSeq)))).toEqual([]);
     expect(refusedSettlementChecks(stack.relayOutput())).toEqual([]);
     await attachScreen(testInfo, recipient.page, "both people's typing reached the shared note");
   } catch (error) {

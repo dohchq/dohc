@@ -139,14 +139,13 @@ export class OwnerCommittedDelivery {
           }
         }
         if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
-          const response = await c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
+          const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
             registrationId,terminalReceipt: {...progress.adoptionTerminal},
-          }},signal);
+          }},signal),progress.adoptionTerminal);
           check(); latest.assertCurrent();
-          const settled = settlementResult(response.result,progress.adoptionTerminal);
-          if (!settled.materialized) {
+          if (settlementPending(settled) || !settled.materialized) {
             if (settle) return settled;
-            return {kind: "pending",reason: SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+            return {kind: "pending",reason: settlementPending(settled) ? settled.reason : SETTLEMENT_UNMATERIALIZED,continueDrain: false};
           }
           adopted.settled = settled;
         }

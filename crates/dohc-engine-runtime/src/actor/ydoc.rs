@@ -2469,6 +2469,8 @@ fn record_file_holds_head(
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)
         })?;
     }
+    // An empty settlement publishes nothing, so it records nothing here.
+    let live_audit = live_audit.filter(|audit| !audit.is_empty());
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
             "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
@@ -3267,7 +3269,7 @@ fn ydoc_settle_attempt_on_store(
             faults,
             path,
             content_kind == ContentKind::Richdoc,
-            recorded_audit,
+            live_audit,
             &current,
             &projection.source_state_vector_sha256,
             publication_state_bytes.as_deref(),
@@ -3610,7 +3612,7 @@ fn ydoc_settle_attempt_on_store(
             content_kind == ContentKind::Richdoc,
         )?;
         #[cfg(any(test, feature = "fault-injection"))]
-        if live_audit.is_none() { markdown_settlement_test_fault(tx)?; }
+        if recorded_audit.is_none() { markdown_settlement_test_fault(tx)?; }
         Ok((Some((result, reconcile_required)), uses_consent))
     })?;
     let (settlement, uses_consent) = match outcome {

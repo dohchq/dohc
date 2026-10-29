@@ -2672,6 +2672,7 @@ async fn unavailable_publication_after_handover(
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2751,6 +2752,7 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2790,6 +2792,7 @@ async fn settling_straight_after_a_handover_records_and_publishes_nothing() {
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2849,6 +2852,7 @@ async fn the_handover_settle_keeps_the_new_owners_unaccepted_edit() {
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2890,6 +2894,7 @@ async fn the_handover_settle_refuses_an_unfolded_file_change() {
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2959,6 +2964,7 @@ async fn empty_handover_settle_after_its_file_is_restored(after: AfterConflict) 
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -3158,6 +3164,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
     let receipt = cut.terminal_receipt.clone().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -3199,6 +3206,7 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
