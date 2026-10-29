@@ -153,7 +153,7 @@ function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
     recordEngineProblem: vi.fn(),
     workspaceAuthorities: authorities,
     collectionAutomations: { current: (id) => rows.has(id) ? states.get(id)?.collectionAutomations : undefined },
-    notifyRenderer: vi.fn(), noteNoAtomicPlacement: vi.fn(),
+    notifyRenderer: vi.fn(), noteNoAtomicPlacement: vi.fn(), noteWriteDeferred: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
   };
@@ -945,6 +945,8 @@ describe("desktop engine composed sessions and events", () => {
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");
+      f.client.emit("capture.writeDeferred", { workspaceId: "workspace", path: "notes.md" });
+      expect(f.dependencies.noteWriteDeferred).toHaveBeenCalledExactlyOnceWith("workspace", "notes.md");
       expect(collection.failuresChanged).toHaveBeenCalledOnce();
       f.client.emit("capture.noAtomicPlacement", { workspaceId: "workspace" });
       expect(f.dependencies.noteNoAtomicPlacement).toHaveBeenCalledWith("workspace");

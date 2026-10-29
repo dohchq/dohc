@@ -42,6 +42,10 @@ pub const CAPTURE_IMPORT_PROGRESS_EVENT: &str = "capture.importProgress";
 /// dropped; `watcher.status` reports the same fact as `noAtomicPlacement`.
 pub const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT: &str = "capture.noAtomicPlacement";
 
+/// A path gained an outside write while a live session held it. Delivery is
+/// at most once; `watcher.status` supplies the deferred paths if a wake is lost.
+pub const CAPTURE_WRITE_DEFERRED_EVENT: &str = "capture.writeDeferred";
+
 /// Record events fire on every device as that device's engine applies an
 /// update — local `ydoc.recordUpdate` and pulled replication alike. One
 /// applied update emits together: `record.created` first, then

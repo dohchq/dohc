@@ -508,6 +508,7 @@ export interface WorkspaceEngineCapture {
   beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
+  noteWriteDeferred(path: string): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
   observeFileEvents(events: readonly WatcherEvent[]): void;
@@ -4595,8 +4596,8 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
-        // Set by the capture health poll while capture holds a change made
-        // outside dohc to this file. The session keeps it until it closes.
+        // Set by capture events or the health poll while capture holds an
+        // outside change to this file. The session keeps it until it closes.
         let changedOutside = false;
         // Capture keeps a note's unsaved text in History when it records an
         // outside version, but has no such copy for a drawing's strokes. A
@@ -5917,6 +5918,14 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
+        // An outside write capture held before this entry existed woke no
+        // session, so read the held paths once instead of waiting for the poll.
+        // Before start(), the first poll reads them.
+        if (daemonCaptureHealthTimer !== null) void engine.watcherStatus?.().then((status) => {
+          if (!stopped && !shuttingDown && status?.deferredWrites.includes(input.path) && liveYDocSessions.get(input.path) === liveEntry) {
+            liveEntry.changedOutside();
+          }
+        }).catch(() => undefined);
         // The editor's first save state, decided before it can show Saved.
         //
         // A document can open over an outside edit: write nothing and report
@@ -6063,6 +6072,10 @@ export function createWorkspaceEngineCapture(
   return {
     start() {
       pollDaemonCaptureHealth();
+    },
+
+    noteWriteDeferred(path) {
+      if (!stopped && !shuttingDown) liveYDocSessions.get(path)?.changedOutside();
     },
 
     observeFileEvents(events) {

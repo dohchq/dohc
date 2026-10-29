@@ -5196,6 +5196,7 @@ const desktopEngine = createDesktopEngine({
   recordEngineProblem: (error, stage) => recordCrash({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
+  noteWriteDeferred: (workspaceId, path) => activity.engineCaptureFor(workspaceId)?.noteWriteDeferred(path),
   launchMarks, desktopMarks, logLaunchMarksOnce,
   noteNoAtomicPlacement: (workspaceId) => {
     try {

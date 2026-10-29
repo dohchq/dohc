@@ -27,7 +27,10 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, DeferredWrites, PolicyState, SelfWriteSuppression,
     StoreCaptureSink, StoreCaptureSinkParams,
 };
-use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
+use crate::{
+    CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
+    EngineEvents,
+};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -3005,9 +3008,26 @@ async fn apply_run(
     cancel: &CancellationToken,
 ) -> ApplyOutcome {
     let status = Arc::clone(context.status);
+    let events = context.events.clone();
+    let workspace_id = context.workspace_id;
     let mut outcome = apply_bound_run_with_handle(context, files, run, cancel).await;
     if let Some(writes) = outcome.deferred_writes.take() {
-        *crate::lock(&status.deferred_writes) = writes;
+        let gained = {
+            let mut previous = crate::lock(&status.deferred_writes);
+            let gained: Vec<_> = writes
+                .keys()
+                .filter(|path| !previous.contains_key(*path))
+                .cloned()
+                .collect();
+            *previous = writes;
+            gained
+        };
+        for path in gained {
+            events.emit(
+                CAPTURE_WRITE_DEFERRED_EVENT,
+                serde_json::json!({ "workspaceId": workspace_id, "path": path }),
+            );
+        }
     }
     outcome
 }
