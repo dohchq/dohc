@@ -2407,13 +2407,19 @@ it("keeps a released document hosted while its retirement waits for a restore", 
 // it is unfinished, retirement passes send the engine nothing and keep the
 // document's activation target, which a restarted host rebuilds, so the
 // restore fences and is declined through the host. The engine then releases
-// the activation at the generation the Decline restored, and it retires.
-it.each([false, true])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: %s", async restart => {
+// the activation at the generation the Decline restored, and it retires. A
+// document whose queue is frozen at its owner's adoption seed, which departs as
+// an ordinary unload instead, waits for the restore the same way.
+it.each([
+  {restart: false, seeded: false}, {restart: true, seeded: false}, {restart: false, seeded: true}, {restart: true, seeded: true},
+])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: $restart, frozen seed: $seeded", async ({restart, seeded}) => {
   const o = await enrolledServiceHost();
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  // The current daemon's engine requests that reconcile or release a retiring activation.
-  const retiring = () => o.calls(0).filter(method => method === "liveApplication.reconcileActivation" || method === "liveApplication.releaseActivation");
+  // The current daemon's engine requests that reconcile, release or unload a leaving document.
+  const retiring = () => o.calls(0).filter(method => method === "liveApplication.reconcileActivation" || method === "liveApplication.releaseActivation" ||
+    method === "liveApplication.unloadDocument");
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  if (seeded) {keptEdits(o); o.keptOutbox.appendKey = "owner-adoption:seed";}
   o.beginRestore();
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 40});
   await o.depart();
@@ -2432,6 +2438,11 @@ it.each([false, true])("holds a retirement its restore opened until the restore 
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   expect(retiring()).toEqual([]);
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  if (seeded) {
+    // Its ordinary departure goes ahead once the restore ended.
+    await vi.waitFor(() => expect(retiring()).toContain("liveApplication.unloadDocument"), {timeout: 10_000});
+    return;
+  }
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(retiredRow(o).retired).toBe(true);
   expect(retiring()).toContain("liveApplication.releaseActivation");

@@ -157,11 +157,6 @@ export class ServiceActivationStore {
     });
   }
 
-  /** Whether the document has a restore that has neither resumed nor been declined. */
-  restoreInProgress(workspaceId: string, objectId: string): boolean {
-    return restoreInProgress(this.storage, workspaceId, objectId);
-  }
-
   /**
    * Retires the activation after the engine released it and its document parked.
    * Archives its owner, releases its reservations on every host, and refunds its retained state.

@@ -670,6 +670,8 @@ export async function startServiceLiveHost(options: {
       if (!open) return null;
       let seeded = seededOf.get(key);
       if (!seeded) {seeded = await endKeptRetries(row, joined, false); seededOf.set(key, seeded); grantsEnded.add(key);}
+      // An unfinished restore continues through the document's target, so the document neither retires nor departs until it ends.
+      if (storage.serviceRestoreInProgress({workspaceId: row.target.workspaceId, objectId: row.objectId})) return "Waiting for its restore to finish.";
       if (seeded.has(open.lineageClaimId)) return null;
       const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
       const step = await activation!.retire(row.target, row.objectId, joined, {

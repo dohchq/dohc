@@ -416,7 +416,7 @@ export class ServiceActivationDriver {
     const slot=targetKey(target);
     // An unfinished restore moves the generation the key names and continues through the
     // document's owner and target, so nothing retires, or leaves activation, until it ends.
-    if(this.#store.restoreInProgress(open.workspaceId,open.objectId))return {kind:"pending",reason:"Waiting for its restore to finish."};
+    if(o.storage.serviceRestoreInProgress(open))return {kind:"pending",reason:"Waiting for its restore to finish."};
     const workspace=o.workspace(target.workspaceId),maxApplications=o.maxApplications;
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     if(maxApplications===undefined)throw new Error("Service activation retirement requires live settlement.");
