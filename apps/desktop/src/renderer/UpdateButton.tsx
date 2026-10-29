@@ -103,7 +103,8 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
   useEffect(() => {
     if (failureId !== undefined) setPending(null);
   }, [failureId]);
-  // So does a person going back on a restart a late draft stopped.
+  // So does a person going back, in any window, on a restart a late draft
+  // stopped.
   useEffect(() => onRestartStopped(() => setPending(null)), []);
 
   const run = useCallback(async function run(action: UpdateAction): Promise<void> {
