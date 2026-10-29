@@ -1747,7 +1747,7 @@ pub fn acknowledge(
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     validate_identifier(outbox_id, "outbox id must be non-empty and bounded")?;
     validate_receipts(receipts)?;
-    let outcome = store.write_with(&NoFaults, |tx| {
+    let outcome = store.write_with(&NoFaults, |tx| -> Result<_, OwnerOutboxError> {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
         require_unfrozen(&parent, receipts)?;
@@ -2013,8 +2013,11 @@ fn acknowledge_prefix_in(
     )
     .map_err(write_sql)?;
     // Every refusal recorded here was of a head this acknowledgement passed.
-    tx.execute("DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1", [outbox_id])
-        .map_err(write_sql)?;
+    tx.execute(
+        "DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+        [outbox_id],
+    )
+    .map_err(write_sql)?;
     Ok(OwnerOutboxAcknowledgeResult {
         acknowledged: i64::try_from(receipts.len())
             .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,

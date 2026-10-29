@@ -1951,7 +1951,7 @@ fn a_recovery_copy_rebuilds_the_accepted_state_once_its_document_unloaded() {
     ));
     refuse_seed(&mut f, &outbox);
     // Nothing read the frozen queue before its idle document unloaded.
-    f._owner.unregister(&mut f.store, "object").unwrap();
+    f._owner.unregister(&mut f.store, "object", Some("adoption")).unwrap();
     let available: i64 = f
         .store
         .read_with(|conn| conn.query_row("SELECT available FROM live_device_application_bindings", [], |r| r.get(0)))
