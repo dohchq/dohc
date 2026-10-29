@@ -2,12 +2,13 @@ import type { BrowserWindow as ElectronWindow } from "electron";
 import {
   DesktopUserSettingsResult, DesktopMarksResult, ExitRoundAnswerPayload, LaunchMarksResult,
   OpenExternalUrlPayload, ReloadRendererRequestPayload, SetTitlebarThemePayload,
-  StepWindowZoomPayload,
+  StepWindowZoomPayload, VersionRoundAnswerPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { isSafeExternalUrl } from "../security/electronSecurity";
 import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "../settings/userSettings";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
+import type { createVersionRounds } from "../versionRounds";
 import type { rememberChromeTheme as RememberChromeTheme, titleBarOverlayOptions as TitleBarOverlayOptions } from "../window/createMainWindow";
 import { palette } from "../renderer/tokens";
 
@@ -29,6 +30,7 @@ export function createWindowIpc<
   titleBarOverlayOptions: typeof TitleBarOverlayOptions;
   stepWindowZoom(step: ZoomStep): Promise<UserSettingsResult>;
   exitRounds: Pick<ReturnType<typeof createExitRounds<unknown>>, "answer">;
+  versionRounds: Pick<ReturnType<typeof createVersionRounds<unknown>>, "answer">;
   quitGuard: Pick<ReturnType<typeof createQuitGuard>, "hold" | "resume">;
   isTrustedFrame(url: string): boolean;
   launchMarks: Pick<typeof import("../performance/launchMarks").launchMarks, "firstPaint" | "snapshot">;
@@ -39,7 +41,7 @@ export function createWindowIpc<
   const {
     registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
     shell, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
-    stepWindowZoom, exitRounds, quitGuard, isTrustedFrame, launchMarks,
+    stepWindowZoom, exitRounds, versionRounds, quitGuard, isTrustedFrame, launchMarks,
     desktopMarks, logLaunchMarksOnce, app,
   } = dependencies;
 
@@ -111,6 +113,14 @@ export function createWindowIpc<
       const answer = ExitRoundAnswerPayload.safeParse(payload);
       if (!answer.success) return;
       exitRounds.answer(event.sender.id, answer.data.roundId, answer.data.decision);
+    });
+
+    // Keyed to the sender and its round, as the exit round's answer is.
+    registerHandler(CHANNELS.versionRoundAnswer, (event, payload: unknown) => {
+      assertTrustedSender(event);
+      const answer = VersionRoundAnswerPayload.safeParse(payload);
+      if (!answer.success) return;
+      versionRounds.answer(event.sender.id, answer.data.roundId, answer.data);
     });
 
     registerHandler(CHANNELS.holdQuit, (event) => {

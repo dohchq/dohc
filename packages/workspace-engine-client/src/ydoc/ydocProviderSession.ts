@@ -161,7 +161,7 @@ export interface EngineYdocProviderSession {
   // holds another history, `onLineageReplaced` has announced it by then.
   resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
-  settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
+  settleNow(options?: { summary?: string; ifNeeded?: boolean }): Promise<YdocSettleResult | undefined>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
@@ -229,10 +229,15 @@ export async function openEngineYdocProviderSession(
   // A state vector alone does not cover deletions. Replacements and pending
   // resyncs also withdraw proof, even when their bytes have not arrived yet.
   let documentRevision = 0;
-  let settledRevision = -1;
+  // An unseeded session with no head has no durable state to settle.
+  // Updates and resyncs below withdraw this no-work proof.
+  let settledRevision = session.head === "absent" && session.lineage === "absent" ? 0 : -1;
   let observedDoc = session.doc;
   const noteDocumentChange = (): void => { documentRevision += 1; };
   observedDoc.on("update", noteDocumentChange);
+  const canSkipSettle = (): boolean =>
+    session.head === "absent" && session.lineage === "absent" &&
+    settledRevision === documentRevision && !session.missingLocalState && session.lineageClaimId === null;
 
   function notifyError(
     callback: ((error: unknown) => void) | undefined,
@@ -506,6 +511,7 @@ export async function openEngineYdocProviderSession(
     },
 
     async settleNow(settleOptions) {
+      if (settleOptions?.ifNeeded && canSkipSettle()) return;
       cancelSettle?.();
       cancelSettle = null;
       const operation = runSettle(settleOptions?.summary);
@@ -532,26 +538,28 @@ export async function openEngineYdocProviderSession(
       ) {
         try {
           await session.resyncIfNeeded();
-          if (settledRevision !== documentRevision || session.missingLocalState) {
-            await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
-          } else if (session.lineageClaimId !== null) {
-            // Replicated lineage can contain owner frames whose notice has
-            // not arrived. Settle it without repeating artifact verification,
-            // then release separately so terminal refusals still release.
-            const token = ++settleTokens;
-            try {
-              const result = await retryWhileEngineBusy(
-                () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
-                closeRetryController.signal,
-              );
-              if (!result.materialized) {
-                throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+          if (!canSkipSettle()) {
+            if (settledRevision !== documentRevision || session.missingLocalState) {
+              await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
+            } else if (session.lineageClaimId !== null) {
+              // Replicated lineage can contain owner frames whose notice has
+              // not arrived. Settle it without repeating artifact verification,
+              // then release separately so terminal refusals still release.
+              const token = ++settleTokens;
+              try {
+                const result = await retryWhileEngineBusy(
+                  () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
+                  closeRetryController.signal,
+                );
+                if (!result.materialized) {
+                  throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+                }
+              } catch (error) {
+                // Reuse has no success callback. Give failures an observable token.
+                notifySettleStart(token);
+                notifySettleError(error, token);
+                throw error;
               }
-            } catch (error) {
-              // Reuse has no success callback. Give failures an observable token.
-              notifySettleStart(token);
-              notifySettleError(error, token);
-              throw error;
             }
           }
         } catch (error) {

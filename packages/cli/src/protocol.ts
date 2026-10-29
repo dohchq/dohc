@@ -26,8 +26,8 @@ export const CLI_JSON_SCHEMA_VERSION = 3;
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
-// Who wrote a message the CLI reads back.
-const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
+// Who wrote a message the CLI reads back. Only the relay writes a link author.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -49,8 +49,22 @@ const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
+// Where a group's stream page ends: an item's time, lane and id.
+const streamPositionSchema = z
+  .object({
+    createdAtMs: z.number().int().nonnegative(),
+    lane: z.enum(["posts", "chat"]),
+    id: z.string().min(1).max(200),
+  })
+  .strict();
+export type CliStreamPosition = z.infer<typeof streamPositionSchema>;
+const streamPageArgs = {
+  before: streamPositionSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+};
+// A thread or message shows that thread; a group shows its stream.
 const showArgsSchema = z
-  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean() })
+  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
 const postArgsSchema = z
   .object({
@@ -128,9 +142,10 @@ const momentArgsSchema = z
 const fileChatsArgsSchema = z
   .object({ ...argsBase, path: z.string().min(1).max(4096) })
   .strict();
-const chatArgsSchema = z
-  .object({ ...argsBase, threadId: z.string().min(1).max(200) })
-  .strict();
+const chatArgsSchema = z.union([
+  z.object({ ...argsBase, threadId: z.string().min(1).max(200) }).strict(),
+  z.object({ ...argsBase, group: z.string().min(1).max(500), ...streamPageArgs }).strict(),
+]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
 export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
   group: z.string().min(1).max(500),
@@ -194,6 +209,37 @@ const fileDeleteArgsSchema = z.object({
   requestId: requestIdSchema,
 }).strict();
 
+const versionListArgsSchema = z.object(argsBase).strict();
+// `version` is a version's name or id, as version list prints them.
+const versionCompareArgsSchema = z.object({
+  ...argsBase,
+  version: z.string().min(1).max(200),
+  afterPath: z.string().min(1).max(4096).optional(),
+}).strict();
+const versionConflictsArgsSchema = z.object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() }).strict();
+// The versions menu's name field takes at most 80 characters.
+export const MAX_VERSION_NAME_LENGTH = 80;
+const versionCreateArgsSchema = z.object({ ...argsBase, name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) }).strict();
+const versionSwitchArgsSchema = z.object({ ...argsBase, version: z.string().min(1).max(200) }).strict();
+const versionMergeArgsSchema = versionSwitchArgsSchema;
+// Keep one side of a conflict, or replace both with combined text. Combined
+// text replaces the file, so it has the file write limit.
+export const versionResolutionSchema = z.discriminatedUnion("keep", [
+  z.object({ keep: z.enum(["current", "incoming"]) }).strict(),
+  z.object({
+    keep: z.literal("combined"),
+    text: z.string().refine((value) => fitsUtf8Bytes(value, MAX_FILE_WRITE_BYTES), {
+      message: "Combined text is at most 10 MiB as UTF-8.",
+    }),
+  }).strict(),
+]);
+export type VersionResolution = z.infer<typeof versionResolutionSchema>;
+const versionResolveArgsSchema = z.object({
+  ...argsBase,
+  conflictId: z.string().min(1).max(200),
+  resolution: versionResolutionSchema,
+}).strict();
+
 const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
@@ -211,6 +257,18 @@ const deleteRetainedCopiesArgsSchema = z
     acceptLateWriteRisk: z.literal(true),
   })
   .strict();
+
+// Edits the server refused for good that this computer keeps for a live
+// document, found by the document's path. Try again and Stop again name the
+// refusal they answer, so a newer one is read before either runs. Save
+// recovery copy may name one, to save exactly those edits.
+const liveKeptEditsArgsSchema = z.object(argsBase).strict();
+const keptEditsIncidentSchema = z.string().min(1).max(1024);
+const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() }).strict();
+const retryKeptEditsArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
+  .strict();
+const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
@@ -383,9 +441,11 @@ const automationSwitchArgsSchema = z.object({ ...automationArgs, enabled: z.bool
   expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean(), submitId: requestIdSchema,
 }).strict();
 // `page` is the `next` of an earlier listing: the runs older than it.
-const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
+// `server` reads the runs of the workspace's self-hosted server instead of
+// this computer's.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() }).strict();
 const automationRunArgsSchema = z
-  .object({ ...automationArgs, run: automationRunIdArg })
+  .object({ ...automationArgs, run: automationRunIdArg, server: z.boolean().optional() })
   .strict();
 // `startOver` confirms running an automation that changed since the run
 // failed, or a run whose progress is gone, from its first step.
@@ -477,11 +537,22 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCreate"), args: versionCreateArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionSwitch"), args: versionSwitchArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -553,11 +624,22 @@ export const CLI_CAPABILITIES = {
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
+  versionList: ["version.list"],
+  versionCompare: ["version.compare"],
+  versionConflicts: ["version.conflicts.list"],
+  versionCreate: ["version.create"],
+  versionSwitch: ["version.switch"],
+  versionMerge: ["version.merge"],
+  versionResolve: ["version.conflict.resolve"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
+  liveKeptEdits: ["workspace.status"],
+  saveRecoveryCopy: ["share.live.document.recovery.save"],
+  retryKeptEdits: ["share.live.document.retry"],
+  stopAgain: ["share.live.document.stop"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -632,6 +714,20 @@ const cliAttachmentSchema = z
   })
   .strict();
 
+// Where one agent's request to answer a message stands. Finished requests
+// are left out.
+const agentRequestSchema = z
+  .object({
+    agentId: z.string().min(1),
+    state: z.enum(["waiting", "running", "failed"]),
+    runId: z.string().min(1).optional(),
+    startedAtMs: z.number().int().nonnegative().optional(),
+    failureReason: z.string().min(1).optional(),
+    exitCode: z.number().int().optional(),
+    logPath: z.string().min(1).optional(),
+  })
+  .strict();
+
 const cliShowMessageSchema = z
   .object({
     id: z.string().min(1),
@@ -644,6 +740,7 @@ const cliShowMessageSchema = z
     decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -706,13 +803,50 @@ const threadDispatchSchema = z.object({
   }).strict().nullable(),
 }).strict();
 
-const showResultSchema = z
+const showThreadResultSchema = z
   .object({
     thread: cliShowThreadSchema,
     dispatch: threadDispatchSchema,
     messages: z.array(cliShowMessageSchema),
   })
   .strict();
+export type CliShowThreadResult = z.infer<typeof showThreadResultSchema>;
+
+// A group's posts and conversation messages in one order, oldest first. A
+// post carries what its thread holds beyond its first message.
+function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group: Group, message: Message) {
+  return z
+    .object({
+      group,
+      items: z.array(z.object({
+        position: streamPositionSchema,
+        threadId: z.string().min(1),
+        message,
+        post: z.object({
+          replyCount: z.number().int().nonnegative(),
+          repliers: z.array(z.object({ author: cliAuthorSchema, lastReplyAtMs: z.number().int().nonnegative() }).strict()),
+          lastReplyAtMs: z.number().int().nonnegative().optional(),
+          latestAgentReply: z.object({
+            id: z.string().min(1),
+            author: cliAuthorSchema,
+            createdAtMs: z.number().int().nonnegative(),
+            bodyExcerpt: z.string(),
+          }).strict().optional(),
+          openDecisionCount: z.number().int().nonnegative(),
+        }).strict().optional(),
+      }).strict()),
+      // Pass as `before` to read the older page. Null at the oldest item.
+      nextBefore: streamPositionSchema.nullable(),
+      // The newest item the person has read.
+      readPosition: streamPositionSchema.nullable(),
+    })
+    .strict();
+}
+
+const showResultSchema = z.union([
+  showThreadResultSchema,
+  z.object({ stream: streamSchema(cliGroupSchema, cliShowMessageSchema) }).strict(),
+]);
 const postResultSchema = z
   .object({
     group: cliGroupSchema,
@@ -911,6 +1045,7 @@ const rawChatMessageSchema = z
     options: z.array(z.string()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
   })
   .strict();
 const rawFailureSchema = z
@@ -928,7 +1063,7 @@ const fileChatsResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const chatResultSchema = z.discriminatedUnion("ok", [
+const chatResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
@@ -942,6 +1077,15 @@ const chatResultSchema = z.discriminatedUnion("ok", [
           text: z.string(),
         })
         .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      stream: streamSchema(
+        z.object({ id: rawChannelIdSchema, name: z.string().min(1), kind: z.enum(["group", "dm", "agent"]) }).strict(),
+        rawChatMessageSchema,
+      ),
     })
     .strict(),
   rawFailureSchema,
@@ -1120,12 +1264,108 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// A workspace's versions and the active one, whose files the folder shows.
+// canMergeIntoMain is false for a version made from another version.
+const versionListResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    versions: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      kind: z.enum(["main", "named"]),
+      createdAtMs: z.number(),
+      canMergeIntoMain: z.boolean(),
+    }).strict()),
+    activeVersionId: z.string().min(1),
+  }).strict(),
+  rawFailureSchema,
+]);
+
+// Version rows leave out secret-backed files and paths the workspace's rules
+// don't track, as History does.
+const versionCompareResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    version: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
+    // One page of the files that differ from Main. Pass nextAfterPath back as
+    // afterPath for the next page.
+    files: z.array(z.object({
+      path: z.string().min(1),
+      status: z.enum(["added", "modified", "deleted"]),
+      // Main's side; absent when the file exists only in the version.
+      currentText: z.string().optional(),
+      // The version's side; absent when the file exists only in Main.
+      incomingText: z.string().optional(),
+      // A binary file differs by its bytes, so neither side has text.
+      binary: z.boolean().optional(),
+    }).strict()),
+    nextAfterPath: z.string().min(1).nullable(),
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const conflictBinarySchema = z.object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) }).strict().nullable();
+// One page of open conflicts: from a merge, or from two computers editing
+// the same file while apart (origin "sync"). A side's text is null when that
+// side has no file or holds binary.
+const versionConflictsPage = {
+  conflicts: z.array(z.object({
+    conflictId: z.string().min(1),
+    path: z.string().min(1),
+    sourceVersionId: z.string().min(1),
+    targetVersionId: z.string().min(1),
+    origin: z.enum(["merge", "sync"]),
+    contentKind: z.enum(["text", "binary"]),
+    currentText: z.string().nullable(),
+    incomingText: z.string().nullable(),
+    baseText: z.string().nullable(),
+    currentBinary: conflictBinarySchema.optional(),
+    incomingBinary: conflictBinarySchema.optional(),
+    baseBinary: conflictBinarySchema.optional(),
+  }).strict()),
+  nextAfterConflictId: z.string().min(1).nullable(),
+};
+const versionConflictsResultSchema = z.union([
+  z.object({ ok: z.literal(true), ...versionConflictsPage }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const versionNameSchema = z.object({ id: z.string().min(1), name: z.string().min(1) }).strict();
+// The new version, now the active one.
+const versionCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema }).strict(),
+  rawFailureSchema,
+]);
+const versionSwitchResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema, changedFileCount: z.number().int().nonnegative() }).strict(),
+  rawFailureSchema,
+]);
+// conflictCount counts every conflict the merge left. The page lists the
+// open conflicts, from this merge and earlier ones, as version conflicts does.
+const versionMergeResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    version: versionNameSchema,
+    mergedFileCount: z.number().int().nonnegative(),
+    unchangedFileCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    ...versionConflictsPage,
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+// The open conflicts that remain, as version conflicts lists them.
+const versionResolveResultSchema = versionConflictsResultSchema;
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
 // visible copy beside its file.
 const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
+    outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),
@@ -1175,6 +1415,59 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
     failed: z.number().int().nonnegative(),
     remaining: retainedCopiesSummarySchema,
   }).strict(),
+  rawFailureSchema,
+]);
+
+// Live documents whose edits the server refused for good, as dohc keeps them
+// on this computer or, for a document the server hosts, on the server
+// (`storedOn`). `recovery` is paused while they wait for the owner, retrying
+// while Try again waits for the server, stopping while a Stop waits for it,
+// stopped-kept or not-written after a Stop kept them, cannot-write once only
+// a recovery copy can return them, copied once a recovery copy of edits the
+// server keeps is saved, maybe by another of the owner's computers, and
+// unreadable while this computer's engine refuses to read them, for `reason`.
+// `earlier` marks edits the server keeps in an earlier copy of the workspace,
+// copied or not, which only a recovery copy can reach.
+const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
+const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptEdits: z.array(z.object({
+      path: z.string().min(1),
+      reason: z.string().min(1),
+      storedOn: keptEditsStoredOnSchema,
+      incident: keptEditsIncidentSchema,
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
+      earlier: z.literal(true).optional(),
+      saveOnly: z.literal(true).optional(),
+    }).strict()),
+  }).strict(),
+  rawFailureSchema,
+]);
+// The package always holds every kept edit. `copyPath` is null when dohc
+// could not read the edits as a document. Both sit in `folder`. The edits
+// came from where `storedOn` says. `keptEdits` is kept while they stay there,
+// copied once the server may release them, and ended once dohc no longer
+// keeps a Stop's edits it could not write.
+const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copyPath: z.string().min(1).nullable(),
+    packagePath: z.string().min(1),
+    folder: z.string().min(1),
+    storedOn: keptEditsStoredOnSchema,
+    keptEdits: z.enum(["kept", "copied", "ended"]),
+  }).strict(),
+  rawFailureSchema,
+]);
+const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+// What the Stop did with the kept edits: wrote them into the file, still
+// keeps them, or kept none.
+const stopAgainResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
   rawFailureSchema,
 ]);
 
@@ -1269,6 +1562,9 @@ const automationRunFields = {
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
+  // The server lost the copy it ran in, and may not have sent its changes
+  // from updatedAtMs on. Nothing can run or undo it again.
+  unsentChangesLost: z.literal(true).optional(),
 };
 const automationRunsResultSchema = z.discriminatedUnion("ok", [
   z
@@ -1285,7 +1581,7 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      run: z
+      run: z.union([z
         .object({
           ...automationRunFields,
           findMs: z.number().nonnegative().optional(),
@@ -1308,6 +1604,8 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
           startsOver: z.boolean(),
         })
         .strict(),
+      // A run the server ran, with what it changed there, oldest first.
+      z.object({ ...automationRunFields, server: z.literal(true), changes: z.array(automationRunChangeSchema) }).strict()]),
     })
     .strict(),
   rawFailureSchema,
@@ -1463,6 +1761,13 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  versionList: versionListResultSchema,
+  versionCompare: versionCompareResultSchema,
+  versionConflicts: versionConflictsResultSchema,
+  versionCreate: versionCreateResultSchema,
+  versionSwitch: versionSwitchResultSchema,
+  versionMerge: versionMergeResultSchema,
+  versionResolve: versionResolveResultSchema,
   keptCopies: keptCopiesResultSchema,
   // The engine's answer: Collection updates wait for an unfinished pull.
   collectionsWaiting: z.discriminatedUnion("ok", [
@@ -1472,6 +1777,10 @@ export const cliResultSchemas = {
   saveKeptCopy: saveKeptCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+  liveKeptEdits: liveKeptEditsResultSchema,
+  saveRecoveryCopy: saveRecoveryCopyResultSchema,
+  retryKeptEdits: retryKeptEditsResultSchema,
+  stopAgain: stopAgainResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

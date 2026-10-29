@@ -90,6 +90,18 @@
     "deleteRetainedCopies": [
       "file.retained.delete"
     ],
+    "liveKeptEdits": [
+      "workspace.status"
+    ],
+    "saveRecoveryCopy": [
+      "share.live.document.recovery.save"
+    ],
+    "retryKeptEdits": [
+      "share.live.document.retry"
+    ],
+    "stopAgain": [
+      "share.live.document.stop"
+    ],
     "documentEdit": [
       "document.edit"
     ],
@@ -208,6 +220,27 @@
     ],
     "chatLinks": [
       "chat.read"
+    ],
+    "versionList": [
+      "version.list"
+    ],
+    "versionCompare": [
+      "version.compare"
+    ],
+    "versionConflicts": [
+      "version.conflicts.list"
+    ],
+    "versionCreate": [
+      "version.create"
+    ],
+    "versionSwitch": [
+      "version.switch"
+    ],
+    "versionMerge": [
+      "version.merge"
+    ],
+    "versionResolve": [
+      "version.conflict.resolve"
     ]
   },
   "public": {
@@ -219,6 +252,10 @@
     "document create": "document.create",
     "document chats": "file.chats.list",
     "document comment": "file.chat.start",
+    "document kept-edits": "workspace.status",
+    "document save-recovery-copy": "share.live.document.recovery.save",
+    "document retry-kept-edits": "share.live.document.retry",
+    "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
     "chat inbox": "chat.inbox.read",
@@ -277,6 +314,13 @@
     "app undo-responses": "app.responses.undo",
     "history list": "history.list",
     "history show": "history.read",
+    "version list": "version.list",
+    "version compare": "version.compare",
+    "version conflicts": "version.conflicts.list",
+    "version create": "version.create",
+    "version switch": "version.switch",
+    "version merge": "version.merge",
+    "version resolve": "version.conflict.resolve",
     "automation list": "automation.list",
     "automation switch": "automation.switch",
     "automation buttons": "automation.buttons.inspect",

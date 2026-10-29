@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -415,7 +416,7 @@ function workflowContext({ enabled = "", event = "pull_request", draft = false, 
   };
 }
 
-test("disabled cloud CI never allocates a PR runner, while manual runs stay self-hosted", () => {
+test("disabled Blacksmith never allocates a PR runner, while manual runs use GitHub Ubuntu", () => {
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
   assert.deepEqual(document.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]);
@@ -429,7 +430,7 @@ test("disabled cloud CI never allocates a PR runner, while manual runs stay self
     const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const job of Object.values(document.jobs)) {
-      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["self-hosted", "linux", "x64"]);
+      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
     }
   }
 });
@@ -491,7 +492,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
   const setupIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
-  assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "self-hosted verdicts need Node on PATH");
+  assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "verdicts need the selected Node on PATH");
   assert.equal(job.steps[setupIndex].with["node-version"], "24");
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
@@ -986,4 +987,15 @@ test("a checkout that keeps no HEAD reflog is refused, not passed", () => {
   assert.equal(formatTreeState(unlogged), "UNATTRIBUTABLE");
   assert.equal(formatTreeStamp(unlogged, 10), "UNATTRIBUTABLE");
   assert.equal(formatTreeState({ ...A, reflog: null }), "UNATTRIBUTABLE");
+});
+
+test("no workflow can target a self-hosted runner", async () => {
+  const directory = fileURLToPath(new URL("../.github/workflows/", import.meta.url));
+  const files = (await readdir(directory, { recursive: true })).filter(file => /\.ya?ml$/i.test(file));
+  assert.ok(files.length > 0);
+  const unsafe = [];
+  for (const file of files) {
+    if (/self-hosted/i.test(await readFile(join(directory, file), "utf8"))) unsafe.push(file);
+  }
+  assert.deepEqual(unsafe, [], "workflows mentioning self-hosted runners");
 });

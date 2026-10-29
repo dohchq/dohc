@@ -634,6 +634,10 @@ mod tests {
         let held = handle.registration.lock().unwrap();
         (
             NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: held.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: held.namespace.clone(),
                 old_binding: held.binding.clone(),

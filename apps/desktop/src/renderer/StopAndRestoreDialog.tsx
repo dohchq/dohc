@@ -7,6 +7,7 @@ import { Overlay } from "./Overlay";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
 import { restoreRulesUnreadableWords } from "./workbench/HistoryPolicyStates";
+import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Stop and restore (ADR 0013): the owner picks a person they shared this
 // workspace with, or an Edit share link, and confirms once. dohc stops that
@@ -68,7 +69,7 @@ interface Shown {
  */
 export function useStopAndRestore(workspaceId: string, recovery?: {
   ready: boolean;
-  onError(fallback: string, error: unknown, retry: () => void, identity: string): void;
+  onError(fallback: string, error: unknown, retry: (() => void) | null, identity: string): void;
 }) {
   const [session, setSession] = useState<StopAndRestoreSession | null>(null);
   const receipts = useRef(new Map<string, Receipt[]>());
@@ -154,8 +155,13 @@ export function useStopAndRestore(workspaceId: string, recovery?: {
           () => void recover(), `stop-and-restore:recovery:${workspaceId}`);
       }
     };
+    // Main answers nothing while the workspace is still opening, so read
+    // again once its Collection automations open.
+    const stop = bridge().onCollectionAutomationsChanged((event) => {
+      if (event.workspaceId === workspaceId) void recover();
+    });
     void recover();
-    return () => {current = false;};
+    return () => {current = false; stop();};
   }, [workspaceId, recovery?.ready, store, retry]);
   return {
     session: session?.workspaceId === workspaceId ? session : null,
@@ -208,7 +214,7 @@ export function StopAndRestoreDialog({
    * The shell's toast and Notices row, with Try again. Each person or link
    * has one row, `identity`, which a newer failure replaces.
    */
-  onError(fallback: string, error: unknown, retry: () => void, identity: string): void;
+  onError(fallback: string, error: unknown, retry: (() => void) | null, identity: string): void;
   /** Removes the row of `identity`: what it reported has finished, or its Try again no longer applies. */
   onSettled(identity: string): void;
 }) {
@@ -264,6 +270,10 @@ export function StopAndRestoreDialog({
   const chosen = targets.find((candidate) => keyOf(candidate.target) === key) ?? first;
   const words = wordsFor(chosen);
   const identity = `stop-and-restore:${JSON.stringify([workspaceId, keyOf(chosen.target)])}`;
+  const reportRefusal = (path: string, refusal?: "synced-deletion") => {
+    if (refusal === "synced-deletion") onError(SYNCED_DELETION_REVIVAL_WORDS(path).batch, new SyncedDeletionRevivalError(path, undefined, true),
+      null, `${identity}:${JSON.stringify(path)}`);
+  };
 
   // The listing may land while an action runs; what it found stays.
   const listedTargets = (current: State): StopTarget[] => current.kind === "loading" ? targets : current.targets;
@@ -338,6 +348,9 @@ export function StopAndRestoreDialog({
     };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
+    for (const file of result.review) {
+      if (file.reason === "restore-refused") reportRefusal(file.path, file.refusal);
+    }
     if (result.unfinished !== null) {
       onError(words.unfinished[result.unfinished.step], new Error(result.unfinished.message), () => onRetry(workspaceId, chosen, "stop"), identity);
     } else {
@@ -363,10 +376,11 @@ export function StopAndRestoreDialog({
     for (const file of result.files) {
       const original = originals.get(file.momentId);
       if (!original) continue;
+      if (file.kind === "refused") reportRefusal(original.path, file.refusal);
       if (file.kind === "restored") review.delete(original.path);
       else if (file.kind === "rules-unreadable") {
         review.set(original.path, { path: original.path, reason: "rules-unreadable", unreadable: file.unreadable });
-      } else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
+      } else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail, refusal: file.refusal });
     }
     const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
@@ -398,7 +412,7 @@ export function StopAndRestoreDialog({
       role: "dialog", "aria-modal": true, "aria-labelledby": "stop-and-restore-title", "data-testid": "stop-and-restore-dialog",
       className: "dohc-elevated dohc-pop-in w-[min(520px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5",
     }}>
-      <h2 id="stop-and-restore-title" className="m-0 text-sm font-semibold text-ink">Stop and restore</h2>
+      <h2 id="stop-and-restore-title" className="m-0 text-base font-semibold text-ink">Stop and restore</h2>
       {state.kind === "loading" || state.kind === "choose" || state.kind === "working" ? (
         <div className="mt-3 space-y-3">
           {targets.length > 1 ? (

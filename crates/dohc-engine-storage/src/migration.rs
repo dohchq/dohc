@@ -3375,6 +3375,68 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 68,
+        id: "v2-accepted-reader-history",
+        sql: include_str!("accepted_reader_history.sql"),
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 69,
+        id: "v2-chat-link-author",
+        sql: include_str!("chat_link_author.sql"),
+        sets_user_version: None,
+    },
+    // The delivery a quarantined outbox's owner asked to try once more.
+    // Acceptance or another refusal clears it. Every refusal recorded for the
+    // pending head keeps its key, so writing any of them again changes nothing.
+    // A queue still waiting when a later restore generation replaces its
+    // accepted checkpoint keeps that checkpoint, which its edits may build on.
+    // A queue frozen at its lineage's refused adoption seed records the
+    // recovery checkpoint built from its accepted frames, and the applied
+    // cursor it runs through.
+    Migration {
+        ordinal: 70,
+        id: "v2-owner-outbox-retry",
+        sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
+              CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_cursor INTEGER \
+              CHECK ((recovery_checkpoint_cursor IS NULL) = (recovery_checkpoint_digest IS NULL) AND (recovery_checkpoint_cursor IS NULL OR recovery_checkpoint_cursor >= 0)); \
+              CREATE TABLE owner_ydoc_outbox_refusals ( \
+              outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
+              delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
+              refusal_key TEXT NOT NULL CHECK (length(refusal_key) > 0), \
+              PRIMARY KEY (outbox_id, refusal_key)) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 71,
+        id: "v2-agent-ids",
+        sql: include_str!("agent_ids.sql"),
+        sets_user_version: None,
+    },
+    // A group's stream pages its posts by creation time, and its
+    // conversation's top-level messages by time without reading the replies
+    // inside it.
+    Migration {
+        ordinal: 72,
+        id: "v2-chat-stream-order",
+        sql: "CREATE INDEX idx_chat_threads_channel_lane_created \
+              ON chat_threads(workspace_id, channel_id, lane, created_at_ms, thread_id); \
+              CREATE INDEX idx_chat_messages_thread_top_created \
+              ON chat_messages(workspace_id, thread_id, created_at_ms, message_id) \
+              WHERE parent_message_id IS NULL;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 73,
+        id: "v2-replication-conflict-resolution-index",
+        sql: "CREATE INDEX replication_log_conflict_resolution ON replication_log(workspace_id) \
+              WHERE op_kind='conflict.resolve';",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 74,
         id: "v2-live-owner-activations",
         sql: V2_LIVE_OWNER_ACTIVATIONS_DDL,
         sets_user_version: None,
@@ -4563,6 +4625,78 @@ pub(crate) fn newer_build_refusal(
         }))
 }
 
+/// What a store's ledger says about this build's migrations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerState {
+    /// Every migration completed from this build's definition and passed its
+    /// integrity check.
+    Current,
+    /// Some migrations have not run, as in a store an older build last
+    /// opened. Every recorded one matches this build's definition.
+    Pending,
+}
+
+/// Classify the ledger of an existing store against `migrations`, reading
+/// only. A recorded migration must match its definition's ordinal and, once
+/// completed, its checksum and a passed integrity check; anything else is a
+/// ledger the runner would refuse or this build cannot judge. A migration
+/// this build does not define means a newer build ran it.
+pub(crate) fn classify_ledger(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<LedgerState, StorageError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT ordinal, id, checksum, completed_at IS NOT NULL, integrity_ok \
+             FROM engine_migrations ORDER BY ordinal",
+        )
+        .map_err(StorageError::corrupt)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(StorageError::corrupt)?;
+    if !rows.iter().any(|(_, id, ..)| id == BASELINE_MIGRATION_ID) {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
+    let mut completed = 0;
+    for (ordinal, id, checksum, complete, integrity_ok) in &rows {
+        let Some(migration) = migrations.iter().find(|migration| migration.id == id) else {
+            return Err(StorageError::MigratedByNewerBuild {
+                ordinal: *ordinal,
+                id: id.chars().take(64).collect(),
+            });
+        };
+        if i64::from(migration.ordinal) != *ordinal
+            || (*complete
+                && (*checksum != migration_checksum(migration.sql) || *integrity_ok != Some(1)))
+        {
+            return Err(StorageError::MigrationFailed {
+                source: Some(
+                    format!(
+                        "migration {} ({}) was recorded unlike this build's definition",
+                        migration.ordinal, migration.id
+                    )
+                    .into(),
+                ),
+            });
+        }
+        completed += usize::from(*complete);
+    }
+    Ok(if completed == migrations.len() {
+        LedgerState::Current
+    } else {
+        LedgerState::Pending
+    })
+}
+
 /// Run every pending migration in `migrations` (ordered) against `conn`,
 /// idempotently and crash-recoverably. Safe to call on every open: already-
 /// applied migrations are skipped after a checksum check.
@@ -5216,6 +5350,30 @@ mod tests {
                 "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
             ),
             (
+                "v2-accepted-reader-history",
+                "df391d026835c68d1b0c026cad2408d90afb109e2cc2968a664bd36e383ec84d",
+            ),
+            (
+                "v2-chat-link-author",
+                "5b21c35c5a98bc7621b3cc004e422a53b03bb0e74355e28344a24db6c4100f4b",
+            ),
+            (
+                "v2-owner-outbox-retry",
+                "2ac9352889cc37f605b39b3e39fff5fe5611721fd7cdf369c4187a5d72e3aaeb",
+            ),
+            (
+                "v2-agent-ids",
+                "3886571a320da5555e255b174f102a40f1ee3bffe51c58d7ad31614757b67718",
+            ),
+            (
+                "v2-chat-stream-order",
+                "ed7263ecdfa09bd3eba5c1177a3f9df1be700e864d8903a3547af9f60e5853c6",
+            ),
+            (
+                "v2-replication-conflict-resolution-index",
+                "a852c0240ab994a1d67c8bd86002832ad3cd76b85459b532a38f06855a6a7856",
+            ),
+            (
                 "v2-live-owner-activations",
                 "ab7c083adc62cd7ceb164fda18d23f473673bf6c024c091742e292d84683cd5b",
             ),
@@ -5643,8 +5801,8 @@ mod tests {
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-live-owner-activations");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 67);
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 68);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 73);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 74);
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
@@ -6074,7 +6232,8 @@ mod tests {
         let before = migration_index("v2-chat-local-dispatch-discovery");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO chat_channels (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES ('ws','channel','Channel','channel','channel',1,1); INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('ws','thread','Thread',20,20,'channel'); INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('ws','thread',0,'old','human','Ada','@agent',20); INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101);").unwrap();
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let removed = migration_index("v2-agent-ids");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..removed], &ctx, &NoFaults).unwrap();
         let state: (i64, i64, i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM chat_messages), (SELECT COUNT(*) FROM chat_dispatch_local_discovery), (SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id='ws')",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -6708,6 +6867,51 @@ mod tests {
             r#"[["hosted","legacy-unknown",null],["ordinary","local",null]]"#
         );
         released_hold_and_deferred_feed_constraints_hold(&conn);
+    }
+
+    #[test]
+    fn conflict_resolution_index_upgrades_existing_log_without_changing_rows() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-replication-conflict-resolution-index");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO replication_log VALUES ('ws','peer',1,'ydoc.update','{}',1,1,'applied'),
+             ('ws','peer',2,'moment.append','{}',2,1,'applied'),
+             ('ws','peer',3,'conflict.resolve','{}',3,1,'applied');",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT payload_json FROM replication_log
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve' AND apply_disposition='applied'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("replication_log_conflict_resolution"),
+            "{plan}"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replication_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 3);
+        let resolutions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM replication_log INDEXED BY replication_log_conflict_resolution
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolutions, 1);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
     }
 
     #[test]
@@ -7710,6 +7914,376 @@ mod tests {
             [],
         )
         .expect("an automation mention");
+    }
+
+    /// Messages, mentions and pending dispatch discovery written before link
+    /// authors keep every row, and every chat trigger and view keeps its
+    /// definition. The rebuilt tables take a link message only with its grant
+    /// and link principal, and never with an account.
+    #[test]
+    fn chat_rows_from_before_link_authors_upgrade_unchanged() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 68);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms, automation_id, chain_depth, author_actor_key) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi @ana', 2, NULL, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread-1', 1, 'message-2', 'automation', 'Stamp', NULL, 'Done', 3, 'collection:Tasks#stamp', 1, NULL); \
+             INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 'message-1', 'ana', 'human', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        let definitions = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT name, sql FROM sqlite_schema WHERE type IN ('trigger', 'view') ORDER BY name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let definitions_before = definitions(&conn);
+        assert!(
+            definitions_before
+                .iter()
+                .any(|(name, _)| name == "conversation_file_link_message_insert")
+        );
+        // Every store opens with foreign keys on, so DROP TABLE cascades.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(definitions(&conn), definitions_before);
+        let legacy: i64 = conn
+            .query_row("PRAGMA legacy_alter_table", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            legacy, 0,
+            "the migration leaves renames in their normal mode"
+        );
+
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT message_id, author_kind, author_user_id, automation_id, author_actor_key, link_grant_id \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "message-1".into(),
+                    "human".into(),
+                    Some("user-ice".into()),
+                    None,
+                    Some(r#"{"kind":"unknown"}"#.into()),
+                    None
+                ),
+                (
+                    "message-2".into(),
+                    "automation".into(),
+                    None,
+                    Some("collection:Tasks#stamp".into()),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let kept: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'message-1' AND handle = 'ana'), \
+                        (SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE message_id = 'message-1')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (1, 1),
+            "the mention and the pending discovery row survive"
+        );
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+
+        let insert = |order: i64,
+                      kind: &str,
+                      user: Option<&str>,
+                      grant: Option<&str>,
+                      principal: Option<&str>| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      author_user_id, body, created_at_ms, link_grant_id, link_principal_id) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Guest', ?4, 'Hello', 4, ?5, ?6)",
+                rusqlite::params![order, format!("message-{order}"), kind, user, grant, principal],
+            )
+        };
+        insert(10, "link", None, Some("grant-1"), Some("principal-1")).expect("a link message");
+        assert!(
+            insert(
+                11,
+                "link",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
+            "a link message names no account"
+        );
+        assert!(
+            insert(12, "link", None, Some("grant-1"), None).is_err(),
+            "a link message names its link principal"
+        );
+        assert!(
+            insert(13, "link", None, None, None).is_err(),
+            "a link message names its grant"
+        );
+        assert!(
+            insert(
+                14,
+                "human",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
+            "only link messages name a link"
+        );
+        conn.execute(
+            "INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws', 'thread-1', 'message-10', 'ana', 'link', 4)",
+            [],
+        )
+        .expect("a link mention");
+    }
+
+    /// With foreign keys off, as on a bare connection, dropping the message
+    /// table cascades nothing. The link-author migration still applies once
+    /// and keeps each pending dispatch discovery row once.
+    #[test]
+    fn chat_link_author_migration_keeps_dispatch_discovery_without_foreign_keys() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id = 'ws' AND message_id = 'message-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    /// The agent chat, its requests, its runs and its place in each thread
+    /// belong to the default agent after the agent-ids migration, and every
+    /// request and place keeps its state. The agent chat is the one the
+    /// default agent's wire id names, whatever its slug.
+    #[test]
+    fn agent_ids_migration_gives_existing_agent_work_to_the_default_agent() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-agent-ids");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'agent', 'My agent', 'my-agent-2', 'agent', 1, 1), \
+                        ('ws', 'group', 'My agent', 'my-agent', 'channel', 1, 1), \
+                        ('ws', 'general', 'general', 'general', 'channel', 1, 1); \
+             INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+                 VALUES ('ws', 'channel_wire_agent_v1', 'agent'); \
+             INSERT INTO chat_agent_read_state \
+                 (workspace_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+                 VALUES ('ws', 't1', 2, 'm1', 3, 4); \
+             INSERT INTO chat_dispatch_ledger \
+                 (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'm1', 't1', 'failed', 'run-1', 'app-quit', 1, 2, 3), \
+                        ('ws', 'm2', 't1', 'pending', NULL, NULL, 0, 4, 4); \
+             INSERT INTO agent_run_records \
+                 (workspace_id, run_id, thread_id, trigger_message_id, command, started_at_ms, ended_at_ms, exit_code, failure_reason) \
+                 VALUES ('ws', 'run-1', 't1', 'm1', 'agent', 2, 3, 143, 'app-quit'); \
+             INSERT INTO chat_dispatch_scan_cursor (workspace_id, max_created_at_ms, updated_at_ms) VALUES ('ws', 4, 5);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let channels: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT channel_id, agent_id FROM chat_channels ORDER BY channel_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            channels,
+            vec![
+                ("agent".to_owned(), Some("default".to_owned())),
+                ("general".to_owned(), None),
+                ("group".to_owned(), None)
+            ]
+        );
+        let places: Vec<(String, String, i64, String, i64)> = conn
+            .prepare(
+                "SELECT agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision \
+                 FROM chat_agent_read_state ORDER BY agent_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            places,
+            vec![
+                (String::new(), "t1".into(), 2, "m1".into(), 3),
+                ("default".into(), "t1".into(), 2, "m1".into(), 3),
+            ],
+            "the default agent and agents outside a run keep the place they shared."
+        );
+        conn.execute(
+            "INSERT INTO chat_agent_read_state \
+                 (workspace_id, agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+             VALUES ('ws', 'codex', 't1', 0, '', 0, 0)",
+            [],
+        )
+        .expect("a second agent's place in the same thread");
+        let ledger: Vec<(String, String, String, Option<String>, i64)> = conn
+            .prepare(
+                "SELECT trigger_message_id, agent_id, state, run_id, attempt_count \
+                 FROM chat_dispatch_ledger ORDER BY trigger_message_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            ledger,
+            vec![
+                (
+                    "m1".into(),
+                    "default".into(),
+                    "failed".into(),
+                    Some("run-1".into()),
+                    1
+                ),
+                ("m2".into(), "default".into(), "pending".into(), None, 0),
+            ]
+        );
+        let run_agent: String = conn
+            .query_row(
+                "SELECT agent_id FROM agent_run_records WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_agent, "default");
+        conn.execute(
+            "INSERT INTO chat_dispatch_ledger \
+                 (workspace_id, trigger_message_id, agent_id, thread_id, state, attempt_count, created_at_ms, updated_at_ms) \
+             VALUES ('ws', 'm2', 'codex', 't1', 'pending', 0, 4, 4)",
+            [],
+        )
+        .expect("a second agent's request for the same message");
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+                 VALUES ('ws', 'agent-2', 'Second', 'second', 'agent', 1, 1, 'default')",
+                [],
+            )
+            .is_err(),
+            "an agent has one chat"
+        );
+        let removed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name IN \
+                 ('chat_dispatch_scan_cursor', 'chat_dispatch_local_discovery')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    /// A fresh store keeps each agent's place in a thread apart.
+    #[test]
+    fn a_fresh_store_keys_each_agents_place_in_a_thread_by_the_agent() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let place = |agent_id: &str| {
+            format!(
+                "INSERT INTO chat_agent_read_state \
+                     (workspace_id, agent_id, thread_id, last_read_created_at_ms, last_read_message_id, revision, updated_at_ms) \
+                 VALUES ('ws', '{agent_id}', 't1', 1, 'm1', 1, 1)"
+            )
+        };
+        for agent_id in ["default", "codex", ""] {
+            conn.execute(&place(agent_id), [])
+                .expect("one place per agent");
+        }
+        assert!(
+            conn.execute(&place("codex"), []).is_err(),
+            "an agent has one place in a thread"
+        );
     }
 
     /// Plugin subscriptions and claims written before the automation facts
@@ -9221,6 +9795,36 @@ mod tests {
         eprintln!(
             "TRIGGER_GUARD before_ns={} after_ns={} lookups_per_trial=15000 trials=6; SQL dispatch included",
             before_ns[3], after_ns[3]
+        );
+    }
+
+    #[test]
+    fn reader_history_migration_leaves_prior_lineages_unknown() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("reader-history.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-accepted-reader-history");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES('w','main');
+            INSERT INTO binary_blobs VALUES('native',2,x'0000');
+            INSERT INTO live_accepted_checkpoints VALUES('r','w','main','o','l',0,0,'null','{}',
+                lower(hex(zeroblob(32))),'native',lower(hex(zeroblob(32))),NULL,NULL);",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM live_accepted_reader_history",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
         );
     }
 

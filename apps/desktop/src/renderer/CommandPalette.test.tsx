@@ -93,6 +93,21 @@ describe("CommandPalette keyboard selection", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  // A command can open a surface that takes focus at once, as Settings does
+  // once its chunk has loaded. Enter must not also press what it focused.
+  it("keeps Enter from pressing the control its command focused", async () => {
+    const pressed = vi.fn();
+    const control = document.createElement("button");
+    control.addEventListener("click", pressed);
+    document.body.append(control);
+    render(<CommandPalette commands={[{ id: "open", label: "open", run: () => control.focus() }]} onClose={vi.fn()} />);
+
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(control);
+    expect(pressed).not.toHaveBeenCalled();
+    control.remove();
+  });
+
   it("typing resets the selection to the first match", async () => {
     const { ran } = setup();
     await userEvent.keyboard("{ArrowDown}"); // beta

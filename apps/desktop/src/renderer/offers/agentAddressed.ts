@@ -16,14 +16,13 @@ export function mapAgentRosterPick(pick: AgentRosterPick | null, edit: { from: n
   if (edit.from >= pick.to) return pick;
   return null;
 }
-// Each fact is null until read. `workspaceId` is the workspace the runner
+// Each fact is null until read. `workspaceId` is the workspace the agent
 // facts were read for; `paused` and `liveRun` belong to the conversation the
 // composer sends into, and a conversation that does not exist yet has neither.
 export interface AddressedAgentFacts {
   workspaceId: string;
   agentId: string;
   presentation: ActorPresentation;
-  runner: { command: boolean; enabled: boolean } | null;
   // A run started outside chat holds the workspace's agent until it ends.
   runActive: boolean | null;
   paused: boolean | null;
@@ -31,9 +30,9 @@ export interface AddressedAgentFacts {
   // The workspace folder the runner starts in.
   reach: string | null;
 }
-// Dispatch's rule: a run starts only with the runner on and a command set.
-// A paused conversation runs after Resume; a busy agent runs after its run.
-export type AgentOfferState = "runs" | "working" | "paused" | "runner-off" | "no-command" | "unknown";
+// The roster lists only agents that can run. A paused conversation runs
+// after Resume; a busy agent runs after its run.
+export type AgentOfferState = "runs" | "working" | "paused" | "unknown";
 export interface AgentAddressedOffer {
   kind: "agent-addressed";
   agent: MentionCandidate;
@@ -43,9 +42,6 @@ export interface AgentAddressedOffer {
   reach: string | null;
 }
 function offerState(facts: AddressedAgentFacts, working: boolean | null): AgentOfferState {
-  if (!facts.runner) return "unknown";
-  if (!facts.runner.command) return "no-command";
-  if (!facts.runner.enabled) return "runner-off";
   if (facts.paused === null || working === null) return "unknown";
   return facts.paused ? "paused" : working ? "working" : "runs";
 }

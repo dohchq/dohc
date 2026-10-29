@@ -1,7 +1,13 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
-import { existingLocalStateDir, localStateDir, readOwnedLocalState, type LocalStateWorkspace } from "./workspaceLocalState";
+import {
+  existingLocalStateDir,
+  localStateDir,
+  LocalStateUnavailableError,
+  readOwnedLocalState,
+  type LocalStateWorkspace,
+} from "./workspaceLocalState";
 
 // Main-side store for per-workspace UI state (.dohc/local/ui-state.json). The
 // layout belongs to this computer, so it lives in `.dohc/local`, which
@@ -20,8 +26,9 @@ const writeQueues = new Map<string, Promise<void>>();
 export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 
 // Tolerant read: a missing, corrupt, oversized, or escape-y file is "no saved
-// state", never an error. So is any file on Windows unless the engine's open
-// holds `.dohc/local` throughout the read. Returns the raw parsed JSON — the
+// state", never an error. On Windows, a read the engine's open doesn't hold
+// `.dohc/local` throughout is refused instead, so the renderer saves no
+// defaults over a file it couldn't read. Returns the raw parsed JSON — the
 // IPC handler validates the shape with the WorkspaceUiState zod contract
 // before it reaches the renderer.
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
@@ -29,7 +36,8 @@ export async function readUiStateFile(rootPath: string): Promise<unknown> {
     return await (process.platform === "win32"
       ? readOwnedLocalState(rootPath, uiStateIn)
       : uiStateIn(await existingLocalStateDir(rootPath)));
-  } catch {
+  } catch (error) {
+    if (error instanceof LocalStateUnavailableError) throw error;
     return null;
   }
 }

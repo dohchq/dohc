@@ -21,17 +21,21 @@ afterEach(cleanup);
 const context: CommandContext = {
   shareView: null,
   activeDocumentKind: null,
+  activeDocumentShareable: false,
   pinnedApps: [],
+  updateStatus: null,
 };
+// Main's palette with an update ready to install.
+const mainContext: CommandContext = { ...mainPalette.context, updateStatus: "ready" };
 const viewShare: ShareViewWriteScope = { access: "view", ended: false };
 const editShare: ShareViewWriteScope = { access: "edit", ended: false };
 // In palette order.
-const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-drawing", "new-folder", "new-collection", "import-files"];
+const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-file-at-path", "new-drawing", "new-folder", "new-collection", "import-files"];
 
 describe("command availability", () => {
   it.each<[string, ShareViewWriteScope | null, readonly CommandId[]]>([
     ["an ordinary workspace", null, CREATE_COMMANDS],
-    ["an Edit share view", editShare, ["new-file", "new-drawing", "new-collection", "import-files"]],
+    ["an Edit share view", editShare, ["new-file", "new-file-at-path", "new-drawing", "new-collection", "import-files"]],
     ["a Comment share view", { access: "comment", ended: false }, []],
     ["a View share view", viewShare, []],
     ["an ended Edit share view", { access: "edit", ended: true }, []],
@@ -46,6 +50,17 @@ describe("command availability", () => {
     const current = { ...context, activeDocumentKind };
     expect(isCommandAvailable("toggle-markdown-source", current)).toBe(activeDocumentKind === "markdown");
     expect(paletteCommandRows(current).some((row) => row.id === "toggle-markdown-source")).toBe(activeDocumentKind === "markdown");
+  });
+
+  // Like the source toggle, Share… is hidden, not disabled, when the active
+  // editor shows no file its Share button could share.
+  it.each([false, true])("Share… when the active file is shareable: %s", (activeDocumentShareable) => {
+    const current = { ...context, activeDocumentShareable };
+    expect(isCommandAvailable("share-file", current)).toBe(activeDocumentShareable);
+    const rows = paletteCommandRows(current).filter((row) => row.label.toLowerCase().includes("share"));
+    expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(
+      activeDocumentShareable ? [{ id: "share-file", label: "Share…" }] : [],
+    );
   });
 
   it.each([null, viewShare, editShare])("Chats with share view %j", (shareView) => {
@@ -96,9 +111,20 @@ describe("command inventory", () => {
   });
 
   it("tags only the matching capability already issued on this base", () => {
-    expect(paletteCommandRows(mainPalette.context).filter((row) => row.capabilityId).map(({ id, capabilityId }) => ({ id, capabilityId }))).toEqual([
+    expect(paletteCommandRows(mainContext).filter((row) => row.capabilityId).map(({ id, capabilityId }) => ({ id, capabilityId }))).toEqual([
       { id: "new-folder", capabilityId: "folder.create" },
     ]);
+  });
+
+  it("offers Update dohc while an update waits, and Restart to update once it is downloaded", () => {
+    const updateRows = (updateStatus: CommandContext["updateStatus"]) =>
+      paletteCommandRows({ ...context, updateStatus })
+        .filter((row) => row.id.endsWith("-update") || row.id === "check-updates")
+        .map((row) => row.label);
+    expect(updateRows(null)).toEqual(["Check for updates"]);
+    expect(updateRows("available")).toEqual(["Check for updates", "Update dohc"]);
+    expect(updateRows("downloading")).toEqual(["Check for updates"]);
+    expect(updateRows("ready")).toEqual(["Check for updates", "Restart to update"]);
   });
 
   it("rejects an unknown command rather than treating it as unavailable", () => {
@@ -106,7 +132,7 @@ describe("command inventory", () => {
   });
 
   it("renders main's generated labels in main's order for the fixed context", () => {
-    const rows = paletteCommandRows(mainPalette.context);
+    const rows = paletteCommandRows(mainContext);
     expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(mainPalette.rows);
     Element.prototype.scrollIntoView = vi.fn();
     render(<CommandPalette commands={rows.map((row) => ({ ...row, run: vi.fn() }))} onClose={vi.fn()} />);

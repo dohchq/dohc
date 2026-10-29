@@ -140,13 +140,13 @@ async function fixture(synced = true, collectionsWaiting = false) {
 describe("stop one workspace's sync", () => {
   it("keeps a dispatched run active and claiming writes across the capture restart", async () => {
     const h = await fixture();
-    const run = { agentId: "dohc-mcp", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    const run = { agentId: "default", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
     await h.service.claimAgentRun(h.workspace, h.state, run);
     try {
       await h.stop(h.operation());
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
       expect(h.runStates.map(event => event.active)).toEqual([true]);
-      expect(h.service.dispatchedAgentRun(h.state)).toBe(true);
+      expect(h.service.dispatchedAgent(h.state)).toBe("default");
       expect(h.service.agentRunDepth(h.state)).toBe(2);
       const collectionRun = h.service.agentRun(h.state);
       expect(collectionRun).toEqual(run);
@@ -157,7 +157,7 @@ describe("stop one workspace's sync", () => {
       expect(await h.service.claimAgentRun(h.workspace, h.state, { ...run, agentId: "other", agentRunId: "other" })).toBe(false);
       await h.service.clearAgentRun(h.state, run.agentRunId);
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
-      expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
+      expect(h.service.dispatchedAgent(h.state)).toBeNull();
       expect(h.service.agentRun(h.state)).toBeNull();
     } finally {
       await h.service.close(h.workspace, h.state);
@@ -166,18 +166,18 @@ describe("stop one workspace's sync", () => {
 
   it("does not revive a run that ends while sync is stopping", async () => {
     const h = await fixture();
-    const run = { agentId: "dohc-mcp", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    const run = { agentId: "default", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
     await h.service.claimAgentRun(h.workspace, h.state, run);
     h.closeRelay.mockImplementationOnce(async () => {
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
-      expect(h.service.dispatchedAgentRun(h.state)).toBe(true);
+      expect(h.service.dispatchedAgent(h.state)).toBe("default");
       await h.service.clearAgentRun(h.state, run.agentRunId, h.workspace.rootPath);
     });
     try {
       await h.stop(h.operation());
       expect(h.cleanupFailed).not.toHaveBeenCalled();
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
-      expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
+      expect(h.service.dispatchedAgent(h.state)).toBeNull();
       expect(h.runStates.map(event => event.active)).toEqual([true, false]);
       expect(h.captureRuns[1]).not.toHaveBeenCalled();
       h.write();

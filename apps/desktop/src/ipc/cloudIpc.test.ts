@@ -1,3 +1,8 @@
+import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
+import { mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { createTestScratch } from "../workspaces/testTemp";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
@@ -9,6 +14,8 @@ import { syncPauseFor } from "../workspaces/syncPauseFor";
 import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
 import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import { registerCloudIpcHandlers } from "./cloudIpc";
+import { ipcWireError } from "./errorWords";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { workspaceSyncOperations, type SyncStatusResult } from "./bridgeContract";
 import { createWorkspaceRootApproval } from "./workspaceRegistryIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -23,6 +30,11 @@ import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { chatShareSessionKey } from "../mainChatIpcHandlers";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
+
+vi.mock("../atomicReplaceFile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../atomicReplaceFile")>();
+  return { ...actual, atomicCreateFile: vi.fn(actual.atomicCreateFile) };
+});
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
@@ -115,6 +127,7 @@ async function harness() {
   const readSecrets = vi.fn<Dependencies["readWorkspaceSecretState"]>(async () => "none");
   const readDataKey = vi.fn<Dependencies["readWorkspaceDataKeyForEnrollment"]>(async () => null);
   const enroll = vi.fn<Dependencies["enrollWorkspaceKeyEnvelope"]>(async () => { steps.push("enroll"); });
+  const installDataKey = vi.fn<Dependencies["installWorkspaceDataKey"]>(async () => undefined);
   const bootstrap = vi.fn<Dependencies["bootstrapJoinedWorkspace"]>(async () => { steps.push("bootstrap"); });
   const probe = vi.fn<Dependencies["probeRelayWorkspace"]>(async () => {
     steps.push("probe");
@@ -199,7 +212,7 @@ async function harness() {
       if (refusal) throw new Error(refusal);
     },
     relayClientForWorkspace: bindRelay, enrollWorkspaceKeyEnvelope: enroll,
-    installWorkspaceDataKey: vi.fn(async () => undefined), setWorkspaceRemote: setRemote,
+    installWorkspaceDataKey: installDataKey, setWorkspaceRemote: setRemote,
     usableRoot: roots.usableRoot, readdir, mkdir, probeRelayWorkspace: probe,
     createJoinedWorkspace, bootstrapJoinedWorkspace: bootstrap,
     refreshNativeWorkspaceSurfaces: () => { steps.push("surfaces"); },
@@ -211,7 +224,7 @@ async function harness() {
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
     handlers, invoke, removeJoinedWorkspace, stopWorkspaceSync, stopOperation, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
-    stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
+    stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, installDataKey, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
     retireRenderer: () => { rendererCurrent = false; },
     reopenRenderer: () => {
@@ -222,6 +235,35 @@ async function harness() {
 }
 
 describe("registered cloud handlers", () => {
+  it.each(["enable", "join"] as const)("preserves the unsupported-drive key refusal during %s", async action => {
+    const h = await harness();
+    const root = await createTestScratch("dohc-key-cloud-words-");
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true });
+    vi.mocked(atomicCreateFile).mockRejectedValueOnce(
+      Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
+    );
+    h.installDataKey.mockImplementation((_root, key) => installWorkspaceDataKey(root, key));
+    h.enroll.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
+    h.bootstrap.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
+    const result = action === "enable"
+      ? h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })
+      : h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+    const expected = action === "enable"
+      ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
+      : `This drive can't store the workspace's secret key safely. Files remain in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+    const failure = await result.catch(error => error);
+    expect(failure).toMatchObject({ message: expected });
+    const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
+    const received = new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(failure))}`);
+    expect(ipcErrorMessage(received, "Couldn't sync the workspace.")).toBe(expected);
+    expect(h.installDataKey).toHaveBeenCalledOnce();
+    expect(h.enable).not.toHaveBeenCalled();
+    if (action === "join") {
+      expect(h.cleanup).toHaveBeenCalledWith("joined");
+      expect(h.registry.has("joined")).toBe(false);
+    }
+  });
+
   it.each(["https://account.example.test?query=1", "https://account.example.test#fragment"])("keeps cloud status available with malformed account URL %s", async (serverUrl) => {
     const h = await harness();
     h.cache.set({ ...credentials, serverUrl });
@@ -372,7 +414,8 @@ describe("registered cloud handlers", () => {
       ownPresentation: ownActorPresentation("device", credentials),
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
-      workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
+      workspaceSyncOwned: true, workspaceSynced: true, workspaceServerUrl: credentials.serverUrl,
+      workspaceSyncConnected: true, workspaceSecretState: "none",
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
@@ -697,7 +740,8 @@ it("exposes owned sync and pause state while signed out", async () => {
   h.login.status.mockResolvedValue({ connected: false });
   h.login.credentials.mockResolvedValue(null); h.cache.clear();
   expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
-    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: false,
+    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceServerUrl: credentials.serverUrl,
+    workspaceSyncConnected: false,
   });
   const stopped = await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
   expect(stopped).toMatchObject({ syncPause: { author: { kind: "person", personId: "local", self: true } } });

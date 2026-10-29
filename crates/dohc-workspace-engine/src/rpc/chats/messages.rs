@@ -6,6 +6,7 @@ use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
+use crate::rpc::chats::stream::with_agent_requests;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
 use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
@@ -20,6 +21,7 @@ use dohc_engine_domain::ChatDecision;
 use dohc_engine_domain::ChatMention;
 use dohc_engine_domain::ChatMessage;
 use dohc_engine_domain::ChatMessageAutomation;
+use dohc_engine_domain::ChatMessageLinkAuthor;
 use dohc_engine_domain::ChatReaction;
 use dohc_engine_domain::ChatReactionState;
 use dohc_engine_domain::LocalAttachmentInput;
@@ -57,6 +59,10 @@ struct ChatMessageSendParams {
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -154,11 +160,16 @@ struct ChatMentionsListForHandleParams {
 }
 
 /// A message author. The domain accepts an automation only with its automation.
+/// Only the relay writes a link message, so no caller here names one.
 pub(super) fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     match raw {
         "human" => Ok(ChatActorKind::Human),
         "agent" => Ok(ChatActorKind::Agent),
         "automation" => Ok(ChatActorKind::Automation),
+        "link" => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "only the relay writes a link message",
+        )),
         _ => Err(WireError::new(
             ErrorCode::InvalidParams,
             "unknown chat actor kind",
@@ -202,18 +213,29 @@ impl<'a> From<&'a ChatMessageAutomation> for AutomationWire<'a> {
     }
 }
 
+/// A link author also names its link grant and link principal.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AuthorWire<'a> {
     kind: &'static str,
     display_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    principal_id: Option<&'a str>,
 }
 
 impl<'a> AuthorWire<'a> {
-    pub(super) fn new(kind: ChatActorKind, display_name: &'a str) -> Self {
+    pub(super) fn new(
+        kind: ChatActorKind,
+        display_name: &'a str,
+        link_author: Option<&'a ChatMessageLinkAuthor>,
+    ) -> Self {
         AuthorWire {
             kind: kind.as_str(),
             display_name,
+            grant_id: link_author.map(|link| link.grant_id.as_str()),
+            principal_id: link_author.map(|link| link.principal_id.as_str()),
         }
     }
 }
@@ -240,6 +262,8 @@ pub(super) struct MessageWire<'a> {
     origin: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     automation: Option<AutomationWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<&'a str>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -248,7 +272,11 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             id: &message.message_id,
             workspace_id: &message.workspace_id,
             thread_id: &message.thread_id,
-            author: AuthorWire::new(message.author_kind, &message.author_display_name),
+            author: AuthorWire::new(
+                message.author_kind,
+                &message.author_display_name,
+                message.link_author.as_ref(),
+            ),
             body: &message.body,
             created_at_ms: message.created_at_ms,
             attachments: message
@@ -262,6 +290,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             parent_message_id: message.parent_message_id.as_deref(),
             origin: message.origin.as_deref(),
             automation: message.automation.as_ref().map(AutomationWire::from),
+            author_agent_id: message.author_agent_id.as_deref(),
         }
     }
 }
@@ -587,6 +616,8 @@ impl EngineService {
                         .map(LocalAttachmentInput::from)
                         .collect(),
                     automation: params.automation.map(ChatMessageAutomation::from),
+                    author_agent_id: params.author_agent_id,
+                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -821,7 +852,16 @@ impl EngineService {
             ),
         )
         .await?;
-        let row_values: Vec<Value> = page.messages.iter().map(message_json).collect();
+        let row_values: Vec<Value> = page
+            .messages
+            .iter()
+            .map(|message| {
+                with_agent_requests(
+                    message_json(message),
+                    page.agent_requests.get(&message.message_id),
+                )
+            })
+            .collect();
         let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         let next_after = if truncated {
@@ -859,6 +899,8 @@ mod tests {
             body: "hello".to_owned(),
             created_at_ms: 10,
             automation: None,
+            link_author: None,
+            author_agent_id: None,
             attachments: Vec::new(),
         }
     }
@@ -928,6 +970,44 @@ mod tests {
                 "automation": { "automationId": "collection:tasks#stamp" },
             })
         );
+    }
+
+    #[test]
+    fn link_message_projection_names_its_link_and_no_account() {
+        let link = ChatMessage {
+            author_kind: ChatActorKind::Link,
+            author_display_name: "Guest".to_owned(),
+            link_author: Some(ChatMessageLinkAuthor {
+                grant_id: "grant".to_owned(),
+                principal_id: "principal".to_owned(),
+            }),
+            ..message()
+        };
+        assert_eq!(
+            message_json(&link),
+            json!({
+                "id": "message",
+                "workspaceId": "workspace",
+                "threadId": "thread",
+                "author": {
+                    "kind": "link",
+                    "displayName": "Guest",
+                    "grantId": "grant",
+                    "principalId": "principal",
+                },
+                "body": "hello",
+                "createdAtMs": 10,
+                "attachments": [],
+            })
+        );
+    }
+
+    #[test]
+    fn local_writers_cannot_name_a_link_author() {
+        let refused = parse_actor_kind("link").unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert!(parse_reactor_kind("link").is_err());
+        assert_eq!(parse_actor_kind("human").unwrap(), ChatActorKind::Human);
     }
 
     #[test]

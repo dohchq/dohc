@@ -288,21 +288,14 @@ describe("AppsView", () => {
     expect(onCreateFirstApp).toHaveBeenCalledTimes(1);
   });
 
-  it("creates another app from the header and hands one to the agent", async () => {
+  it("creates another app from the header", async () => {
     const onCreateFirstApp = vi.fn(async () => undefined);
-    const ask = vi.fn();
     const user = userEvent.setup();
-    render(
-      <AppsView
-        {...props({ onCreateFirstApp, askAgent: { ready: true, ask, setUp: vi.fn() } })}
-      />,
-    );
+    render(<AppsView {...props({ onCreateFirstApp })} />);
 
     await screen.findByText("Client Portal");
     await user.click(screen.getByRole("button", { name: "Create app" }));
     expect(onCreateFirstApp).toHaveBeenCalledOnce();
-    await user.click(screen.getByRole("button", { name: "Ask my agent for an app" }));
-    expect(ask).toHaveBeenCalledExactlyOnceWith({ kind: "app" });
   });
 
   it("does not offer file creation in an empty received share workspace", async () => {
@@ -314,7 +307,6 @@ describe("AppsView", () => {
           workspaceId: "ws-received-share",
           onCreateFirstApp,
           receivedShareWorkspace: true,
-          askAgent: { ready: true, ask: vi.fn(), setUp: vi.fn() },
         })}
       />,
     );
@@ -326,7 +318,6 @@ describe("AppsView", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
     expect(screen.queryByTestId("sites-create-first")).toBeNull();
-    expect(screen.queryByTestId("ask-agent")).toBeNull();
     expect(onCreateFirstApp).not.toHaveBeenCalled();
   });
 

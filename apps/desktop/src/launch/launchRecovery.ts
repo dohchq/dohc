@@ -1,7 +1,8 @@
-import { app, dialog } from "electron";
+import { app } from "electron";
 import { startAutoUpdates, type UpdateWaitBounds } from "../updates/electronUpdater";
 import { createUpdateAfterFailure, FAILURE_UPDATE_BOUNDS } from "../updates/updateAfterFailure";
-import { confirmRestartDialog, showDownloadingDialog } from "../updates/failureDialogs";
+import { confirmDownloadDialog, confirmRestartDialog, showDownloadingDialog } from "../updates/failureDialogs";
+import { showMessageBox } from "../window/messageBox";
 import type { LaunchFailure } from "./launchEntry";
 
 // Before main loads, nothing is on screen until an update is found, so the
@@ -26,9 +27,10 @@ export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<
   try {
     const restarting = await createUpdateAfterFailure({
       controller: async () => controller,
-      showDownloading: (kind, version, signal) => showDownloadingDialog(dialog, kind, version, signal),
+      confirmDownload: (kind, version) => confirmDownloadDialog({ showMessageBox }, kind, version),
+      showDownloading: (kind, version, signal) => showDownloadingDialog({ showMessageBox }, kind, version, signal),
       confirmRestart: async (kind, version) => {
-        declined = !(await confirmRestartDialog(dialog, kind, version));
+        declined = !(await confirmRestartDialog({ showMessageBox }, kind, version));
         return !declined;
       },
       install: async () => controller ? await controller.installUpdate() : { accepted: false },

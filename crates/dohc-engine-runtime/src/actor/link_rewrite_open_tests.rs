@@ -132,6 +132,11 @@ impl Fixture {
             )
             .await
     }
+    async fn undo_open_with_busy_retry(
+        &self,
+    ) -> Result<super::super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        retry_undo(&self.ws, || self.undo_open()).await
+    }
     async fn adopt(&self, object: &str) {
         let ws = self.ws.clone();
         let object = object.to_owned();
@@ -175,7 +180,7 @@ async fn ordinary_open_rewrite_and_inverse_preserve_typing_labels_and_new_links(
     f.type_document("source-0000", body).await;
     f.settle_document("source-0000").await;
     let start = Instant::now();
-    let result = f.undo_open().await.unwrap();
+    let result = f.undo_open_with_busy_retry().await.unwrap();
     let undo_ns = start.elapsed().as_nanos();
     assert!(result.not_restored.is_empty());
     let expected = "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]";
@@ -381,6 +386,8 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
     let f = Fixture::new(2000, 4999);
+    // Publication has its own proof that a queued update waits at most one turn.
+    let _publication = f.capture.clone().lock_owned().await;
     let _index_hold = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {
@@ -479,7 +486,7 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
             start.elapsed().as_nanos(),
         )
     };
-    let (result, (undo_gap, undo_wait)) = tokio::join!(f.undo_open(), typing);
+    let (result, (undo_gap, undo_wait)) = tokio::join!(f.undo_open_with_busy_retry(), typing);
     let result = result.unwrap();
 
     assert!(undo_gap <= 1);
@@ -571,7 +578,7 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
         "typing [[new#part|label]] [[./new.md]] [old](old.md)",
     )
     .await;
-    let result = f.undo_open().await;
+    let result = f.undo_open_with_busy_retry().await;
     let text = f.text("source-0000.md").await;
     drop(lease);
     f.close().await;
@@ -1164,4 +1171,413 @@ async fn forward_lock_proof(lock_at_commit: bool) {
         result.expect("forward read must wait for the checkpoint lock")["documents"],
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_write_defers_only_the_stale_source() {
+    let f = Fixture::new(2, 2);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent text [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    let result = f.pass("outside-write", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 1);
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        outside
+    );
+    assert!(
+        f.text("source-0001.md")
+            .await
+            .contains("[[new#part|label]]")
+    );
+    drop(lease);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_write_same_request_resumes_unwritten_sources_after_reopen() {
+    let mut f = Fixture::new(20, 20);
+    let (lease, _) = f.open_document("source-0019").await;
+    let outside = "agent text [[old]]\n";
+    std::fs::write(f.root.join("source-0019.md"), outside).unwrap();
+    let first = f.pass("outside-resume", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(first["complete"], false);
+    assert_eq!(first["unchecked"], json!(["source-0019.md"]));
+    let before = f
+        .actor
+        .history_operation(f.ws.clone(), OP.into())
+        .await
+        .unwrap();
+    assert!(
+        before.moments.len() > 1,
+        "some healthy sources committed before the stale source"
+    );
+    drop(lease);
+    f.restart().await;
+    f.edit("source-0019", "source-0019.md", outside).await;
+    let read = Arc::new(Mutex::new(Vec::new()));
+    let observed = read.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
+        observed.lock().unwrap().push(object.to_owned())
+    }));
+    let result = f.pass("outside-resume", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 20);
+    assert_eq!(result["complete"], true);
+    for moment in before.moments.iter().filter(|m| m.operation == "write") {
+        assert!(
+            !read.lock().unwrap().contains(&moment.object_id),
+            "finished source was read again"
+        );
+    }
+    assert_eq!(f.text("source-0019.md").await, "agent text [[new]]\n");
+    f.close().await;
+}
+
+impl Fixture {
+    async fn outside_head(&self, object: &str, text: &str, moment: &str) {
+        let path = format!("{object}.md");
+        let input = write(&self.ws, object, &path, text, moment);
+        self.actor
+            .run(move |store, _| {
+                VersionedTextStore::new(store).write_text(&input, &NoFaults)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        std::fs::write(self.root.join(path), text).unwrap();
+    }
+
+    async fn rewrite_receipt(&self, request: &str) -> (bool, Value) {
+        let receipt = Receipt {
+            key: request.into(),
+            binding: hex_sha256(json!([self.ws, OP, None::<String>]).to_string().as_bytes()),
+        };
+        self.actor
+            .run(move |store, _| store.read_with(|conn| receipt.read(conn)))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn captured(&self, path: &str) {
+        self.actor
+            .offer_captured_link_rewrites(&self.ws, &[path.into()]);
+        self.actor.retry_pending_link_rewrites(&self.ws).await;
+    }
+
+    async fn released(&self) {
+        self.actor.offer_released_link_rewrites(&self.ws);
+        self.actor.retry_pending_link_rewrites(&self.ws).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_capture_retries_only_that_note_and_undo_keeps_prose() {
+    let f = Fixture::new(3, 3);
+    let (first, _) = f.open_document("source-0000").await;
+    let (second, _) = f.open_document("source-0001").await;
+    let agent = "agent prose [[old]]\n";
+    let human = "human prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), agent).unwrap();
+    std::fs::write(f.root.join("source-0001.md"), human).unwrap();
+    let initial = f.pass("two-outside", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(initial["documents"], 1);
+    assert!(!f.rewrite_receipt("two-outside").await.0);
+    f.captured("source-0000.md").await;
+    assert_eq!(
+        f.text("source-0000.md").await,
+        BODY,
+        "a lease still excludes the retry"
+    );
+    drop(first);
+    f.captured("source-0000.md").await;
+    assert_eq!(
+        f.text("source-0000.md").await,
+        BODY,
+        "disk bytes must first become the head"
+    );
+    assert_eq!(f.rewrite_receipt("two-outside").await.1, initial);
+    f.outside_head("source-0000", agent, "outside-agent").await;
+    let read = Arc::new(Mutex::new(Vec::new()));
+    let observed = read.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
+        observed.lock().unwrap().push(object.to_owned())
+    }));
+    f.captured("source-0000.md").await;
+    assert_eq!(*read.lock().unwrap(), vec!["source-0000"]);
+    assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
+        human
+    );
+    let (done, result) = f.rewrite_receipt("two-outside").await;
+    assert!(!done);
+    assert_eq!(result["documents"], 2);
+    assert_eq!(result["unchecked"], json!(["source-0001.md"]));
+    drop(second);
+    f.outside_head("source-0001", human, "outside-human").await;
+    f.captured("source-0001.md").await;
+    let (done, result) = f.rewrite_receipt("two-outside").await;
+    assert!(done);
+    assert_eq!(result["documents"], 3);
+    assert_eq!(result["complete"], true);
+    assert_eq!(
+        f.pass("two-outside", Arc::new(NoFaults)).await.unwrap(),
+        result
+    );
+    f.publish().await;
+    let undone = f.undo().await.unwrap();
+    assert!(undone.not_restored.is_empty());
+    let placed = f
+        .actor
+        .history_undo_place(
+            f.ws.clone(),
+            undone,
+            f.root.to_path_buf(),
+            Arc::new(()),
+            11,
+            |_| {},
+        )
+        .await;
+    assert!(placed.materialized);
+    assert_eq!(f.text("source-0000.md").await, agent);
+    assert_eq!(f.text("source-0001.md").await, human);
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        agent
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
+        human
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_undo_before_capture_cancels_retry() {
+    let f = Fixture::new(2, 2);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent text [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    f.pass("undo-before-capture", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    drop(lease);
+    f.publish().await;
+    f.undo().await.unwrap();
+    f.outside_head("source-0000", outside, "outside-after-undo")
+        .await;
+    f.captured("source-0000.md").await;
+    assert_eq!(f.text("source-0000.md").await, outside);
+    assert!(f.actor.link_rewrites.deferred.lock().unwrap().is_empty());
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_newer_write_waits_for_next_capture_without_polling() {
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    let first = "first prose [[old]]\n";
+    let second = "second prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), first).unwrap();
+    f.pass("newer-outside", Arc::new(NoFaults)).await.unwrap();
+    drop(lease);
+    f.outside_head("source-0000", first, "first-outside").await;
+    let path = f.root.join("source-0000.md");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        std::fs::write(&path, second).unwrap();
+    }));
+    f.captured("source-0000.md").await;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(!f.rewrite_receipt("newer-outside").await.0);
+    f.released().await;
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        1,
+        "a newer outside write needs another capture"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
+        second
+    );
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = None;
+    f.outside_head("source-0000", second, "second-outside")
+        .await;
+    f.captured("source-0000.md").await;
+    assert_eq!(f.text("source-0000.md").await, "second prose [[new]]\n");
+    assert!(f.rewrite_receipt("newer-outside").await.0);
+    f.publish().await;
+    f.undo().await.unwrap();
+    assert_eq!(f.text("source-0000.md").await, second);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_capture_waits_for_a_reopened_lease_to_release() {
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    f.pass("reopened-outside", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    drop(lease);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    f.released().await;
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "capture must offer the note first"
+    );
+    f.outside_head("source-0000", outside, "outside-before-reopen")
+        .await;
+    let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
+    let reopened = f.leases.acquire(&key).unwrap();
+    f.captured("source-0000.md").await;
+    assert_eq!(f.text("source-0000.md").await, outside);
+    assert!(!f.rewrite_receipt("reopened-outside").await.0);
+    drop(reopened);
+    f.released().await;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+    assert!(f.rewrite_receipt("reopened-outside").await.0);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_retry_failure_keeps_pending_work_and_durable_progress() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        for nth in [4, 5] {
+            let f = Fixture::new(1, 1);
+            let (lease, _) = f.open_document("source-0000").await;
+            let outside = "agent prose [[old]]\n";
+            std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+            let faults = Arc::new(CrashNth {
+                point,
+                // Initial reserve/reply, retry reserve, then write and completion.
+                nth,
+                seen: AtomicUsize::new(0),
+            });
+            f.pass("outside-retry-fault", faults).await.unwrap();
+            drop(lease);
+            f.outside_head("source-0000", outside, "outside-before-fault")
+                .await;
+            f.captured("source-0000.md").await;
+            assert_eq!(
+                f.rewrite_receipt("outside-retry-fault").await.0,
+                nth == 5 && point == FaultPoint::StorageAfterCommitBeforeAck
+            );
+            assert!(
+                f.actor.link_rewrites.deferred.lock().unwrap()["outside-retry-fault"]
+                    .sources
+                    .contains_key("source-0000")
+            );
+            f.captured("source-0000.md").await;
+            let (done, result) = f.rewrite_receipt("outside-retry-fault").await;
+            assert!(done);
+            assert_eq!(result["documents"], 1);
+            assert_eq!(result["complete"], true);
+            assert!(f.actor.link_rewrites.deferred.lock().unwrap().is_empty());
+            assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+            f.publish().await;
+            f.undo().await.unwrap();
+            assert_eq!(f.text("source-0000.md").await, outside);
+            f.close().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_refused_undo_keeps_the_deferred_retry() {
+    let f = Fixture::new(2, 2);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    f.pass("outside-refused-undo", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    f.publish().await;
+    std::fs::write(f.root.join("source-0001.md"), "new outside prose [[new]]\n").unwrap();
+    assert!(matches!(
+        f.undo().await,
+        Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
+    ));
+    drop(lease);
+    f.outside_head("source-0000", outside, "outside-after-refused-undo")
+        .await;
+    f.captured("source-0000.md").await;
+    assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+    assert!(f.rewrite_receipt("outside-refused-undo").await.0);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_retry_yields_to_another_pass_and_keeps_its_offer() {
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    f.pass("outside-busy-pass", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    drop(lease);
+    f.outside_head("source-0000", outside, "outside-before-busy-pass")
+        .await;
+    f.actor
+        .offer_captured_link_rewrites(&f.ws, &["source-0000.md".into()]);
+    let other_pass = f.actor.link_rewrites.gate.clone().lock_owned().await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        f.actor.retry_pending_link_rewrites(&f.ws),
+    )
+    .await
+    .expect("capture must yield to a running link pass");
+    assert_eq!(f.text("source-0000.md").await, outside);
+    assert!(!f.rewrite_receipt("outside-busy-pass").await.0);
+    drop(other_pass);
+    f.actor.retry_pending_link_rewrites(&f.ws).await;
+    assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+    assert!(f.rewrite_receipt("outside-busy-pass").await.0);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_retry_paused_mid_turn_resumes_after_undo_is_cancelled() {
+    let f = Fixture::new(1, 1);
+    let (lease, _) = f.open_document("source-0000").await;
+    let outside = "agent prose [[old]]\n";
+    std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
+    f.pass("outside-cancelled-undo", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    drop(lease);
+    f.outside_head("source-0000", outside, "outside-before-paused-undo")
+        .await;
+    let stopped = Arc::new(Mutex::new(None));
+    let observed = stopped.clone();
+    let actor = f.actor.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, _| {
+        *observed.lock().unwrap() = Some(actor.stop_link_rewrites(OP));
+    }));
+    f.captured("source-0000.md").await;
+    assert_eq!(f.text("source-0000.md").await, outside);
+    assert!(!f.rewrite_receipt("outside-cancelled-undo").await.0);
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = None;
+    stopped.lock().unwrap().take();
+    f.actor.retry_pending_link_rewrites(&f.ws).await;
+    assert_eq!(f.text("source-0000.md").await, "agent prose [[new]]\n");
+    assert!(f.rewrite_receipt("outside-cancelled-undo").await.0);
+    f.close().await;
 }

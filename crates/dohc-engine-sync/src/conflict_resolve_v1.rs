@@ -1519,23 +1519,24 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             close_imported_conflict(tx, payload)?;
         }
         ImportedHeadDisposition::ReviewedSide => {
-            for shadow in &validated.shadows {
+            let (shadow, preceding) = validated
+                .shadows
+                .split_last()
+                .ok_or_else(|| invalid("reviewed text resolution has no write effect"))?;
+            for shadow in preceding {
                 crate::moment_apply::record_conflict_parent_shadow_in_tx(
                     tx,
                     &payload.workspace_id,
                     shadow,
                 )?;
             }
-            let shadow = validated
-                .shadows
-                .last()
-                .ok_or_else(|| invalid("reviewed text resolution has no write effect"))?;
             materialization_changes.extend(
                 crate::moment_apply::adopt_conflict_parent_text_result_in_tx(
                     tx,
                     envelope,
                     shadow,
                     search_policy,
+                    true,
                 )?,
             );
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
@@ -1574,6 +1575,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                         envelope,
                         shadow,
                         search_policy,
+                        false,
                     )?,
                 );
             }
@@ -1959,13 +1961,14 @@ fn classify_imported_head(
                 || same_object_and_projected_content(&current_live, &payload.result)
             {
                 ImportedHeadDisposition::AlreadyResult
-            } else if payload
-                .lineage_transition
-                .as_ref()
-                .is_some_and(|transition| transition.successor.is_some())
-                && [&payload.current, &payload.incoming]
-                    .iter()
-                    .any(|side| same_object_and_projected_content(&current_live, side))
+            } else if kept_text_write_reviews_incoming(tx, payload, &current_live)?
+                || (payload
+                    .lineage_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.successor.is_some())
+                    && [&payload.current, &payload.incoming]
+                        .iter()
+                        .any(|side| same_object_and_projected_content(&current_live, side)))
             {
                 ImportedHeadDisposition::ReviewedSide
             } else {
@@ -1992,6 +1995,53 @@ fn classify_imported_head(
             current_live
         },
     ))
+}
+
+fn kept_text_write_reviews_incoming(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    live: &HeadV1,
+) -> Result<bool, SyncError> {
+    if payload.resolution != ResolutionV1::KeptCurrent
+        || payload.lineage_transition.is_some()
+        || payload.effects.len() != 1
+        || payload.effects[0].kind != EffectKindV1::Write
+        || !payload
+            .result
+            .present()
+            .is_some_and(|head| head.content_kind == HeadContentKindV1::Text)
+        || !payload.incoming.present().is_some_and(|incoming| {
+            incoming.content_kind == HeadContentKindV1::Text
+                && payload
+                    .current
+                    .present()
+                    .is_some_and(|current| current.object_id == incoming.object_id)
+        })
+        || *live != payload.incoming
+    {
+        return Ok(false);
+    }
+    let Some(row) = dohc_engine_domain::load_text_conflict_in_tx(
+        tx,
+        &payload.workspace_id,
+        &payload.conflict_id,
+    )
+    .map_err(map_local_domain_error)?
+    else {
+        return Ok(false);
+    };
+    if row.status != ConflictStatus::Open || row.target_version_id != payload.target_version_id {
+        return Ok(false);
+    }
+    let receiver_path = &payload.paths[payload.incoming.path_ref()];
+    let resolver_path = &payload.paths[payload.current.path_ref()];
+    Ok(row.path == *receiver_path
+        && row.current.path == *receiver_path
+        && row.incoming.path == *resolver_path
+        && head_from_conflict_side(&row.current, payload.incoming.path_ref(), None)?
+            == payload.incoming
+        && head_from_conflict_side(&row.incoming, payload.current.path_ref(), None)?
+            == payload.current)
 }
 
 fn imported_live_head(
@@ -2910,7 +2960,7 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         incoming_path_ref,
         incoming_binary_updated_at_ms,
     )?;
-    let (result_path, result, result_text) = planned_result(tx, input, conflict, &current)?;
+    let (result_path, result, result_text) = planned_result(input, conflict, &current)?;
     let result_path_ref = intern_path(&mut paths, &result_path);
     let result = with_path_ref(result, result_path_ref);
     let effects = planned_effects(input, &current, &result);
@@ -3185,7 +3235,6 @@ fn head_from_conflict_side(
 }
 
 fn planned_result(
-    tx: &Transaction<'_>,
     input: &ResolveTextConflict,
     conflict: &TextConflict,
     current: &HeadV1,
@@ -3193,8 +3242,7 @@ fn planned_result(
     match &input.resolution {
         ResolveConflictKind::KeepCurrent => {
             let mut result = current.clone();
-            if dohc_engine_domain::conflicts::keep_current_needs_lineage_effect(tx, conflict)
-                .map_err(map_local_domain_error)?
+            if dohc_engine_domain::conflicts::keep_current_needs_write_effect(conflict)
                 && let HeadV1::Present(head) = &mut result
             {
                 head.latest_moment_id = input.write_moment_id.clone();
@@ -4422,9 +4470,20 @@ mod tests {
     }
 
     fn receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_with_role(false)
+    }
+
+    fn receiver_fixture_with_role(
+        passive: bool,
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
-        let mut store = EngineStore::open(&path, 1_000).expect("store");
+        let mut store = if passive {
+            EngineStore::open_passive(&path, 1_000, None, None)
+        } else {
+            EngineStore::open(&path, 1_000)
+        }
+        .expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");
@@ -4559,6 +4618,769 @@ mod tests {
         })
         .expect("carrier");
         (scratch, store, key, built)
+    }
+
+    fn text_keep_receiver_fixture() -> (ScratchDir, EngineStore, BuiltConflictResolveV1) {
+        text_keep_receiver_fixture_with_role(false)
+    }
+
+    fn text_keep_receiver_fixture_with_role(
+        passive: bool,
+    ) -> (ScratchDir, EngineStore, BuiltConflictResolveV1) {
+        let (scratch, mut store, _, built) = receiver_fixture_with_role(passive);
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        payload.chosen_from = ResolveChoiceV1::Current;
+        payload.resolution = ResolutionV1::KeptCurrent;
+        payload.incoming = payload.current.clone();
+        payload.current = payload.result.clone();
+        if let HeadV1::Present(head) = &mut payload.current {
+            head.latest_moment_id = "resolver-head".to_owned();
+            head.updated_at_ms = 15;
+        }
+        let built = build_conflict_resolve_v1(payload).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")?;
+                let payload = &built.validated.payload;
+                let conflict = TextConflict {
+                    conflict_id: payload.conflict_id.clone(),
+                    workspace_id: "ws".to_owned(),
+                    path: "doc.md".to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "peer".to_owned(),
+                    created_at_ms: 15,
+                    updated_at_ms: 15,
+                    status: ConflictStatus::Open,
+                    chosen_from: ConflictChoice::Current,
+                    resolution: None,
+                    metadata: ConflictMetadata::origin("sync"),
+                    base: ConflictFileState::text("doc.md", None),
+                    current: conflict_state_from_head(tx, payload, &payload.incoming)?,
+                    incoming: conflict_state_from_head(tx, payload, &payload.current)?,
+                };
+                insert_text_conflict_if_absent(tx, &conflict).map_err(map_local_domain_error)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        (scratch, store, built)
+    }
+
+    fn import_text_keep(store: &mut EngineStore, built: &BuiltConflictResolveV1) {
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.recorded_at_ms = built.validated.payload.effect_context.recorded_at_ms;
+        let outcome = crate::apply_replication_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+            "{outcome:?}"
+        );
+        assert!(outcome.refusals.is_empty(), "{outcome:?}");
+    }
+
+    fn text_keep_head(store: &mut EngineStore) -> TextSnapshot {
+        VersionedTextStore::new(store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap()
+            .unwrap()
+    }
+
+    fn text_keep_open_rows(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn text_keep_adopts_exact_reviewed_incoming_and_closes_row() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        import_text_keep(&mut store, &built);
+        let head = text_keep_head(&mut store);
+        assert_eq!(head.text, "resolved text");
+        assert_eq!(head.latest_moment_id, "moment-result");
+        assert_eq!(text_keep_open_rows(&store), 0);
+        let mut child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
+        child.recorded_at_ms = 21;
+        for _ in 0..2 {
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &child,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .unwrap();
+        }
+        let moments: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id='moment-result'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(moments, 1);
+    }
+
+    #[test]
+    fn text_keep_edit_over_peer_deletion_preserves_both_sides() {
+        let (_sender_scratch, mut sender, _) = text_keep_receiver_fixture();
+        sender
+            .write_with(&NoFaults, |tx| {
+                let mut row = dohc_engine_domain::load_text_conflict_in_tx(tx, "ws", "conflict-1")
+                    .map_err(map_local_domain_error)?
+                    .unwrap();
+                row.incoming = ConflictFileState::text("doc.md", None);
+                tx.execute("DELETE FROM conflicts", []).unwrap();
+                insert_text_conflict_if_absent(tx, &row).map_err(map_local_domain_error)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let built =
+            resolve_text_keep_locally(&mut sender, ResolveConflictKind::KeepCurrent, "local-kept");
+        let (_receiver_scratch, mut receiver, _) = text_keep_receiver_fixture();
+        VersionedTextStore::new(&mut receiver)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "doc.md".to_owned(),
+                    moment_id: "receiver-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        receiver
+            .write_with(&NoFaults, |tx| {
+                let mut row = dohc_engine_domain::load_text_conflict_in_tx(tx, "ws", "conflict-1")
+                    .map_err(map_local_domain_error)?
+                    .unwrap();
+                row.incoming = row.current;
+                row.current = ConflictFileState::text("doc.md", None);
+                tx.execute("DELETE FROM conflicts", []).unwrap();
+                insert_text_conflict_if_absent(tx, &row).map_err(map_local_domain_error)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        import_text_keep(&mut receiver, &built);
+        assert!(
+            VersionedTextStore::new(&mut receiver)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(text_keep_open_rows(&receiver), 2);
+        assert_eq!(text_keep_open_rows(&sender), 0);
+        assert_eq!(text_keep_head(&mut sender).text, "current text");
+        assert!(
+            VersionedTextStore::new(&mut receiver)
+                .get_moment("ws", "receiver-delete")
+                .unwrap()
+                .is_some()
+        );
+        if !built.validated.payload.effects.is_empty() {
+            let kept = VersionedTextStore::new(&mut receiver)
+                .get_moment("ws", "local-kept")
+                .unwrap()
+                .unwrap();
+            assert_eq!(kept.before_text.as_deref(), Some("current text"));
+            assert_eq!(kept.after_text.as_deref(), Some("current text"));
+        }
+        eprintln!(
+            "deletion receiver: absent, 2 open rows; resolver: current text, 0 open rows; effects={}",
+            built.validated.payload.effects.len()
+        );
+    }
+
+    #[test]
+    fn text_keep_unbound_write_preserves_exact_richdoc_receiver() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let key = DocKey::new("ws", "main", "object-a").unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "current text")
+            .unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &doc.encode_full_state(),
+            &NoFaults,
+            20,
+        )
+        .unwrap();
+        let claim = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id;
+        assert!(claim.is_some());
+        assert!(built.validated.payload.lineage_transition.is_none());
+        store
+            .write_with(&NoFaults, |tx| {
+                assert_eq!(
+                    imported_live_head(tx, &built.validated.payload, 0)?,
+                    built.validated.payload.incoming
+                );
+                assert!(!unbound_receiver_lineages_match_reviewed_sides(
+                    tx,
+                    &built.validated.payload
+                )?);
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        assert_eq!(text_keep_open_rows(&store), 2);
+        assert_eq!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id,
+            claim
+        );
+        assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+    }
+
+    #[test]
+    fn text_keep_does_not_adopt_equal_bytes_at_a_different_head() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE snapshots SET latest_moment_id='newer-head'", [])
+                    .unwrap();
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).latest_moment_id, "newer-head");
+        assert!(text_keep_open_rows(&store) > 0);
+    }
+
+    #[test]
+    fn text_keep_does_not_adopt_after_row_was_resolved() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET status='resolved',resolution='kept-current'",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        assert_eq!(text_keep_open_rows(&store), 1);
+    }
+
+    #[test]
+    fn text_keep_preserves_a_coalesced_newer_incoming_side() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_latest_moment_id='newer-incoming'",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        let (status, incoming): (String, String) = store.read_with(|conn| conn.query_row(
+            "SELECT status,incoming_latest_moment_id FROM conflicts WHERE conflict_id='conflict-1'", [],
+            |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+        assert_eq!(
+            (status.as_str(), incoming.as_str()),
+            ("open", "newer-incoming")
+        );
+    }
+
+    #[test]
+    fn text_keep_legacy_no_effect_still_diverges() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let mut payload = built.validated.payload;
+        payload.result = payload.current.clone();
+        payload.effects.clear();
+        let built = build_conflict_resolve_v1(payload).unwrap();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        assert_eq!(text_keep_open_rows(&store), 2);
+    }
+
+    #[test]
+    fn text_keep_history_restores_the_receivers_overwritten_copy() {
+        let (scratch, mut store, built) = text_keep_receiver_fixture();
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_head(&mut store).latest_moment_id, "moment-result");
+        let history = VersionedTextStore::new(&mut store)
+            .get_moment("ws", "moment-result")
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.before_text.as_deref(), Some("current text"));
+        assert_eq!(history.after_text.as_deref(), Some("resolved text"));
+        drop(store);
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 50).unwrap();
+        VersionedTextStore::new(&mut store)
+            .rollback_text_file_mutation(
+                &dohc_engine_domain::RollbackTextFileMutation {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "doc.md".to_owned(),
+                    mutation_moment_id: "moment-result".to_owned(),
+                    request_id: None,
+                    metadata_origin: "restore".to_owned(),
+                    author_json: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let restored = text_keep_head(&mut store);
+        assert_eq!(restored.text, "current text");
+    }
+
+    #[test]
+    fn text_keep_domain_writes_without_a_lineage() {
+        let (scratch, mut store, _) = text_keep_receiver_fixture();
+        let path = scratch.path().join("doc.md");
+        std::fs::write(&path, "current text").unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let input = text_keep_input(ResolveConflictKind::KeepCurrent, "local-kept");
+        let result = VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(&input, &NoFaults, |_, _, _| Ok(()), |_, _, ()| Ok(()))
+            .unwrap();
+        assert_eq!(
+            result.write.unwrap().snapshot.latest_moment_id,
+            "local-kept"
+        );
+        let history = VersionedTextStore::new(&mut store)
+            .get_moment("ws", "local-kept")
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.before_text.as_deref(), Some("current text"));
+        assert_eq!(history.after_text.as_deref(), Some("current text"));
+        let jobs = dohc_engine_files::run_pending_jobs(
+            &store,
+            scratch.path(),
+            &dohc_engine_files::MaterializeOptions {
+                holds: None,
+                policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                replacer: &dohc_engine_files::StdReplacer,
+                backoff: &dohc_engine_files::NoBackoff,
+                now_ms: 31,
+                faults: &NoFaults,
+            },
+        )
+        .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(
+            jobs[0].outcome,
+            dohc_engine_files::JobOutcome::AlreadyMaterialized
+        ));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        VersionedTextStore::new(&mut store)
+            .rollback_text_file_mutation(
+                &dohc_engine_domain::RollbackTextFileMutation {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "doc.md".to_owned(),
+                    mutation_moment_id: "local-kept".to_owned(),
+                    request_id: None,
+                    metadata_origin: "restore".to_owned(),
+                    author_json: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        assert_eq!(text_keep_open_rows(&store), 0);
+    }
+
+    #[test]
+    fn text_keep_absent_and_binary_kept_sides_still_have_no_effect() {
+        for binary in [false, true] {
+            let (_scratch, mut store, _) = text_keep_receiver_fixture();
+            store
+                .write_with(&NoFaults, |tx| {
+                    let mut conflict =
+                        dohc_engine_domain::load_text_conflict_in_tx(tx, "ws", "conflict-1")
+                            .map_err(map_local_domain_error)?
+                            .unwrap();
+                    tx.execute("DELETE FROM conflicts", []).unwrap();
+                    tx.execute("DELETE FROM snapshots", []).unwrap();
+                    tx.execute("DELETE FROM path_aliases", []).unwrap();
+                    conflict.current = if binary {
+                        let bytes = b"\0kept binary\xff";
+                        let sha = dohc_engine_storage::hex_sha256(bytes);
+                        put_binary_blob(tx, bytes).map_err(SyncError::Storage)?;
+                        write_binary_file_in_tx(
+                            tx,
+                            &WriteBinaryFile {
+                                workspace_id: "ws".to_owned(),
+                                version_id: "main".to_owned(),
+                                object_id: "binary-object".to_owned(),
+                                path: "doc.md".to_owned(),
+                                binary_sha256: sha.clone(),
+                                moment_id: "binary-head".to_owned(),
+                                metadata_origin: "sync".to_owned(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                materialize: None,
+                                now_ms: 19,
+                            },
+                        )
+                        .map_err(map_local_domain_error)?;
+                        ConflictFileState::binary_head(
+                            "doc.md",
+                            &sha,
+                            bytes.len() as i64,
+                            "binary-object",
+                            "binary-head",
+                            19,
+                        )
+                    } else {
+                        ConflictFileState::text("doc.md", None)
+                    };
+                    insert_text_conflict_if_absent(tx, &conflict)
+                        .map_err(map_local_domain_error)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            let input = text_keep_input(ResolveConflictKind::KeepCurrent, "unused-kept");
+            let built = RefCell::new(None);
+            let result = VersionedTextStore::new(&mut store)
+                .resolve_text_conflict_with(
+                    &input,
+                    &NoFaults,
+                    |tx, conflict, _| {
+                        prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                            .map_err(sync_as_domain)
+                    },
+                    |tx, result, prepared| {
+                        *built.borrow_mut() = Some(prepared.built.clone());
+                        commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                            .map_err(sync_as_domain)
+                    },
+                )
+                .unwrap();
+            assert!(
+                result.write.is_none() && result.binary_write.is_none() && result.delete.is_none()
+            );
+            assert!(
+                built
+                    .into_inner()
+                    .unwrap()
+                    .validated
+                    .payload
+                    .effects
+                    .is_empty()
+            );
+        }
+    }
+
+    fn text_keep_input(resolution: ResolveConflictKind, moment_id: &str) -> ResolveTextConflict {
+        ResolveTextConflict {
+            workspace_id: "ws".to_owned(),
+            conflict_id: "conflict-1".to_owned(),
+            resolution,
+            object_id: "object-a".to_owned(),
+            write_moment_id: moment_id.to_owned(),
+            delete_moment_id: format!("{moment_id}-delete"),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 30,
+            request_id: None,
+            conflict_answer_budget_bytes: usize::MAX,
+        }
+    }
+
+    #[test]
+    fn text_keep_version_merge_reaches_an_unchanged_peer() {
+        let (_scratch, mut sender, _) = text_keep_receiver_fixture();
+        let (_receiver_scratch, mut receiver, _) = text_keep_receiver_fixture();
+        for store in [&mut sender, &mut receiver] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("DELETE FROM conflicts", []).unwrap();
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            VersionedTextStore::new(store)
+                .create_named_version(
+                    &dohc_engine_domain::CreateNamedVersion {
+                        workspace_id: "ws".to_owned(),
+                        new_version_id: "feat".to_owned(),
+                        name: "Feature".to_owned(),
+                        from_version_id: "main".to_owned(),
+                        now_ms: 11,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-a".to_owned(),
+                        path: "doc.md".to_owned(),
+                        text: "main text".to_owned(),
+                        moment_id: "main-head".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 13,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        VersionedTextStore::new(&mut sender)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "feat".to_owned(),
+                    object_id: "feature-object".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "feature text".to_owned(),
+                    moment_id: "feature-head".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 12,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let merge = VersionedTextStore::new(&mut sender)
+            .merge_text_file_from_version_with(
+                &dohc_engine_domain::MergeTextFileFromVersion {
+                    workspace_id: "ws".to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "feat".to_owned(),
+                    path: "doc.md".to_owned(),
+                    object_id: "merge-object".to_owned(),
+                    moment_id: "merge-attempt".to_owned(),
+                    request_id: None,
+                    conflict_id: "conflict-1".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 19,
+                },
+                &NoFaults,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(
+            merge,
+            dohc_engine_domain::MergeTextFileResult::Conflict { .. }
+        ));
+        let input = text_keep_input(ResolveConflictKind::KeepCurrent, "merge-kept");
+        let built = RefCell::new(None);
+        VersionedTextStore::new(&mut sender)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                        .map_err(sync_as_domain)
+                },
+                |tx, result, prepared| {
+                    *built.borrow_mut() = Some(prepared.built.clone());
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .unwrap();
+        let built = built.into_inner().unwrap();
+        copy_resolution_roots(&sender, &mut receiver, &built);
+        import_text_keep(&mut receiver, &built);
+        assert_eq!(text_keep_head(&mut receiver).latest_moment_id, "merge-kept");
+        assert_eq!(text_keep_open_rows(&receiver), 0);
+    }
+
+    fn resolve_text_keep_locally(
+        store: &mut EngineStore,
+        choice: ResolveConflictKind,
+        moment: &str,
+    ) -> BuiltConflictResolveV1 {
+        let input = text_keep_input(choice, moment);
+        let built = RefCell::new(None);
+        VersionedTextStore::new(store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                        .map_err(sync_as_domain)
+                },
+                |tx, result, prepared| {
+                    *built.borrow_mut() = Some(prepared.built.clone());
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .unwrap();
+        built.into_inner().unwrap()
+    }
+
+    #[test]
+    fn text_keep_offline_decisions_preserve_different_results_and_converge_equal_results() {
+        for scenario in ["both-keep", "keep-incoming", "same-merged"] {
+            let (_left_scratch, mut left, fixture) = text_keep_receiver_fixture();
+            let (_right_scratch, mut right, _) = text_keep_receiver_fixture();
+            VersionedTextStore::new(&mut right)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-a".to_owned(),
+                        path: "doc.md".to_owned(),
+                        text: "resolved text".to_owned(),
+                        moment_id: "resolver-head".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 15,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            right
+                .write_with(&NoFaults, |tx| {
+                    let payload = &fixture.validated.payload;
+                    let mut row =
+                        dohc_engine_domain::load_text_conflict_in_tx(tx, "ws", "conflict-1")
+                            .map_err(map_local_domain_error)?
+                            .unwrap();
+                    row.current = conflict_state_from_head(tx, payload, &payload.current)?;
+                    row.incoming = conflict_state_from_head(tx, payload, &payload.incoming)?;
+                    tx.execute("DELETE FROM conflicts", []).unwrap();
+                    insert_text_conflict_if_absent(tx, &row).map_err(map_local_domain_error)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            let (left_choice, right_choice) = match scenario {
+                "both-keep" => (
+                    ResolveConflictKind::KeepCurrent,
+                    ResolveConflictKind::KeepCurrent,
+                ),
+                "keep-incoming" => (
+                    ResolveConflictKind::KeepCurrent,
+                    ResolveConflictKind::ApplyIncoming,
+                ),
+                _ => (
+                    ResolveConflictKind::ApplyMerged {
+                        text: "agreed".to_owned(),
+                    },
+                    ResolveConflictKind::ApplyMerged {
+                        text: "agreed".to_owned(),
+                    },
+                ),
+            };
+            let left_result = resolve_text_keep_locally(&mut left, left_choice, "left-result");
+            let right_result = resolve_text_keep_locally(&mut right, right_choice, "right-result");
+            copy_resolution_roots(&left, &mut right, &left_result);
+            copy_resolution_roots(&right, &mut left, &right_result);
+            import_text_keep(&mut left, &right_result);
+            import_text_keep(&mut right, &left_result);
+            if scenario == "both-keep" {
+                for (store, own, other) in [
+                    (&mut left, "current text", "resolved text"),
+                    (&mut right, "resolved text", "current text"),
+                ] {
+                    assert_eq!(text_keep_head(store).text, own);
+                    assert_eq!(text_keep_open_rows(store), 1);
+                    let sides: (String, String) = store.read_with(|conn| conn.query_row(
+                        "SELECT c.text,i.text FROM conflicts r JOIN blobs c ON c.sha256=r.current_blob_sha256 JOIN blobs i ON i.sha256=r.incoming_blob_sha256 WHERE r.status='open'", [],
+                        |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+                    assert_eq!(sides, (own.to_owned(), other.to_owned()));
+                }
+            } else {
+                let expected = if scenario == "keep-incoming" {
+                    "current text"
+                } else {
+                    "agreed"
+                };
+                for store in [&mut left, &mut right] {
+                    assert_eq!(text_keep_head(store).text, expected);
+                    assert_eq!(text_keep_open_rows(store), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_keep_converges_on_a_passive_workspace_replica() {
+        let (_scratch, mut replica, built) = text_keep_receiver_fixture_with_role(true);
+        crate::adopt_join_identity(
+            &mut replica,
+            "ws",
+            "relay-private",
+            "epoch-1",
+            "stream-1",
+            20,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(replica.is_passive());
+        import_text_keep(&mut replica, &built);
+        assert_eq!(
+            text_keep_head(&mut replica).latest_moment_id,
+            "moment-result"
+        );
+        assert_eq!(text_keep_open_rows(&replica), 0);
+        let (local_ops, jobs): (i64, i64) = replica
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_log WHERE imported=0",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM materialization_jobs", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+        assert_eq!((local_ops, jobs), (0, 0));
     }
 
     fn path_change_receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {

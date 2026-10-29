@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { EngineClient } from "../../workspace-engine-client/src/daemon/index.js";
+import { OwnerKnownRefusals } from "../../workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.js";
 import { OwnerCommittedDelivery } from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 import { createLiveMarkdownJournalValidator } from "./liveDocumentValidation.js";
 import { policy } from "./liveCommittedDeliveryTestSupport.js";
@@ -17,7 +18,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
       sendRequest: vi.fn(async (request: {method: string}) => {
         if (request.method === "liveApplication.register") return {result: {registrationId: 1}};
         if (request.method === "liveApplication.ownerState") return {result: {adoptionId: "owner-origin",expectedLocalSequence: 0,throughCursor: 0,sessionId: "1"}};
-        if (request.method === "liveApplication.ownerOutbox") return {result: {outboxId: null,pendingBytes: 0,state: null}};
+        if (request.method === "liveApplication.ownerOutbox") return {result: {outboxId: null,pendingBytes: 0,state: null,retryDeliveryId: null}};
         if (request.method !== "liveApplication.settle") throw new Error(request.method);
         settles++;
         return {result: {status: "settled",settlement: {settlementId: "settlement",previousCursor: 0,terminalCursor: 0,applicationCount: 0,localYDocSequence: 0,
@@ -27,7 +28,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
     };
     const delivery = new OwnerCommittedDelivery(f.storage,createLiveJournalHistoryAuthority({namespace: "owner-history",reconciled: true}),{
       client: client as unknown as EngineClient,workspace: "workspace-handle",host,deadlineMs: 30_000,nextRequestId: () => ++sequence,bounds: {maxBytes: 1_000_000,maxEvents: 10},
-      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,
+      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)},
     });
     expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(false);

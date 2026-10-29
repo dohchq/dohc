@@ -173,6 +173,19 @@ describe("RecordButtonsRow", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("tells the view which record the file is, or that it is none", async () => {
+    stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
+    const onRecord = vi.fn();
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenHistory={() => undefined} onRecord={onRecord} />);
+    await waitFor(() => expect(onRecord).toHaveBeenLastCalledWith({ workspaceId: "ws-1", path: "Invoices/12.md", id: "rec-12" }));
+    cleanup();
+
+    stub({ record: null });
+    const none = vi.fn();
+    render(<RecordButtonsRow workspaceId="ws-1" path="Notes/todo.md" onError={() => undefined} onNotice={() => undefined} onOpenHistory={() => undefined} onRecord={none} />);
+    await waitFor(() => expect(none).toHaveBeenLastCalledWith(null));
+  });
+
   it("offers History for a record without buttons, and asks the shell to open it", async () => {
     const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [] });
     const history = vi.fn();

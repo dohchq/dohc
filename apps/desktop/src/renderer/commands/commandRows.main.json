@@ -3,6 +3,7 @@
   "context": {
     "shareView": null,
     "activeDocumentKind": "markdown",
+    "activeDocumentShareable": true,
     "pinnedApps": [
       {
         "root": "apps/Trip planner",
@@ -14,6 +15,10 @@
     {
       "id": "new-file",
       "label": "New file"
+    },
+    {
+      "id": "new-file-at-path",
+      "label": "New file…"
     },
     {
       "id": "new-drawing",
@@ -66,6 +71,10 @@
     {
       "id": "toggle-markdown-source",
       "label": "Toggle markdown source view"
+    },
+    {
+      "id": "share-file",
+      "label": "Share…"
     },
     {
       "id": "toggle-about",
@@ -121,7 +130,7 @@
     },
     {
       "id": "install-update",
-      "label": "Update and restart"
+      "label": "Restart to update"
     },
     {
       "id": "toggle-theme",

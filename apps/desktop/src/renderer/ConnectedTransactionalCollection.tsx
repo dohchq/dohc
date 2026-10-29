@@ -17,7 +17,7 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -29,8 +29,7 @@ import { useCollectionHistoryUndo } from "./useCollectionHistoryUndo";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
-import { CollectionCustomizeDialog } from "./collections/CollectionCustomizeDialog";
-import { AUTOMATIONS_FILE } from "./collections/AutomationsPanel";
+import { CollectionCustomizeDialog, automationsFile } from "./collections/CollectionCustomizeDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -84,7 +83,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     onHistoryShown?.();
   }, [historyRequested, onHistoryShown]);
   const [viewingPending, setViewingPending] = useState(false);
-  const [editingFields, setEditingFields] = useState(false);
+  // True, or the type of the new field the dialog opens on.
+  const [editingFields, setEditingFields] = useState<boolean | "date">(false);
   const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -192,7 +192,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     return <EmptyState data-testid="collection-refusal" icon={held ? Laptop : TriangleAlert} tone={held ? "warning" : "danger"} title={refusal.words}>
       <div className="flex flex-wrap justify-center gap-2">
         {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections &&
-          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{USE_THIS_COMPUTER}</SecondaryButton>}
         {refusal.kind !== "unclaimed" && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
       </div>
     </EmptyState>;
@@ -250,6 +250,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
     onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
     onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+    onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
     onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
     onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
     onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
@@ -368,8 +369,9 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
-      files={[{ path: `${automations.collectionPath}/${AUTOMATIONS_FILE}`, holds: "automations" }]} onClose={() => setCustomizing(false)} />}
+      files={[automationsFile(automations.collectionPath, automations.fileMade)]} onOpenFile={onOpenFile} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      addType={editingFields === "date" ? "date" : undefined}
       buttonStates={buttonStates}
       onChooseButton={table ? chooseButton : undefined}
       onButtonAdded={table ? chooseButton : undefined}

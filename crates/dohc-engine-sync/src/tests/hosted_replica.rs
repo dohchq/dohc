@@ -521,7 +521,14 @@ fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
         let mut chats = LinkedChatStore::new(&mut store);
         for refused in [
             chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
-            chats.ensure_agent_channel("ws", "agent-local", 2_000, &NoFaults),
+            chats.ensure_agent_channel(
+                "ws",
+                "agent-local",
+                "default",
+                "My agent",
+                2_000,
+                &NoFaults,
+            ),
         ] {
             assert!(matches!(
                 refused,
@@ -2061,9 +2068,75 @@ fn withheld_conflict(
 fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     let (_scratch, _path, mut store) = hosted_store();
     let (parent, child, result_sha) = withheld_conflict(&mut store);
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+#[test]
+fn a_text_keep_without_lineage_holds_like_an_incoming_resolution() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (parent, _, result_sha) = withheld_conflict(&mut store);
+    let context = crate::conflict_resolve_v1::ConflictResolveEnvelopeContext {
+        workspace_id: "ws",
+        recorded_at_ms: 21,
+    };
+    let mut payload =
+        crate::conflict_resolve_v1::validate_conflict_resolve_v1(&parent.payload, context)
+            .unwrap()
+            .payload;
+    payload.chosen_from = crate::conflict_resolve_v1::ResolveChoiceV1::Current;
+    payload.resolution = crate::conflict_resolve_v1::ResolutionV1::KeptCurrent;
+    payload.current = payload.result.clone();
+    if let crate::conflict_resolve_v1::HeadV1::Present(head) = &mut payload.current {
+        head.latest_moment_id = "owner-before".to_owned();
+        head.updated_at_ms = 20;
+    }
+    payload.incoming = crate::conflict_resolve_v1::HeadV1::Absent { path_ref: 0 };
+    payload.effect_context.current_object_created_at_ms = Some(20);
+    assert!(payload.lineage_transition.is_none());
+    let built = crate::conflict_resolve_v1::build_conflict_resolve_v1(payload).unwrap();
+    let mut parent = envelope("owner", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "owner",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 21;
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "hosted-object".to_owned(),
+                path: "hosted.md".to_owned(),
+                text: "resolved by the owner".to_owned(),
+                moment_id: "owner-before".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+fn assert_conflict_child_hold_parity(
+    store: &mut EngineStore,
+    parent: ReplicationEnvelope,
+    child: ReplicationEnvelope,
+    result_sha: String,
+) {
     assert!(matches!(
         apply_replication_envelope(
-            &mut store,
+            store,
             &mut WriterDocCache::new(),
             &child,
             &NoFaults,
@@ -2079,7 +2152,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     feed.share("hosted-object", "hosted.md");
     feed.share("other-object", "other.md");
     let client = RelaySyncClient::new(feed);
-    sync(&client, &mut store);
+    sync(&client, store);
 
     // The child waits for its parent; a later edit of its document waits
     // behind it, though an edit of another document from the same origin does not.
@@ -2119,33 +2192,33 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
         }),
     ));
     feed.create("peer", 1, "other-object", "other.md", "independent");
-    let held = pass(&client, &mut store, &NoFaults).unwrap();
+    let held = pass(&client, store, &NoFaults).unwrap();
     assert_eq!(held.applied, 1);
-    assert!(commit(&client, &mut store, &held));
-    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert!(commit(&client, store, &held));
+    assert_eq!(hold(store, "hosted-object"), Some(parent_withheld()));
     assert_eq!(
-        retained(&store),
+        retained(store),
         0,
         "both edits of the held document wait in its feed"
     );
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [("owner".to_owned(), 2), ("peer".to_owned(), 1)]
     );
 
     // The parent arrives (5b projects it); the held document resumes in order.
     apply_replication_envelope(
-        &mut store,
+        store,
         &mut WriterDocCache::new(),
         &parent,
         &NoFaults,
         &NoLiveLeases,
     )
     .unwrap();
-    sync(&client, &mut store);
-    assert_eq!(retained(&store), 0);
+    sync(&client, store);
+    assert_eq!(retained(store), 0);
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [
             ("owner".to_owned(), 0),
             ("owner".to_owned(), 1),
@@ -2156,11 +2229,19 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     );
     assert_eq!(
         count(
-            &store,
+            store,
             "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='owner-moment'"
         ),
         1,
         "the resolution applies once, through its parent"
+    );
+    assert_eq!(
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .read_text("ws", "main", "hosted.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        later_text
     );
 }
 

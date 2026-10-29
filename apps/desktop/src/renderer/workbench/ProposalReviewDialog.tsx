@@ -136,7 +136,7 @@ function ProposalFileSection(props: {
         onClick={toggle}
         className="flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
           {file.path}
         </span>
         {size ? (
@@ -256,7 +256,7 @@ export function ProposalReviewDialog(props: {
         className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
       >
         <header className="border-b border-line px-4 py-3">
-          <h3 id="proposal-review-title" className="m-0 text-sm font-semibold text-ink">
+          <h3 id="proposal-review-title" className="m-0 text-base font-semibold text-ink">
             Changes from {sender}
           </h3>
         </header>

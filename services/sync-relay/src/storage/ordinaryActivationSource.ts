@@ -4,7 +4,6 @@ import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/da
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
-import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownHistoryValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
 import {SETTLEMENT_BINDINGS,SETTLEMENT_CUTS} from "./hostedSettlementSchema";
@@ -12,9 +11,19 @@ import {isNativeSettlementRecord,settlementRecordDigest} from "./hostedSettlemen
 import {NATIVE_MOMENT_FIELDS} from "./serviceActivationPublication";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import {stableJsonStringify} from "../canonicalJson";
+import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
+import type {OrdinaryActivationBaseline,OrdinaryActivationHistory,OrdinaryActivationProof,Projection} from "./ordinaryActivationValidation";
 
 export class ServiceActivationStaleCut extends Error {
   constructor(){super("Ordinary replication advanced before service activation.");}
+}
+/** Live validation had no slot free for the capture. A later pass captures it again. */
+export class ServiceActivationBusy extends Error {
+  constructor(){super("Live validation is busy.");}
+}
+/** Validating the capture ran its validation process out of memory, as the same capture would again. */
+export class ServiceActivationTooLarge extends Error {
+  constructor(){super("Native activation is too large to validate.");}
 }
 export interface OrdinaryActivationBounds {maxCaptureBytes:number;maxEntriesPerDrain:number;maxBytesPerDrain:number}
 export interface VerifiedOrdinaryActivationCut {readonly verified:true}
@@ -28,23 +37,21 @@ function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
   if(current?.replication_epoch!==source.replicationEpoch||current.stream_identity!==source.streamIdentity||high?.cursor!==source.committedCursor||
     source.baseRelaySeq>source.committedCursor||source.baseRelaySeq<=storage.getEpochLogFloor(source.workspaceId))throw new ServiceActivationStaleCut();
 }
-export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;
-  baselineBytes:Uint8Array;fullState:Uint8Array;baseline:LiveMarkdownRegistrationEvidence;
-  validateHistory:ReturnType<typeof createLiveMarkdownHistoryValidator>;validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;
-  bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
-  const {source,document,baselineBytes,fullState,baseline,validateHistory,validateRegistration,bounds}=input;
+/** The history prefix a write at this relay position follows. */
+const prefixAt=(rows:OrdinaryActivationHistory["rows"],relaySeq:number)=>rows.filter(row=>row.relay_seq<relaySeq).length-1;
+type HistoryInput={source:NativeOwnerActivationSource;document:LiveDocumentKey;baselineBytes:Uint8Array;fullState:Uint8Array;bounds:OrdinaryActivationBounds};
+/** Reads and checks the history a capture must rebuild and its source's proof, charging both to the drain budget. Validation runs on what it returns. */
+export function readOrdinaryActivationHistory(storage:StorageContext,input:HistoryInput):OrdinaryActivationHistory{
+  const {source,document,baselineBytes,fullState,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
-  // Native acknowledges another lineage's base and deltas without applying them, so they are neither read nor charged.
-  // The captured full state must still equal the rebuilt history.
-  const claim="json_extract(payload_json,'$.lineageClaimId')";
+  // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
       AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
-      AND NOT (op_kind='ydoc.update' AND json_type(payload_json,'$.lineageClaimId') IS 'text' AND ${claim}<>?
-        AND length(${claim})=64 AND length(CAST(${claim} AS BLOB))=64 AND ${claim} NOT GLOB '*[^0-9a-f]*')
+      AND NOT (${OTHER_LINEAGE_UPDATE})
     ORDER BY relay_seq LIMIT ?`;
   const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
@@ -89,53 +96,49 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     return new Uint8Array(bytes);
   });
   requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
-  charge(fullState.length);
-  const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
-  requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
-  const projects=(evidence:{projectedMarkdownSha256:string;projectedMarkdownByteLength:number})=>
-    evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
-  const moment=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
+  const history=rows.map(({relay_seq,origin_id,origin_seq,ordinary})=>({relay_seq,origin_id,origin_seq,ordinary}));
+  const found=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
+  const moment=found?{...found}:null;
   const echoes=moment?.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
-  // The first history prefix that must project the source, or null when the latest file moment is the source.
-  let from:number|null=null,artifact:number|null=null;
+  let from:number|null=null,artifact:number|null=null,settled:OrdinaryActivationHistory["settled"]=null;
   if(!(moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes)){
     // A receiver-generated source names an ordinarily admitted Y.Doc row; a departed row counts as history, never as a source.
     // Otherwise the source is a settlement moment the relay proved, after the history before it.
     const index=rows.findIndex(row=>source.sourceMomentId===`moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`);
     if(index>=0)requireValue(rows[index]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
-    const anchor=index>=0?rows[index]!.relay_seq:provedSettlementSource(storage,{source,document,validateRegistration,charge,projects});
-    from=index>=0?index:rows.filter(row=>row.relay_seq<anchor).length-1;
+    let anchor:number;
+    if(index>=0)anchor=rows[index]!.relay_seq;
+    else{const proved=provedSettlementSource(storage,{source,document,charge});anchor=proved.relaySeq;settled={state:proved.state,stateSha256:proved.stateSha256};}
+    from=index>=0?index:history.filter(row=>row.relay_seq<anchor).length-1;
     if(moment&&Number(moment.relay_seq)>anchor&&!echoes)artifact=Number(moment.relay_seq);
   }
-  // The history prefix a write at this relay position follows.
-  const prefixAt=(relaySeq:number)=>rows.filter(row=>row.relay_seq<relaySeq).length-1;
-  // One pass validates the history and, from the source's prefix on, checks that every prefix keeps its projection,
-  // so a change and its reversal can't stand behind an earlier source. The baseline alone was validated as a registration.
-  // Behind a later artifact, it also keeps the projection each of this document's writes followed, to tell folded echoes.
-  charge(baselineBytes.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
-  const start=from===null?updates.length:Math.max(from,1);
-  const wanted=new Set(artifact===null?[]:metadata.filter(row=>row.op_kind==="moment.append"&&Number(row.relay_seq)<artifact)
-    .map(row=>prefixAt(Number(row.relay_seq))).filter(index=>index>=1&&index<updates.length-1));
-  const lower=Math.min(start,...wanted),projections=new Map<number,Projection>();
-  let projected=from!==0||projects(baseline),next=lower;
-  const result=validateHistory({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:updates.slice(1,Math.max(updates.length-1,1)),
-    candidate:updates.length===1?new Uint8Array([0,0]):updates[updates.length-1]!},
-  {from:lower,visit:(evidence,index)=>{
-    projected&&=index===next++&&(index<start||projects(evidence));
-    if(wanted.has(index))projections.set(index,{projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
-  }});
-  requireValue(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
-  requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
-  const captured=full.evidence,ordinary=result.evidence;
-  requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
-    Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
-    ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
-    "Native activation differs from the complete ordinary CRDT history.");
-  requireValue(projected&&next===Math.max(updates.length-1,lower),"Native activation source moment does not project the captured source.");
-  if(artifact!==null){
-    const projectionAt=(relaySeq:number)=>{const index=prefixAt(relaySeq);return index===0?baseline:index===updates.length-1?ordinary:projections.get(index);};
-    requireValue(sameLineageArtifact(storage,{source,document,charge,projectionAt,proved:new Map()},artifact),
+  // Behind a later artifact, validation keeps the projection each of this document's writes followed, to tell folded echoes.
+  const wanted=artifact===null?[]:[...new Set(metadata.filter(row=>row.op_kind==="moment.append"&&Number(row.relay_seq)<artifact)
+    .map(row=>prefixAt(history,Number(row.relay_seq))).filter(index=>index>=1&&index<updates.length-1))].sort((a,b)=>a-b);
+  return {rows:history,updates,moment,from,artifact,wanted,settled,charged};
+}
+/**
+ * Accepts a capture whose validation passed on `history`, in the transaction that registers it. A write
+ * since that read refuses it as stale, so the transaction never registers evidence for another history.
+ * A later divergent file moment is proved a stale artifact here, against the projections validation kept.
+ */
+export function verifyOrdinaryActivationCut(storage:StorageContext,input:HistoryInput&{baseline:OrdinaryActivationBaseline;history:OrdinaryActivationHistory;proof?:OrdinaryActivationProof}):VerifiedOrdinaryActivationCut{
+  const {source,document,baseline,history,proof,bounds}=input;
+  // Validation accepted the history it read, so refusing the history read again means it changed since.
+  let current:OrdinaryActivationHistory;
+  try{current=readOrdinaryActivationHistory(storage,input);}
+  catch(error){if(error instanceof Error&&error.constructor===Error&&!("code" in error))throw new ServiceActivationStaleCut();throw error;}
+  if(!isDeepStrictEqual(current,history))throw new ServiceActivationStaleCut();
+  if(history.artifact!==null){
+    requireValue(proof,"Ordinary activation found a later ordinary file moment with a divergent projection.");
+    let charged=proof.charged;
+    const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
+    const kept=new Map(proof.projections.map(({index,...projection})=>[index,projection]));
+    const last=history.updates.length-1,sourceProjection={projectedMarkdownSha256:source.sourceDigest,projectedMarkdownByteLength:source.sourceByteLength};
+    // Validation proved the complete history projects the source.
+    const projectionAt=(relaySeq:number)=>{const index=prefixAt(history.rows,relaySeq);return index===0?baseline:index===last?sourceProjection:kept.get(index);};
+    requireValue(sameLineageArtifact(storage,{source,document,charge,projectionAt,proved:new Map()},history.artifact),
       "Ordinary activation found a later ordinary file moment with a divergent projection.");
   }
   const evidence={version:1 as const,document:structuredClone(document),currentPath:source.currentPath,
@@ -147,11 +150,11 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
  * A source naming a settlement moment, such as the retiring host's departed
  * one: the binding the relay committed when it verified that publication, and
  * its exact log row, prove the record, the interval's terminal cut and the
- * state the moment wrote. Returns the moment's relay sequence.
+ * state the moment wrote. Returns the moment's relay sequence and the settled
+ * state's bytes, which validation checks project the source.
  */
-function provedSettlementSource(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;
-  validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;charge:(bytes:number)=>void;
-  projects:(evidence:{projectedMarkdownSha256:string;projectedMarkdownByteLength:number})=>boolean}):number{
+function provedSettlementSource(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;charge:(bytes:number)=>void}):
+  {relaySeq:number;state:Uint8Array;stateSha256:string}{
   const {source,document}=input;
   const settled=storage.db.prepare(`SELECT b.*,l.relay_seq,l.op_kind,l.payload_json,l.settlement_admission_json FROM ${SETTLEMENT_BINDINGS} b
     JOIN sync_relay_log l ON l.workspace_id=b.workspace_id AND l.origin_id=b.origin_id AND l.origin_seq=b.origin_seq
@@ -192,11 +195,8 @@ function provedSettlementSource(storage:StorageContext,input:{source:NativeOwner
   input.charge(Number(header!.byte_length));
   const bytes=storage.getBlob(document.workspaceId,state);
   proved(bytes&&bytes.length===header!.byte_length&&hash(bytes)===state);
-  const settledState=input.validateRegistration({document,currentPath:source.currentPath,checkpoint:new Uint8Array(bytes!)});
-  proved(settledState.kind==="accepted"&&settledState.evidence.stateUpdateSha256===settled.state_sha256&&input.projects(settledState.evidence));
-  return Number(settled.relay_seq);
+  return {relaySeq:Number(settled.relay_seq),state:new Uint8Array(bytes!),stateSha256:String(settled.state_sha256)};
 }
-type Projection={projectedMarkdownSha256:string;projectedMarkdownByteLength:number};
 interface ArtifactProof {
   source:NativeOwnerActivationSource;document:LiveDocumentKey;charge:(bytes:number)=>void;
   /** The captured lineage's projection after the history before this relay position. */

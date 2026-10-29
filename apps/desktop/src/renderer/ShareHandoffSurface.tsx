@@ -44,7 +44,7 @@ function HandoffCard(props: {
             <ArrowLeft size={13} aria-hidden />
           </IconButton>
         ) : null}
-        <h2 className="m-0 text-sm font-semibold text-ink">{props.title}</h2>
+        <h2 className="m-0 text-base font-semibold text-ink">{props.title}</h2>
       </div>
       {props.children}
     </div>

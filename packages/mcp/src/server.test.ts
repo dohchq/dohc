@@ -14,6 +14,10 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  // Refused live edits are kept only in the original workspace.
+  "dohc_save_recovery_copy",
+  "dohc_retry_kept_edits",
+  "dohc_stop_again",
   "dohc_delete_retained_copies",
   "dohc_publish_app",
   "dohc_write_file",
@@ -81,6 +85,16 @@ async function connectedToolNames(
   return { names: listed.tools.map((tool) => tool.name), client };
 }
 
+it("returns a pending document edit as a successful tool result", async () => {
+  const root = await workspaceRoot();
+  const outcome = { ok: true, path: "n.md", changed: true,
+    warning: "Saved locally. The shared file update is pending. Do not repeat this edit." };
+  const { client } = await connectedToolNames({ root, home: root, request: async () => outcome });
+  const reply = await client.callTool({ name: "dohc_edit_document", arguments: { path: "n.md", replacement: "After." } });
+  expect(reply.isError).not.toBe(true);
+  expect(JSON.stringify(reply)).toContain(outcome.warning);
+});
+
 describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 
@@ -93,6 +107,27 @@ describe("share-level tool profiles", () => {
     const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
     expect(result.isError).not.toBe(true);
     expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
+  });
+
+  it("saves, tries again and stops again an owner's kept edits by path, refusing a path outside the workspace", async () => {
+    const root = await workspaceRoot();
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ root, home: base.home, request: async request => {
+      requests.push(request);
+      return request.verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+        : "incident" in request.args ? { ok: true, path: "plan.md" }
+        : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "this-computer", keptEdits: "kept" };
+    } });
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_retry_kept_edits", arguments: { path: "plan.md", incident: "outbox:delivery:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "plan.md", incident: "release:a:0" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "../other/plan.md" } })).isError).toBe(true);
+    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "../other/plan.md", incident: "release:a:0" } })).isError).toBe(true);
+    expect(requests).toEqual([
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "saveRecoveryCopy", args: { cwd: root, actor: "agent", path: "plan.md" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "retryKeptEdits", args: { cwd: root, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" } },
+      { protocolVersion: expect.any(Number), door: "mcp", verb: "stopAgain", args: { cwd: root, actor: "agent", path: "plan.md", incident: "release:a:0" } },
+    ]);
   });
 
   it("parses the --share-access flag", () => {
@@ -113,6 +148,23 @@ describe("share-level tool profiles", () => {
     expect(() => parseArgs(["--share-access"])).toThrow(
       "--share-access must be one of view, comment, edit. Received: no value.",
     );
+  });
+
+  it("offers only the tools named with --tool", async () => {
+    const ctx = parseArgs(["--workspace", "/w", "--home", "/h", "--tool", "dohc_reply_to_chat"]);
+    expect(ctx.tools).toEqual(new Set(["dohc_reply_to_chat"]));
+    expect((await connectedToolNames(ctx)).names).toEqual(["dohc_reply_to_chat"]);
+    // The share level still decides: a view profile can't reply.
+    const view = parseArgs(["--share-access", "view", "--tool", "dohc_reply_to_chat", "--tool", "dohc_read_file"]);
+    expect((await connectedToolNames(view)).names).toEqual(["dohc_read_file"]);
+  });
+
+  it("refuses a --tool that names no dohc tool", () => {
+    expect(() => parseArgs(["--tool", "dohc_reply"])).toThrow(
+      '--tool must name a dohc tool, such as dohc_reply_to_chat. Received: "dohc_reply".',
+    );
+    expect(() => parseArgs(["--tool", "toString"])).toThrow(/Received: "toString"/u);
+    expect(() => parseArgs(["--tool"])).toThrow(/Received: no value/u);
   });
 
   it("registers NO write tools for a view profile and keeps read tools", async () => {

@@ -37,6 +37,7 @@ interface SqliteStatement {
 }
 
 interface SqliteDb {
+  readonly isTransaction: boolean;
   prepare(sql: string): SqliteStatement;
   exec(sql: string): void;
   close(): void;
@@ -415,7 +416,11 @@ async function reserveOperationVersion(input: {
 
 async function withOperationLog<T>(
   input: { logPath: string; storageIdentity: FsEntryIdentity },
-  run: (append: (operation: DatabaseOperationInput & { version: number }) => Promise<void>, handle: FileHandle) => Promise<T>,
+  run: (
+    append: (operation: DatabaseOperationInput & { version: number }) => Promise<void>,
+    handle: FileHandle,
+    restore: (transactionOpen: boolean) => Promise<void>,
+  ) => Promise<T>,
 ): Promise<T> {
   const { logPath, storageIdentity } = input;
   const folderGuard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}` };
@@ -441,19 +446,20 @@ async function withOperationLog<T>(
   });
   if (before) checkFile(before);
   const handle = await open(logPath, before ? "a+" : "ax+", 0o600);
-  let closed = false;
-  const closeLog = async () => {
-    if (closed) return;
-    closed = true;
-    await handle.close();
-  };
+  let restoreHandle: FileHandle | undefined;
+  let synced = false;
   try {
+    // Windows cannot truncate an append-mode handle. Open both before SQLite locks.
+    const writable = restoreHandle = await open(logPath, "r+");
     const checkLog = async () => {
       const opened = await handle.stat({ bigint: true });
+      const writableStats = await writable.stat({ bigint: true });
       const named = await lstat(logPath, { bigint: true });
       checkFile(opened);
+      checkFile(writableStats);
       checkFile(named);
-      if (sameFsEntry(opened, named) !== "same" ||
+      if (sameFsEntry(opened, writableStats) !== "same" ||
+          sameFsEntry(opened, named) !== "same" ||
           (before && sameFsEntry(before, opened) !== "same")) {
         throw new Error(fileChangedWhileOpeningRefusal(guard));
       }
@@ -461,10 +467,37 @@ async function withOperationLog<T>(
     await checkLog();
     // Opening the log can yield. Recheck that it opened in the folder dohc checked.
     await checkFolder();
+    let pendingAppend: { size: number; line: Buffer } | undefined;
+    const restore = async (transactionOpen: boolean) => {
+      readLogs.delete(logPath);
+      if (!pendingAppend) return;
+      if (!transactionOpen) {
+        throw new Error("Cannot restore the operations log after the SQLite transaction ended.");
+      }
+      await checkLog();
+      const { size, line } = pendingAppend;
+      const after = await writable.stat();
+      if (after.size < size || after.size > size + line.byteLength) {
+        throw new Error("Cannot restore the operations log because its tail changed.");
+      }
+      const tail = Buffer.alloc(after.size - size);
+      let offset = 0;
+      while (offset < tail.byteLength) {
+        const { bytesRead } = await writable.read(tail, offset, tail.byteLength - offset, size + offset);
+        if (bytesRead === 0) throw new Error("Cannot read the operations log tail for restoration.");
+        offset += bytesRead;
+      }
+      if (!tail.equals(line.subarray(0, tail.byteLength))) {
+        throw new Error("Cannot restore the operations log because its tail changed.");
+      }
+      await writable.truncate(size);
+      await writable.sync();
+    };
     return await run(async (operation) => {
       await checkLog();
       const line = `${JSON.stringify(operation)}\n`;
       const beforeAppend = logVersion(fstatSync(handle.fd, { bigint: true }));
+      pendingAppend = { size: Number(beforeAppend[2]), line: Buffer.from(line, "utf8") };
       await handle.appendFile(line, "utf8");
       await handle.sync();
       const after = fstatSync(handle.fd, { bigint: true });
@@ -481,14 +514,14 @@ async function withOperationLog<T>(
       } else {
         readLogs.delete(logPath);
       }
-      await closeLog().catch((error) => {
-        console.error("[desktop] database operation log close failed after sync:", error);
-      });
-    }, handle);
+      synced = true;
+    }, handle, restore);
   } finally {
-    await closeLog().catch(() => {
-      // Preserve the edit or append error through cleanup.
-    });
+    for (const opened of [restoreHandle, handle]) {
+      await opened?.close().catch((error) => {
+        if (synced) console.error("[desktop] database operation log close failed after sync:", error);
+      });
+    }
   }
 }
 
@@ -540,7 +573,7 @@ export async function editDatabaseAtPath(input: {
   pageOffset: number;
 }): Promise<DatabaseEditResult> {
   validateOperationInput(input.operation);
-  return withOperationLog(input, async (append, handle) => {
+  return withOperationLog(input, async (append, handle, restore) => {
     const version = await reserveOperationVersion(input, handle);
     const operation = createValidatedOperation(input.operation, version);
     const { DatabaseSync } = nodeSqlite();
@@ -571,8 +604,11 @@ export async function editDatabaseAtPath(input: {
       };
     } catch (error) {
       if (transactionOpen) {
+        await restore(db.isTransaction).catch((restoreError) => {
+          console.error("[desktop] database operation log restore failed:", restoreError);
+        });
         try {
-          db.exec("ROLLBACK");
+          if (db.isTransaction) db.exec("ROLLBACK");
         } catch {
           // Preserve the original edit or durable-log failure.
         }

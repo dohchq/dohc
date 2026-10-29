@@ -37,7 +37,10 @@ export function selfHostLiveProfile() {
       // A hosted document with no live connection for idleUnloadMs settles and
       // leaves memory until it is opened again.
       activation: {validation, maxCaptureBytes: 4 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
-        maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000}},
+        maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000},
+      // Copying and migrating an earlier store for its owner's recovery copy
+      // may take this long, the longest the engine answers a request.
+      recovery: {preparationDeadlineMs: 300_000}},
   };
 }
 

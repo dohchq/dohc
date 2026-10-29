@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
@@ -30,9 +30,12 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * `live` serves the stack over HTTPS from a fixture CA and runs the self-host
  * live service with the native engine. `trustEnv` is the environment a desktop
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
- * for an HTTPS loopback relay.
+ * for an HTTPS loopback relay. `refuse` answers matching requests with 503
+ * before they reach a service.
  */
-export async function startSelfHostOnboardingStack(directory: string, options: { live?: boolean; signal: AbortSignal }) {
+export async function startSelfHostOnboardingStack(directory: string, options: {
+  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean;
+}) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
   const ca = options.live ? await mintLocalhostCa(directory) : undefined;
@@ -43,18 +46,23 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     ? { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
       DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" }
     : {};
-  const proxy = await startServerProxy(ca);
+  const proxy = await startServerProxy(ca, options.refuse ? { refuse: options.refuse } : {});
+  let account: Awaited<ReturnType<typeof startAccountServer>> | undefined;
   let relay: Awaited<ReturnType<typeof startAuthenticatedRelay>> | undefined;
   try {
+    // The account server applies the migrations whose tables the relay reads as it starts.
+    account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
+    proxy.routeAuthTo(account.listenOrigin);
     relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
     proxy.routeRelayTo(relay.url);
-    const account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
-    proxy.routeAuthTo(account.listenOrigin);
     return {
       account,
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      pause: () => proxy.pause(),
+      resume: () => proxy.resume(),
+      outageState: () => proxy.outageState(),
       // The relay's recent console output, such as a failed service host pass,
       // for a failure report. Bearer values are removed.
       relayOutput: () => relay!.output().replace(/(bearer\s+)\S+/giu, "$1[redacted]"),
@@ -71,13 +79,13 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
         hostedAgentEvidence(directory, workspaceId, path, agentId),
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
       async close() {
-        const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
+        const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Self-host services did not close.");
       },
     };
   } catch (error) {
-    await Promise.allSettled([proxy.close(), relay?.close()]);
+    await Promise.allSettled([proxy.close(), relay?.close(), account?.close()]);
     throw error;
   }
 }
@@ -119,16 +127,22 @@ interface PendingHostedLogResponse extends HostedLogResponseBarrier {
 
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
+  refuse?(method: string, path: string): boolean;
 } = {}) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
   let nextHostedLog: PendingHostedLogResponse | undefined;
   let holdingHostedLog: PendingHostedLogResponse | undefined;
+  let paused = false;
+  let refusedRequests = 0;
+  let refusedUpgrades = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
   const forward: RequestListener = (incoming, outgoing) => {
+    if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
+    if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
     const hostedWorkspace = incoming.method === "GET"
       ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
     const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
@@ -184,17 +198,21 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   };
   const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, forward) : createHttpServer(forward);
   server.on("upgrade", (incoming, socket, head) => {
+    if (paused) { refusedUpgrades++; socket.destroy(); return; }
     const target = route(incoming.url ?? "/");
     if (!target) { socket.destroy(); return; }
     upgraded.add(socket);
     socket.once("close", () => upgraded.delete(socket));
     const upstream = requestHttp(new URL(incoming.url ?? "/", target), { method: incoming.method, headers: incoming.headers });
+    upstreams.add(upstream);
+    upstream.once("close", () => upstreams.delete(upstream));
     const answer = (response: IncomingMessage) => {
       const lines = [`HTTP/1.1 ${response.statusCode} ${response.statusMessage}`];
       for (let index = 0; index < response.rawHeaders.length; index += 2) lines.push(`${response.rawHeaders[index]}: ${response.rawHeaders[index + 1]}`);
       return `${lines.join("\r\n")}\r\n\r\n`;
     };
     upstream.once("upgrade", (response, relaySocket, relayHead) => {
+      if (paused) { relaySocket.destroy(); socket.destroy(); return; }
       upgraded.add(relaySocket);
       relaySocket.once("close", () => { upgraded.delete(relaySocket); socket.destroy(); });
       socket.once("close", () => relaySocket.destroy());
@@ -215,6 +233,16 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   assert.ok(address && typeof address !== "string");
   return {
     origin: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
+    pause() {
+      paused = true;
+      nextHostedLog?.destroy();
+      holdingHostedLog?.destroy();
+      for (const request of upstreams) request.destroy();
+      for (const socket of upgraded) socket.destroy();
+      server.closeAllConnections();
+    },
+    resume() { paused = false; },
+    outageState() { return { paused, refusedRequests, refusedUpgrades, upstreams: upstreams.size, upgraded: upgraded.size }; },
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
     /** Buffers the next real hosted-log response for this workspace until released. */
@@ -396,8 +424,10 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
      WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
   ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
   const hostRoot = join(directory, "relay-deployment", "live-host");
+  // The relay makes a store's folder before the service host creates its engine database.
   const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-    .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+    .flatMap((file) => read(file, (db) => relay.map((change) => ({
       deliveryId: change.deliveryId,
       accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
           json_extract(metadata_json,'$.accepted') AS accepted, json_extract(metadata_json,'$.authorSnapshot') AS authorSnapshot FROM live_accepted_updates
@@ -419,7 +449,8 @@ function settlementEvidence(directory: string) {
   const hostRoot = join(directory, "relay-deployment", "live-host");
   return {
     host: readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-      .map((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => ({
+      .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+      .map((file) => read(file, (db) => ({
         settled: cursors(db, "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor"),
         heldForExport: Number(db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0),
         journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log

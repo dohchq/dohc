@@ -85,6 +85,8 @@ export class ServiceHostedReplication {
   }, config: ServiceHostedReplicationConfig) {
     this.#config = parseServiceHostedReplicationConfig(config);
   }
+  /** The workspace identity whose store this replica uses. */
+  get identity(): ServiceHostedReplicationConfig["identity"] { return this.#config.identity; }
   /** Whether the replica's origin diverged from the relay's. Its workspace stays detached, and its store is kept. */
   get diverged(): boolean { return this.#diverged; }
   /** Whether the replica checked its origin: a create on this instance succeeded. */

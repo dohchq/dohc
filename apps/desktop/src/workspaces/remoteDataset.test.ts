@@ -267,7 +267,7 @@ describe("a workspace's Collections on this computer's server, where another com
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
     const failed = await data.list({}).then(() => null, (error: unknown) => error);
     expect(failed).toBeInstanceOf(ServerCollectionsUnavailableError);
-    expect(readServerCollectionsUnavailable(failed)).toEqual({ elsewhere: f.elsewhere.message, failure: "dohc could not reach the server." });
+    expect(readServerCollectionsUnavailable(failed)).toEqual({ elsewhere: f.elsewhere.message, computer: "Laptop", failure: "dohc could not reach the server." });
     f.relay.mockImplementationOnce(async () => { f.switchCredential(); return { kind: "success", body: { datasets: [description], nextCursor: null } }; });
     expect(readServerCollectionsUnavailable(await data.list({}).catch((error: unknown) => error))?.failure).toBe("Your server session changed. Try again.");
     // Only the list carries where the Collections are.

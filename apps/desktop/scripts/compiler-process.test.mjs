@@ -4,17 +4,24 @@ import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/prom
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runOwnedCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
-import { compileClosedAppInProcess } from '../src/workspaces/closedAppCompilerProcess.ts';
-import { stageAppCompiler } from './stage-app-compiler.mjs';
+import { runOwnedCompilerProcess as superviseCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
+import { compileClosedAppInProcess as compileClosedApp } from '../src/workspaces/closedAppCompilerProcess.ts';
+import { compileWindowsCompilerOwner, stageAppCompiler } from './stage-app-compiler.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 
-// The compile deadline counts from the owner's spawn. Beside other work, one
-// Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
-// inside each 30 s test.
+function reportCompilerFailure(running){
+  // assert.rejects' property comparison omits custom error fields. Observe
+  // rejection immediately, including while a fixture waits for readiness.
+  void running.catch(error=>{if(error.details)process.stderr.write(`${error.name}: ${error.message} ${error.details}\n`);});
+  return running;
+}
+const runOwnedCompilerProcess=(...args)=>reportCompilerFailure(superviseCompilerProcess(...args));
+const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedApp(...args));
+
+// The compile deadline counts from the owner's spawn and is 20 s, inside each 30 s test.
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
@@ -23,16 +30,17 @@ const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
 const ownerOnly={skip:!confined,timeout:30000};
 // macOS and Linux run the worker under the staged official Node and owner, as
 // the installed app does. Seatbelt stops any Node that loads libraries from
-// outside its own file.
+// outside its own file. Windows runs this Node under the compiled job owner.
 let staged,stagedRoot;
 before(async()=>{
-  if(!confined)return;
+  if(!confined&&process.platform!=='win32')return;
   stagedRoot=await mkdtemp(join(tmpdir(),'dohc-compiler-process-staged-'));
   staged=join(stagedRoot,'app-compiler');
-  await stageAppCompiler({destination:staged});
+  if(confined)await stageAppCompiler({destination:staged});
+  else await compileWindowsCompilerOwner(join(stagedRoot,'compiler-owner.exe'));
 });
 after(()=>stagedRoot&&rm(stagedRoot,{recursive:true,force:true}));
-const runtimeFor=workerPath=>confined?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,workerPath};
+const runtimeFor=workerPath=>confined?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,ownerExecutable:join(stagedRoot,'compiler-owner.exe'),workerPath};
 const compilerWorker=()=>confined?join(staged,'worker.mjs'):fileURLToPath(new URL('../src/workspaces/closedAppCompilerWorker.ts',import.meta.url));
 // A worker writes its marker into its build directory, the only place the
 // owner's sandbox lets it write, so each test gives the supervisor its own temporary root.
@@ -112,9 +120,20 @@ for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned 
   const context=await fixture(t,`import {spawn}from'node:child_process';import{existsSync,writeFileSync}from'node:fs';${markerLine}${proceedLine}const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())}));${mode==='normal-exit'?'proceed(()=>process.exit(0))':'setInterval(()=>{},1000)'}});`);
   const {directory,runtime}=context;runtime.workerArgs=[join(directory,'ready.json')];let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
   const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal});
-  const outcome=mode==='normal-exit'?running:assert.rejects(running,{reason:mode==='cancel'?'cancelled':'timeout'});
-  const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
-  for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  const outcome=mode==='normal-exit'?running:assert.rejects(running,error=>{
+    assert.equal(error.reason,mode==='cancel'?'cancelled':'timeout');
+    if(mode==='timeout'){
+      assert.match(error.details,/Last stage: /);assert.match(error.details,/elapsed=\d+ms/);assert.match(error.details,/stderr tail: /);
+      if(process.platform==='win32')for(const stage of ['owner running','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
+    }
+    return true;
+  });
+  void outcome.catch(()=>{});
+  try{
+    const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
+    for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  }catch(error){await outcome;throw error;}
+  finally{controller.abort();await outcome.catch(()=>{});}
 });
 test('aggregate memory covers two sub-limit native allocations',owned,async t=>{
   const {runtime}=await fixture(t,`import{spawn}from'node:child_process';globalThis.held=Buffer.alloc(160*1024*1024,1);const child=spawn(process.execPath,['-e','try{globalThis.held=Buffer.alloc(160*1024*1024,1);setInterval(()=>{},1000)}catch{process.exit(42)}'],{windowsHide:true,stdio:'inherit'});child.once('exit',code=>process.exit(code??1));`);

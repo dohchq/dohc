@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
@@ -196,6 +196,31 @@ describe("History timeline changes", () => {
     expect(calls.open).toHaveBeenLastCalledWith("m-1", "notes/plan.md");
   });
 
+  // History loads a page at a time. While earlier changes remain, the oldest
+  // loaded row may continue on the next page, so it counts what has loaded as
+  // a lower bound, and only it does.
+  it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
+    const pass = (id: string) => file(id, { correlationId: "import", path: `notes/${id}.md` });
+    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2"), pass("p-1")], hasMore: true });
+    expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2");
+    const count = screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!;
+    expect(count.textContent).toBe("2+ or more files");
+    expect(count.querySelector("[aria-hidden]")?.textContent).toBe("+");
+    cleanup();
+
+    view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: true });
+    const run = screen.getByTestId("engine-moment-run-toggle");
+    expect(run.textContent).toBe("2+");
+    expect(run.getAttribute("aria-label")).toBe("2 or more changes");
+    expect(run.getAttribute("title")).toBe("2 or more changes");
+    expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!.textContent).toBe("2 files");
+    cleanup();
+
+    // Once nothing earlier remains, every count is the total.
+    view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: false });
+    expect(screen.getByTestId("engine-moment-run-toggle").getAttribute("aria-label")).toBe("2 changes");
+  });
+
   it("marks the open change, and only it, as selected", () => {
     view({ entries: [file("m-2"), file("m-1")], openMomentId: "m-1" });
     const [other, open] = screen.getAllByTestId("engine-moment-open");
@@ -282,6 +307,15 @@ describe("History timeline sources", () => {
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
     expect(screen.queryByText("No changes yet")).toBeNull();
     fireEvent.click(screen.getByTestId("history-sources-retry"));
+    expect(calls.retry).toHaveBeenCalledOnce();
+  });
+
+  it("says History is paused beside the Collections an empty paused page is missing", () => {
+    const calls = view({ unavailableSources: [{ datasetId: GUESTS }], paused: true });
+    const state = screen.getByTestId("history-collections-unavailable");
+    expect(within(state).getByTestId("history-paused").textContent).toBe("History paused");
+    expect(state.textContent).toContain("dohc could not load changes from Guests.");
+    fireEvent.click(within(state).getByTestId("history-sources-retry"));
     expect(calls.retry).toHaveBeenCalledOnce();
   });
 

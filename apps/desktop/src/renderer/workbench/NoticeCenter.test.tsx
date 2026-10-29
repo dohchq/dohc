@@ -3,17 +3,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  NoticeRow,
-  SyncStatusResult,
-  UpdateActionResult,
-  UpdateStateEvent,
-} from "../../ipc/bridgeContract";
+import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
 import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "../orphanedDrafts";
 
 it("offers Discard as a separate toast action without dismissing the Notice",()=>{
   const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
@@ -21,43 +17,15 @@ it("offers Discard as a separate toast action without dismissing the Notice",()=
   expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
 });
 
-// Captures the renderer-side update listener exactly as the preload would
-// install it — the auto-updater itself never runs in dev/test (gated on
-// isPackaged + DOHC_UPDATE_URL), so the surface is driven with a fake.
-let pushUpdate: ((state: UpdateStateEvent) => void) | null = null;
-const unsubscribe = vi.fn();
-const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
-  accepted: true,
-  state: {
-    status: "ready" as const,
-    message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-    currentVersion: "1.2.2",
-    channel: "latest" as const,
-    canCheck: false,
-    canInstall: true,
-    version: "1.2.3",
-  },
-}));
-
 beforeEach(() => {
-  vi.stubGlobal("dohcDesktop", {
-    getUpdateState: vi.fn(
-      () => new Promise<UpdateStateEvent>(() => undefined),
-    ),
-    checkForUpdates: vi.fn(),
-    installUpdate,
-    onUpdateState: (listener: (state: UpdateStateEvent) => void) => {
-      pushUpdate = listener;
-      return unsubscribe;
-    },
-  });
+  vi.stubGlobal("dohcDesktop", {});
 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
-  pushUpdate = null;
 });
 
 function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
@@ -66,6 +34,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       workspaceId={props.workspaceId ?? "ws-status-test"}
       {...(props.host ? { host: props.host } : {})}
       syncStatus={props.syncStatus ?? null}
+      {...(props.failedSaves !== undefined ? { failedSaves: props.failedSaves } : {})}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
@@ -94,6 +63,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
       {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
+      {...(props.onReadSentNotice ? { onReadSentNotice: props.onReadSentNotice } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
@@ -282,84 +252,6 @@ describe("automation notices", () => {
   });
 });
 
-describe("update toast", () => {
-  it("shows the machine's message when an update becomes ready, and dismisses", async () => {
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-    const toast = await screen.findByTestId("update-toast");
-    expect(toast.textContent).toContain("Update 1.2.3 is ready");
-
-    await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
-    expect(screen.queryByTestId("update-toast")).toBeNull();
-  });
-
-  it("keeps subscription state when the initial update fetch resolves later", async () => {
-    const pending = deferred<UpdateStateEvent>();
-    (
-      (window as unknown as {
-        dohcDesktop: {
-          getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
-        };
-      }).dohcDesktop as {
-        getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
-      }
-    ).getUpdateState.mockReturnValueOnce(pending.promise);
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-    await screen.findByTestId("update-toast");
-
-    pending.resolve({
-      status: "idle",
-      message: "Updates have not been checked yet.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: true,
-      canInstall: false,
-    });
-
-    await waitFor(() =>
-      expect(screen.getByTestId("update-toast").textContent).toContain(
-        "Update 1.2.3 is ready",
-      ),
-    );
-  });
-
-  it.each(["checking", "downloading", "offline"] as const)(
-    "keeps the %s state silent",
-    (status) => {
-      renderNotices();
-      const listener = pushUpdate;
-      expect(listener).toBeTypeOf("function");
-      if (!listener) throw new Error("The update listener was not installed.");
-
-      act(() => listener({ status, message: "noise" }));
-
-      expect(screen.queryByTestId("update-toast")).toBeNull();
-    },
-  );
-
-  it("unsubscribes from the update channel on unmount", () => {
-    renderNotices().unmount();
-    expect(unsubscribe).toHaveBeenCalledOnce();
-  });
-});
-
 describe("notice center", () => {
   it("hides empty path Copy on both the toast and the Notice row", async () => {
     renderNotices({ workspaceErrors: [{ id: "empty-paths", title: "Share check incomplete",
@@ -370,6 +262,16 @@ describe("notice center", () => {
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(await screen.findByTestId("notice-center")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Copy file paths" })).toBeNull();
+  });
+
+  it("offers no Copy on a success, on the toast or the Notice row", async () => {
+    renderNotices({ workspaceErrors: [{ id: "moved", tone: "success", message: "Moved 4 files to Archived",
+      details: "Moved 4 files to Archived", atMs: 1, canRetry: false, seen: false }] });
+    expect(screen.getByTestId("workspace-shell-notice").textContent).toContain("Moved 4 files to Archived");
+    expect(screen.queryByTestId("workspace-shell-error-copy")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await screen.findByTestId("notice-moved")).toBeTruthy();
+    expect(screen.queryByTestId("notice-moved-copy")).toBeNull();
   });
   it("offers to repair shared files whose folder projection is pending", async () => {
     const onRefreshShareView = vi.fn();
@@ -414,6 +316,30 @@ describe("notice center", () => {
     await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open History" }));
     expect(document.activeElement).toBe(destination);
     expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+
+  // Focus that leaves Notices for the workbench closes it, as a press outside
+  // does. Focus that moves within it or leaves the window keeps it open.
+  it("closes when focus moves out of it, not when focus leaves the window", async () => {
+    render(<button type="button">Search</button>);
+    const outside = screen.getByRole("button", { name: "Search" });
+    renderNotices({ agentActive: true });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const panel = screen.getByTestId("notice-center");
+    const action = within(panel).getByRole("button", { name: "Open History" });
+    act(() => {
+      panel.focus();
+      action.focus();
+      action.blur();
+    });
+    expect(screen.getByTestId("notice-center")).toBe(panel);
+
+    act(() => {
+      action.focus();
+      outside.focus();
+    });
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+    expect(document.activeElement).toBe(outside);
   });
 
   // Saved edits still reach others, never live ones. Sync cannot clear the
@@ -532,7 +458,7 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
   });
 
-  it("collects conflict, agent, and update notices in one popover", async () => {
+  it("collects conflict and agent notices in one popover", async () => {
     const onOpenConflicts = vi.fn();
     const onOpenHistory = vi.fn();
     renderNotices({
@@ -550,27 +476,15 @@ describe("notice center", () => {
       onOpenConflicts,
       onOpenHistory,
     });
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const center = screen.getByTestId("notice-center");
-    expect(within(center).getByTestId("notice-center-count").textContent).toBe("3");
+    expect(within(center).getByTestId("notice-center-count").textContent).toBe("2");
     expect(within(center).getByTestId("notice-sync-conflict").textContent).toContain(
       "Both sides changed notes/today.md.",
     );
     expect(within(center).getByTestId("notice-agent-active").textContent).toContain(
       "Agent running",
-    );
-    expect(within(center).getByTestId("notice-update-ready").textContent).toContain(
-      "Update 1.2.3 is ready",
     );
 
     // The conflict notice's Review action opens the conflict review dialog
@@ -701,6 +615,116 @@ describe("notice center", () => {
 
     rerender(view(true));
     await waitFor(() => expect(document.activeElement).toBe(restore));
+  });
+
+  // Notices opens above every dialog, as the toasts do, when a toast's Open
+  // fails and shows the reason there. Over a dialog, Tab stays in Notices,
+  // and Escape closes Notices, not the dialog, and gives focus back to the
+  // dialog, not to the Notices button behind it. Opening a dialog closes
+  // Notices.
+  describe("over a dialog", () => {
+    const failedOpen = (onClose: () => void = () => undefined) => (
+      <>
+        {noticeElement({
+          sentNotices: [sentRow("a")],
+          sentNoticeToast: sentRow("a"),
+          onHideSentNoticeToast: vi.fn(),
+          onOpenSentNotice: async () => "The automation's file is gone.",
+        })}
+        <Overlay onClose={onClose}>
+          <button type="button">Close</button>
+        </Overlay>
+      </>
+    );
+    const openFromToast = async () => {
+      fireEvent.click(screen.getByTestId("sent-notice-toast-open"));
+      const panel = await screen.findByTestId("notice-center");
+      await waitFor(() => expect(document.activeElement).toBe(panel));
+      return panel;
+    };
+
+    it("opens on the toasts' layer and closes on Escape without closing the dialog", async () => {
+      const onClose = vi.fn();
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
+      expect(panel.className).toContain("z-60");
+      expect(panel.className).not.toContain("z-20");
+
+      fireEvent.keyDown(panel, { key: "Escape" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      await waitFor(() => expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull());
+    });
+
+    it("keeps Tab in Notices", async () => {
+      render(failedOpen());
+      const panel = await openFromToast();
+      const controls = [...panel.querySelectorAll<HTMLElement>("button:not([disabled])")];
+      const last = controls[controls.length - 1]!;
+      last.focus();
+      fireEvent.keyDown(last, { key: "Tab" });
+      expect(document.activeElement).toBe(controls[0]);
+    });
+
+    it("closes when a dialog opens", async () => {
+      const view = (dialog: boolean) => (
+        <>
+          {noticeElement({ sentNotices: [sentRow("a")] })}
+          {dialog ? (
+            <Overlay onClose={() => undefined}>
+              <button type="button">Close</button>
+            </Overlay>
+          ) : null}
+        </>
+      );
+      const { rerender } = render(view(false));
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      rerender(view(true));
+      await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when F6 takes focus back to the dialog", async () => {
+      const onClose = vi.fn();
+      render(failedOpen(onClose));
+      const panel = await openFromToast();
+      fireEvent.keyDown(panel, { key: "F6" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("closes when Tab finds nothing to reach in it", async () => {
+      const view = (rows: SentNotice[]) => (
+        <>
+          {noticeElement({
+            sentNotices: rows,
+            sentNoticeToast: sentRow("a"),
+            onHideSentNoticeToast: vi.fn(),
+            onOpenSentNotice: async () => "The automation's file is gone.",
+          })}
+          <Overlay onClose={() => undefined}>
+            <button type="button">Close</button>
+          </Overlay>
+        </>
+      );
+      const { rerender } = render(view([sentRow("a")]));
+      const panel = await openFromToast();
+      rerender(view([]));
+      expect(panel.querySelector("button:not([disabled])")).toBeNull();
+      fireEvent.keyDown(panel, { key: "Tab" });
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+      expect(document.activeElement?.closest("[data-dohc-modal='true']")).not.toBeNull();
+    });
+
+    it("lifts a corner-hosted panel out of its host, as its toasts are", async () => {
+      const { container } = render(noticeElement({ sentNotices: [sentRow("a")], host: "corner" }));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const panel = screen.getByTestId("notice-center");
+      expect(panel.parentElement).toBe(document.body);
+      expect(container.contains(panel)).toBe(false);
+    });
   });
 
   // A dialog opened over the one F6 left takes focus when the toast goes:
@@ -1065,344 +1089,51 @@ describe("notice center", () => {
   });
 
   it("stands the toast stack down while the notice center is open", async () => {
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
+    renderNotices({
+      workspaceErrors: [{ id: "e1", message: "Could not refresh history.", details: "", atMs: 0, canRetry: false, seen: false }],
     });
-    await screen.findByTestId("update-toast");
+    await screen.findByTestId("workspace-shell-error");
 
     // Every toast has a row in the panel, so the stack gets out of the way
     // instead of sitting over the surface the user just opened.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.queryByTestId("update-toast")).toBeNull();
-    expect(screen.getByTestId("notice-center").textContent).toContain(
-      "Update 1.2.3 is ready",
-    );
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      await screen.findByRole("button", { name: /dismiss update/i }),
-    );
-    expect(screen.queryByTestId("update-toast")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("notice-center").textContent).toContain("Could not refresh history.");
   });
 
-  it("calls installUpdate from the update notice action", async () => {
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
+  it("shows a command the error asks the person to run, with its copy, in the toast and the row", async () => {
+    const command = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
+    renderNotices({
+      workspaceErrors: [{
+        id: "deb", title: "dohc could not install update 1.2.3",
+        message: "The update did not install. Run this command in a terminal to install it.",
+        command, details: "", atMs: 0, canRetry: true, seen: false,
+      }],
     });
-
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not install update 1.2.3");
+    expect(within(toast).getByTestId("workspace-shell-toast-command").textContent).toBe(command);
+    expect(within(toast).getByTestId("workspace-shell-toast-command-copy").getAttribute("aria-label")).toBe("Copy command");
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", {
-        name: "Restart",
-      }),
-    );
-
-    expect(installUpdate).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("notice-deb-command").textContent).toBe(command);
+    expect(screen.getByTestId("notice-deb-command-copy").getAttribute("aria-label")).toBe("Copy command");
   });
 
-  it("keeps the install result after an older update event arrives", async () => {
-    const pendingInstall = deferred<UpdateActionResult>();
-    installUpdate.mockReturnValueOnce(pendingInstall.promise);
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", {
-        name: "Restart",
-      }),
-    );
-    await waitFor(() => expect(installUpdate).toHaveBeenCalledOnce());
-
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-    pendingInstall.resolve({
-      accepted: true,
-      state: {
-        status: "ready",
-        message: "Update 1.2.4 is ready. Restart dohc to apply it.",
-        currentVersion: "1.2.2",
-        channel: "latest",
-        canCheck: false,
-        canInstall: true,
-        version: "1.2.4",
-      },
-    });
-
-    await waitFor(() =>
-      expect(screen.getByTestId("update-toast").textContent).toContain(
-        "Update 1.2.4 is ready",
-      ),
-    );
-  });
-
-  it("shows why a Linux .deb did not install, with the command that installs it and its copy, in the toast and the notice", async () => {
-    const ready = {
-      status: "ready" as const,
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest" as const,
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    };
-    const reason = "The update did not install. Run this command in a terminal to install it.";
-    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
-    installUpdate.mockResolvedValueOnce({ accepted: false, reason, state: { ...ready, message: reason, installCommand } });
-    renderNotices();
-    pushUpdate?.(ready);
-    expect(screen.queryByTestId("update-toast-install-command")).toBeNull();
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Restart" }));
-
-    expect((await screen.findByTestId("update-toast-install-command")).textContent).toBe(installCommand);
-    expect(screen.getByTestId("update-toast").textContent).toContain(reason);
-    expect(screen.getByTestId("update-toast-install-command-copy").getAttribute("aria-label")).toBe("Copy command");
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.getByTestId("notice-update-ready").textContent).toContain(reason);
-    expect(screen.getByTestId("notice-update-ready-command").textContent).toBe(installCommand);
-    expect(screen.getByTestId("notice-update-ready-command-copy").getAttribute("aria-label")).toBe("Copy command");
-  });
-
-  it("shows restart failures in the update notice and toast", async () => {
-    installUpdate.mockResolvedValueOnce({
-      accepted: false,
-      state: {
-        status: "ready",
-        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-        currentVersion: "1.2.2",
-        channel: "latest",
-        canCheck: false,
-        canInstall: true,
-        version: "1.2.3",
-      },
-    });
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", {
-        name: "Restart",
-      }),
-    );
-
-    await screen.findByText("Could not restart into the update.");
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
-      "Could not restart into the update.",
-    );
-  });
-
-  it("shows a restart failure after the ready toast was dismissed", async () => {
-    installUpdate.mockResolvedValueOnce({
-      accepted: false,
-      state: {
-        status: "ready",
-        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-        currentVersion: "1.2.2",
-        channel: "latest",
-        canCheck: false,
-        canInstall: true,
-        version: "1.2.3",
-      },
-    });
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Dismiss update notice" }),
-    );
-    expect(screen.queryByTestId("update-toast")).toBeNull();
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", {
-        name: "Restart",
-      }),
-    );
-
-    expect((await screen.findByTestId("update-toast")).textContent).toContain(
-      "Could not restart into the update.",
-    );
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "Dismiss update notice" }),
-    );
-    expect(screen.queryByTestId("update-toast")).toBeNull();
-  });
-
-  it("keeps updater errors visible with a working next step", async () => {
-    const onOpenSettings = vi.fn();
-    installUpdate.mockResolvedValueOnce({
-      accepted: false,
-      state: {
-        status: "error",
-        message: "dohc could not install the update. Try again.",
-        currentVersion: "1.2.2",
-        channel: "latest",
-        canCheck: true,
-        canInstall: false,
-      },
-    });
-    renderNotices({ onOpenSettings });
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.3",
-    });
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", {
-        name: "Restart",
-      }),
-    );
-
-    const toast = await screen.findByTestId("update-toast");
-    expect(toast.textContent).toContain(
-      "dohc could not install the update. Try again.",
-    );
-    expect(within(toast).queryByRole("button", { name: "Restart" })).toBeNull();
-    await userEvent.click(
-      within(toast).getByRole("button", { name: "Open Settings" }),
-    );
-    expect(onOpenSettings).toHaveBeenCalledOnce();
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const updateNotice = screen.getByTestId("notice-update-error");
-    expect(updateNotice.textContent).toContain(
-      "dohc could not install the update. Try again.",
-    );
-    expect(within(updateNotice).queryByRole("button", { name: "Restart" }))
-      .toBeNull();
-    expect(within(updateNotice).getByRole("button", { name: "Open Settings" }))
-      .toBeTruthy();
-  });
-
-  it("surfaces live updater errors in the toast and notice center", async () => {
-    const onOpenSettings = vi.fn();
-    renderNotices({ onOpenSettings });
-
-    pushUpdate?.({
-      status: "error",
-      message: "dohc could not check for updates. Try again.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: true,
-      canInstall: false,
-    });
-
-    const toast = await screen.findByTestId("update-toast");
-    expect(toast.textContent).toContain(
-      "dohc could not check for updates. Try again.",
-    );
-    await userEvent.click(
-      within(toast).getByRole("button", { name: "Open Settings" }),
-    );
-    expect(onOpenSettings).toHaveBeenCalledOnce();
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const updateNotice = screen.getByTestId("notice-update-error");
-    expect(updateNotice.textContent).toContain(
-      "dohc could not check for updates. Try again.",
-    );
-    expect(
-      within(updateNotice).getByRole("button", { name: "Open Settings" }),
-    ).toBeTruthy();
-
-    pushUpdate?.({
-      status: "checking",
-      message: "Checking for updates…",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: false,
-    });
-    await waitFor(() => expect(screen.queryByTestId("update-toast")).toBeNull());
-    expect(screen.queryByTestId("notice-update-error")).toBeNull();
-  });
-
-  it("does not show the restart action when the update is not installable", async () => {
-    renderNotices();
-    pushUpdate?.({
-      status: "ready",
-      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
-      currentVersion: "1.2.2",
-      channel: "latest",
-      canCheck: false,
-      canInstall: false,
-      version: "1.2.3",
-    });
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-
-    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
-      "Update 1.2.3 is ready",
-    );
-    expect(
-      within(screen.getByTestId("notice-center")).queryByRole("button", {
-        name: "Restart",
-      }),
-    ).toBeNull();
-  });
+  // A retry with no reason raises its toast and row only once it has lasted 15 s.
+  const outlastQuietRetry = () => act(() => vi.advanceTimersByTime(15_000));
+  const serverUnreachable = {
+    state: "sync-failed" as const,
+    syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+  };
 
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
   // what it offers depends on whether anything can be dialled again.
   it("raises a toast and a notice with Copy while live delivery retries", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const onRetryLiveDelivery = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+    outlastQuietRetry();
 
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain("Live editing retrying");
@@ -1425,8 +1156,10 @@ describe("notice center", () => {
   });
 
   it("runs the shell's retry from the live delivery toast", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const onRetryLiveDelivery = vi.fn();
     renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+    outlastQuietRetry();
 
     await userEvent.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
@@ -1496,6 +1229,11 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
+    {
+      reason: "conflict-parent-withheld" as const,
+      title: "Live editing can't resume",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
+    },
   ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();
@@ -1509,6 +1247,8 @@ describe("notice center", () => {
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain(`${title}. ${body}`);
     expect(liveDeliveryIcon(toast)).toBe("triangle-alert");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Live documents" })).toBeTruthy();
     await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
 
@@ -1551,7 +1291,9 @@ describe("notice center", () => {
   });
 
   it("clears the live delivery toast and notice when delivery recovers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
 
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
@@ -1565,7 +1307,9 @@ describe("notice center", () => {
   // Status snapshots arrive on every workspace activity. A dismissed toast
   // must not come back because an equal snapshot was read again.
   it("does not raise the live delivery toast again for a repeated snapshot", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     await userEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
@@ -1580,32 +1324,169 @@ describe("notice center", () => {
 
   // A dismissal answers one workspace. The same failure in the next workspace
   // is news the user has not seen, so it must still be announced.
-  it("announces an identical live delivery failure in another workspace", async () => {
+  it("announces an identical live delivery failure in another workspace", () => {
+    vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
-    await userEvent.click(
+    outlastQuietRetry();
+    fireEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
 
+    // The other workspace's retry waits its own 15 s.
     rerender(
       noticeElement({
         workspaceId: "ws-status-other",
         syncStatus: liveDeliveryStatus("retrying"),
       }),
     );
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
   // Recovery forgets the dismissal, so the next failure is announced again.
   it("announces a new live delivery failure after a recovery", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
     await userEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
 
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    outlastQuietRetry();
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // Live editing needs the server. While the title bar names the server, the
+  // server's own toast and row report the outage, and live editing adds none.
+  it.each([
+    { label: "Server unreachable", server: serverUnreachable },
+    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
+  ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    outlastQuietRetry();
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+
+    rerender(noticeElement({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+
+    // The server comes back: live editing prepares again, with no toast.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("preparing") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // Sync can come back before live editing tries again. Its ring shows once
+  // the server is back, and a retry that keeps failing toasts and adds its
+  // row 15 s after the ring returns.
+  it("announces a live retry that keeps failing 15 s after the server is back", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing retrying");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
+
+  // A healthy recovery tries again within about 10 s of the server coming
+  // back, so it never toasts or adds a row.
+  it("never announces a live retry that recovers within 15 s of the server coming back", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    act(() => vi.advanceTimersByTime(20_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(10_000));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // A failed save or a required update takes the title bar's words from the
+  // server, so live editing reports its own state again.
+  it.each([
+    { label: "a file couldn't save", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
+  ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {
+    renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying", "document-unavailable"), ...status }, failedSaves });
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
+  });
+
+  // The server's report does not explain a named reason, so once the server
+  // is back it shows at once, with its toast.
+  it("announces a named live reason once the server is back", () => {
+    const paused = liveDeliveryStatus("retrying", "document-unavailable");
+    const { rerender } = renderNotices({ syncStatus: { ...paused, ...serverUnreachable } });
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    rerender(noticeElement({ syncStatus: paused }));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
+  });
+
+  // A retry dohc is still fixing by itself shows in the title bar at once,
+  // and adds a toast and a row only once it has lasted 15 s.
+  it("keeps a short live retry to the title bar", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    // It recovers in time, and the next retry waits its own 15 s.
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
+
+  // A retry that turns active before its 15 s cancels the wait: no toast or
+  // row ever appears, however long live editing then stays active.
+  it("never announces a live retry that turns active before 15 s", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(14_999));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+  });
+
+  // A named reason stays until someone acts, so it does not wait.
+  it("shows a live retry at once when it gains a reason", () => {
+    vi.useFakeTimers();
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying", "document-unavailable") }));
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain("Live editing paused");
   });
 
   // Enrollment refusals are one boolean on the status: however many shares it
@@ -1975,6 +1856,193 @@ describe("notices sent to you", () => {
   it("names the toggle without a count when nothing is unread", () => {
     renderNotices({ sentNotices: [sentRow("read", { readAtMs: 1 })] });
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  describe("reading a row", () => {
+    const error = {
+      id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    };
+    const errorProps = (onHideWorkspaceError = vi.fn()) => ({
+      workspaceErrors: [error, { ...error, id: "e2", message: "dohc could not search this workspace.", atMs: 2 }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError,
+    });
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      resetOrphanedDrafts();
+    });
+
+    it("reads a row the pointer rests on, not one it crosses", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("2");
+
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      fireEvent.pointerLeave(screen.getByTestId("notice-e1"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e2"));
+      act(() => vi.advanceTimersByTime(599));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e2");
+      expect(screen.queryByTestId("notice-e2-unread")).toBeNull();
+      expect(screen.getByTestId("notice-e1-unread").textContent).toBe("Unread");
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+      // Reading changes nothing else: the row and its Try again stay.
+      expect(within(screen.getByTestId("notice-e2")).getByRole("button", { name: "Try again" })).toBeTruthy();
+    });
+
+    it("reads a row keyboard focus rests on", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // Moving within the row keeps its rest going.
+      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
+      act(() => vi.advanceTimersByTime(300));
+      expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
+    });
+
+    it("reads nothing once the panel closes mid-rest", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 2 unread");
+    });
+
+    it("reads nothing when the rested row goes away and returns", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("notice-e1").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // A removed row gets no blur, so its rest must stop another way.
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      act(() => vi.advanceTimersByTime(200));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("marks this computer's rows read with Mark all read, and a row that returns is unread again", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+      expect(onHideWorkspaceError.mock.calls).toEqual([["e2"], ["e1"]]);
+      expect(screen.queryByTestId("notice-center-count")).toBeNull();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+      expect(screen.getByTestId("notice-e1")).toBeTruthy();
+
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("reads a row's words as they are when the rest ends", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      const [, second] = errorProps().workspaceErrors;
+      rerender(noticeElement({
+        ...errorProps(onHideWorkspaceError),
+        workspaceErrors: [{ ...error, message: "dohc could not save Trip/day-3.md." }, second!],
+      }));
+      act(() => vi.advanceTimersByTime(300));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e1");
+      expect(screen.queryByTestId("notice-e1-unread")).toBeNull();
+    });
+
+    it("reads a row once when the pointer and focus both rest on it", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a")], onReadSentNotice });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(100));
+      fireEvent.pointerEnter(screen.getByTestId("sent-notice-a"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onReadSentNotice).toHaveBeenCalledOnce();
+    });
+
+    it("counts a different set-aside edit as unread, even at the same count", async () => {
+      captureOrphanedDraft("ws-status-test", "a.md", "Kept!");
+      renderNotices();
+      await act(async () => {});
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-set-aside-edits"));
+      act(() => vi.advanceTimersByTime(600));
+      expect(screen.queryByTestId("notice-set-aside-edits-unread")).toBeNull();
+
+      await act(async () => {
+        resetOrphanedDrafts();
+        captureOrphanedDraft("ws-status-test", "b.md", "Kept too!");
+      });
+      expect(screen.getByTestId("notice-set-aside-edits-unread")).toBeTruthy();
+    });
+
+    it("opens clipped text in place", () => {
+      // jsdom lays nothing out; make every text box report more than it shows.
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const more = screen.getByTestId("notice-e1-more");
+      expect(more.textContent).toBe("Show more");
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      expect(document.getElementById(more.getAttribute("aria-controls") ?? "")?.textContent).toBe(error.message);
+
+      fireEvent.click(more);
+      expect(more.textContent).toBe("Show less");
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.click(more);
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+
+      // A click on the clipped text opens it too; the second click of a double click does not count.
+      fireEvent.click(screen.getByText(error.message), { detail: 2 });
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(screen.getByText(error.message), { detail: 1 });
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("offers Show more only for clipped text", () => {
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(32);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-e1-more")).toBeNull();
+    });
+
+    it("keeps Show more while the text is hidden", () => {
+      const resized = new Set<() => void>();
+      vi.stubGlobal("ResizeObserver", class {
+        constructor(private readonly callback: () => void) {}
+        observe() { resized.add(this.callback); }
+        disconnect() { resized.delete(this.callback); }
+      });
+      const scroll = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      const client = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
+
+      // Hidden text lays out at no height; it is not text that fits.
+      scroll.mockReturnValue(0);
+      client.mockReturnValue(0);
+      act(() => resized.forEach((callback) => callback()));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
+    });
   });
 
   it("shows each sender's shape and says who sent it", async () => {
@@ -2364,6 +2432,51 @@ describe("notices sent to you", () => {
       expect(onHideSentNoticeToast).not.toHaveBeenCalled();
       act(() => vi.advanceTimersByTime(1));
       expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+    });
+
+    // Something finished fades, but not while the person reads it.
+    it("holds a success toast while it is hovered or focused", () => {
+      vi.useFakeTimers();
+      const onHideWorkspaceError = vi.fn();
+      renderNotices({
+        workspaceErrors: [{
+          id: "s1", tone: "success", message: "Moved 4 files to Archived", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+        onHideWorkspaceError,
+      });
+      const toast = screen.getByTestId("workspace-shell-notice");
+      fireEvent.pointerEnter(toast);
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      fireEvent.pointerLeave(toast);
+      act(() => within(toast).getByRole("button", { name: "Dismiss workspace notice" }).focus());
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => (document.activeElement as HTMLElement).blur());
+      act(() => vi.advanceTimersByTime(5_999));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledWith("s1");
+    });
+
+    // A list clamps by whole entries, so none is cut in half. Its count is
+    // true only beside the whole list, so it waits for Show more.
+    it("shows a list's first 3 entries whole, and its count only with the rest", async () => {
+      renderNotices({
+        workspaceErrors: [{
+          id: "e1", title: "250 files weren't imported", message: "a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.",
+          lastLine: "246 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+      });
+      const toast = screen.getByTestId("workspace-shell-error");
+      const body = () => toast.querySelector("p")!;
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.");
+      expect(body().className).not.toContain("line-clamp");
+      expect(within(toast).queryByText("246 more weren't imported.")).toBeNull();
+
+      await userEvent.click(within(toast).getByTestId("workspace-shell-toast-more"));
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.");
+      within(toast).getByText("246 more weren't imported.");
     });
 
     it("opens from the toast or closes it", async () => {

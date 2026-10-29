@@ -44,6 +44,7 @@ pub struct Document {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Construct,
+    ConstructFold,
     Prove,
 }
 #[derive(Clone)]

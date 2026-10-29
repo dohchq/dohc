@@ -8,6 +8,26 @@ export const COLLECTIONS_PROJECTED_EVENT = "collections.projected";
 /** The engine answers reads it refused while it read a new workspace's files. */
 export const CAPTURE_INITIAL_SETTLED_EVENT = "capture.initialSettled";
 export const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT = "capture.noAtomicPlacement";
+export const CAPTURE_WRITE_DEFERRED_EVENT = "capture.writeDeferred";
+
+export function bridgeWriteDeferred(
+  daemon: { onEvent(handler: (event: Event) => void): () => void },
+  note: (workspaceId: string, path: string) => void,
+): () => void {
+  return daemon.onEvent((event) => {
+    if (event.name !== CAPTURE_WRITE_DEFERRED_EVENT) return;
+    const payload = event.payload;
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      !Array.isArray(payload) &&
+      typeof payload.workspaceId === "string" && payload.workspaceId.length > 0 &&
+      typeof payload.path === "string" && payload.path.length > 0
+    ) {
+      note(payload.workspaceId, payload.path);
+    }
+  });
+}
 
 /**
  * Calls `note` with the workspace an engine names in its

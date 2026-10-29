@@ -44,7 +44,7 @@ const swatch = (name: string) => {
   return found;
 };
 
-it("opens square swatches from the avatar, olive Default first, the agent's choice checked and focused", async () => {
+it("opens square swatches from the avatar, olive first, the agent's choice checked and focused", async () => {
   const user = userEvent.setup();
   render(<Row save={vi.fn()} />);
   const trigger = screen.getByRole("button", { name: "Color for Orbit" });
@@ -57,14 +57,14 @@ it("opens square swatches from the avatar, olive Default first, the agent's choi
   expect(dialog()?.getAttribute("aria-label")).toBe("Color for Orbit");
   expect(dialog()?.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("Color for Orbit");
   expect(radios().map((radio) => radio.getAttribute("aria-label"))).toEqual(
-    ["Default", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
+    ["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
   expect(radios()[0]!.className).toContain("bg-agent");
   for (const radio of radios()) expect(radio.className).toContain("rounded-md");
   expect(swatch("Plum").getAttribute("aria-checked")).toBe("true");
   expect(document.activeElement).toBe(swatch("Plum"));
 });
 
-it("saves a pick under the token's group, closes, and returns focus; Default clears the choice", async () => {
+it("saves a pick under the token's group, closes, and returns focus; Olive clears the choice", async () => {
   const user = userEvent.setup();
   const save = vi.fn();
   render(<Row save={save} />);
@@ -75,7 +75,7 @@ it("saves a pick under the token's group, closes, and returns focus; Default cle
   expect(dialog()).toBeNull();
   expect(document.activeElement).toBe(trigger);
   await user.click(trigger);
-  await user.click(swatch("Default"));
+  await user.click(swatch("Olive"));
   expect(save).toHaveBeenLastCalledWith("7", null);
 });
 
@@ -89,7 +89,7 @@ it("moves focus with the arrows without saving, and picks with Enter or Space", 
   await user.keyboard("{ArrowRight}");
   expect(document.activeElement).toBe(swatch("Rose"));
   await user.keyboard("{ArrowRight}");
-  expect(document.activeElement).toBe(swatch("Default"));
+  expect(document.activeElement).toBe(swatch("Olive"));
   await user.keyboard("{ArrowLeft}{ArrowLeft}");
   expect(document.activeElement).toBe(swatch("Plum"));
   expect(save).not.toHaveBeenCalled();
@@ -182,7 +182,7 @@ it("checks what main's event says, not the save", async () => {
   expect(swatch("Teal").getAttribute("aria-checked")).toBe("true");
   expect(screen.getByTitle("Orbit").className).toContain("text-hue-teal");
   act(() => changed({ workspaceId: "w", group: "7", hue: null }));
-  expect(swatch("Default").getAttribute("aria-checked")).toBe("true");
+  expect(swatch("Olive").getAttribute("aria-checked")).toBe("true");
   stop();
 });
 

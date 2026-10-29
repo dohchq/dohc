@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalWorkspaceRoot } from "../src/workspaces/createWorkspaceFolder";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { installFakeAgentTools } from "./helpers/agentTools";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -30,8 +31,8 @@ function fatalLogs(desktop: LaunchedDesktopApp): string[] {
     .filter((text) => FATAL_LOG_PATTERNS.some((pattern) => pattern.test(text)));
 }
 
-async function openWorkspace(temp: TempWorkspace): Promise<LaunchedDesktopApp> {
-  const desktop = await launchDesktopApp({ workspace: temp });
+async function openWorkspace(temp: TempWorkspace, env?: NodeJS.ProcessEnv): Promise<LaunchedDesktopApp> {
+  const desktop = await launchDesktopApp({ workspace: temp, env });
   await openWorkspaceFromFirstRun(desktop.page, temp);
   return desktop;
 }
@@ -101,7 +102,8 @@ test("settings search finds matching sections and shows an empty result", async 
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    desktop = await openWorkspace(temp);
+    // Searching for "mcp" opens the Agents section, which detects agent tools.
+    desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(desktopPins.settingsSearch).fill("theme");
     await expect(desktop.page.getByTestId(settingsSectionPin("appearance"))).toBeVisible();
@@ -138,21 +140,20 @@ test("theme setting persists across a restart", async () => {
   }
 });
 
-test("MCP config shows and copies the canonical workspace path", async () => {
+test("MCP config copies the canonical workspace path", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    desktop = await openWorkspace(temp);
+    desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // The snippet renders the workspace's real path in forward-slash form.
+    // The config carries the workspace's real path in forward-slash form.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
-    await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
-      canonicalRootPath,
-    );
+    const copy = desktop.page.getByTestId("mcp-config-copy");
+    await expect(copy).toBeEnabled();
     await holdSystemClipboard(test.info(), async (remainingMs) => {
-      await desktop!.page.getByRole("button", { name: "Copy" }).click({ timeout: remainingMs() });
+      await copy.click({ timeout: remainingMs() });
       await expect
         .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
         .toContain(canonicalRootPath);

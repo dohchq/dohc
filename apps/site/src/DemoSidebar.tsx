@@ -10,6 +10,7 @@ import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
+import { VIEW_IDENTITY } from "../../desktop/src/renderer/workbench/viewIdentity";
 
 // The demo has no engine, so no folder is a collection.
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
@@ -153,7 +154,7 @@ export function DemoSidebar(props: {
 
   return (
     <SidePanel
-      title={props.activePanel}
+      title={VIEW_IDENTITY[props.activePanel].label}
       width={width}
       onWidthChange={setWidth}
     >
@@ -181,7 +182,8 @@ export function DemoSidebar(props: {
           pinned={[]}
           openEditorsHeight={openEditorsHeight}
           onOpenEditorsHeightChange={setOpenEditorsHeight}
-          createRequest={null}
+          newFolderRequest={null}
+          onNewPage={props.onCreateDocument}
           onOpenFile={props.onOpenDocument}
           onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
           onCloseTab={(_groupId, path) => props.onCloseTab(path)}
@@ -255,8 +257,8 @@ export function DemoSidebar(props: {
             {
               id: "agent:default",
               kind: "agent",
-              handle: "agent",
-              label: "Your agent",
+              handle: "Nova",
+              label: "Nova",
               description: "your agent",
             },
             {

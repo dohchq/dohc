@@ -223,7 +223,7 @@ pub fn list_drafts_in(
             )
         })
         .unwrap_or(("", "", ""));
-    let mut stmt = conn.prepare("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings b WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) AND (?6=0 OR EXISTS (SELECT 1 FROM owner_ydoc_outboxes o WHERE o.workspace_id=b.workspace_id AND o.main_version_id=b.main_version_id AND o.object_id=b.object_id AND o.lineage_claim_id=b.lineage_claim_id AND o.restore_fence_generation=json_extract(b.binding_json,'$.restoreFenceGeneration') AND o.current_path=json_extract(b.binding_json,'$.currentPath') AND json(o.selector_paths_json)=json_extract(b.binding_json,'$.selectorPaths') AND o.pending_bytes>0 AND o.state!='quarantined')) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
+    let mut stmt = conn.prepare("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings b WHERE workspace_id=?1 AND (main_version_id,object_id,lineage_claim_id)>(?2,?3,?4) AND (?6=0 OR EXISTS (SELECT 1 FROM owner_ydoc_outboxes o WHERE o.workspace_id=b.workspace_id AND o.main_version_id=b.main_version_id AND o.object_id=b.object_id AND o.lineage_claim_id=b.lineage_claim_id AND o.restore_fence_generation=json_extract(b.binding_json,'$.restoreFenceGeneration') AND o.current_path=json_extract(b.binding_json,'$.currentPath') AND json(o.selector_paths_json)=json_extract(b.binding_json,'$.selectorPaths') AND o.pending_bytes>0 AND (o.state!='quarantined' OR o.retry_delivery_id IS NOT NULL))) ORDER BY main_version_id,object_id,lineage_claim_id LIMIT ?5").map_err(read_sql)?;
     let rows = stmt
         .query_map(
             params![
@@ -2080,6 +2080,232 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+    fn refuse_for_good(store: &mut EngineStore, outbox_id: &str) {
+        super::super::quarantine(
+            store,
+            "workspace",
+            super::super::OwnerOutboxQuarantineInput {
+                outbox_id: outbox_id.into(),
+                reason: "invalid-update".into(),
+                observed_binding: None,
+            },
+            5,
+        )
+        .unwrap();
+    }
+    fn try_again(
+        store: &mut EngineStore,
+        observed: &ObservedOwnerBinding,
+        outbox_id: &str,
+    ) -> Result<String, OwnerOutboxError> {
+        super::super::retry(
+            store,
+            "workspace",
+            super::super::OwnerOutboxRetryInput {
+                outbox_id: outbox_id.into(),
+                binding: observed.binding.clone(),
+            },
+        )
+    }
+    #[test]
+    fn an_accepted_try_again_on_an_observed_binding_is_applied_and_resumes_delivery() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let head_delta = owner.richdoc_append_paragraph("refused, then tried again");
+        let head = pending(&mut store, &observed, head_delta.clone());
+        let suffix_delta = owner.richdoc_append_paragraph("later owner edit");
+        let suffix = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    append_draft_in_tx(
+                        tx,
+                        "workspace",
+                        &observed.binding,
+                        1,
+                        "owner-suffix".into(),
+                        suffix_delta.clone(),
+                        4,
+                    )
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        refuse_for_good(&mut store, &head.outbox_id);
+        let listed = |store: &EngineStore| {
+            store
+                .read_with(|c| list_drafts_in(c, "workspace", None, 64, true))
+                .unwrap()
+                .len()
+        };
+        assert_eq!(listed(&store), 0);
+        let receipt = |append: &OwnerOutboxAppendResult, cursor| OwnerDeliveryReceipt {
+            delivery_id: append.delivery_id.clone(),
+            update_digest: append.update_digest.clone(),
+            journal_cursor: cursor,
+            accepting_host_epoch: 1,
+        };
+        let applied = |store: &EngineStore, receipt: &OwnerDeliveryReceipt| {
+            store.read_with(|c| {
+                super::super::accepted::is_receipt_applied_in(
+                    c,
+                    &observed.binding,
+                    &observed.relay_database_namespace,
+                    receipt,
+                )
+            })
+        };
+        let head_receipt = receipt(&head, 4);
+        assert!(matches!(
+            applied(&store, &head_receipt),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        assert_eq!(
+            try_again(&mut store, &observed, &head.outbox_id).unwrap(),
+            head.delivery_id
+        );
+        assert_eq!(listed(&store), 1, "a granted draft is listed for delivery");
+        feed(&mut store, &observed, 4, head_delta);
+        assert!(applied(&store, &head_receipt).unwrap());
+        // The grant covers the head alone.
+        let suffix_receipt = receipt(&suffix, 6);
+        assert!(matches!(
+            applied(&store, &suffix_receipt),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        super::super::acknowledge(
+            &mut store,
+            "workspace",
+            &head.outbox_id,
+            std::slice::from_ref(&head_receipt),
+        )
+        .unwrap();
+        let resumed = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        assert_eq!(resumed.state, super::super::OwnerOutboxState::Active);
+        assert_eq!(resumed.quarantine_reason, None);
+        assert_eq!(resumed.retry_delivery_id, None);
+        assert_eq!(resumed.entries.len(), 1);
+        feed(&mut store, &observed, 6, suffix_delta);
+        assert!(applied(&store, &suffix_receipt).unwrap());
+        super::super::acknowledge(&mut store, "workspace", &head.outbox_id, &[suffix_receipt])
+            .unwrap();
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &head.outbox_id)
+                .unwrap()
+                .entries
+                .len(),
+            0
+        );
+    }
+    #[test]
+    fn try_again_refuses_a_document_no_longer_live_at_the_owner_binding() {
+        for assignment in [
+            "path='moved.md'",
+            "lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
+            "regime='local-only', lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
+        ] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            let owner = Ydoc::wire();
+            owner.apply(&checkpoint).unwrap();
+            let head = pending(
+                &mut store,
+                &observed,
+                owner.richdoc_append_paragraph("refused"),
+            );
+            refuse_for_good(&mut store, &head.outbox_id);
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(&format!("UPDATE ydoc_docs SET {assignment}"), [])
+                        .unwrap();
+                    Ok::<_, OwnerOutboxError>(())
+                })
+                .unwrap();
+            assert!(
+                matches!(
+                    try_again(&mut store, &observed, &head.outbox_id),
+                    Err(OwnerOutboxError::ParentMismatch)
+                ),
+                "{assignment}"
+            );
+            assert_eq!(
+                super::super::read_pending(&store, "workspace", &head.outbox_id)
+                    .unwrap()
+                    .retry_delivery_id,
+                None,
+                "{assignment}"
+            );
+        }
+    }
+    #[test]
+    fn try_again_refuses_an_observed_binding_whose_document_is_gone() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let head = pending(
+            &mut store,
+            &observed,
+            owner.richdoc_append_paragraph("refused"),
+        );
+        refuse_for_good(&mut store, &head.outbox_id);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM ydoc_docs", []).unwrap();
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+        assert!(store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .is_some());
+        assert!(matches!(
+            try_again(&mut store, &observed, &head.outbox_id),
+            Err(OwnerOutboxError::ParentMismatch)
+        ));
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &head.outbox_id)
+                .unwrap()
+                .retry_delivery_id,
+            None
+        );
+    }
+    #[test]
+    fn retiring_the_granted_head_ends_its_try_again() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let head = pending(
+            &mut store,
+            &observed,
+            owner.richdoc_append_paragraph("refused twice"),
+        );
+        refuse_for_good(&mut store, &head.outbox_id);
+        assert_eq!(
+            try_again(&mut store, &observed, &head.outbox_id).unwrap(),
+            head.delivery_id
+        );
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: head.outbox_id.clone(),
+            delivery_id: head.delivery_id.clone(),
+            update_digest: head.update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let retired = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        assert_eq!(retired.state, super::super::OwnerOutboxState::Quarantined);
+        assert_eq!(retired.retry_delivery_id, None);
+        assert!(retired.entries.is_empty());
     }
     fn feed(
         store: &mut EngineStore,

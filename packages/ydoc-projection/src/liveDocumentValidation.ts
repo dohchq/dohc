@@ -453,7 +453,8 @@ function projectAndFinalize(
     if (topology.kind !== 'compatible') refuse('invalid-schema')
     projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
   } catch (error) {
-    if (engineReader && !(error instanceof Refusal)) throw error
+    // A journal candidate is an owner's edit: a validator failure retries it instead of refusing it.
+    if ((engineReader || unverifiedSource === 'refuse') && !(error instanceof Refusal)) throw error
     pending = error instanceof Refusal ? error.reason : 'invalid-schema'
   }
   finally {
@@ -798,8 +799,8 @@ function validatePublicState(
       if (Object.keys(json).length !== 1 || json.type !== 'doc') refuse('invalid-schema')
     } else rootNode.check()
   } catch (error) {
-    if (engineReader && !isProseMirrorSchemaError(error)) throw error
-    if (error instanceof Refusal) throw error
+    // Only a schema verdict refuses the document; anything else is a validator failure.
+    if (!isProseMirrorSchemaError(error)) throw error
     refuse('invalid-schema')
   }
 
@@ -810,8 +811,7 @@ function validatePublicState(
       prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
-      if (engineReader && !isProseMirrorSchemaError(error)) throw error
-      if (error instanceof Refusal) throw error
+      if (!isProseMirrorSchemaError(error)) throw error
       refuse('invalid-schema')
     } finally { rebuilt.destroy() }
   }

@@ -14,7 +14,7 @@ export type PendingTreeMove = {
 
 export type PendingTreeChange =
   | PendingTreeMove
-  | { id: string; kind: 'create-file' | 'create-folder'; path: string }
+  | { id: string; kind: 'create-folder'; path: string }
   | { id: string; kind: 'delete-file' | 'delete-folder'; path: string }
 
 // Not exported on the desktop (knip single-consumer rule): every caller
@@ -64,12 +64,6 @@ export function applyPendingTreeMoves(
   let nextFolders = [...folders]
 
   for (const change of moves) {
-    if (change.kind === 'create-file') {
-      if (!nextFiles.some((file) => file.path === change.path)) {
-        nextFiles.push({ path: change.path, kind: 'file' })
-      }
-      continue
-    }
     if (change.kind === 'create-folder') {
       if (!nextFolders.includes(change.path)) nextFolders.push(change.path)
       continue
@@ -94,9 +88,6 @@ export function pendingTreeMoveSettled(
   files: ReadonlyArray<FileRow>,
   folders: ReadonlyArray<FolderInput>,
 ): boolean {
-  if (move.kind === 'create-file') {
-    return files.some((file) => file.path === move.path)
-  }
   if (move.kind === 'create-folder') {
     return folders.includes(move.path)
   }

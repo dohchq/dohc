@@ -13,6 +13,7 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { pendingHeadingTargetForOpen, type Workspace } from "./DesktopWorkspaceShell";
 import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalescer";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
@@ -1434,7 +1435,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
   });
 
-  it("a user open queued before the load resolves wins over stored state (the exact stale-ref race)", async () => {
+  it("a file opened under the cover opens alongside the saved tabs (the exact stale-ref race)", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
@@ -1442,31 +1443,135 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
     await act(async () => {
-      // Resolve the load first (queues its.then as a microtask), then click
-      // via a raw dispatch: React commits the open synchronously but defers
-      // passive effects (a scheduler macrotask), so when the awaited
-      // microtask runs the .then, wbRef still holds the stale default. Only
-      // the synchronous touched-ref can know the user already acted.
+      // Resolve the load first (queues its .then as a microtask), then click
+      // via a raw dispatch, before the saved layout commits.
       stored.resolve(STORED_STATE);
       row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
 
-    // The user's open survived; the stored tabs did not clobber it.
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(screen.queryByTestId("tab-b.md")).toBeNull();
-    // And the pre-load action is durable: it gets written (immediate write on
-    // load-settle, then the debounced writer once the commit lands).
-    await waitFor(
-      () => {
-        const states = bridge.setWorkspaceUiState.mock.calls.map(
-          ([payload]) => payload.state,
-        );
-        expect(
-          states.some((state) => storedTabs(state).includes("a.md")),
-        ).toBe(true);
-      },
-    );
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+    await waitFor(() => {
+      const states = bridge.setWorkspaceUiState.mock.calls.map(([payload]) => storedTabs(payload.state));
+      expect(states.some((tabs) => tabs.includes("a.md") && tabs.includes("b.md"))).toBe(true);
+    });
+  });
+
+  it("opens a file the OS opened under the cover once the saved tabs apply", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    act(() => bridge.emitWorkspaceActivated(WORKSPACE, "a.md"));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("opens a file picked in Go to under the cover once the saved tabs apply", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    fireEvent.click(await screen.findByTestId("titlebar-quick-open"));
+    fireEvent.click(await within(await screen.findByTestId("quick-open")).findByRole("button", { name: /a\.md/ }));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("drops a command given under the cover instead of running it on the saved tabs", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    act(() => {
+      bridge.emitMenuCommand("toggle-sidebar");
+      bridge.emitMenuCommand("export-workspace");
+    });
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(bridge.exportWorkspaceZip).not.toHaveBeenCalled();
+  });
+
+  it("opens Settings from the menu under the cover, as its shortcut does", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    act(() => bridge.emitMenuCommand("settings"));
+    await waitFor(() => expect(document.querySelector("[data-dohc-modal='true']")).not.toBeNull());
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("keeps the saved tabs when the rail is used under the cover", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("activity-history"));
+
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("opens every file the OS opened before the workspace opened, next to the saved tabs", async () => {
+    const opened = deferred<typeof SYNC_STATUS>();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.openWorkspace.mockImplementationOnce(() => opened.promise);
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: ["a.md", "b.md", "c.md"].map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    act(() => {
+      bridge.emitWorkspaceActivated(WORKSPACE, "a.md");
+      bridge.emitWorkspaceActivated(WORKSPACE, "c.md");
+    });
+
+    await act(async () => {
+      opened.resolve(SYNC_STATUS);
+      await opened.promise;
+    });
+
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-c.md").dataset.active).toBe("true");
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
   // Journey 2: rolling back a rename left `assets/alpha-renamed.png`
@@ -3290,11 +3395,7 @@ describe("ui-state merge-on-load", () => {
       workspace={WORKSPACE}
       workspaces={[WORKSPACE]}
       {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: {
-        ...DEFAULT_USER_SETTINGS,
-        profile: enabled ? { agentName: "Nova" } : {},
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled, command: enabled ? "node agent.mjs" : "" },
-      } }}
+      userSettings={{ source: "stored", settings: enabled ? settingsWithAgent({ name: "Nova" }) : DEFAULT_USER_SETTINGS }}
       onSwitchWorkspace={() => {}}
     />);
     await screen.findByTestId("chats-personal-feed");

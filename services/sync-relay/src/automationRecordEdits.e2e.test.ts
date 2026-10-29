@@ -32,7 +32,8 @@ import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
 import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
-import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { ChatsLiveAdapter, DaemonRefusalError, isEngineStoreBusyRefusal, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {SHARED_BUTTON_HELD} from "@dohc/automation-executor/button-presser";
 import {registerStopAndRestoreIpc} from "../../../apps/desktop/src/ipc/stopAndRestoreIpc";
 import {CHANNELS} from "../../../apps/desktop/src/ipc/channels";
@@ -308,8 +309,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
         return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
       }
       if (request.method === "liveApplication.ownerOutbox") {
-        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
-        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null; retryDeliveryId: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState, retryDeliveryId: result.retryDeliveryId}};
       }
       if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
         const params = request.params as {[key: string]: JsonValue};
@@ -331,7 +332,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now()})!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
@@ -360,7 +361,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   const delivery = automationRecordDelivery({replica, namespace, ownerUserId: "owner", capture});
   const recordEngine = replicaRecordEngine(replica);
   recordEngine.prepareSharedRecord = (_path, signal) => delivery.synchronize(binding, signal);
-  recordEngine.deliverSharedRecord = (_path, signal) => delivery.drain(binding, signal);
+  recordEngine.deliverSharedRecord = async (_path, signal) => { await delivery.drain(binding, signal); };
   const context = replicaRecordEditContext(replica, recordEngine, copy.lifetime);
   const author = {...AUTOMATION, onBehalfOf: "owner"};
   loseAck = true;
@@ -743,13 +744,17 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
     sync: async () => undefined, withRecordWork: async work => {laneEntries++; return work();}};
   const bindingReads = vi.spyOn(storage, "automationRecordBinding");
   const capture = vi.fn(async (): Promise<never> => {throw Error("Find must not capture the owner host");});
+  const errors: Array<{context: string; error: unknown}> = [];
   const tracker = createAutomationAcceptedRecords({replica, namespace: "find-5000", storage, synchronize: capture, onError: (_path, error) => {throw error;}});
+  const prune = vi.spyOn(VersionedLiveAdapter.prototype, "pruneAutomationHistory").mockRejectedValue(
+    new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined));
+  cleanup.push(async () => {prune.mockRestore();});
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   let options: ConstructorParameters<typeof CollectionAutomations>[0] | undefined;
   const running = await startAutomationServer({storage, server: {label: "Benchmark"},
     replicas: {root: localRoot, engineExecutable: engine.require(), relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "find-5000"},
     recordDelivery: {namespace: "find-5000", capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
-    noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (_context, error) => {throw error;},
+    noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (context, error) => {errors.push({context, error});},
     createExecutor: input => {options = input; return new CollectionAutomations(input);},
     startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
       failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined};}});
@@ -784,6 +789,12 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
     beforeRecordLanes: 5000, afterRecordLanes: 0, liveRecords: 0, filter: query.filter, limit: query.limit};
   console.log("FIND_5000 " + JSON.stringify(measurement));
   if (process.env.DOHC_AUTOMATION_FIND_MEASUREMENT) await writeFile(process.env.DOHC_AUTOMATION_FIND_MEASUREMENT, JSON.stringify(measurement));
+  await vi.waitFor(() => expect(prune).toHaveBeenCalled(), {timeout: DEADLINE_MS});
+  await running.close();
+  const unexpectedErrors = errors.filter(({context, error}) =>
+    context !== `automations in workspace "${WORKSPACE}": expire automation run history` ||
+    !(error instanceof DaemonRefusalError && isEngineStoreBusyRefusal(error) && error.retry === "afterBackoff"));
+  expect(unexpectedErrors.map(({context, error}) => `${context}: ${String(error)}`)).toEqual([]);
 }, 180_000);
 
 it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as const)(
@@ -849,8 +860,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
         return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
       }
       if (request.method === "liveApplication.ownerOutbox") {
-        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
-        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null; retryDeliveryId: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState, retryDeliveryId: result.retryDeliveryId}};
       }
       if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
         const params = request.params as {[key: string]: JsonValue};
@@ -872,7 +883,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const nativeRegistration = consumer.captureRegistration(binding);
   const common = {storage, bounds: profile.namedLive.host, validate,

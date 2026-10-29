@@ -9,6 +9,102 @@ use std::{
 use tokio::sync::OnceCell;
 
 const MAX_ENTRIES: usize = 16;
+pub const MAX_FOLD_SOURCE_BYTES: usize = 100 * 1024;
+
+pub struct FoldPreparation {
+    request: Request,
+    marker: crate::Marker,
+    vector: Vec<u8>,
+    deletes: Vec<u8>,
+}
+
+pub struct PreparedFold {
+    pub key: DocKey,
+    pub path: String,
+    marker: crate::Marker,
+    vector: Vec<u8>,
+    deletes: Vec<u8>,
+    source_sha: String,
+    pub delta: Vec<u8>,
+}
+
+impl PreparedFold {
+    pub fn matches(&self, key: &DocKey, marker: &crate::Marker, doc: &Ydoc, source: &str) -> bool {
+        self.key == *key
+            && self.marker == *marker
+            && self.vector == doc.encode_state_vector()
+            && self.deletes == doc.encode_delete_set()
+            && self.source_sha == crate::hex_sha256(source.as_bytes())
+    }
+}
+
+impl FoldPreparation {
+    pub async fn construct(self, resolver: &ReaderResolver) -> Option<PreparedFold> {
+        let key = DocKey::new(
+            &self.request.document.workspace_id,
+            &self.request.document.main_version_id,
+            &self.request.document.object_id,
+        )
+        .ok()?;
+        let path = self.request.current_path.clone();
+        let source_sha = crate::hex_sha256(&self.request.source);
+        let delta = resolver.construct_fold(self.request).await?;
+        Some(PreparedFold {
+            key,
+            path,
+            source_sha,
+            delta,
+            marker: self.marker,
+            vector: self.vector,
+            deletes: self.deletes,
+        })
+    }
+}
+
+/// Copy the inputs only. No child is started while this connection is borrowed.
+pub fn prepare_fold(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    source: &str,
+) -> Result<Option<FoldPreparation>, CollabError> {
+    if source.len() > MAX_FOLD_SOURCE_BYTES {
+        return Ok(None);
+    }
+    let Some(marker) = crate::read_marker_in(conn, key)? else {
+        return Ok(None);
+    };
+    if marker.content_kind != crate::ContentKind::Richdoc
+        || marker.lineage_claim_status != crate::LineageClaimStatus::Exact
+        || marker.path.as_deref() != Some(path)
+    {
+        return Ok(None);
+    }
+    let Some(claim) = marker.lineage_claim_id.clone() else {
+        return Ok(None);
+    };
+    let doc = crate::load_doc_in(conn, key)?;
+    if doc.has_reader_source() || doc.has_pending_dependencies() {
+        return Ok(None);
+    }
+    Ok(Some(FoldPreparation {
+        vector: doc.encode_state_vector(),
+        deletes: doc.encode_delete_set(),
+        marker,
+        request: Request {
+            method: Method::ConstructFold,
+            document: Document {
+                workspace_id: key.workspace_id.clone(),
+                main_version_id: key.version_id.clone(),
+                object_id: key.object_id.clone(),
+                lineage_claim_id: claim,
+            },
+            current_path: path.to_owned(),
+            source: source.as_bytes().to_vec(),
+            checkpoint: doc.encode_full_state(),
+        },
+    }))
+}
 
 fn transient(failure: &Failure) -> bool {
     matches!(
@@ -141,6 +237,34 @@ pub struct ReaderResolver {
     entries: Mutex<VecDeque<Entry>>,
 }
 impl ReaderResolver {
+    /// Outside-fold construction has no snapshot-witness cache or retry policy.
+    /// Its caller must await this future outside the writer and recheck its inputs.
+    pub async fn construct_fold(&self, request: Request) -> Option<Vec<u8>> {
+        let checkpoint_sha = crate::hex_sha256(&request.checkpoint);
+        let source_sha = crate::hex_sha256(&request.source);
+        let source_length = request.source.len();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.reader.request(request),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        match outcome {
+            Outcome::Constructed {
+                proof,
+                delta,
+                checkpoint_sha256,
+            } if checkpoint_sha256 == checkpoint_sha
+                && proof.source_sha256 == source_sha
+                && proof.source_byte_length == source_length =>
+            {
+                Some(delta)
+            }
+            _ => None,
+        }
+    }
+
     pub fn new(reader: Arc<Reader>) -> Self {
         Self {
             reader,
@@ -177,7 +301,7 @@ impl ReaderResolver {
             .map(|_| ())
     }
 
-    fn check_snapshot(
+    pub(crate) fn check_snapshot(
         &self,
         conn: &Connection,
         key: &DocKey,

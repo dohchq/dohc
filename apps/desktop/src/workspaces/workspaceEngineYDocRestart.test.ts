@@ -470,7 +470,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
 
   const settled = await session.settleNow();
-  expect(settled.content).toBe("seed survives remote");
+  expect(settled?.content).toBe("seed survives remote");
   expect(openedDocs).toHaveLength(2);
   expect(openedDocs[1].getText("plainText").toString()).toBe(
     "seed survives remote",
@@ -487,7 +487,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   );
 
   const settledAfterSecondRestart = await session.settleNow();
-  expect(settledAfterSecondRestart.content).toBe(
+  expect(settledAfterSecondRestart?.content).toBe(
     "seed survives twice remote",
   );
   expect(openedDocs).toHaveLength(3);
@@ -1558,7 +1558,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
   const settled = await session.settleNow();
 
-  expect(settled.content).toBe("seed survives");
+  expect(settled?.content).toBe("seed survives");
   expect(lifecycle.slice(0, 3)).toEqual(["open-1", "close-1", "open-2"]);
   expect(onError).not.toHaveBeenCalled();
   await session.close({ settle: false });
@@ -2128,7 +2128,7 @@ it("retires a persistent local failure and releases every failed lease", async (
   advanceBackoff();
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   advanceBackoff();
-  expect((await session.settleNow()).content).toBe("seed");
+  expect((await session.settleNow())?.content).toBe("seed");
   expect(onError).toHaveBeenCalledWith(
     "Y.Doc local update of note.md",
     refusal,
@@ -2467,7 +2467,7 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   await expect.poll(() => state.generation).toBe(2);
 
   const settled = await session.settleNow();
-  expect(settled.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
+  expect(settled?.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
   expect(generations[1]?.getText("plainText").toString()).toBe(
     "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
   );
@@ -2518,7 +2518,7 @@ it("journals a keyed write on a dead session under its own key once the daemon i
   // follows as its own journal write, under its own key.
   expect(state.generation).toBe(2);
   expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/), "claim/1/0"]);
-  expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
+  expect((await session.settleNow())?.content).toBe("PRE_KILL KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -2555,7 +2555,7 @@ it.each([false, true])("forwards a keyed write acknowledged after an uncertain f
   expect(editor.getText("plainText").toString()).toBe("Late acknowledgement");
   expect(fixture.state.journalKeys).toEqual(["late-ack"]);
   typeInto(editor, session, " and later typing");
-  expect((await session.settleNow()).content).toBe("Late acknowledgement and later typing");
+  expect((await session.settleNow())?.content).toBe("Late acknowledgement and later typing");
   editor.destroy(); await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2575,7 +2575,7 @@ it.each(["commit-then-cancel", "commit-then-internal"] as const)("dedupes %s wit
     const original = keyedUpdate(session.doc, "Saved once");
     if (confirmed) await session.applyDecidedLocalUpdate(() => original, undefined, { idempotencyKey: "uncertain" });
     else session.applyLocalUpdate(original, undefined, { idempotencyKey: "uncertain" });
-    expect((await session.settleNow()).content).toBe("Saved once");
+    expect((await session.settleNow())?.content).toBe("Saved once");
     expect(fixture.state.journalKeys).toEqual(["uncertain"]);
     expect(fixture.state.durableUpdates).toHaveLength(1);
     expect(notices).not.toHaveBeenCalled();
@@ -2601,7 +2601,7 @@ it.each([false, true])("keeps a write after one Internal answer when confirmed i
   const update = keyedUpdate(session.doc, "Saved after retry");
   if (confirmed) await session.applyDecidedLocalUpdate(() => update, undefined, { idempotencyKey: "retry" });
   else session.applyLocalUpdate(update, undefined, { idempotencyKey: "retry" });
-  expect((await session.settleNow()).content).toBe("Saved after retry");
+  expect((await session.settleNow())?.content).toBe("Saved after retry");
   expect(fixture.state.journalKeys).toEqual(["retry"]);
   expect(notices).not.toHaveBeenCalled();
   await session.close({ settle: false }); await capture.stop();
@@ -2632,7 +2632,7 @@ it.each(["deadline", "overloaded", "backoff", "client-timeout", "internal"] as c
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(notices).not.toHaveBeenCalled();
-  expect((await session.settleNow()).content).toBe("Saved after the burst");
+  expect((await session.settleNow())?.content).toBe("Saved after the burst");
   expect(fixture.state.journalKeys).toEqual(["burst"]);
   await session.close({ settle: false }); await capture.stop();
 });
@@ -2666,7 +2666,7 @@ it.each(["insert", "delete"] as const)("acknowledges a durable %s after its thir
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   advanceBackoff();
   fixture.state.applyFaults.push("commit-then-internal");
-  expect((await session.settleNow()).content).toBe(kind === "delete" ? "" : "Base saved once");
+  expect((await session.settleNow())?.content).toBe(kind === "delete" ? "" : "Base saved once");
   expect(fixture.state.journalKeys.filter(key => key === "third-commit")).toHaveLength(1);
   expect(notices).not.toHaveBeenCalled();
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
@@ -2699,7 +2699,7 @@ it.each(["deadline", "overloaded", "backoff", "client-timeout"] as const)("does 
     await expect(session.settleNow()).rejects.toThrow(/closed/i);
     expect(notices).not.toHaveBeenCalled();
   }
-  expect((await session.settleNow()).content).toBe("Still waiting");
+  expect((await session.settleNow())?.content).toBe("Still waiting");
   await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2732,7 +2732,7 @@ it("retires an unanswered deletion whose clocks are durable but whose delete set
       code: "INTERNAL", message: "unanswered deletion", retry: "no",
     }, undefined));
     if (attempt < 2) await expect(session.settleNow()).rejects.toThrow(/closed/i);
-    else expect((await session.settleNow()).content).toBe("Keep me");
+    else expect((await session.settleNow())?.content).toBe("Keep me");
   }
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
@@ -2777,7 +2777,7 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   }
   if (confirmed) await session.applyDecidedLocalUpdate(() => independent, undefined, { idempotencyKey: "independent" });
   else session.applyLocalUpdate(independent, undefined, { idempotencyKey: "independent" });
-  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect((await session.settleNow())?.content).toBe("Saved independent");
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(fixture.state.journalKeys).toEqual(["independent"]);
   expect(notices).toHaveBeenCalledTimes(confirmed ? 0 : 1);
@@ -2793,7 +2793,9 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   await session.close({ settle: false }); await capture.stop();
 });
 
-it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
+// "frozen": typing after the server refused this file's earlier edits. The
+// engine refuses it, the notice says why, and the recovery row keeps it.
+it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
   const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
@@ -2826,8 +2828,8 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const busy = kind === "uncertain-after-busy" && attempt === 1;
     fixture.state.applyRefusals.push(new DaemonRefusalError({
-      code: busy ? "OVERLOADED" : kind === "definitive" ? "INVALID_PARAMS" : "INTERNAL",
-      message: busy ? "engine-store-busy" : "future-refusal", retry: busy ? "afterBackoff" : "no",
+      code: busy ? "OVERLOADED" : kind === "definitive" || kind === "frozen" ? "INVALID_PARAMS" : "INTERNAL",
+      message: busy ? "engine-store-busy" : kind === "frozen" ? "owner-outbox-frozen" : "future-refusal", retry: busy ? "afterBackoff" : "no",
     }, undefined));
   }
   for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
@@ -2835,11 +2837,12 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
     expect(notices).toHaveLength(0);
     advanceBackoff();
   }
-  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect((await session.settleNow())?.content).toBe("Saved independent");
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "No answer after three attempts.");
+  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit."
+    : kind === "frozen" ? "Live editing is paused for this file." : "No answer after three attempts.");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
@@ -2871,7 +2874,7 @@ it("reports dependent typing when a caller-confirmed original is refused during 
   }, undefined));
   errors.mockClear();
 
-  expect((await session.settleNow()).content).toBe("");
+  expect((await session.settleNow())?.content).toBe("");
   expect(fixture.state.journalKeys).toEqual([]);
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices).toHaveBeenCalledWith("typing", expect.stringContaining("Use Save copy"));
@@ -2901,7 +2904,7 @@ it("names the pending queue limit and releases its byte budget after draining", 
   expect(notices[0]).not.toContain("too large");
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   await session.applyDecidedLocalUpdate(doc => keyedUpdate(doc, "later"), undefined, { idempotencyKey: "after-drain" });
-  expect((await session.settleNow()).content).toBe("later");
+  expect((await session.settleNow())?.content).toBe("later");
   expect(notices).toHaveLength(1);
   await session.close({ settle: false }); await capture.stop();
 });
@@ -2961,7 +2964,7 @@ it.each([
       }
       expect(setAside.some(text => text.includes("refused"))).toBe(!confirmed);
       typeInto(mirror, session, "later");
-      expect((await session.settleNow()).content).toBe("Saved later");
+      expect((await session.settleNow())?.content).toBe("Saved later");
       expect(session.doc.getText("plainText").toString()).toBe("Saved later");
       expect(notices).toHaveLength(confirmed ? 0 : 1);
       mirror.destroy();
@@ -3005,7 +3008,7 @@ it("sends a keyed write again under its key after its daemon died, so the key st
     idempotencyKey: "claim/1/1",
   });
   expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
-  expect((await session.settleNow()).content).toBe("FIRST NEXT");
+  expect((await session.settleNow())?.content).toBe("FIRST NEXT");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3042,7 +3045,7 @@ it("answers success when a keyed write's answer was lost and its resend finds th
 
   expect(state.journalKeys).toEqual(["claim/1/0"]);
   expect(session.doc.getText("plainText").toString()).toBe("KEYED");
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3061,7 +3064,7 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
 
   // It was: the daemon's lineage holds it once the daemon is back.
   state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
   await session.close({ settle: false });
   await capture.stop();
@@ -3087,7 +3090,7 @@ it("says a keyed write may have been recorded after two sends went unanswered", 
     idempotencyKey: "claim/1/0",
   });
   expect(state.journalKeys).toEqual(["claim/1/0"]);
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3145,7 +3148,7 @@ it("rejects a keyed write on a dead session while the daemon is still down, and 
   expect(errors.filter((context) => context.startsWith("Y.Doc local update"))).toHaveLength(1);
 
   state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("TYPED ");
+  expect((await session.settleNow())?.content).toBe("TYPED ");
   expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/)]);
   await session.close({ settle: false });
   await capture.stop();
@@ -3193,7 +3196,7 @@ it("a failure sink that throws cannot turn a daemon death into an unhandled reje
     state.daemonAlive = true;
     typeInto(rendererDoc, session, "AFTER_RESTART");
     await expect.poll(() => state.generation).toBe(2);
-    expect((await session.settleNow()).content).toBe(
+    expect((await session.settleNow())?.content).toBe(
       "PRE_KILL DURING_OUTAGE AFTER_RESTART",
     );
     await session.close({ settle: false });
@@ -3364,7 +3367,7 @@ it("restores an acknowledged base before pending originals on explicit settle", 
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   fixture.loseDurableLineage();
   fixture.state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("Saved pending");
+  expect((await session.settleNow())?.content).toBe("Saved pending");
   expect(fixture.state.recoveryBases).toHaveLength(1);
   const base = new Y.Doc();
   Y.applyUpdate(base, fixture.state.recoveryBases[0]!);
@@ -3465,7 +3468,7 @@ it("a settle after the daemon returns recovers the session on its own", async ()
   state.daemonAlive = true;
   const settled = await session.settleNow();
 
-  expect(settled.content).toBe("alive PRE_KILL");
+  expect(settled?.content).toBe("alive PRE_KILL");
   expect(state.generation).toBe(2);
   await session.close({ settle: false });
   await capture.stop();

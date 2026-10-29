@@ -89,6 +89,44 @@ export const DROP_IMPORT_REFUSALS = {
   skipped: `dohc reads up to ${DROP_IMPORT_LIMITS.skipped.toLocaleString("en-US")} files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.`,
 } as const;
 
+// Why an import left a source out. The shell words each reason. A result
+// lists the first IMPORT_SKIPS_LISTED, and counts the rest.
+export const IMPORT_SKIP_REASONS = [
+  "link",
+  // A socket, device or pipe.
+  "not-a-file",
+  // Gone, or dohc may not read it.
+  "unreadable",
+  // Inside a workspace's .dohc folder.
+  "workspace-data",
+  // Dropped on its own: a file the OS makes, such as .DS_Store.
+  "system-file",
+  // Dropped on its own: a name every workspace leaves out, such as node_modules.
+  "left-out",
+  // A name dohc keeps for itself, such as .dohc.
+  "dohc-name",
+  // A name Windows can't use, such as CON.
+  "windows-name",
+  // A name dohc would have to change to save, such as a\b.
+  "name",
+  // Too long to save in that folder, even shortened.
+  "too-long",
+  // The name and its 99 numbered copies are all taken.
+  "taken",
+  // A shared view holds only files, so a folder with none lands nothing.
+  "no-files",
+  // Over a shared view's limit for a file, or for text.
+  "too-large",
+  "too-large-text",
+] as const;
+export const IMPORT_SKIPS_LISTED = 100;
+// The longest path Windows can name, so a skip from deep in a dropped
+// folder still fits.
+export const IMPORT_SKIPPED_PATH_MAX_CHARS = 32_767;
+// Past this many "name (N).ext" copies, a name collision skips the source
+// instead of probing forever.
+export const IMPORT_COLLISION_RENAMES = 99;
+
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
 // schema enforces them at both ends of the channel.
@@ -202,6 +240,8 @@ export const CHANNELS = {
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
+  chatDispatchPaused: "desktop:chat-dispatch-paused",
+  chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",
@@ -300,6 +340,11 @@ export const CHANNELS = {
   // carries a round id; each renderer answers clear, hold, or cancel with it.
   exitRound: "desktop:exit-round",
   exitRoundAnswer: "desktop:exit-round-answer",
+  // Version rounds: before the CLI or MCP changes a workspace's versions,
+  // main asks each window showing it to save its open edits. Each answers
+  // ready or refused with the round id, and hears the round's end.
+  versionRound: "desktop:version-round",
+  versionRoundAnswer: "desktop:version-round-answer",
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",

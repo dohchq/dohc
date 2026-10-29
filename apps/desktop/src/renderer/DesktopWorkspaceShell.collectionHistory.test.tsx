@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
@@ -129,5 +129,26 @@ describe("a Collection change in the History timeline", () => {
       page.loading = null;
       loading.resolve();
     }
+  });
+});
+
+describe("the Collections section", () => {
+  it("shows its controls once the list has loaded, and keeps them while the archived list loads", async () => {
+    const user = userEvent.setup();
+    const listed = deferred<DatasetResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.dataset = vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
+      if (request.action !== "list") throw new Error(`Unexpected dataset action: ${request.action}`);
+      return request.includeArchived ? await new Promise<DatasetResult>(() => {}) : await listed.promise;
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledOnce());
+    expect(screen.queryByLabelText("Archived collections")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+
+    await act(async () => listed.resolve({ kind: "list", datasets: [], nextCursor: null }));
+    await user.click(await screen.findByLabelText("Archived collections"));
+    expect(screen.getByRole("button", { name: "Restore from recovery file" })).toBeTruthy();
+    expect((screen.getByLabelText("Archived collections") as HTMLInputElement).checked).toBe(true);
   });
 });

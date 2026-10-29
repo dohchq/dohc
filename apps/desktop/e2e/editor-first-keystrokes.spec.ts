@@ -34,8 +34,10 @@ async function withDesktop(
   }
 }
 
+// The palette's New file… makes the file before its editor opens.
 async function createDocument(page: Page, name: string): Promise<void> {
-  await page.keyboard.press("ControlOrMeta+n");
+  await page.keyboard.press("ControlOrMeta+k");
+  await page.getByTestId("command-palette").getByRole("option", { name: "New file…", exact: true }).click();
   const fileName = page.getByRole("textbox", { name: "File name" });
   await expect(fileName).toBeFocused();
   await fileName.fill(name);
@@ -107,33 +109,6 @@ test("keys typed right after the page title's Enter land in the body", async () 
       temp,
       "lisbon.md",
       /^---\r?\ntitle: Lisbon\r?\n---\r?\n\r?\nTrip to Lisbon\s*$/,
-    );
-  });
-});
-
-test("keys typed right after Ctrl+N reach the new document while it opens", async () => {
-  await withDesktop([], async (page, temp) => {
-    await createDocument(page, "packing.md");
-
-    // No wait for the session: the title and the body take keys at once.
-    const title = page.getByLabel("Page title");
-    await title.click();
-    await page.keyboard.type("Packing");
-    await tabIntoEditor(page);
-    await page.keyboard.type("Charger");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("Passport");
-
-    await expect(title).toHaveValue("Packing");
-    await expect(page.getByTestId("markdown-editor").locator("p")).toHaveText([
-      "Charger",
-      "Passport",
-    ]);
-    await expectSettledFile(
-      page,
-      temp,
-      "packing.md",
-      /^---\r?\ntitle: Packing\r?\n---\r?\n\r?\nCharger\r?\n\r?\nPassport\s*$/,
     );
   });
 });

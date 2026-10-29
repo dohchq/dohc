@@ -301,6 +301,13 @@ describe("adding a share to this workspace", () => {
 describe("active file sharing", () => {
   it("opens the relay share dialog for the active inspector path and returns a code", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true,
+      workspaceSyncConnected: true,
+    }));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -310,6 +317,8 @@ describe("active file sharing", () => {
 
     const dialog = await screen.findByTestId("share-dialog");
     expect(within(dialog).getByText("a.md")).toBeTruthy();
+    await waitFor(() => expect(dialog.querySelector("[inert]")).toBeNull());
+    expect(within(dialog).queryByTestId("share-setup")).toBeNull();
 
     await user.type(within(dialog).getByTestId("share-email"), "friend@dohc.test");
     await user.click(within(dialog).getByTestId("share-create"));
@@ -322,6 +331,74 @@ describe("active file sharing", () => {
       access: "view",
       paths: ["a.md"],
     });
+  });
+
+  it("opens the same dialog from the palette's Share… for the active file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).getAllByRole("option").map((row) => row.textContent)).toEqual(["Share…"]);
+    await user.keyboard("{Enter}");
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+  });
+
+  // The palette hides Share… whenever the toolbar draws no Share file.
+  it.each<[string, Workspace | undefined, string[]]>([
+    ["no editor shows a file", undefined, []],
+    ["the workspace is a shared view", SHARE_VIEW, ["a.md"]],
+    ["the file is in a received share", undefined, ["shared-with-me/sam/a.md"]],
+  ])("offers no Share… when %s", async (_name, workspace, tabs) => {
+    const bridge = (workspace ? makeShareBridge : makeBridge)(Promise.resolve(storedStateWithTabs(tabs)));
+    const user = userEvent.setup();
+    renderShell(bridge, workspace);
+    if (workspace) await settleShareView();
+    if (tabs.length > 0) await screen.findByTestId("file-inspector");
+    expect(screen.queryByTestId("file-share")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("share");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).queryAllByRole("option")).toEqual([]);
+    expect(within(palette).getByText("No matching commands")).toBeTruthy();
+  });
+
+  // Share reads the same facts as About's Access, and its one action opens
+  // the place that fixes the cause, where About's would.
+  it.each([
+    [
+      "does not sync",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false },
+      "not-synced", "Set up sync", "settings-section-cloud",
+    ],
+    [
+      "is not connected to its server",
+      { connected: false, email: "", serverUrl: "", workspaceSynced: true, workspaceServerUrl: "https://sync.example.org" },
+      "signed-out", "Connect server", "cloud-server-url",
+    ],
+  ] as const)("says why before the form when the workspace %s", async (_case, status, reason, action, opens) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("file-share"));
+
+    const setup = await within(await screen.findByTestId("share-dialog")).findByTestId("share-setup");
+    expect(setup.dataset.reason).toBe(reason);
+    if (reason === "signed-out") expect(setup.textContent).toContain("Not connected to sync.example.org");
+    await user.click(within(setup).getByRole("button", { name: action }));
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    expect(screen.queryByTestId("share-dialog")).toBeNull();
   });
 });
 
@@ -1740,14 +1817,14 @@ describe("chats surface after a failed capture build", () => {
 });
 
 // #687/#589: the note's precedence and exact copy are pinned at the
-// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// AgentList layer, but every test there hands
 // sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
 // would leave every other suite green. This test drives the real command
 // palette -> Settings -> Agents path through the shell itself.
-describe("runner note reaches the card through the shell's own wiring", () => {
+describe("the Check note reaches Settings › Agents through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
@@ -1758,13 +1835,14 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 
     // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await screen.findByTestId("command-palette");
-    await user.keyboard("mcp{Enter}");
+    const palette = await screen.findByTestId("command-palette");
+    await user.keyboard("mcp");
+    await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
-        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+        "The workspace engine starts when dohc starts. Restart dohc to check an agent.",
       ),
     );
   });
@@ -1780,7 +1858,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
       ),
     );
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
         "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",

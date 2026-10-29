@@ -217,18 +217,28 @@ body {
 }
 
 .nav-github {
-  padding: 4px 2px;
-  border-bottom: 1px solid transparent;
-  color: var(--subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 12px;
   text-decoration: none;
   transition: color 0.14s ease-out, border-color 0.14s ease-out;
 }
 
-.nav-github:hover {
-  color: var(--ink);
-  border-bottom-color: var(--ink);
+.nav-github:hover { color: var(--ink); border-color: var(--ink); }
+.nav-github:focus-visible { border-radius: 10px; }
+.nav-github svg { width: 15px; height: 15px; flex: none; fill: currentColor; }
+
+/* A narrower header has room for only the mark. */
+@media (max-width: 840px) {
+  .nav-github { padding: 0 10px; }
+  .nav-github-label { display: none; }
 }
 
 @media (max-width: 640px) {
@@ -236,7 +246,6 @@ body {
   .nav-links { display: flex; gap: 10px; margin-left: auto; }
   .nav-links a { font-size: 11px; }
   .nav-end { padding-left: 0; border-left: 0; gap: 8px; }
-  .nav-github { font-size: 11px; }
 }
 
 /* Below 380px the logo and the alpha tag leave no room for the wordmark. */

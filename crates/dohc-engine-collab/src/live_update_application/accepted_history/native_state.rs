@@ -889,8 +889,11 @@ pub(super) fn read(
         evidence = metadata.evidence_digest;
         binding = metadata.accepted.binding;
     }
-    if cursor != through || doc.has_missing_updates() {
+    if cursor != through {
         return Err(ApplicationError::Conflict);
+    }
+    if doc.has_missing_updates() {
+        return Err(ApplicationError::AcceptedStateIncomplete);
     }
     Ok(doc)
 }

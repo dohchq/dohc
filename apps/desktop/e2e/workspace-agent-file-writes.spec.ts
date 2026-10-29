@@ -30,7 +30,7 @@ test("dashboard-03: four MCP file writes show the agent in History", async () =>
     const rows = page.locator('[data-testid="engine-moment-open"][data-moment-path^="dashboard/"]');
     await expect(rows).toHaveCount(4);
     await expect(rows.getByTestId("engine-moment-source")).toHaveText(Array(4).fill("Dashboard agent"));
-    for (const label of ["Local file edit", "Reconciled offline edits", "dohc-mcp"]) {
+    for (const label of ["Local file edit", "Changed while dohc was closed", "Added existing files", "Found changes in the folder", "dohc-mcp"]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
     // A flush before a fifth request ensures watcher observations of the four

@@ -29,8 +29,9 @@ test-support = []
 held-proof-memory = []
 
 [dependencies]
+memchr = "2.8.3"
 dohc-engine-reader = { path = "../dohc-engine-reader" }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 # The durable store (single writer, migration ledger with the R11a ydoc tables,
 # content-addressed binary_blobs, the R04 materialization-job pipeline).
 dohc-engine-storage = { path = "../dohc-engine-storage" }

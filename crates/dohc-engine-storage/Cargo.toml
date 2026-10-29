@@ -14,12 +14,14 @@ description = "SQLite storage for the workspace engine: one writable connection 
 # in-process crash tier and by `cargo test --workspace` via feature unification.
 fault-injection = []
 # Hooks tests above this crate wait on, such as the background checkpoint's
-# completions. Production builds must not enable this feature.
+# completions, and builds stores an older build left, for other crates' tests.
+# Production builds must not enable this feature.
 test-support = []
 
 [dependencies]
-# `hooks` counts open work and search changes; `functions` exposes the search counter.
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
+# `hooks` counts open work and search changes; `functions` exposes the search counter;
+# `backup` copies an earlier store for its recovery copy.
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions", "backup"] }
 sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a

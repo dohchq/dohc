@@ -81,6 +81,41 @@ struct Fixture {
 }
 const OP: &str = "dohc-operation:rename";
 const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
+async fn retry_undo<T, F>(ws: &str, mut operation: impl FnMut() -> F) -> Result<T, RuntimeError>
+where
+    F: std::future::Future<Output = Result<T, RuntimeError>>,
+{
+    let policy: Value = serde_json::from_str(include_str!(
+        "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
+    ))
+    .unwrap();
+    let budget = Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
+    let mut deadline = None;
+    let mut backoff = Duration::from_millis(5);
+    let mut attempts = Vec::new();
+    loop {
+        let start = Instant::now();
+        let result = operation().await;
+        attempts.push(start.elapsed().as_nanos());
+        let retries = attempts.len() - 1;
+        eprintln!("LINK_UNDO_RETRIES request={ws}-undo retries={retries} attempt_ns={attempts:?}");
+        match result {
+            Err(error) if error.is_file_locked() => {
+                let deadline = *deadline.get_or_insert_with(|| Instant::now() + budget);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                tokio::time::sleep(backoff.min(remaining)).await;
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
 fn write(ws: &str, object: &str, path: &str, body: &str, moment: &str) -> WriteText {
     WriteText {
         workspace_id: ws.into(),
@@ -265,6 +300,11 @@ impl Fixture {
                 CancellationToken::new(),
             )
             .await
+    }
+    async fn undo_with_busy_retry(
+        &self,
+    ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        retry_undo(&self.ws, || self.undo()).await
     }
     async fn publish(&self) {
         let _capture = self.capture.clone().lock_owned().await;
@@ -711,7 +751,7 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
         ),
     )
     .await;
-    let result = f.undo().await.unwrap();
+    let result = f.undo_with_busy_retry().await.unwrap();
     assert_eq!(result.moments.len(), 2);
     assert_eq!(
         f.text("source-0000.md").await,
@@ -1493,7 +1533,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         (waits, positions, gaps, retry_evidence)
     });
     let undo_start = Instant::now();
-    let undo = f.admitted(|| f.undo()).await.unwrap();
+    let undo = f.admitted(|| f.undo_with_busy_retry()).await.unwrap();
     assert_eq!(undo.moments.len(), 2001);
     assert!(undo.not_restored.is_empty());
     let undo_ns = undo_start.elapsed().as_nanos();
@@ -1558,7 +1598,7 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
     }));
     let (forward, undone) = tokio::join!(f.pass("stop-for-undo", Arc::new(NoFaults)), async {
         reached.notified().await;
-        let undo = f.undo();
+        let undo = f.undo_with_busy_retry();
         tokio::pin!(undo);
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());

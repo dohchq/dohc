@@ -11,10 +11,11 @@ use crate::search::upsert_file_search_index;
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LineageClaimStatus,
     OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
-    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, Projection, Regime,
-    SceneAsset, WriterDocCache, Ydoc, acknowledge_owner_outbox, append_owner_outbox,
-    encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
-    quarantine_owner_outbox,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRefusal,
+    OwnerOutboxRetryInput, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    acknowledge_owner_outbox, append_owner_outbox, encode_scene_asset_record,
+    encode_scene_asset_records, import_portable_scene, prepare_owner_outbox_recovery_checkpoint,
+    quarantine_owner_outbox, record_owner_outbox_refusal, retry_owner_outbox,
 };
 use dohc_engine_domain::{
     ChangeAttribution, DomainError, ProjectedWriteText, VersionedTextStore,
@@ -90,6 +91,8 @@ pub struct YdocResyncState {
     pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    /// Record facts the resync's deferred drain committed, in drain order.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -189,6 +192,7 @@ impl ActorHandle {
         binding: Option<dohc_engine_collab::LiveObjectBinding>,
         document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
         accepted_cursor: Option<i64>,
+        kept_snapshot: Option<String>,
         action: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -216,13 +220,13 @@ impl ActorHandle {
             };
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
                 "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
-                "clear"=>release::clear_in_tx(tx,&key).map(|()|vec![]),
+                "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    release::release_in_tx(tx,b,accepted_cursor.ok_or(OwnerOutboxError::StopConflict)?,now_ms,|tx,update,actor,attribution,outcome| {
+                    release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
                     }).map(|row|vec![row])
                 },
@@ -343,6 +347,32 @@ impl ActorHandle {
                     conn,
                     &workspace_id,
                     &writes,
+                )
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_list_restore_fenced(
+        &self,
+        workspace_id: String,
+        after: Option<String>,
+        limit: usize,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &workspace_id,
+                    after.as_deref(),
+                    limit,
                 )
             }))
         })
@@ -673,6 +703,66 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_record_refusal(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        refusal: OwnerOutboxRefusal,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(record_owner_outbox_refusal(
+                    store,
+                    &workspace_id,
+                    input,
+                    refusal,
+                    now_ms,
+                ))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_prepare_recovery_checkpoint(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(prepare_owner_outbox_recovery_checkpoint(
+                    store,
+                    &workspace_id,
+                    &outbox_id,
+                ))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_retry(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxRetryInput,
+        token: CancellationToken,
+    ) -> Result<Result<String, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(retry_owner_outbox(store, &workspace_id, input))
             }
         })
         .await
@@ -3503,6 +3593,7 @@ fn ydoc_resync_on_store(
         lineage_originated_here,
         recovered_paths,
         artifact_assets,
+        record_facts: drained.record_facts,
     })
 }
 
@@ -3577,6 +3668,12 @@ pub(super) fn ydoc_unload_pending(
     use dohc_engine_collab::live_update_application::UnloadPending;
     if !reconcile_author_coverage(store, key, now_ms, &NoFaults)? {
         return Ok(Some(UnloadPending::Materialization));
+    }
+    // The store keeps the head no settlement can write while the owner's adoption seed stays refused.
+    if store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::frozen_at_refused_seed(conn, key)
+    })? {
+        return Ok(None);
     }
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);

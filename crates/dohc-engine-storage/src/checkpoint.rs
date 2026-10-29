@@ -61,6 +61,30 @@ impl Drop for HeldReader {
     }
 }
 
+/// The outcome of a bounded wait for checkpoint work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointWait {
+    /// The same cycle is still doing checkpoint work.
+    Running,
+    /// A cycle completed, or the worker is idle.
+    Finished,
+}
+
+struct CheckpointRun<'a>(&'a AtomicBool);
+
+impl<'a> CheckpointRun<'a> {
+    fn start(running: &'a AtomicBool) -> Self {
+        running.store(true, Ordering::Release);
+        Self(running)
+    }
+}
+
+impl Drop for CheckpointRun<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// PASSIVE checkpoints use a separate connection, including during capture.
 #[derive(Debug)]
 pub(crate) struct Checkpoints {
@@ -68,6 +92,7 @@ pub(crate) struct Checkpoints {
     thread: Option<JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
     full_requested: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     completed: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
     #[cfg(test)]
     writer_max: std::sync::atomic::AtomicI64,
@@ -106,12 +131,15 @@ impl Checkpoints {
         let worker_stopped = Arc::clone(&stopped);
         let full_requested = Arc::new(AtomicBool::new(false));
         let worker_full = full_requested.clone();
+        let running = Arc::new(AtomicBool::new(false));
+        let worker_running = running.clone();
         let completed = Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
         let worker_completed = Arc::clone(&completed);
         let thread = std::thread::Builder::new()
             .name("dohc-wal-checkpoint".into())
             .spawn(move || {
                 while rx.recv().is_ok() {
+                    let run = CheckpointRun::start(&worker_running);
                     #[cfg(feature = "fault-injection")]
                     let mut phase =
                         crate::capture_phase::Phase::new("checkpoint_request_cycle", None, 0, true);
@@ -129,6 +157,7 @@ impl Checkpoints {
                     }) {
                         catch_up(&conn, &worker_stopped, full);
                     }
+                    drop(run);
                     let (sequence, signal) = &*worker_completed;
                     *sequence.lock().unwrap() += 1;
                     signal.notify_all();
@@ -151,6 +180,7 @@ impl Checkpoints {
             thread: Some(thread),
             stopped,
             full_requested,
+            running,
             completed,
             #[cfg(test)]
             writer_max: std::sync::atomic::AtomicI64::new(0),
@@ -163,19 +193,10 @@ impl Checkpoints {
         })
     }
 
-    pub(crate) fn next_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub(crate) fn next_cycle(&self) -> impl Fn() -> CheckpointWait + Send + Sync + use<> {
         let completed = self.completed.clone();
-        move || {
-            let before = *completed.0.lock().unwrap();
-            let (sequence, signal) = &*completed;
-            let _wait = signal
-                .wait_timeout_while(
-                    sequence.lock().unwrap(),
-                    std::time::Duration::from_millis(100),
-                    |s| *s <= before,
-                )
-                .unwrap();
-        }
+        let running = self.running.clone();
+        move || wait_for_cycle(&completed, &running)
     }
 
     pub(crate) fn request_full(&self) {
@@ -458,6 +479,25 @@ impl Drop for Checkpoints {
     }
 }
 
+fn wait_for_cycle(
+    completed: &(std::sync::Mutex<u64>, std::sync::Condvar),
+    running: &AtomicBool,
+) -> CheckpointWait {
+    let (sequence, signal) = completed;
+    let guard = sequence.lock().unwrap();
+    let before = *guard;
+    let (sequence, _) = signal
+        .wait_timeout_while(guard, std::time::Duration::from_millis(100), |s| {
+            *s == before
+        })
+        .unwrap();
+    if *sequence == before && running.load(Ordering::Acquire) {
+        CheckpointWait::Running
+    } else {
+        CheckpointWait::Finished
+    }
+}
+
 // A PASSIVE result describes its starting header. Full requests include writes
 // that arrived during I/O; ordinary requests leave a bounded tail for the writer.
 fn catch_up(conn: &Connection, stopped: &AtomicBool, full: bool) {
@@ -518,6 +558,22 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn bounded_wait_reports_a_running_checkpoint_until_it_finishes() {
+        let completed = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+        let running = AtomicBool::new(false);
+        let run = CheckpointRun::start(&running);
+        assert_eq!(
+            wait_for_cycle(&completed, &running),
+            CheckpointWait::Running
+        );
+        drop(run);
+        assert_eq!(
+            wait_for_cycle(&completed, &running),
+            CheckpointWait::Finished
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn concurrent_readers_release_checkpoint_locks() {
@@ -558,7 +614,7 @@ mod tests {
                     let reader = if raw {
                         Connection::open(path).unwrap()
                     } else {
-                        crate::schema::open_engine_db_read_only(&path, None)
+                        crate::schema::open_engine_db_read_only(&path, None, None)
                             .unwrap()
                             .conn
                     };

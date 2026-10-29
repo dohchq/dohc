@@ -124,12 +124,29 @@ type RecoveryRecordRead = { status: "missing" } | { status: "untrusted" } | { st
 async function recordIn(dir: string | null | "unusable", id: string, kind: "delete" | "move"): Promise<RecoveryRecordRead> {
   if (dir === null) return { status: "missing" };
   if (dir === "unusable") return { status: "untrusted" };
-  const path = join(dir, recordName(id, kind));
+  return readRecoveryFileText(join(dir, recordName(id, kind)));
+}
+async function readRecoveryFileText(path: string): Promise<RecoveryRecordRead> {
   const entry = await info(path);
   if (!entry || Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return { status: "missing" };
   const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(() => null);
   if (read?.status === "missing") return { status: "missing" };
   return read?.status === "read" ? { status: "read", text: read.content } : { status: "untrusted" };
+}
+export async function listRecoveryRecordTexts(root: string, kind: "delete" | "move"): Promise<{ name: string; text: string }[]> {
+  return readOwnedLocalStateFolder(root, "trash", async dir => {
+    if (dir === null || dir === "unusable") return [];
+    const records: { name: string; text: string }[] = [];
+    const recordPattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`, "u");
+    for (const name of await readdir(dir)) {
+      if (!recordPattern.test(name)) continue;
+      try {
+        const read = await readRecoveryFileText(join(dir, name));
+        if (read.status === "read") records.push({name, text: read.text});
+      } catch { /* One unavailable record does not prevent other moves from resuming. */ }
+    }
+    return records;
+  });
 }
 export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
   const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);

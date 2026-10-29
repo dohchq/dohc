@@ -59,6 +59,10 @@ async fn applied_restore(
         .owner
         .fence_restore(
             NativeRestoreFence {
+                point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: f.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "restore-settlement".into(),
                 relay_database_namespace: "relay".into(),
                 old_binding: f.binding.clone(),
@@ -1385,6 +1389,10 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         f.owner
             .fence_restore(
                 NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: 0,
+                        receipt_digest: f.binding.lineage_claim_id.clone()
+                    },
                     operation_id: "restore-settlement".into(),
                     relay_database_namespace: "relay".into(),
                     old_binding: f.binding.clone(),
@@ -1903,6 +1911,10 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
         connection_id: "connection".into(),
     };
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2032,6 +2044,10 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
     let mut f = Fixture::new().await;
     let terminal = f.apply_folder_scope().await;
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2063,6 +2079,10 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
 async fn restore_fence_recovers_first_commit_after_reconnect_without_readoption() {
     let f = Fixture::new().await;
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore-reconnected".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2223,6 +2243,10 @@ async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
             connection_id: "connection".into(),
         };
         let input = NativeRestoreFence {
+            point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore".into(),
             relay_database_namespace: "relay".into(),
             old_binding: f.binding.clone(),
@@ -3016,6 +3040,10 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
             .owner
             .fence_restore(
                 NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: 0,
+                        receipt_digest: f.binding.lineage_claim_id.clone(),
+                    },
                     operation_id: "restore".into(),
                     relay_database_namespace: "relay".into(),
                     old_binding: f.binding.clone(),
@@ -3507,7 +3535,7 @@ impl Fixture {
         let mut terminal = None;
         for (index, update) in updates.iter().enumerate() {
             let cursor = after + index + 1;
-            let authority = if cursor % 8 == 0 {
+            let authority = if cursor.is_multiple_of(8) {
                 ServerDerivedLiveUpdateAuthority::Link {
                     principal_id: "link-principal".into(),
                     grant_id: "link-grant".into(),

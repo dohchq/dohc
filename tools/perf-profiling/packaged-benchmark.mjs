@@ -1,4 +1,5 @@
 import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
+import { linkFixtureFile, measureLinkRename, rearmLinkReceipt, readLinkRecord } from './packaged-link-rename.mjs';
 import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
@@ -50,6 +51,7 @@ await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { metricVersion: METRIC_VERSION, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, typingTrace, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
   ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'link-rename' ? {links: options.links} : {}),
   ...(scenario === 'presence' ? { presencePeers, selectionHz: 20, peerTypingHz: 5, presenceTiming: 'event-latency-v1' } : {}),
   ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode, label: options.label } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
@@ -222,7 +224,7 @@ async function fixture(runDir, documentCase) {
       }));
     }
     for (const [name, paragraphs] of [['small', 100], ['large', 5000]]) {
-      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n`;
+      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n` + (scenario === 'link-rename' && name === 'large' && options.links ? '\n[[link-target#part|label]]' : '');
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
@@ -230,8 +232,8 @@ async function fixture(runDir, documentCase) {
       benchmarkSignal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
-        const name = `fixture-${String(n).padStart(6, '0')}.txt`;
-        const content = `Workspace ${index}, fixture ${n}.\n`;
+        const {name, content} = scenario === 'link-rename' ? linkFixtureFile(n, options.links)
+          : {name: `fixture-${String(n).padStart(6, '0')}.txt`, content: `Workspace ${index}, fixture ${n}.\n`};
         workspaceHash.update(`${name}\0${content}\0`);
         batch.push(writeFile(join(workspace.rootPath, name), content));
       }
@@ -1117,6 +1119,21 @@ async function documentRelay(runDir, documentCase, deadline) {
         algorithm: 'SHA256 of sorted canonical path,NUL,UTF8-content,NUL after normal admission; metadata excluded' });
       await json(join(runDir, 'fixture.json'), f.fixtureHashes);
       await json(join(output, 'result.json'), receipt);
+    }
+    if (scenario === 'link-rename') {
+      data.linkRename = await measureLinkRename({instance: fresh, links: options.links, typing, waitUntil, signal: benchmarkSignal});
+      await shutdown(runDir, fresh);
+      await rearmLinkReceipt(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+      const resumedAt = performance.now(), resumed = await launch(runDir, f, 'resume');
+      const resumeReceipt = await waitUntil(async () => {
+        const record = await readLinkRecord(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+        return record.links.state === 'done' ? record.links : false;
+      }, 300_000);
+      data.linkRename.resume = {startup: resumed.startup, receipt: resumeReceipt, launchToDoneObservedMs: performance.now() - resumedAt,
+        interruption: 'engine receipt completed before main persisted done'};
+      await shutdown(runDir, resumed);
+      await json(join(output, 'result.json'), receipt);
+      continue;
     }
     if (['go-to', 'go-to-mixed', 'command-palette', 'search', 'collection'].includes(scenario)) {
       data.listing = await filesListed(fresh.page, fixtureFiles + (scenario === 'collection' ? 1 : 0));

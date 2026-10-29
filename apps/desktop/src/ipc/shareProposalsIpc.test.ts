@@ -39,6 +39,7 @@ async function harness() {
   const attachmentId = await authorities.withOperation(workspace.workspaceId, operation => operation.workspace.attachmentId);
   const otherAttachmentId = await authorities.withOperation("other", operation => operation.workspace.attachmentId);
   let rendererCurrent = true;
+  let afterHandler = () => {};
   const session = { workspaceId: workspace.workspaceId, attachmentId, generation: 1, isCurrent: () => rendererCurrent };
   const otherSession = { workspaceId: "other", attachmentId: otherAttachmentId, generation: 1, isCurrent: () => true };
   type Event = { sender: string; trusted: boolean };
@@ -82,7 +83,11 @@ async function harness() {
   registerOperations<typeof shareProposalOperations, Event, Operation>({
     handle: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event: Event) => { if (!event.trusted) throw new Error("untrusted"); },
-    withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, work),
+    withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, async operation => {
+      const result = await work(operation);
+      afterHandler();
+      return result;
+    }),
   }, shareProposalOperations, directWrites.handlers);
   const invoke = (channel: string, payload: unknown = { workspaceId: "workspace" }, trusted = true, sender = "window") =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender, trusted }, payload));
@@ -97,7 +102,8 @@ async function harness() {
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,
     readText, queue, reconcile, submit, pushDirect, relayFor, handlers, invoke, recipient, reported, directWrites,
     work: [warm, list, read, readOp, settle, listMine, withdraw, readText, queue, reconcile, submit, pushDirect, relayFor],
-    retireRenderer: () => { rendererCurrent = false; } };
+    retireRenderer: () => { rendererCurrent = false; },
+    afterHandler: (work: () => void) => { afterHandler = work; } };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -140,6 +146,59 @@ describe("registered share proposal handlers", () => {
     h.recipient();
     await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).rejects.toThrow("workspace you shared from");
     expect(h.list).not.toHaveBeenCalled();
+  });
+
+  it("lists nothing without logging for an unsynced workspace, even when signed out", async () => {
+    const h = await harness();
+    delete h.workspace.remote;
+    const logs = [vi.spyOn(console, "error"), vi.spyOn(console, "warn"), vi.spyOn(console, "log")];
+    try {
+      await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).resolves.toEqual({ proposals: [] });
+      h.cache.clear();
+      await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).resolves.toEqual({ proposals: [] });
+      expect(h.list).not.toHaveBeenCalled();
+      for (const log of logs) expect(log).not.toHaveBeenCalled();
+    } finally {
+      for (const log of logs) log.mockRestore();
+    }
+  });
+
+  it("refuses an empty listing if the window switches workspaces before the reply", async () => {
+    const h = await harness();
+    delete h.workspace.remote;
+    h.afterHandler(h.retireRenderer);
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).rejects.toThrow("changed workspaces");
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["signed out", "Sign in to your server first."],
+    ["other account", "Sign in to the account that synced this workspace."],
+    ["other server", "Sign in to the cloud server this workspace uses."],
+    ["missing relay", "Reconnect your server to refresh its connection settings, then try again."],
+  ] as const)("refuses listing and settlement when %s", async (state, message) => {
+    const h = await harness();
+    if (state === "signed out") h.cache.clear();
+    if (state === "other account") h.cache.set({ ...credentials, userId: "someone-else" });
+    if (state === "other server") h.cache.set({ ...credentials, serverUrl: "https://other.example.test" });
+    if (state === "missing relay") h.cache.set({ ...credentials, relayUrl: undefined });
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).rejects.toThrow(message);
+    for (const decision of ["accept", "decline"]) {
+      await expect(h.invoke(shareProposalOperations.settleShareProposal.channel, {
+        workspaceId: "workspace", proposalId: "proposal", decision,
+      })).rejects.toThrow(message);
+    }
+    expect(h.list).not.toHaveBeenCalled();
+    expect(h.settle).not.toHaveBeenCalled();
+  });
+
+  it.each(["accept", "decline"])("still refuses to %s changes in an unsynced workspace", async decision => {
+    const h = await harness();
+    delete h.workspace.remote;
+    await expect(h.invoke(shareProposalOperations.settleShareProposal.channel, {
+      workspaceId: "workspace", proposalId: "proposal", decision,
+    })).rejects.toThrow("Sync this workspace before sharing.");
+    expect(h.settle).not.toHaveBeenCalled();
   });
 
   it("stops before relay work if the renderer retires while credentials warm", async () => {

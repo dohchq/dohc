@@ -103,6 +103,11 @@ export function automationCount(file: ListCollectionAutomationsResult | null, ta
   return file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)).length : 0;
 }
 
+/** False once dohc knows a Collection's automations.yaml does not exist yet. */
+export function automationsFileMade(file: ListCollectionAutomationsResult | null): boolean {
+  return (file?.status === "shared" ? file.definitions.file.status : file?.status) !== "missing";
+}
+
 /** The ⚡ Automations button at the top of a Collection, with how many it has. */
 export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void }) {
   return (

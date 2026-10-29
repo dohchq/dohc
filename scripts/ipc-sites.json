@@ -73,6 +73,7 @@
     "apps/desktop/src/ipc/windowIpc.ts | CHANNELS.reloadRenderer",
     "apps/desktop/src/ipc/windowIpc.ts | CHANNELS.resumeQuit",
     "apps/desktop/src/ipc/windowIpc.ts | CHANNELS.setTitlebarTheme",
+    "apps/desktop/src/ipc/windowIpc.ts | CHANNELS.versionRoundAnswer",
     "apps/desktop/src/ipc/windowIpc.ts | CHANNELS.stepWindowZoom",
     "apps/desktop/src/ipc/workspaceDatabaseIpc.ts | CHANNELS.applyDatabaseEdit",
     "apps/desktop/src/ipc/workspaceDatabaseIpc.ts | CHANNELS.readWorkspaceDatabase",
@@ -113,8 +114,6 @@
     "apps/desktop/src/main.ts | CHANNELS.getSitePackage",
     "apps/desktop/src/main.ts | CHANNELS.listSites",
     "apps/desktop/src/main.ts | handleIpc forwards channel to ipcMain.handle",
-    "apps/desktop/src/main.ts | registerAutomationButtonsIpc.registerHandler forwards channel to ipcMain.handle",
-    "apps/desktop/src/main.ts | registerStopAndRestoreIpc.registerHandler forwards channel to ipcMain.handle",
     "apps/desktop/src/preload.ts | CHANNELS.acceptDm",
     "apps/desktop/src/preload.ts | CHANNELS.applyDatabaseEdit",
     "apps/desktop/src/preload.ts | CHANNELS.attachWorkspaceFolder",
@@ -226,6 +225,7 @@
     "apps/desktop/src/preload.ts | CHANNELS.syncDms",
     "apps/desktop/src/preload.ts | CHANNELS.undoCollectionAutomationRun",
     "apps/desktop/src/preload.ts | CHANNELS.undoStopAndRestore",
+    "apps/desktop/src/preload.ts | CHANNELS.versionRoundAnswer",
     "apps/desktop/src/preload.ts | CHANNELS.writeCollectionAutomations",
     "apps/desktop/src/preload.ts | invokeParsed forwards channel to ipcRenderer.invoke"
   ]

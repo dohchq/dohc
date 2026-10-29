@@ -1503,6 +1503,7 @@ define_server_error_codes! {
     "key_envelope_not_found" => |_| RelayError::KeyEnvelopeMissing,
     "link_discussion_blocked" => |_| RelayError::Forbidden,
     "link_discussion_paused" => |_| RelayError::Forbidden,
+    "link_name_already_set" => |_| RelayError::Conflict,
     "link_read_rate_limited" => |_| RelayError::LinkReadRateLimited,
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
     "not_found" => unavailable,

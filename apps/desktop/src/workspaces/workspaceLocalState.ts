@@ -93,9 +93,10 @@ export async function localStateDir(workspace: LocalStateWorkspace): Promise<str
 
 /**
  * Waits for an engine open of the workspace that is already under way, so a
- * writer refused during it can ask again. Starts no open and waits for no
- * close: the caller may be inside an engine run, and a close waits for runs.
- * Returns at once when no open is under way, and when `signal` aborts.
+ * writer refused during it can ask again. A close that keeps the workspace
+ * counts as one until its reopen, except inside an engine run: a close waits
+ * for runs. Starts no open. Returns at once when no open is under way, and
+ * when `signal` aborts.
  */
 export async function localStateOpened(workspace: LocalStateWorkspace, signal?: AbortSignal): Promise<void> {
   let opening: Promise<unknown> | null = null;

@@ -2992,6 +2992,18 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Deleted 1 added record. History can restore them."));
   });
 
+  it("shows a server run whose changes its lost copy may not have sent, with nothing to run again or undo", async () => {
+    const error = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
+    const lost = run({ claimId: "atc_lost", state: "failed", error, unsentChangesLost: true });
+    makeBridge(read([summary(stamp)]), [], { serverRuns: [lost] });
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    const row = await screen.findByTestId("automation-run-server-atc_lost");
+    expect(within(row).getByText(error)).toBeTruthy();
+    expect(within(row).getByLabelText("Failed")).toBeTruthy();
+    expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+
   it("pages the server independently and keeps its older rows when the head refreshes", async () => {
     const newest = run({ claimId: "server-new", createdAtMs: 30 });
     const older = run({ claimId: "server-old", createdAtMs: 10 });

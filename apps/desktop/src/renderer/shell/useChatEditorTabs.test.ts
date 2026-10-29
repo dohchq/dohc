@@ -6,12 +6,16 @@ import { chatEditorPath } from "./chatsNav";
 import { chatTabPath } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import { deferred } from "../../testing/deferred";
+import type { SettingsAgent } from "../workbench/agentChat";
 
 const general: ChatsNav = { level: "channel", channel: {
   id: "general-id", name: "General", slug: "general", kind: "channel",
   createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0,
 } };
-const agent: ChatsNav = { level: "channel", channel: { ...general.channel, id: "agent-id", kind: "agent" } };
+const agent: ChatsNav = { level: "channel", channel: { ...general.channel, id: "agent-id", name: "My agent", kind: "agent", agentId: "default" } };
+const scoutChat = { ...general.channel, id: "scout-chat", name: "Scout", kind: "agent" as const, agentId: "scout" };
+const NO_AGENTS: SettingsAgent[] = [];
+const AGENTS: SettingsAgent[] = [{ id: "default", name: "Nova", hue: "olive" }, { id: "scout", name: "Scout", hue: "teal" }];
 const dm: ChatsNav = { level: "dm", dm: {
   channelId: "dm-id", channelWireId: "wire-id", name: "alice", peerLabel: "Alice",
   threadId: "dm-thread", shareId: null, role: "owner", unreadCount: 0, connected: true,
@@ -36,7 +40,7 @@ describe("chat editor tabs", () => {
     const path = chatEditorPath(dm);
     const home = chatEditorPath({ level: "feed" });
     const { result, rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
     }), { initialProps: { activePaths: [home] } });
     rerender({ activePaths: [path] });
     rerender({ activePaths: [home] });
@@ -51,7 +55,7 @@ describe("chat editor tabs", () => {
     const path = chatEditorPath(dm);
     const home = chatEditorPath({ level: "feed" });
     const { rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
     }), { initialProps: { activePaths: [home] } });
     await act(async () => {});
     rerender({ activePaths: [path] });
@@ -65,7 +69,7 @@ describe("chat editor tabs", () => {
     vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
     const paths = [chatEditorPath(dm), chatEditorPath(general)];
     renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths, activePaths: paths, enabled: true,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths, activePaths: paths, enabled: true,
     }));
     expect(syncDms).not.toHaveBeenCalled();
     expect(listChatChannels).not.toHaveBeenCalled();
@@ -79,7 +83,7 @@ describe("chat editor tabs", () => {
     });
     const path = chatEditorPath(dm);
     const { result, rerender } = renderHook(({ enabled }) => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled,
     }), { initialProps: { enabled: false } });
     act(() => result.current.open(dm));
     const stale = result.current.get(path);
@@ -99,7 +103,7 @@ describe("chat editor tabs", () => {
     vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
     const paths = [chatEditorPath(dm), chatEditorPath(general)];
     const { result, rerender } = renderHook(({ paths }) => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths, enabled: true,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths, enabled: true,
     }), { initialProps: { paths } });
     await act(async () => {});
     expect(result.current.get(paths[0]!).restoreAttempted).toBe(true);
@@ -113,7 +117,7 @@ describe("chat editor tabs", () => {
   it("only user commands cancel a pending navigation, not reports from another live editor", () => {
     const onNavigate = vi.fn();
     const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate, paths: [], enabled: false,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate, paths: [], enabled: false,
     }));
     act(() => { result.current.open(general); result.current.open(dm); });
     onNavigate.mockClear();
@@ -129,7 +133,7 @@ describe("chat editor tabs", () => {
       onCloudSessionChanged: (listener: typeof changeSession) => { changeSession = listener; return () => {}; },
     });
     const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: true,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: true,
     }));
     act(() => result.current.open(dm));
     const old = result.current.get(chatEditorPath(dm));
@@ -147,7 +151,7 @@ describe("chat editor tabs", () => {
   it("keeps Home, channels, agents and DMs independent and reuses a channel's current thread", () => {
     const onOpen = vi.fn();
     const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
     }));
     act(() => result.current.open(general));
     const generalEditor = result.current.get(chatEditorPath(general));
@@ -164,13 +168,13 @@ describe("chat editor tabs", () => {
     expect(generalEditor.drafts).toBe(draft);
     expect(result.current.get(chatEditorPath(dm)).drafts).toBeUndefined();
     expect(result.current.titles.get(chatEditorPath(general))).toBe("#General");
-    expect(result.current.titles.get(chatEditorPath(agent))).toBe("My agent");
+    expect(result.current.titles.get(chatEditorPath(agent))).toBe("Your agent");
     expect(result.current.titles.get(chatEditorPath(dm))).toBe("Alice");
   });
 
   it("repeats a message jump without discarding that conversation's draft", () => {
     const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
     }));
     act(() => result.current.open(thread));
     const editor = result.current.get(chatEditorPath(thread));
@@ -184,7 +188,7 @@ describe("chat editor tabs", () => {
   it("refreshes a focused DM's metadata while keeping its draft and message position", () => {
     const onOpen = vi.fn();
     const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
     }));
     act(() => result.current.open({ ...dm, focusMessageId: "message" }));
     const editor = result.current.get(chatEditorPath(dm));
@@ -206,7 +210,7 @@ describe("chat editor tabs", () => {
     vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, listChatChannels: vi.fn(() => pending.promise) });
     const path = chatTabPath({ kind: "channel", id: general.channel.id });
     const { result, rerender } = renderHook(({ workspaceId }) => useChatEditorTabs({
-      workspaceId, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled: true,
+      workspaceId, agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled: true,
     }), { initialProps: { workspaceId: "first" } });
     const stale = result.current.get(path);
     rerender({ workspaceId: "second" });
@@ -218,54 +222,22 @@ describe("chat editor tabs", () => {
     expect(stale.nav).toBeUndefined();
     vi.unstubAllGlobals();
   });
-  it("puts a prefill in the new-post composer after what the person typed, and remounts the tab", () => {
-    const onOpen = vi.fn();
-    const path = chatEditorPath(agent);
-    const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [path], activePaths: [path], enabled: false,
-    }));
-    act(() => result.current.open(agent, "First request"));
-    expect(result.current.get(path).nav).toBe(agent);
-    expect(result.current.get(path).drafts?.newThreadBody).toBe("First request");
-    expect(result.current.get(path).focusNewPost).toBe(true);
-    const revision = result.current.get(path).revision;
-    act(() => result.current.get(path).onDraftsChange({ ...draft, composer: "", newThreadBody: "My own words" }));
-    // The page reported its drafts, so a later remount leaves focus alone.
-    expect(result.current.get(path).focusNewPost).toBe(false);
-    act(() => result.current.open(agent, "Second request"));
-    expect(result.current.get(path).drafts?.newThreadBody).toBe("My own words\n\nSecond request");
-    expect(result.current.get(path).revision).toBe(revision + 1);
-    expect(onOpen).toHaveBeenLastCalledWith(path);
-  });
-
-  it("keeps a thread with an unsent reply instead of putting a prefill over it", () => {
-    const onOpen = vi.fn();
-    const path = chatEditorPath(general);
-    const { result } = renderHook(() => useChatEditorTabs({
-      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [path], enabled: false,
-    }));
-    act(() => { result.current.open(thread); });
-    act(() => result.current.get(path).onDraftsChange(draft));
-    let opened = true;
-    act(() => { opened = result.current.open(general, "Request"); });
-    expect(opened).toBe(false);
-    expect(result.current.get(path).nav).toBe(thread);
-    expect(result.current.get(path).drafts).toBe(draft);
-    expect(onOpen).toHaveBeenLastCalledWith(path);
-
-    // An empty reply gives way, and the channel's unsent new post stays with
-    // its poll. The reply's poll goes with the reply.
-    act(() => result.current.get(path).onDraftsChange({
-      ...draft, composer: "  ", newThreadBody: "Half a post", replyTarget: { messageId: "m", authorLabel: "Ana" },
-      poll: { threadId: "thread", choices: ["Yes", "No"], open: true },
-      newThreadPoll: { channelId: general.channel.id, choices: ["Lisbon", "Porto"], open: true },
-    }));
-    act(() => { opened = result.current.open(general, "Request"); });
-    expect(opened).toBe(true);
-    expect(result.current.get(path).nav).toBe(general);
-    expect(result.current.get(path).drafts).toEqual({
-      ...draft, composer: "", newThreadBody: "Half a post\n\nRequest",
-      newThreadPoll: { channelId: general.channel.id, choices: ["Lisbon", "Porto"], open: true },
+  it("names each agent's chat tab and its thread after that agent, and follows a rename", () => {
+    const scoutThread: ChatsNav = { level: "thread", channel: scoutChat, thread: { ...thread.thread, id: "scout-thread", channelId: scoutChat.id } };
+    const { result, rerender } = renderHook(({ agents }) => useChatEditorTabs({
+      workspaceId: "workspace", agents, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
+    }), { initialProps: { agents: AGENTS } });
+    act(() => {
+      result.current.open(agent);
+      result.current.open(scoutThread);
     });
+    expect(result.current.titles.get(chatEditorPath(agent))).toBe("Nova");
+    expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Scout");
+    rerender({ agents: [AGENTS[0]!, { ...AGENTS[1]!, name: "Ranger" }] });
+    expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Ranger");
+    // Removed from Settings, the agent's chat keeps the name it was stored with.
+    rerender({ agents: [] });
+    expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Scout");
+    expect(result.current.titles.get(chatEditorPath(agent))).toBe("Your agent");
   });
 });

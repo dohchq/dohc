@@ -1,24 +1,26 @@
 use dohc_engine_domain::{AutomationClaim, AutomationGroupMessage, claim_group_message_in_tx};
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex};
+use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
-use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
-    bump_chat_conversation_revision, chat_thread_display_title,
-    index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
+    DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
+    agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
+    chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
+    is_agent_channel_slug, is_agent_id, replicated_source_origin, truncate_slug_base,
+    upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
-    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
-    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
-    attachment_id_for, channel_slug_for_name, encode_poll_options, has_projection_control_char,
-    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_agent_owner_name,
-    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
-    normalize_display_name, normalize_feed_identity, normalize_poll_options,
-    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path,
+    AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
+    ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
+    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
+    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, normalize_agent_owner_name, normalize_author_user_id,
+    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path, validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -771,6 +773,15 @@ struct MessageAppend {
     /// computers. A person's message never carries one.
     #[serde(default)]
     chain_depth: Option<u32>,
+    /// The link grant and link principal of a link message, which only the
+    /// relay writes.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    link_grant_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    link_principal_id: Option<String>,
+    /// The agent that wrote an agent message.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    author_agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -931,10 +942,8 @@ fn apply_channel(
     let channel_id = normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
         .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
     if channel_id != payload.channel_id
-        || matches!(
-            channel_id.as_str(),
-            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
-        )
+        || channel_id == GENERAL_CHANNEL_WIRE_ID
+        || agent_id_for_channel_wire_id(&channel_id).is_some()
     {
         return Err(SyncError::InvalidInput {
             reason: "chat channel id is invalid",
@@ -983,17 +992,39 @@ fn apply_channel(
             reason: "chat channel timestamp is invalid",
         });
     }
-    let carries_agent_wire = payload.wire_id.as_deref() == Some(AGENT_CHANNEL_WIRE_ID);
-    let canonical_agent_slug = channel_slug_for_name(AGENT_CHANNEL_NAME);
-    if (payload.kind == "agent") != carries_agent_wire
-        || (payload.slug == canonical_agent_slug) != carries_agent_wire
-        || (requested_slug == canonical_agent_slug) != carries_agent_wire
-        || (name == AGENT_CHANNEL_NAME) != carries_agent_wire
-    {
+    // An agent's chat is named by its wire id. The default agent's chat keeps
+    // its fixed name and slug; another agent's chat has its own reserved slug.
+    let agent_id = payload
+        .wire_id
+        .as_deref()
+        .and_then(agent_id_for_channel_wire_id);
+    let default_agent_slug = agent_channel_slug(DEFAULT_AGENT_ID);
+    let reserved_violated = match agent_id {
+        Some(agent_id) => {
+            payload.kind != "agent"
+                || payload.slug != agent_channel_slug(agent_id)
+                || (agent_id == DEFAULT_AGENT_ID && name != AGENT_CHANNEL_NAME)
+        }
+        None => {
+            payload.kind == "agent"
+                || payload.slug == default_agent_slug
+                || requested_slug == default_agent_slug
+        }
+    };
+    if reserved_violated {
         return Err(SyncError::InvalidInput {
             reason: "reserved agent-channel invariant violated",
         });
     }
+    let requested_slug = match agent_id {
+        Some(agent_id) => agent_channel_slug(agent_id),
+        // An older build's group may have a name only agent chats may now
+        // use. It keeps the name and takes a slug no agent chat can have.
+        None if is_agent_channel_slug(&requested_slug) => {
+            channel_collision_slug(&requested_slug, &channel_id, 0)
+        }
+        None => requested_slug,
+    };
     let wire_id = match payload.wire_id.as_deref() {
         Some(value) => {
             let normalized = normalize_replicated_chat_id(value, "channel wire id is invalid")
@@ -1024,13 +1055,16 @@ fn apply_channel(
             )
             .map_err(SyncError::corrupt)?;
         if placeholder {
-            let slug = allocate_channel_slug(
-                tx,
-                &op.workspace_id,
-                &requested_slug,
-                &channel_id,
-                &wire_id,
-            )?;
+            let slug = match agent_id {
+                Some(agent_id) => agent_chat_slug(tx, &op.workspace_id, agent_id)?,
+                None => allocate_channel_slug(
+                    tx,
+                    &op.workspace_id,
+                    &requested_slug,
+                    &channel_id,
+                    &wire_id,
+                )?,
+            };
             debug_assert!(is_replicated_channel_slug(&slug));
             tx.execute(
                 "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6, \
@@ -1057,13 +1091,18 @@ fn apply_channel(
         }
         return Ok(());
     }
-    let slug = allocate_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id, &wire_id)?;
+    let slug = match agent_id {
+        Some(agent_id) => agent_chat_slug(tx, &op.workspace_id, agent_id)?,
+        None => {
+            allocate_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id, &wire_id)?
+        }
+    };
     debug_assert!(is_replicated_channel_slug(&slug));
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
          (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
-          type, purpose, folder_path) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+          type, purpose, folder_path, agent_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
         params![
             op.workspace_id,
             channel_id,
@@ -1073,7 +1112,8 @@ fn apply_channel(
             payload.created_at_ms,
             group.channel_type.as_str(),
             group.purpose,
-            group.folder_path
+            group.folder_path,
+            agent_id
         ],
     )
     .map_err(SyncError::persist)?;
@@ -1083,6 +1123,19 @@ fn apply_channel(
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+/// An agent's chat holds its agent's slug. Any other chat there moves off it,
+/// as provisioning does.
+fn agent_chat_slug(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<String, SyncError> {
+    let slug = agent_channel_slug(agent_id);
+    free_agent_channel_slug(tx, workspace_id, agent_id, &slug)
+        .map_err(|error| map_chat_rule(error, "chat channel slug is invalid"))?;
+    Ok(slug)
 }
 
 fn allocate_channel_slug(
@@ -1123,34 +1176,6 @@ fn channel_slug_is_occupied(
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)
-}
-
-fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(requested.as_bytes());
-    hasher.update([0]);
-    hasher.update(allocation_identity.as_bytes());
-    if attempt > 0 {
-        hasher.update([0]);
-        hasher.update(attempt.to_be_bytes());
-    }
-    let suffix = hex(&hasher.finalize());
-    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
-    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
-    let base = if bounded_requested.is_empty() {
-        "channel"
-    } else {
-        &bounded_requested
-    };
-    let slug = format!("{base}-{suffix}");
-    debug_assert!(is_replicated_channel_slug(&slug));
-    slug
-}
-
-fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
-    dohc_engine_domain::names::truncate_name(value, max_bytes)
-        .trim_end_matches('-')
-        .to_owned()
 }
 
 fn channel_allocation_base(name: &str) -> String {
@@ -1253,6 +1278,15 @@ fn apply_thread(
             reason: "chat thread payload is invalid",
         });
     }
+    // Only the relay names a link post's new thread, so no device can take
+    // one first and leave the link post on a thread of its own making.
+    if payload.thread_id.starts_with(LINK_THREAD_ID_PREFIX)
+        && !replicated_source_origin(&op.origin_id).starts_with(LINK_ORIGIN_PREFIX)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread id is reserved for link posts",
+        });
+    }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
     // A file-linked thread names its file one way: by object id (a replica's
     // own op) or by path (an op that crossed a share boundary).
@@ -1353,12 +1387,18 @@ fn resolve_or_create_placeholder(
     op: &ReplicationEnvelope,
     payload: &ThreadCreate,
 ) -> Result<String, SyncError> {
-    let canonical_agent_slug = channel_slug_for_name(AGENT_CHANNEL_NAME);
-    let agent_placeholder = payload.channel_wire_id.as_deref() == Some(AGENT_CHANNEL_WIRE_ID);
+    let agent_id = payload
+        .channel_wire_id
+        .as_deref()
+        .and_then(agent_id_for_channel_wire_id);
+    let default_agent_slug = agent_channel_slug(DEFAULT_AGENT_ID);
     if payload
         .channel_slug
         .as_deref()
-        .is_some_and(|slug| (slug == canonical_agent_slug) != agent_placeholder)
+        .is_some_and(|slug| match agent_id {
+            Some(agent_id) => slug != agent_channel_slug(agent_id),
+            None => slug == default_agent_slug,
+        })
     {
         return Err(SyncError::InvalidInput {
             reason: "reserved agent-channel invariant violated",
@@ -1379,26 +1419,26 @@ fn resolve_or_create_placeholder(
         None
     };
     if let Some(channel_id) = mapped_channel_id {
-        if agent_placeholder {
-            let mapped: Option<(String, String, String)> = tx
+        // An agent's wire id that maps to another chat refuses the thread, so
+        // sync goes on past it.
+        if let Some(agent_id) = agent_id {
+            let mapped: Option<(String, Option<String>)> = tx
                 .query_row(
-                    "SELECT kind, name, slug FROM chat_channels \
+                    "SELECT kind, agent_id FROM chat_channels \
                      WHERE workspace_id = ?1 AND channel_id = ?2",
                     params![op.workspace_id, channel_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(SyncError::corrupt)?;
             if !matches!(
                 mapped,
-                Some((ref kind, ref name, ref slug))
-                    if kind == "agent"
-                        && name == AGENT_CHANNEL_NAME
-                        && slug == &canonical_agent_slug
+                Some((ref kind, Some(ref mapped_agent)))
+                    if kind == "agent" && mapped_agent == agent_id
             ) {
-                return Err(local_corruption(
-                    "reserved agent-channel mapping is corrupt",
-                ));
+                return Err(SyncError::InvalidInput {
+                    reason: "agent chat wire id names another chat",
+                });
             }
         }
         return Ok(channel_id);
@@ -1418,32 +1458,24 @@ fn resolve_or_create_placeholder(
         return Ok(channel_id);
     }
 
-    if agent_placeholder
-        && let Some((channel_id, kind, name)) = tx
+    if let (Some(agent_id), Some(wire_id)) = (agent_id, payload.channel_wire_id.as_deref())
+        && let Some((channel_id, kind)) = tx
             .query_row(
-                "SELECT channel_id, kind, name FROM chat_channels \
-                 WHERE workspace_id = ?1 AND slug = ?2",
-                params![op.workspace_id, canonical_agent_slug],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
+                "SELECT channel_id, kind FROM chat_channels \
+                 WHERE workspace_id = ?1 AND agent_id = ?2",
+                params![op.workspace_id, agent_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(SyncError::corrupt)?
     {
-        if kind != "agent" || name != AGENT_CHANNEL_NAME {
-            return Err(local_corruption(
-                "reserved agent-channel slug owner is corrupt",
-            ));
+        if kind != "agent" {
+            return Err(local_corruption("reserved agent-channel owner is corrupt"));
         }
         tx.execute(
             "INSERT OR IGNORE INTO chat_channel_wire_ids \
              (workspace_id, wire_id, channel_id) VALUES (?1, ?2, ?3)",
-            params![op.workspace_id, AGENT_CHANNEL_WIRE_ID, channel_id],
+            params![op.workspace_id, wire_id, channel_id],
         )
         .map_err(SyncError::persist)?;
         return Ok(channel_id);
@@ -1460,39 +1492,52 @@ fn resolve_or_create_placeholder(
     let requested_slug = payload.channel_slug.as_deref().unwrap_or(identity);
     let placeholder_name = channel_allocation_base(requested_slug);
     let allocation_identity = payload.channel_wire_id.as_deref().unwrap_or(&channel_id);
-    let slug = if agent_placeholder {
-        canonical_agent_slug
-    } else {
-        allocate_channel_slug(
-            tx,
-            &op.workspace_id,
-            &placeholder_name,
-            &channel_id,
-            allocation_identity,
-        )?
+    let (slug, name, kind) = match agent_id {
+        // Only the default agent's chat can hold its slug, so it is free.
+        Some(DEFAULT_AGENT_ID) => (default_agent_slug, AGENT_CHANNEL_NAME.to_owned(), "agent"),
+        Some(agent_id) => (
+            agent_chat_slug(tx, &op.workspace_id, agent_id)?,
+            agent_id.to_owned(),
+            "agent",
+        ),
+        // A group keeps its name and takes a slug no agent chat can have, as
+        // its create does.
+        None if is_agent_channel_slug(&placeholder_name) => (
+            allocate_channel_slug(
+                tx,
+                &op.workspace_id,
+                &channel_collision_slug(&placeholder_name, allocation_identity, 0),
+                &channel_id,
+                allocation_identity,
+            )?,
+            placeholder_name,
+            "channel",
+        ),
+        None => (
+            allocate_channel_slug(
+                tx,
+                &op.workspace_id,
+                &placeholder_name,
+                &channel_id,
+                allocation_identity,
+            )?,
+            placeholder_name,
+            "channel",
+        ),
     };
     debug_assert!(is_replicated_channel_slug(&slug));
-    let name = if agent_placeholder {
-        AGENT_CHANNEL_NAME.to_owned()
-    } else {
-        placeholder_name
-    };
-    let kind = if agent_placeholder {
-        "agent"
-    } else {
-        "channel"
-    };
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
-         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
         params![
             op.workspace_id,
             channel_id,
             name,
             slug,
             kind,
-            payload.created_at_ms
+            payload.created_at_ms,
+            agent_id
         ],
     )
     .map_err(SyncError::persist)?;
@@ -1524,7 +1569,7 @@ fn apply_message(
         || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
         // Another computer's automation posts as an automation, without its local provenance.
-        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation")
+        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation" | "link")
         || payload
             .parent_message_id
             .as_ref()
@@ -1549,6 +1594,15 @@ fn apply_message(
             reason: "chat message chain depth is invalid",
         });
     }
+    if payload
+        .author_agent_id
+        .as_deref()
+        .is_some_and(|agent_id| payload.author_kind != "agent" || !is_agent_id(agent_id))
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat message agent id is invalid",
+        });
+    }
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
@@ -1567,6 +1621,20 @@ fn apply_message(
     }
     let body = normalize_body(&payload.body)
         .map_err(|error| map_chat_rule(error, "chat message body is invalid"))?;
+    let link_author = validate_replicated_link_author(
+        &op.origin_id,
+        &payload.message_id,
+        &payload.author_kind,
+        payload.link_grant_id.as_deref(),
+        payload.link_principal_id.as_deref(),
+        author_user_id.is_some()
+            || owner_name.is_some()
+            || payload.origin.is_some()
+            || payload.chain_depth.is_some()
+            || payload.author_agent_id.is_some(),
+        &body,
+    )
+    .map_err(|error| map_chat_rule(error, "chat message link author is invalid"))?;
     let thread_exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2)",
@@ -1605,9 +1673,10 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name],
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
+            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

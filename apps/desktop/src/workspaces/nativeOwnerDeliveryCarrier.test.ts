@@ -5,6 +5,7 @@ import {resolve} from "node:path";
 import {afterEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {createNamedLiveFrameSession} from "../../../../services/sync-relay/src/namedLiveFrameSession";
 import {runNativeOwnerDeliveryPass} from "./nativeOwnerDelivery";
 import {parseDesktopOwnerDeliveryConfig} from "./desktopOwnerDelivery";
@@ -31,7 +32,7 @@ const receipt = {deliveryId: "delivery", updateDigest, journalCursor: 2, accepti
 
 function fixture() {
   relay.head = {outboxId: "outbox", binding, baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "b".repeat(64), state: "active", pendingBytes: 3,
-    oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null,
+    oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
     entry: {sequence: 1, appendKey: "append", deliveryId: "delivery", update, updateDigest, byteLength: 3, createdAtMs: 0, agentDeclaration}};
   relay.acknowledge.mockResolvedValue({acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null});
   relay.submit.mockResolvedValue({result: "success", ack: {...receipt, localYDocSequence: 1, applicationReplayed: false}});
@@ -54,7 +55,7 @@ afterEach(() => {for (const close of relay.closers.splice(0)) close(); vi.clearA
 
 it("submits the queued agent declaration under the owner account from the same credential as the bearer", async () => {
   const client = fixture();
-  expect(await runNativeOwnerDeliveryPass({client, workspaceHandle: "handle", config, document: config.documents[0]!,
+  expect(await runNativeOwnerDeliveryPass({client, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(), document: config.documents[0]!,
     signal: new AbortController().signal, bearer: "owner-bearer", accountId: "owner-account", assertCurrent() {}})).toBe("acknowledged");
   expect(relay.connect.mock.calls[0]![0].bearer).toBe("owner-bearer");
   expect(relay.submit).toHaveBeenCalledWith({deliveryId: "delivery", updateDigest, updateBytes: update,
@@ -66,8 +67,29 @@ it("sends neither the bearer nor the account once the credential retires", async
   const client = fixture();
   let retired = false;
   client.ownerYDocReadState.mockImplementationOnce(async () => {retired = true; return {revision: 1, acceptedCursor: 1, nativeHeadSequence: 1, stateVector: Buffer.from([0])};});
-  expect(await runNativeOwnerDeliveryPass({client, workspaceHandle: "handle", config, document: config.documents[0]!, signal: new AbortController().signal,
+  expect(await runNativeOwnerDeliveryPass({client, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(), document: config.documents[0]!, signal: new AbortController().signal,
     bearer: "owner-bearer", accountId: "owner-account", assertCurrent() {if (retired) throw new Error("retired");}})).toBe("retry");
   expect(relay.connect).not.toHaveBeenCalled();
   expect(relay.submit).not.toHaveBeenCalled();
+});
+
+it("keeps a refusal across recreated passes until its quarantine commits, and never submits it again", async () => {
+  const sendRequest = vi.fn<EngineClient["sendRequest"]>()
+    .mockRejectedValueOnce(new Error("Engine unavailable.")).mockRejectedValueOnce(new Error("Engine unavailable."))
+    .mockImplementation(async request => {
+      relay.head = {...relay.head as object, state: "quarantined", quarantineReason: "invalid-update"};
+      return {id: request.id, result: {quarantined: true}};
+    });
+  const client = Object.assign(fixture(), {sendRequest}), refusals = new OwnerKnownRefusals();
+  relay.submit.mockResolvedValue({result: "refused", reason: "invalid-update"});
+  const pass = () => runNativeOwnerDeliveryPass({client, workspaceHandle: "handle", config, refusals, document: config.documents[0]!,
+    signal: new AbortController().signal, bearer: "owner-bearer", accountId: "owner-account", assertCurrent() {}});
+  for (let attempt = 0; attempt < 2; attempt++) await expect(pass()).rejects.toThrow();
+  expect(await pass()).toBe("retry");
+  expect(await pass()).toBe("frozen");
+  expect(relay.submit).toHaveBeenCalledOnce();
+  const writes = sendRequest.mock.calls.map(([request]) => request);
+  expect(writes).toHaveLength(3);
+  for (const write of writes) expect(write).toMatchObject({method: "ydoc.ownerOutbox.quarantine", workspace: "handle",
+    params: {outboxId: "outbox", reason: "invalid-update", refusal: {deliveryId: "delivery", key: (writes[0]!.params as {refusal: {key: string}}).refusal.key}}});
 });

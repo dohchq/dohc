@@ -4,7 +4,7 @@ import type {
   CliResultByVerb,
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
-import { renderThreadMarkdown } from "./threadMarkdown";
+import { formatStreamPosition, messageMetadata, renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
 import { formatStoredBytes } from "./account";
 
@@ -23,6 +23,11 @@ function lineSafe(value: string): string {
 
 function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
+  return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+    ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
 
 function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
@@ -60,13 +65,42 @@ function decisionCount(count: number): string {
 }
 
 export function renderShowMarkdown(result: ShowResult): string {
-  return renderThreadMarkdown(result);
+  return "stream" in result ? renderStream(result.stream) : renderThreadMarkdown(result);
+}
+
+type StreamResult = Extract<ShowResult, { stream: unknown }>["stream"];
+
+// A group's stream, oldest first: each post with what its thread holds, and
+// each conversation message. The person's read position is marked.
+function renderStream(stream: StreamResult): string {
+  const lines = [`# #${stream.group.slug}`];
+  if (stream.nextBefore) lines.push(`older: --before ${formatStreamPosition(stream.nextBefore)}`);
+  const read = stream.readPosition && formatStreamPosition(stream.readPosition);
+  for (const item of stream.items) {
+    const metadata = messageMetadata(item.message, item.post ? item.threadId : item.message.id);
+    const { post } = item;
+    if (post) {
+      metadata.push(countLabel(post.replyCount, "reply", "replies"));
+      if (post.repliers.length > 0) {
+        metadata.push(`from ${post.repliers.map((replier) => renderAuthorDisplayName(replier.author)).join(", ")}`);
+      }
+      if (post.lastReplyAtMs !== undefined) metadata.push(`last reply ${dateTime(post.lastReplyAtMs)}`);
+      if (post.openDecisionCount > 0) metadata.push(`open decisions: ${post.openDecisionCount}`);
+    }
+    lines.push("", metadata.join(" · "), item.message.body);
+    if (post?.latestAgentReply) {
+      const reply = post.latestAgentReply;
+      lines.push(`> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`);
+    }
+    if (read === formatStreamPosition(item.position)) lines.push("", "--- read up to here ---");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 export function renderGroups(result: GroupsResult): string {
   return result.groups
     .map((group) => {
-      const name = group.kind === "agent" ? "my-agent" : lineSafe(group.name);
+      const name = group.kind === "agent" ? lineSafe(group.slug) : lineSafe(group.name);
       return `${name} · #${group.slug} · ${group.kind} · ${group.id}`;
     })
     .join("\n");
@@ -178,6 +212,7 @@ function renderMoment(result: CliResultByVerb["moment"], side: "before" | "after
 type AutomationRunsResult = Extract<CliResultByVerb["automationRuns"], { ok: true }>;
 type AutomationRunResult = Extract<CliResultByVerb["automationRun"], { ok: true }>;
 type AutomationRunLine = AutomationRunsResult["runs"][number];
+type AutomationRunChange = Extract<AutomationRunResult["run"], { server: true }>["changes"][number];
 
 const TRIGGER_KINDS = {
   added: "record added",
@@ -226,7 +261,7 @@ function json(value: unknown): string {
   return lineSafe(JSON.stringify(value) ?? "null");
 }
 
-function changeText(change: AutomationRunResult["run"]["steps"][number]["changes"][number]): string {
+function changeText(change: AutomationRunChange): string {
   switch (change.kind) {
     case "field":
       return `set ${change.field} on ${change.path}: ${json(change.before)} -> ${json(change.after)}`;
@@ -254,10 +289,14 @@ function changeText(change: AutomationRunResult["run"]["steps"][number]["changes
 }
 
 function renderAutomationRun({ run }: AutomationRunResult): string {
-  return [
+  const head = [
     `${run.run} · ${dateTime(run.createdAtMs)} · ${runStateText(run)}`,
     `trigger: ${triggerText(run.trigger)}`,
     ...(run.error === null ? [] : [`error: ${lineSafe(run.error)}`]),
+  ];
+  if ("server" in run) return [...head, ...run.changes.map(changeText)].join("\n");
+  return [
+    ...head,
     ...(run.failedStep === null ? [] : [`step ${run.failedStep} failed`]),
     ...(run.startsOver
       ? ["Try again starts over from step 1 and needs --start-over."]
@@ -329,6 +368,27 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const commented = `Commented on ${lineSafe(comment.path)} in ${lineSafe(comment.threadId)}`;
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
+    case "liveKeptEdits": {
+      const { keptEdits } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
+      if (keptEdits.length === 0) return "No document has kept edits.";
+      return keptEdits.map(row => `${lineSafe(row.path)} · ${row.storedOn} · ${row.recovery} · ${lineSafe(row.incident)}`).join("\n");
+    }
+    case "saveRecoveryCopy": {
+      const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;
+      return [
+        ...(saved.copyPath === null ? [] : [`Saved ${lineSafe(saved.copyPath)}`]),
+        `Saved ${lineSafe(saved.packagePath)}`,
+        ...(saved.copyPath === null ? ["dohc could not make a readable copy."] : []),
+      ].join("\n");
+    }
+    case "retryKeptEdits":
+      return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
+    case "stopAgain": {
+      const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
+      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept" ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
+        : `Stopped live editing for ${lineSafe(stopped.path)}`;
+    }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":
@@ -353,7 +413,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "historyOperation": {
       const operation = result as CliResultByVerb["historyOperation"];
       if (!operation.ok) return operation.reason;
-      return [...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
+      const links = operation.links;
+      return [...(links ? links.state === "updating" ? ["Updating links…"]
+        : [`Link updates committed in History: ${links.documents} documents. Disk writes follow.`,
+          ...(links.uncheckedCount ? [`${links.uncheckedCount} linking documents not checked.`, ...links.unchecked.map(path => `Not checked: ${lineSafe(path)}`)] : [])] : []),
+        ...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
         ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
         ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
     }
@@ -362,6 +426,37 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!undo.ok) return undo.reason;
       return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
         ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
+    }
+    case "versionList": {
+      const list = result as CliResultByVerb["versionList"];
+      if (!list.ok) return list.reason;
+      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+    }
+    case "versionCompare": {
+      const compare = result as CliResultByVerb["versionCompare"];
+      if (!compare.ok) return compare.reason;
+      return [...compare.files.map(file => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`),
+        ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : [])].join("\n");
+    }
+    case "versionConflicts":
+    case "versionResolve": {
+      const page = result as CliResultByVerb["versionConflicts"];
+      if (!page.ok) return page.reason;
+      return conflictLines(page).join("\n");
+    }
+    case "versionCreate": {
+      const created = result as CliResultByVerb["versionCreate"];
+      return created.ok ? `Created and switched to ${lineSafe(created.version.name)} · ${created.version.id}` : created.reason;
+    }
+    case "versionSwitch": {
+      const switched = result as CliResultByVerb["versionSwitch"];
+      return switched.ok ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed` : switched.reason;
+    }
+    case "versionMerge": {
+      const merge = result as CliResultByVerb["versionMerge"];
+      if (!merge.ok) return merge.reason;
+      return [`Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
+        ...conflictLines(merge)].join("\n");
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);

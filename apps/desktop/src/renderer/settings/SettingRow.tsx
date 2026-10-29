@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Check, Minus, Plus, RotateCcw } from "lucide-react";
-import { IDENTITY_HUES, palette, type IdentityHue } from "../tokens";
+import { AGENT_HUES, IDENTITY_HUES, palette, type AgentHue, type IdentityHue } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
 export function SettingRow(props: {
@@ -20,13 +20,18 @@ export function SettingRow(props: {
   // Its title needs less room than a description, so the value stays beside it
   // in a narrower pane.
   compact?: boolean;
+  // For a control that is a list of 32 px rows: the title and Reset sit
+  // beside its first row, not its middle.
+  top?: boolean;
 }) {
   // The controls keep their size and the text takes what is left, from a
   // readable width: 15rem, or 8rem for a compact row's title. Controls that
   // don't fit beside that wrap under the text.
   const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
+  // Reset and the place a row keeps for it share one footprint.
+  const resetPlace = `size-6 shrink-0 ${props.top ? "mt-1" : ""}`;
   const text = (
-    <div className={props.lead ? "min-w-0 flex-1" : first}>
+    <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
       <div className="relative flex items-center">
         {props.modified ? (
@@ -37,7 +42,7 @@ export function SettingRow(props: {
         <span className="text-[13px] font-medium text-ink">{props.title}</span>
       </div>
       {props.description ? (
-        <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
+        <p className="m-0 mt-1 text-[12px] text-muted">{props.description}</p>
       ) : null}
       {props.aside ? <div className="mt-2">{props.aside}</div> : null}
     </div>
@@ -48,9 +53,9 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
-        props.compact ? "min-h-9 py-1.5" : "min-h-14 py-2.5"
-      } ${props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""}`}
+      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
+        props.compact ? "py-2" : "py-4"
+      } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
       {props.lead ? (
         <div className={`flex items-center gap-3 ${first}`}>
@@ -60,25 +65,34 @@ export function SettingRow(props: {
       ) : (
         text
       )}
-      <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
-        {props.children}
-        {/* Every row keeps the reset's place, so controls share a right edge
-            and stay under the pointer when a reset appears. */}
-        {props.modified && props.onReset ? (
+      <div className={`ml-auto flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
+        {/* A row that can reset keeps Reset's place left of the controls, so
+            they share the right edge and never move or wrap when it appears. */}
+        {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
+        {props.onReset && props.modified ? (
           <button
             type="button"
             aria-label="Reset"
             title="Reset"
             onClick={props.onReset}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+            className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
           >
             <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
           </button>
-        ) : (
-          <span aria-hidden className="size-6 shrink-0" />
-        )}
+        ) : null}
+        {props.children}
       </div>
     </div>
+  );
+}
+
+/** A named group of settings: its heading over a card of rows. A page with one group leaves out the heading. */
+export function SettingsSection(props: { title?: string; children: ReactNode }) {
+  return (
+    <section aria-label={props.title} className="mt-8 first:mt-0">
+      {props.title ? <h4 className="m-0 mb-2 text-sm font-semibold text-ink">{props.title}</h4> : null}
+      <div className="rounded-lg border border-line bg-panel px-4">{props.children}</div>
+    </section>
   );
 }
 
@@ -228,7 +242,7 @@ export function StepperControl(props: {
           >
             {spec.label}
             {spec.keys?.map((key) => (
-              <kbd key={key} className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+              <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
                 {key}
               </kbd>
             ))}
@@ -267,7 +281,7 @@ export function TextControl(props: {
       maxLength={props.maxLength}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink"
     />
   );
 }
@@ -308,7 +322,8 @@ export function SwitchControl(props: {
 }
 
 // Spelled out so Tailwind sees every class.
-const HUE_FILLS: Record<IdentityHue, string> = {
+const HUE_FILLS: Record<AgentHue, string> = {
+  olive: "bg-agent",
   rust: "bg-hue-rust",
   amber: "bg-hue-amber",
   teal: "bg-hue-teal",
@@ -318,26 +333,28 @@ const HUE_FILLS: Record<IdentityHue, string> = {
   rose: "bg-hue-rose",
 };
 
-const AGENT_HUES = [null, ...IDENTITY_HUES] as const;
-
 /**
- * One swatch per identity hue. A person's swatches are round, and null checks
- * none: dohc picks the color. An agent's are rounded squares, the shapes of
- * their avatars, after an olive Default swatch that null checks.
+ * One swatch per hue. A person's swatches are round, and null checks none:
+ * dohc picks the color. An agent's are rounded squares, the shapes of their
+ * avatars, with olive first.
  *
  * The arrows choose as they move, unless `arrowsMoveFocus`: then they move
  * focus only and Enter or Space chooses, for a list where each choice saves.
  */
 export function HueControl(props: {
   label: string;
-  value: IdentityHue | null;
-  shape: "person" | "agent";
-  onChange: (value: IdentityHue | null) => void;
   arrowsMoveFocus?: boolean;
-}) {
+} & (
+  | { shape: "person"; value: IdentityHue | null; onChange: (value: IdentityHue) => void }
+  | { shape: "agent"; value: AgentHue; onChange: (value: AgentHue) => void }
+)) {
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const hues: readonly (IdentityHue | null)[] = props.shape === "agent" ? AGENT_HUES : IDENTITY_HUES;
-  const currentIndex = Math.max(0, hues.indexOf(props.value));
+  const hues: readonly AgentHue[] = props.shape === "agent" ? AGENT_HUES : IDENTITY_HUES;
+  const currentIndex = props.value === null ? 0 : Math.max(0, hues.indexOf(props.value));
+  const choose = (hue: AgentHue) => {
+    if (props.shape === "agent") props.onChange(hue);
+    else if (hue !== "olive") props.onChange(hue);
+  };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.key === "ArrowRight" || event.key === "ArrowDown"
@@ -347,17 +364,17 @@ export function HueControl(props: {
     event.preventDefault();
     const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
     const index = ((focused >= 0 ? focused : currentIndex) + step + hues.length) % hues.length;
-    if (!props.arrowsMoveFocus) props.onChange(hues[index]!);
+    if (!props.arrowsMoveFocus) choose(hues[index]!);
     optionRefs.current[index]?.focus();
   };
 
   return (
     <div role="radiogroup" aria-label={props.label} onKeyDown={handleKeyDown} className="flex items-center gap-1.5">
       {hues.map((hue, index) => {
-        const name = hue === null ? "Default" : hue[0]!.toUpperCase() + hue.slice(1);
+        const name = hue[0]!.toUpperCase() + hue.slice(1);
         return (
           <button
-            key={hue ?? "default"}
+            key={hue}
             ref={(element) => {
               optionRefs.current[index] = element;
             }}
@@ -367,10 +384,10 @@ export function HueControl(props: {
             title={name}
             aria-checked={props.value === hue}
             tabIndex={index === currentIndex ? 0 : -1}
-            onClick={() => props.onChange(hue)}
+            onClick={() => choose(hue)}
             className={`grid size-5 place-items-center text-bg transition-opacity hover:opacity-80 ${
               props.shape === "person" ? "rounded-full" : "rounded-md"
-            } ${hue === null ? "bg-agent" : HUE_FILLS[hue]}`}
+            } ${HUE_FILLS[hue]}`}
           >
             {props.value === hue ? <Check size={12} strokeWidth={2.5} aria-hidden /> : null}
           </button>

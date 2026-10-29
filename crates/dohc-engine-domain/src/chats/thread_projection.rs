@@ -89,6 +89,7 @@ pub fn render_chat_thread_projection(
             ChatActorKind::Human => message.author_display_name.clone(),
             ChatActorKind::Agent => format!("{} (agent)", message.author_display_name),
             ChatActorKind::Automation => format!("{} (automation)", message.author_display_name),
+            ChatActorKind::Link => format!("{} (link holder)", message.author_display_name),
         };
         lines.push(format!("## {author}"));
         lines.push(String::new());
@@ -115,7 +116,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                      ORDER BY created_at_ms, message_id",
                 )

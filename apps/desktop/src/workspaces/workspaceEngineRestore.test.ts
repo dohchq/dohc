@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   VERSIONED_METHOD,
+  DaemonRefusalError,
   type Request,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -65,6 +66,28 @@ function capture(
 }
 
 describe("engine history reads", () => {
+  it("classifies the synced deletion refusal without writing the restored text", async () => {
+    const root = await createTestScratch("dohc-engine-restore-guard-");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
+    try {
+      await write(root, "a.md", "Paris");
+      await engine.flush();
+      await write(root, "a.md", "Tokyo");
+      engine.observeFileEvents([{path: "a.md", operation: "update"}]);
+      await engine.flush();
+      const source = (await engine.listMoments()).moments[0]!;
+      const send = loopback.sendRequest.bind(loopback);
+      vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+        if (request.method === VERSIONED_METHOD.textWrite) throw new DaemonRefusalError({code: "INVALID_PARAMS", message: "synced-deletion-revival-refused", retry: "no"}, null);
+        return send(request);
+      });
+      await expect(engine.restoreFileToBeforeMoment(source.id, RESTORER)).rejects.toMatchObject({
+        name: "SyncedDeletionRevivalError", path: "a.md", restore: true,
+      });
+      expect(await readText(root, "a.md")).toBe("Tokyo");
+    } finally { await engine.stop(); }
+  });
   it("lists the active version's moments newest first and reads one payload", async () => {
     const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "a.md", "first\n");
