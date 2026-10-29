@@ -1437,8 +1437,7 @@ async fn markdown_recovery_notifies_when_reopened_local_consent_clears_the_old_s
                 .await
                 .unwrap();
             assert!(
-                open
-                    .actor
+                open.actor
                     .sync_refusal_notices("w".into())
                     .await
                     .unwrap()

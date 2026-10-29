@@ -95,7 +95,11 @@ async fn run(
             .filter_map(|candidate| {
                 let owed = &candidate.obligation;
                 owed.held_checkpoint_sha256.as_ref().map(|checkpoint| {
-                    (owed.order, checkpoint.clone(), owed.held_head_sha256.clone())
+                    (
+                        owed.order,
+                        checkpoint.clone(),
+                        owed.held_head_sha256.clone(),
+                    )
                 })
             })
             .collect();
