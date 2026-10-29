@@ -11,6 +11,7 @@ import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
+import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
 
 // A file dohc kept while it saved, as its Notices row reads, and the step
 // that moves it to a visible copy.
@@ -61,6 +62,7 @@ export type ShellErrorKind =
   | "file-recovery-unavailable"
   | "kept-files"
   | "retained-copies"
+  | "saved-tabs"
   | "record-history"
   | "record-history-run"
   | "reports"
@@ -587,6 +589,24 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // The saved tabs an open left out: one warning row, updated where it
+  // stands. `toast` files it with a toast; otherwise it updates the row, or
+  // files it quietly. Restore tabs ends the row. Null takes back the row and
+  // its toast.
+  const showSavedTabsNotice = useCallback((notice: SavedTabsNotice | null) => {
+    if (notice === null) {
+      clearKind("saved-tabs");
+      return;
+    }
+    push({
+      tone: "warning",
+      title: SAVED_TABS_TITLE,
+      message: notice.message,
+      retry: null,
+      ...(notice.restore ? { action: { label: "Restore tabs", run: notice.restore, ends: true } } : {}),
+      kind: "saved-tabs",
+    }, notice.toast ? false : "quiet");
+  }, [clearKind, push]);
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -917,6 +937,7 @@ export function useShellError(workspaceId: string) {
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
+    showSavedTabsNotice,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,

@@ -14,6 +14,8 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { captureOrphanedDraft } from "./orphanedDrafts";
 import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collectionWriteFailures, collectionWritesPaused, discardCollectionFieldWrite, enqueueCollectionFieldWrite, hasPendingCollectionFieldWrites } from "./collections/recordFieldWrites";
 import { deferred, type Deferred } from "../testing/deferred";
+import { LAYOUT_READ_WAIT_LIMIT_MS, SAVED_TABS_RESTORE, SAVED_TABS_RESTORE_AFTER_WAIT, SAVED_TABS_TITLE, SAVED_TABS_WAITED } from "./shell/useSavedTabsReread";
+import { COVER_WAIT_LINES_MS } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 async function openDirtyMarkdown(
@@ -189,6 +191,151 @@ describe("workspace switch admission", () => {
     const [payload] = bridge.setWorkspaceUiState.mock.lastCall!;
     expect(payload.workspaceId).toBe(WORKSPACE.workspaceId);
     expect(storedTabs(payload.state)).toEqual([]);
+  });
+
+  describe("saved tabs after a failed read", () => {
+    const refused = () => new Error("dohc has not finished opening this workspace.");
+    const notices = () => screen.getByTestId("notice-center-toggle").getAttribute("aria-label");
+    const openFile = async (user: ReturnType<typeof userEvent.setup>, path: string) => {
+      await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+      await screen.findByTestId(`tab-${path}`);
+    };
+    // The clock passes the open's limit while the first read waits.
+    const waitOutTheOpen = (bridge: ReturnType<typeof makeBridge>) => {
+      const now = Date.now.bind(Date);
+      bridge.getWorkspaceUiState.mockImplementationOnce(() => {
+        vi.spyOn(Date, "now").mockImplementation(() => now() + LAYOUT_READ_WAIT_LIMIT_MS);
+        return Promise.reject(refused());
+      });
+    };
+
+    it("restores them without a notice when the workspace opens and no tab is open", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+      const view = renderShell(bridge);
+      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
+      window.dispatchEvent(new Event("beforeunload"));
+      expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
+
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+
+      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+      expect(notices()).toBe("Notices");
+      view.unmount();
+      expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["b.md"]);
+    });
+
+    it("says so when the read waited out the open, and takes back the toast and the row when they come back", async () => {
+      const second = deferred<WorkspaceUiState | null>();
+      const bridge = makeBridge(second.promise);
+      waitOutTheOpen(bridge);
+      const user = userEvent.setup();
+      try {
+        renderShell(bridge);
+        const toast = await screen.findByTestId("workspace-shell-notice");
+        expect(toast.textContent).toContain(SAVED_TABS_TITLE);
+        expect(toast.textContent).toContain(SAVED_TABS_WAITED);
+        expect(within(toast).queryByRole("button", { name: "Restore tabs" })).toBeNull();
+        expect(notices()).toBe("Notices, 1 unread");
+        await user.click(within(toast).getByRole("button", { name: "Copy notice details" }));
+        expect((await navigator.clipboard.readText()).split("\n").slice(0, 2))
+          .toEqual([`Notice: ${SAVED_TABS_WAITED}`, `Title: ${SAVED_TABS_TITLE}`]);
+
+        await act(async () => {
+          second.resolve(STORED_STATE);
+          await second.promise;
+        });
+
+        expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(notices()).toBe("Notices");
+      } finally {
+        vi.mocked(Date.now).mockRestore();
+      }
+    });
+
+    it("offers Restore tabs once a tab is open, unread again without a toast, and keeps that tab", async () => {
+      const second = deferred<WorkspaceUiState | null>();
+      const bridge = makeBridge(second.promise);
+      waitOutTheOpen(bridge);
+      const user = userEvent.setup();
+      try {
+        renderShell(bridge);
+        const toast = await screen.findByTestId("workspace-shell-notice");
+        await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+        await openFile(user, "a.md");
+        await user.click(screen.getByTestId("notice-center-toggle"));
+        await user.click(within(await screen.findByTestId("notice-center")).getByRole("button", { name: "Mark all read" }));
+        expect(notices()).toBe("Notices");
+
+        await act(async () => {
+          second.resolve(STORED_STATE);
+          await second.promise;
+        });
+
+        const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE_AFTER_WAIT)).closest("li")!;
+        expect(notices(), "the row offers Restore tabs, so it is unread again").toBe("Notices, 1 unread");
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(screen.queryByTestId("tab-b.md")).toBeNull();
+        window.dispatchEvent(new Event("beforeunload"));
+        expect(bridge.setWorkspaceUiState, "saving waits for Restore tabs").not.toHaveBeenCalled();
+
+        await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
+
+        expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+        expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+        expect(screen.queryByText(SAVED_TABS_TITLE)).toBeNull();
+        await waitFor(() => expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["b.md", "a.md"]));
+      } finally {
+        vi.mocked(Date.now).mockRestore();
+      }
+    });
+
+    it("files a row without a toast when a read that failed another way works after a tab opened", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+      const user = userEvent.setup();
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+      await openFile(user, "a.md");
+      expect(notices(), "a failing read says nothing").toBe("Notices");
+
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+
+      await waitFor(() => expect(notices()).toBe("Notices, 1 unread"));
+      expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
+      expect(row.textContent).toContain(SAVED_TABS_TITLE);
+      expect(row.textContent).not.toContain("4 minutes");
+      expect(within(row).getByRole("button", { name: "Restore tabs" })).toBeTruthy();
+    });
+
+    it("says what the cover waits for, and the way out, 5 seconds after the workspace is admitted", async () => {
+      const stored = deferred<WorkspaceUiState | null>();
+      const bridge = makeBridge(stored.promise);
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        renderShell(bridge);
+        await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+        const cover = screen.getByTestId("workspace-preparing");
+        const shown = () => [...cover.querySelectorAll("p")].filter((line) => !line.classList.contains("invisible")).map((line) => line.textContent);
+        await act(() => vi.advanceTimersByTimeAsync(COVER_WAIT_LINES_MS - 1_000));
+        expect(shown()).toEqual(["Preparing this workspace"]);
+
+        await act(() => vi.advanceTimersByTimeAsync(1_000));
+
+        expect(shown()).toEqual([
+          "Preparing this workspace",
+          "dohc is still waiting for this workspace to open, so it can bring back your saved tabs.",
+          "Choose another workspace from the title bar.",
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("reads nothing and saves no defaults until a failed open succeeds", async () => {

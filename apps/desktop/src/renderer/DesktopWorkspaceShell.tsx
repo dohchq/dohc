@@ -46,6 +46,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
+  GetWorkspaceUiStateResult,
 } from "../ipc/bridgeContract";
 import {
   activityPathsAffectWorkspaceListing,
@@ -122,6 +123,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
+import { LAYOUT_READ_WAIT_LIMIT_MS, useSavedTabsReread } from "./shell/useSavedTabsReread";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -376,6 +378,8 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
+// How long after admission the opening cover says it waits for the saved tabs.
+export const COVER_WAIT_LINES_MS = 5_000;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -892,6 +896,7 @@ export function DesktopWorkspaceShell(props: {
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
+    showSavedTabsNotice,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -1315,8 +1320,9 @@ export function DesktopWorkspaceShell(props: {
   // or the defaults when there is none or the read fails. The stored state
   // replaces whatever changed under the cover, and file opens wait for it, so
   // nothing done under the cover loses the saved tabs. Writes start once the
-  // read answers, and never after a failed read, which can't say what is
-  // saved, so a default-state write can never clobber the stored one.
+  // read answers. A failed read can't say what is saved, so after one, writes
+  // wait for a later read to apply the saved tabs, and a default-state write
+  // can never clobber the stored one.
   const uiStateLoaded = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
@@ -1473,12 +1479,19 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // A failed read is read again once the workspace opens (useSavedTabsReread).
+  const layoutReadStartedAt = useRef(0);
+  const [layoutReadFailure, setLayoutReadFailure] = useState<{
+    admission: typeof workspaceAdmission;
+    waitedOut: boolean;
+  } | null>(null);
   useAsyncResponseEffect(
     async () => {
       await workspaceAdmission.promise;
       if (workspaceAdmission.superseded) {
         throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      layoutReadStartedAt.current = Date.now();
       return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
@@ -1516,10 +1529,43 @@ export function DesktopWorkspaceShell(props: {
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
+        setLayoutReadFailure({
+          admission: workspaceAdmission,
+          waitedOut: Date.now() - layoutReadStartedAt.current >= LAYOUT_READ_WAIT_LIMIT_MS,
+        });
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
+  // The saved layout replaces the defaults, and tabs opened since stay open
+  // beside the saved ones, the one in view still in view. Saving starts.
+  const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
+    if (stored) {
+      const saved = parseUiState(stored);
+      const shown = wbRef.current;
+      let next = saved;
+      for (const tab of allTabs(shown)) next = openTab(next, tab.path);
+      const active = activeTabPath(shown);
+      writeWb(active === null ? next : openTab(next, active));
+      setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
+    }
+    uiStateLoaded.current = true;
+  }, [writeWb]);
+  useSavedTabsReread({
+    workspaceId,
+    failed: layoutReadFailure?.admission === workspaceAdmission ? layoutReadFailure : null,
+    tabsOpen: () => allTabs(wbRef.current).length > 0,
+    apply: applySavedLayout,
+    show: showSavedTabsNotice,
+  });
+  // The cover's lines for a saved layout that is slow to load.
+  const [coverWaitedFor, setCoverWaitedFor] = useState<typeof workspaceAdmission | null>(null);
+  useEffect(() => {
+    if (!workspaceIsReady || workbenchRestored) return;
+    const timer = setTimeout(() => setCoverWaitedFor(workspaceAdmission), COVER_WAIT_LINES_MS);
+    return () => clearTimeout(timer);
+  }, [workspaceAdmission, workspaceIsReady, workbenchRestored]);
+  const coverWaits = workspaceIsReady && coverWaitedFor === workspaceAdmission;
   useEffect(() => {
     if (
       restoredSurfaceCommit?.selectionGeneration !==
@@ -6568,10 +6614,20 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          {/* The check is over while the saved layout loads. Hidden, not
-              removed, so the heading does not move. */}
-          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
-            dohc is checking your existing files before editing starts.
+          {/* The check is over while the saved layout loads, and a load that
+              takes a while says what it waits for and the way out. Lines are
+              hidden, not removed, in slots as tall as their tallest text, so
+              the heading does not move. */}
+          <div className="grid text-xs text-muted">
+            <p className={`col-start-1 row-start-1 ${workspaceIsReady ? "invisible" : ""}`}>
+              dohc is checking your existing files before editing starts.
+            </p>
+            <p className={`col-start-1 row-start-1 ${coverWaits ? "" : "invisible"}`}>
+              dohc is still waiting for this workspace to open, so it can bring back your saved tabs.
+            </p>
+          </div>
+          <p className={`text-xs text-muted ${coverWaits ? "" : "invisible"}`}>
+            Choose another workspace from the title bar.
           </p>
         </div>
       ) : null}
