@@ -2873,6 +2873,11 @@ mod collection_relation_cleanup_tests {
         )
         .unwrap();
         // Seed the completed settlement from before cleanup preserved the source.
+        let content = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .canonical_content();
         store
             .write_with(&NoFaults, |tx| {
                 let settled = dohc_engine_domain::write_projected_text_in_tx(
@@ -2909,6 +2914,15 @@ mod collection_relation_cleanup_tests {
             })
             .unwrap();
         std::fs::write(scratch.path().join(PACKING), REWRITTEN).unwrap();
+        // Encodings aren't canonical, so compare the Y.Doc's content, marks and attributes.
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .canonical_content(),
+            content
+        );
         assert_eq!(
             std::fs::read(scratch.path().join(PACKING)).unwrap(),
             REWRITTEN.as_bytes()
