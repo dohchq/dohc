@@ -389,7 +389,7 @@ pub(crate) fn export_covered_heads_in_tx(
                     return Err(failure.error);
                 }
                 if let Some(wait) = failure.waiting_asset {
-                    let (path, sha256) = match wait {
+                    let (path, sha256) = match *wait {
                         crate::ydoc_apply::SceneAssetWait::Head { path, sha256 } => {
                             (Some(path), sha256)
                         }

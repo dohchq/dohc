@@ -2281,19 +2281,17 @@ pub(super) fn ydoc_record_update_on_store(
             if !claim_triggers
                 && actor_origin_id.as_deref() == Some("engine")
                 && attribution.is_none()
-            {
-                if !super::collections::synchronize_collection_index_from_head_in_tx(tx, key, path)
+                && !super::collections::synchronize_collection_index_from_head_in_tx(tx, key, path)
                     .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?
-                {
-                    dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
-                        tx,
-                        &key.workspace_id,
-                        &key.version_id,
-                        &key.object_id,
-                        &serde_json::json!({}),
-                    )
-                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
-                }
+            {
+                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &serde_json::json!({}),
+                )
+                .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
             }
             if !journal_local_append_in_tx(
                 tx,
@@ -3611,7 +3609,7 @@ fn ydoc_settle_attempt_on_store(
     };
     let Some((write, collection_reconcile_required)) = settlement else {
         return Err(RuntimeError::MarkdownWriteHeld {
-            key: key.clone(),
+            key: Box::new(key.clone()),
             path: path.to_owned(),
             head_sha256: probe_sha,
             checkpoint_sha256,
@@ -3898,9 +3896,11 @@ mod markdown_refresh_tests;
 #[cfg(any(test, feature = "fault-injection"))]
 type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError>>;
 #[cfg(any(test, feature = "fault-injection"))]
+type MarkdownBeforeSettle = Box<dyn FnOnce(&mut EngineStore) -> Result<(), RuntimeError>>;
+#[cfg(any(test, feature = "fault-injection"))]
 thread_local! {
     pub(super) static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
-    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce(&mut EngineStore) -> Result<(), RuntimeError>>>> = const { std::cell::RefCell::new(None) };
+    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<MarkdownBeforeSettle>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(any(test, feature = "fault-injection"))]
 fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
@@ -4056,7 +4056,7 @@ fn ydoc_resync_on_store(
         head_blob_sha256: store.read_with(|conn| conn.query_row(
             "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0)).optional()
-            .map_err(|error| StorageError::corrupt_public(error)))?,
+            .map_err(StorageError::corrupt_public))?,
         initial_update,
         lineage_claim_id,
         lineage_originated_here,

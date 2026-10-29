@@ -603,7 +603,7 @@ impl Ydoc {
             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
         ]
         .iter()
-        .any(|key| meta.get(&txn, *key).is_some())
+        .any(|key| meta.get(&txn, key).is_some())
     }
 
     /// Resolve exact Markdown only after its lightweight projection witness

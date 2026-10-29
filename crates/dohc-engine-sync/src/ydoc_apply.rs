@@ -3274,7 +3274,7 @@ fn preserve_incomplete_base_in_tx(
     } else {
         pending_authors.as_str()
     };
-    put_projection_text_blob(tx, &local, &local_sha)?;
+    put_projection_text_blob(tx, local, &local_sha)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id,version_id,object_id,lineage_claim_id, \
          parent_claim_id,disposition,content_kind,path,epoch_tag,full_state_blob_sha256, \
@@ -3783,7 +3783,7 @@ pub(crate) enum SceneAssetWait {
 
 pub(crate) struct SceneProjectionError {
     pub error: SyncError,
-    pub waiting_asset: Option<SceneAssetWait>,
+    pub waiting_asset: Option<Box<SceneAssetWait>>,
 }
 
 impl From<SyncError> for SceneProjectionError {
@@ -3801,10 +3801,10 @@ impl SceneProjectionError {
             error: SyncError::RetryableState {
                 reason: "scene asset head is pending",
             },
-            waiting_asset: Some(SceneAssetWait::Head {
+            waiting_asset: Some(Box::new(SceneAssetWait::Head {
                 path: asset.path.clone(),
                 sha256: asset.sha256.clone(),
-            }),
+            })),
         }
     }
 
@@ -3813,9 +3813,9 @@ impl SceneProjectionError {
             error: SyncError::RetryableState {
                 reason: "scene asset blob is pending",
             },
-            waiting_asset: Some(SceneAssetWait::Blob {
+            waiting_asset: Some(Box::new(SceneAssetWait::Blob {
                 sha256: asset.sha256.clone(),
-            }),
+            })),
         }
     }
 }
@@ -4191,7 +4191,7 @@ fn record_markdown_hold_in_tx(
         tx,
         &dohc_engine_collab::markdown_write_obligations::Obligation {
             order: 0,
-            key: key.clone(),
+            key: (**key).clone(),
             lineage_claim_id: marker.lineage_claim_id.unwrap_or_default(),
             operation_id: format!("{}:{}", inputs.origin_id, inputs.origin_seq),
             kind: dohc_engine_collab::markdown_write_obligations::Kind::SyncProjection,
@@ -4489,7 +4489,7 @@ pub fn project_and_write_in_tx(
             .map_err(map_collab_hard_error)?
         {
             return Err(SyncError::MarkdownWriteHeld {
-                key: key.clone(),
+                key: Box::new(key.clone()),
                 path: path.to_owned(),
                 head_sha256: head_sha256.map(ToOwned::to_owned),
                 checkpoint_sha256: hex_sha256(&doc.encode_full_state()),
@@ -4513,7 +4513,7 @@ pub fn project_and_write_in_tx(
             &key.workspace_id,
             &key.version_id,
             &key.object_id,
-            &lineage,
+            lineage,
         )?;
     }
     let preimage = current

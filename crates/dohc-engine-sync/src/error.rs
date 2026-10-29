@@ -25,7 +25,7 @@ impl std::fmt::Display for ObservedBytes {
 pub enum SyncError {
     #[error("markdown-write-held")]
     MarkdownWriteHeld {
-        key: dohc_engine_collab::DocKey,
+        key: Box<dohc_engine_collab::DocKey>,
         path: String,
         head_sha256: Option<String>,
         checkpoint_sha256: String,

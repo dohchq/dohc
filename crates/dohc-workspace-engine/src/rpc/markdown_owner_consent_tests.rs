@@ -911,8 +911,7 @@ async fn markdown_owner_consent_open_and_settle_validate_the_same_source() {
             100,
         )
         .await
-        .err()
-        .expect("open must reject a different witness source");
+        .expect_err("open must reject a different witness source");
     assert!(lock(&service.sessions).is_empty());
     let (opened, egress) = service
         .ydoc_open(

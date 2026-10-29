@@ -1515,6 +1515,7 @@ impl Request {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settle_audited(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,

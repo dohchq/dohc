@@ -9,7 +9,7 @@ use dohc_engine_storage::StorageError;
 pub enum RuntimeError {
     #[error("markdown-write-held")]
     MarkdownWriteHeld {
-        key: dohc_engine_collab::DocKey,
+        key: Box<dohc_engine_collab::DocKey>,
         path: String,
         head_sha256: Option<String>,
         checkpoint_sha256: String,
