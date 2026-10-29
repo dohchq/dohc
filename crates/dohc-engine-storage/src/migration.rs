@@ -3453,6 +3453,7 @@ CREATE TABLE live_empty_settlements (
     PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id),
     FOREIGN KEY (workspace_id, moment_id) REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX live_empty_settlements_moment ON live_empty_settlements(workspace_id, moment_id);
 ";
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4622,7 +4623,7 @@ mod tests {
             ),
             (
                 "v2-live-empty-settlements",
-                "1b47033552ab4428186ee7f9a38abd29838950156a209534421709f10ffeca96",
+                "b4fa8a3c0e71194cd96dd067afd4b867d77ea0691719878388c7d7938335977b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
