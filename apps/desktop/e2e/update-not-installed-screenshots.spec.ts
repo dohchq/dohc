@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -15,9 +15,8 @@ import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun
 // only when a shot directory is set. The app under test reports Electron's
 // version, so the record names that version as the one the update was
 // chosen on, and the feed offers a later one. An unpackaged build starts a
-// download only with a dev-app-update.yml naming updaterCacheDirName beside
-// apps/desktop/package.json. Without one, Try again reports a download
-// failure instead of showing the download.
+// download only with a dev-app-update.yml naming updaterCacheDirName in its
+// app path, so the test writes one there and removes it afterwards.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture the update notice screenshots");
 
@@ -33,9 +32,11 @@ async function startFeed(): Promise<{ url: string; close: () => void }> {
   const yml = `version: 999.0.0\nfiles:\n  - url: dohc-update.exe\n    sha512: ${sha512}\n    size: ${installer.length}\npath: dohc-update.exe\nsha512: ${sha512}\nreleaseDate: '2026-10-30T00:00:00.000Z'\n`;
   const held: ServerResponse[] = [];
   const server = createServer((request, response) => {
-    if (request.url?.endsWith(".yml")) {
+    // electron-updater adds a cache-busting query to the feed request.
+    const { pathname } = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (pathname.endsWith(".yml")) {
       response.end(yml);
-    } else if (request.url === "/dohc-update.exe") {
+    } else if (pathname === "/dohc-update.exe") {
       response.writeHead(200, { "content-length": installer.length });
       response.write(installer.subarray(0, 4096));
       held.push(response);
@@ -78,6 +79,7 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
   const feed = await startFeed();
   const env = { DOHC_DESKTOP_MOCK_UPDATES: "1", DOHC_UPDATE_URL: feed.url };
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let devUpdateConfig: string | null = null;
   try {
     // A person pressed Update on this version, and dohc opens on it again.
     await writeFile(join(workspace.homeDir, "chosen-update.json"), JSON.stringify({ version: CHOSEN, from: ELECTRON }));
@@ -85,6 +87,8 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
     const { page } = desktop;
     const currentVersion = await desktop.app.evaluate(({ app }) => app.getVersion());
     expect(currentVersion).toBe(ELECTRON);
+    devUpdateConfig = join(await desktop.app.evaluate(({ app }) => app.getAppPath()), "dev-app-update.yml");
+    await writeFile(devUpdateConfig, `provider: generic\nurl: ${feed.url}\nupdaterCacheDirName: dohc-ui-audit-updater\n`);
     await openWorkspaceFromFirstRun(page, workspace);
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -113,16 +117,19 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
     await shoot(page, "04-notices-row");
 
     // Try again starts the download: the toast and the row go at once, and
-    // the title bar shows the download.
+    // the title bar shows the download. Running a row's action closes Notices.
     await notices.getByRole("button", { name: "Try again" }).click();
-    await expect(notices.getByText(TITLE)).toHaveCount(0);
-    await shoot(page, "05-notices-after-try-again");
-    await page.keyboard.press("Escape");
+    await expect(notices).toBeHidden();
     await expect(toast).toHaveCount(0);
     await expect(page.getByTestId("titlebar-update")).toHaveAttribute("data-update-status", "downloading");
-    await shoot(page, "06-title-bar-after-try-again");
+    await shoot(page, "05-title-bar-after-try-again");
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(notices).toBeVisible();
+    await expect(notices.getByText(TITLE)).toHaveCount(0);
+    await shoot(page, "06-notices-after-try-again");
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    if (devUpdateConfig) await rm(devUpdateConfig, { force: true });
     feed.close();
     await cleanupDesktopWorkspace(desktop, workspace);
   }
