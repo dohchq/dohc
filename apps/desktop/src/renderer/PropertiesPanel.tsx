@@ -331,8 +331,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     return () => map.unobserve(update);
   }, [ydoc]);
 
-  // Whether the block has lines no pill shows. A live document's file text is
-  // the text its engine keeps, else its values as a save writes them.
+  // Whether the block has lines no pill shows. A live document's block is the
+  // one a save writes now, from its values and the text its engine keeps, as
+  // Source shows it.
   const [keptRevision, setKeptRevision] = useState(0);
   useEffect(() => {
     if (!ydoc) return;
@@ -347,7 +348,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }, [ydoc]);
   const leading = ydoc ? "" : (LEADING_BLOCK.exec(body)?.[0] ?? "");
   const unshown = useMemo(() => {
-    const text = ydoc ? frontmatterAsWritten(ydoc, false) : leading ? (leadingFrontmatter(leading)?.text ?? "") : "";
+    const text = ydoc ? frontmatterAsWritten(ydoc, true) : leading ? (leadingFrontmatter(leading)?.text ?? "") : "";
     const block = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
     return block !== "" && !everyLineShown(block, props.recordId);
   }, [leading, ydoc, ydocRevision, keptRevision, props.recordId]);
@@ -481,10 +482,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   const isEmpty = entries.length === 0;
   const duplicates = duplicateKeySet(entries);
-  // A duplicate or held name on a saved property shows its flag in place of
-  // the saved line, so only Source still shows that line.
+  // A duplicate, held or reserved name on a saved property shows its flag in
+  // place of the saved line, so only Source still shows that line.
   const flagHidesSaved = entries.some((entry, index) =>
-    entry.sourceKey !== undefined && (index === heldRow || duplicates.has(entry.key.trim().toLowerCase())));
+    entry.sourceKey !== undefined
+    && (index === heldRow || isReserved(entry.key) || duplicates.has(entry.key.trim().toLowerCase())));
   const showSource = props.onShowSource && (unshown || flagHidesSaved) ? props.onShowSource : null;
   if (readOnly && isEmpty && !showSource) return null;
 

@@ -1550,6 +1550,36 @@ describe("PropertiesPanel's Source button", () => {
     expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
+  it("opens Source while a reserved name's flag hides a saved value, but not on a new pill", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-reserved")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("opens Source when a live document gains a value no pill shows beside its kept text", () => {
+    const doc = markdownToYDoc('---\nstatus: "Draft"\n---\n\nBody\n');
+    render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    act(() => setFrontmatterValue(doc, "place", { city: "Lisbon" }));
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
   it("offers no Source button when a held name is on a new pill, since nothing saved is hidden", async () => {
     const user = userEvent.setup();
     render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
