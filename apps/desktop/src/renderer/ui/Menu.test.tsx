@@ -273,9 +273,80 @@ describe("Menu", () => {
       />,
     );
     await user.click(screen.getByTestId("row-menu"));
+    await user.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
     expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
     expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+  });
+
+  // Opened with the mouse, a menu on its first row showed two active-looking
+  // rows: the focused first row and the checked one.
+  it.each([
+    ["its checked row", true, "Draft"],
+    ["its first row when no row is checked", false, "Main"],
+  ])("opens a radio menu on %s", async (_case, draftChecked, focused) => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { id: "main", label: "Main", onSelect: vi.fn(), checked: false },
+          { id: "draft", label: "Draft", onSelect: vi.fn(), checked: draftChecked },
+          MENU_SEPARATOR,
+          { id: "new", label: "New version…", onSelect: vi.fn() },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: focused }));
+  });
+
+  // jsdom has no layout or styles: rows 28px apart from 4px down, in a list that shows 100px.
+  it("scrolls a list shorter than its rows to the checked row it opens on", async () => {
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+        const menu = this.closest('[role="menu"]');
+        return menu && menu !== this ? 4 + [...menu.querySelectorAll('[role^="menuitem"]')].indexOf(this) * 28 : 0;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28),
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100),
+    ];
+    try {
+      const user = userEvent.setup();
+      render(<Harness items={Array.from({ length: 10 }, (_, index) => ({ id: `v${index}`, label: `Version ${index}`, onSelect: vi.fn(), checked: index === 9 }))} />);
+      await user.click(screen.getByTestId("row-menu"));
+      expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Version 9" }));
+      // The last row ends at 284: 284 - 100.
+      expect(screen.getByRole("menu").scrollTop).toBe(184);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("says why a disabled row cannot run on a second line, dimming only its icon and label", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { id: "compare", label: "Compare", onSelect: vi.fn(), icon: <span aria-hidden>C</span> },
+          { id: "merge", label: "Merge", onSelect: remove, icon: <span aria-hidden>M</span>, disabled: true,
+            description: "Only versions made from Main can merge into Main." },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    const merge = screen.getByRole("menuitem", { name: "Merge" });
+    expect(merge.getAttribute("aria-disabled")).toBe("true");
+    const reason = screen.getByText("Only versions made from Main can merge into Main.");
+    expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
+    expect(merge.contains(reason)).toBe(true);
+    // The row, its focus outline and the reason keep their strength.
+    expect(merge.className).not.toContain("opacity");
+    expect(reason.className).not.toContain("opacity");
+    expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");
+    expect(screen.getByText("M").parentElement?.className.split(" ")).toContain("opacity-50");
+    expect(screen.getByRole("menuitem", { name: "Compare" }).getAttribute("aria-describedby")).toBeNull();
+    await user.keyboard("{End}{Enter}");
+    expect(remove).not.toHaveBeenCalled();
   });
 
   // A browser paints :hover on a row that opens under a still pointer.
@@ -358,7 +429,7 @@ describe("Menu", () => {
   });
 
   describe("with a field in a row's place", () => {
-    function Naming(props: { onSubmit: (name: string) => void; busy?: boolean }) {
+    function Naming(props: { onSubmit: (name: string) => void; busy?: boolean; hint?: string }) {
       const [open, setOpen] = useState(false);
       const [name, setName] = useState<string | null>(null);
       const entries: MenuEntry[] = [
@@ -374,6 +445,7 @@ describe("Menu", () => {
                 onSubmit: () => props.onSubmit(name),
                 onCancel: () => setName(null),
                 busy: props.busy,
+                hint: props.hint,
                 testId: "new-input",
               },
             },
@@ -410,6 +482,15 @@ describe("Menu", () => {
       expect((input as HTMLInputElement).value).toBe("xre draft");
       await user.keyboard("{Enter}");
       expect(submit).toHaveBeenCalledWith("xre draft");
+    });
+
+    it("names its hint as the field's description", async () => {
+      const user = userEvent.setup();
+      render(<Naming onSubmit={vi.fn()} hint="Starts as a copy of Main" />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      const hint = screen.getByText("Starts as a copy of Main");
+      expect(screen.getByTestId("new-input").getAttribute("aria-describedby")).toBe(hint.id);
     });
 
     it("moves to the rows around it with the arrows, and back", async () => {

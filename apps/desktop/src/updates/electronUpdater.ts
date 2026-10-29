@@ -6,6 +6,9 @@ import {
   type UpdateState,
 } from "./updateMachine";
 
+// The step a failure stopped, which Try again runs again.
+export type UpdateStep = "check" | "download" | "install";
+
 export type PublicUpdateState = {
   status: UpdateState["status"];
   message: string;
@@ -17,6 +20,9 @@ export type PublicUpdateState = {
   percent?: number;
   // A Linux .deb that did not install: the command that installs it from a terminal.
   installCommand?: string;
+  // The last step that failed, while its state stands. `message` says why. A
+  // new id is a new failure to report.
+  failure?: { step: UpdateStep; id: number };
 };
 
 export type UpdateActionResult = {
@@ -41,12 +47,19 @@ export type UpdateWaitBounds = {
 export type AutoUpdateController = {
   state: () => UpdateState;
   publicState: () => PublicUpdateState;
-  checkForUpdates: () => Promise<UpdateCheckResult>;
-  // Checks now, or joins the check already running. Resolves with the
-  // downloaded version, or null when none downloads within the bounds.
-  // onDownloading runs once, when the feed offers a version to download.
+  // requested: a person asked, so even a failure like the last one is news.
+  checkForUpdates: (requested?: boolean) => Promise<UpdateCheckResult>;
+  // Starts downloading the available update. Progress, the result and a
+  // failure arrive as state.
+  downloadUpdate: () => UpdateActionResult;
+  // Checks now, or joins the check already running. When the feed offers an
+  // update, nothing downloads until confirmDownload resolves true; a download
+  // a person already started is joined without asking. Resolves with the
+  // downloaded version, or null when the person declines or none downloads
+  // within the bounds. onDownloading runs once, when the download starts.
   awaitUpdate: (
     bounds: UpdateWaitBounds,
+    confirmDownload: (version: string) => Promise<boolean>,
     onDownloading?: (version: string) => void,
   ) => Promise<string | null>;
   installUpdate: () => Promise<UpdateActionResult>;
@@ -62,6 +75,7 @@ type AutoUpdaterLike = {
   forceDevUpdateConfig?: boolean;
   setFeedURL(options: { provider: "generic"; url: string }): void;
   checkForUpdates(): Promise<unknown>;
+  downloadUpdate(): Promise<unknown>;
   // False where this updater cannot install, such as a Linux build that is
   // neither an AppImage nor a package. Its checks then resolve without events.
   isUpdaterActive?(): boolean;
@@ -108,9 +122,21 @@ export function updatesEnabled(
 // else is a real error.
 const OFFLINE_PATTERN =
   /ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|net::/i;
-const INSTALL_RESTART_FAILURE = "Could not restart into the update.";
+
+// Whether quitting dohc installs an update the person downloaded, as well as
+// Restart to update. Never on Linux: a .deb installs with dpkg behind a
+// password prompt, which must never appear while someone closes the app.
+const INSTALL_ON_QUIT = true;
+
+export function installsOnQuit(platform: NodeJS.Platform): boolean {
+  return INSTALL_ON_QUIT && platform !== "linux";
+}
 
 type InstallFailure = { message: string; installCommand?: string };
+
+// Each failure shows while the state it left stands: a failed check leaves
+// "error", a failed download "available", and a failed install "ready".
+const FAILED_STATUS = { check: "error", download: "available", install: "ready" } as const;
 
 /**
  * Why a Linux .deb did not install, and what the person can do. electron-updater installs it as root
@@ -123,7 +149,7 @@ type InstallFailure = { message: string; installCommand?: string };
 export function debInstallFailure(error: Error, installer: string): InstallFailure {
   const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
   if (program === "pkexec" && status === "126") {
-    return { message: "The update did not install without your password. Choose Restart to try again." };
+    return { message: "The update did not install without your password." };
   }
   const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
@@ -144,8 +170,15 @@ function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
   if (macReleaseFeed && error instanceof Error && "code" in error && error.code === CHANNEL_FILE_NOT_FOUND) {
     return { type: "not-available" };
   }
-  const message = error instanceof Error ? error.message : "checkForUpdates failed";
+  const message = causeOf(error);
   return OFFLINE_PATTERN.test(message) ? { type: "offline" } : { type: "error", message };
+}
+
+// The updater's reason as one line that fits the IPC contract. An HTTP
+// error carries its response headers on the lines after the first.
+function causeOf(error: unknown): string {
+  const line = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.trim();
+  return (line || "The updater gave no reason.").slice(0, 500);
 }
 
 function boundedPercent(percent: number): number {
@@ -185,7 +218,7 @@ export function publicUpdateState(
     canCheck,
     canInstall,
     ...("version" in state ? { version: state.version } : {}),
-    ...(state.status === "downloading" ? { percent: state.percent } : {}),
+    ...(state.status === "downloading" && state.percent !== undefined ? { percent: state.percent } : {}),
   };
 }
 
@@ -218,21 +251,34 @@ export async function startAutoUpdates(options: {
 
   let state = initialUpdateState;
   let checkInFlight = false;
+  let checkRequested = false;
   let restartStaged = false;
-  let installFailure: InstallFailure | null = null;
+  let failure: (InstallFailure & { step: UpdateStep; id: number }) | null = null;
+  let failures = 0;
   // The downloaded .deb on Linux, which a failed install names in its command.
   let debInstaller: string | null = null;
+  // electron-updater reports a failed macOS staging twice: as Squirrel's
+  // error, then as the download's rejection.
+  let stagingError: unknown = null;
   let stopped = false;
-  const publicState = () => {
+  const publicState = (): PublicUpdateState => {
     const base = publicUpdateState(state, {
       currentVersion,
       channel,
       checkInFlight,
       restartStaged,
     });
-    return installFailure && state.status === "ready"
-      ? { ...base, ...installFailure }
-      : base;
+    if (!failure || FAILED_STATUS[failure.step] !== state.status) return base;
+    const { step, id, message, installCommand } = failure;
+    return { ...base, message, failure: { step, id }, ...(installCommand ? { installCommand } : {}) };
+  };
+  // A background check that fails as the last one did keeps that failure,
+  // so its row updates without a new toast. Anything a person asked for is
+  // a new failure.
+  const fail = (step: UpdateStep, cause: InstallFailure, requested: boolean): void => {
+    if (!requested && failure?.step === step && failure.message === cause.message) return;
+    failures += 1;
+    failure = { ...cause, step, id: failures };
   };
   const waiters = new Set<() => void>();
   const emit = (): void => {
@@ -243,15 +289,17 @@ export async function startAutoUpdates(options: {
     state = transition(state, event);
     emit();
   };
+  const downloadFailed = (error: unknown): void => {
+    if (state.status !== "downloading") return;
+    fail("download", { message: causeOf(error) }, true);
+    dispatch({ type: "error", message: causeOf(error) });
+  };
 
-  autoUpdater.autoDownload = true;
-  // The machine's ready-state contract on Windows and macOS: a downloaded
-  // update installs on quit even if no UI surface ever asks for a restart.
-  // On Linux an update installs only when the person asks: a .deb installs
-  // with dpkg behind a password prompt, which must never appear while someone
-  // closes the app. There the click installs at once, so a staged restart has
-  // nothing left to install.
-  autoUpdater.autoInstallOnAppQuit = platform !== "linux";
+  // Nothing downloads until a person chooses Update.
+  autoUpdater.autoDownload = false;
+  // On Linux the click installs at once, so a staged restart has nothing
+  // left to install.
+  autoUpdater.autoInstallOnAppQuit = installsOnQuit(platform);
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = false;
@@ -264,14 +312,17 @@ export async function startAutoUpdates(options: {
   if (autoUpdater.isUpdaterActive?.() === false) return null;
 
   autoUpdater.on("checking-for-update", () => {
-    installFailure = null;
     checkInFlight = true;
     dispatch({ type: "check" });
   });
-  autoUpdater.on("update-available", (info) =>
-    dispatch({ type: "available", version: info.version }),
-  );
+  autoUpdater.on("update-available", (info) => {
+    failure = null;
+    dispatch({ type: "available", version: info.version });
+    checkInFlight = false;
+    emit();
+  });
   autoUpdater.on("update-not-available", () => {
+    failure = null;
     dispatch({ type: "not-available" });
     checkInFlight = false;
     emit();
@@ -280,25 +331,38 @@ export async function startAutoUpdates(options: {
     dispatch({ type: "progress", percent: boundedPercent(progress.percent) }),
   );
   autoUpdater.on("update-downloaded", (info) => {
-    installFailure = null;
+    failure = null;
     debInstaller = platform === "linux" && info.downloadedFile?.endsWith(".deb") ? info.downloadedFile : null;
     dispatch({ type: "downloaded", version: info.version });
-    checkInFlight = false;
-    emit();
   });
   autoUpdater.on("error", (error) => {
+    if (error === stagingError) return;
+    if (platform === "darwin" && state.status === "ready") {
+      // electron-updater reports a macOS download before Squirrel stages it.
+      // A failed staging leaves nothing to install, so the update downloads
+      // again, which stages it again.
+      stagingError = error;
+      restartStaged = false;
+      fail("download", { message: causeOf(error) }, true);
+      dispatch({ type: "unstaged" });
+      return;
+    }
     if (restartStaged && state.status === "ready") {
       restartStaged = false;
-      installFailure = debInstaller ? debInstallFailure(error, debInstaller) : { message: INSTALL_RESTART_FAILURE };
+      fail("install", debInstaller ? debInstallFailure(error, debInstaller) : { message: causeOf(error) }, true);
       emit();
       return;
     }
+    if (state.status === "downloading") return downloadFailed(error);
     checkInFlight = false;
     restartStaged = false;
-    dispatch(checkFailure(error, macReleaseFeed));
+    const event = checkFailure(error, macReleaseFeed);
+    if (event.type === "error") fail("check", { message: event.message }, checkRequested);
+    else failure = null;
+    dispatch(event);
   });
 
-  const checkForUpdates = async (): Promise<UpdateCheckResult> => {
+  const checkForUpdates = async (requested = false): Promise<UpdateCheckResult> => {
     if (
       stopped ||
       checkInFlight ||
@@ -311,7 +375,7 @@ export async function startAutoUpdates(options: {
       return { checked: false, state: publicState() };
     }
     checkInFlight = true;
-    installFailure = null;
+    checkRequested = requested;
     try {
       await autoUpdater.checkForUpdates();
       return { checked: true, state: publicState() };
@@ -319,13 +383,27 @@ export async function startAutoUpdates(options: {
       // The updater emits "error"; if it does not, leave the app usable and
       // make the action visibly retryable. A check that found no update yet
       // still ran.
-      const failure = checkFailure(error, macReleaseFeed);
+      const event = checkFailure(error, macReleaseFeed);
       if (checkInFlight) {
         checkInFlight = false;
-        dispatch(failure);
+        if (event.type === "error") fail("check", { message: event.message }, requested);
+        else failure = null;
+        dispatch(event);
       }
-      return { checked: failure.type === "not-available", state: publicState() };
+      return { checked: event.type === "not-available", state: publicState() };
     }
+  };
+
+  const downloadUpdate = (): UpdateActionResult => {
+    if (stopped || state.status !== "available") {
+      return { accepted: false, state: publicState() };
+    }
+    failure = null;
+    dispatch({ type: "download" });
+    // The updater's error event reports a failure first; this covers one it
+    // never emitted, so the download cannot stay running forever.
+    autoUpdater.downloadUpdate().catch(downloadFailed);
+    return { accepted: true, state: publicState() };
   };
 
   // quitAndInstall is ONE-SHOT in electron-updater: a second call returns
@@ -348,29 +426,32 @@ export async function startAutoUpdates(options: {
       return { accepted: true, state: publicState() };
     }
     restartStaged = true;
-    installFailure = null;
+    failure = null;
     emit();
     try {
       autoUpdater.quitAndInstall(false, true);
       // The updater's error event sets it while quitAndInstall runs.
-      const failure = installFailure as InstallFailure | null;
-      if (failure) {
-        return { accepted: false, reason: failure.message, state: publicState() };
+      const failed = failure as InstallFailure | null;
+      if (failed) {
+        return { accepted: false, reason: failed.message, state: publicState() };
       }
       return { accepted: true, state: publicState() };
-    } catch {
+    } catch (error) {
       restartStaged = false;
-      installFailure = { message: INSTALL_RESTART_FAILURE };
+      fail("install", { message: causeOf(error) }, true);
       emit();
-      return { accepted: false, reason: INSTALL_RESTART_FAILURE, state: publicState() };
+      return { accepted: false, reason: causeOf(error), state: publicState() };
     }
   };
 
   const awaitUpdate = (
     bounds: UpdateWaitBounds,
+    confirmDownload: (version: string) => Promise<boolean>,
     onDownloading?: (version: string) => void,
   ): Promise<string | null> =>
     new Promise((resolve) => {
+      let asked = false;
+      let asking = false;
       let downloading = false;
       let done = false;
       let timer = setTimeout(() => finish(null), bounds.verdictMs);
@@ -381,11 +462,23 @@ export async function startAutoUpdates(options: {
         resolve(version);
       }
       function settle(): void {
-        if (done) return;
+        if (done || asking) return;
         if (state.status === "ready") return finish(state.version);
         if (stopped) return finish(null);
-        if (state.status === "available" || state.status === "downloading") {
-          // The feed offered an update: the download gets its own bound.
+        if (state.status === "available" && !asked) {
+          // The answer has no bound: the person decides, not the feed.
+          asked = asking = true;
+          clearTimeout(timer);
+          void confirmDownload(state.version).then((accepted) => {
+            asking = false;
+            if (!accepted) return finish(null);
+            downloadUpdate();
+            settle();
+          }, () => finish(null));
+          return;
+        }
+        if (state.status === "downloading") {
+          // The download gets its own bound.
           if (downloading) return;
           downloading = true;
           clearTimeout(timer);
@@ -425,6 +518,7 @@ export async function startAutoUpdates(options: {
     state: () => state,
     publicState,
     checkForUpdates,
+    downloadUpdate,
     awaitUpdate,
     installUpdate,
     stop,

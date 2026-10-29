@@ -13,6 +13,7 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { pendingHeadingTargetForOpen, type Workspace } from "./DesktopWorkspaceShell";
 import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalescer";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
@@ -3290,11 +3291,7 @@ describe("ui-state merge-on-load", () => {
       workspace={WORKSPACE}
       workspaces={[WORKSPACE]}
       {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: {
-        ...DEFAULT_USER_SETTINGS,
-        profile: enabled ? { agentName: "Nova" } : {},
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled, command: enabled ? "node agent.mjs" : "" },
-      } }}
+      userSettings={{ source: "stored", settings: enabled ? settingsWithAgent({ name: "Nova" }) : DEFAULT_USER_SETTINGS }}
       onSwitchWorkspace={() => {}}
     />);
     await screen.findByTestId("chats-personal-feed");

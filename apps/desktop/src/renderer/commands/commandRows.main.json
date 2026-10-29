@@ -17,6 +17,10 @@
       "label": "New file"
     },
     {
+      "id": "new-file-at-path",
+      "label": "New file…"
+    },
+    {
       "id": "new-drawing",
       "label": "New drawing"
     },
@@ -126,7 +130,7 @@
     },
     {
       "id": "install-update",
-      "label": "Update and restart"
+      "label": "Restart to update"
     },
     {
       "id": "toggle-theme",

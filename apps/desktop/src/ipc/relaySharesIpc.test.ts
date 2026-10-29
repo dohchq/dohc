@@ -1,4 +1,5 @@
 import { relayShareOperations } from "./shareOperations";
+import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
@@ -97,6 +98,7 @@ function harness() {
   // Each path holds the document "object", which the object ids name at "live.md".
   const liveDocument = vi.fn<Dependencies["liveDocument"]>(async (_workspace, target) =>
     ({mainVersionId: "main", objectId: "objectId" in target ? target.objectId : "object", currentPath: "path" in target ? target.path : "live.md"}));
+  const pushRecorded = vi.fn<Dependencies["pushRecorded"]>(async () => undefined);
   const editors = new Set<string>(), reserved: string[] = [];
   const withoutEditors: Dependencies["withoutEditors"] = async (_workspace, path, change) => {
     if (editors.has(path)) throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`);
@@ -113,6 +115,7 @@ function harness() {
     relayShareErrorCopy: (status) => `sharing failed (${status})`,
     relayShareDiscussionActivityPolls: polls,
     ownerLiveStop,
+    pushRecorded,
     liveDocument,
     withoutEditors,
     listOwnerLiveStops: localStops,
@@ -147,6 +150,7 @@ function harness() {
     unenrolled:() => {enrolled=false;},
     localStops,
     ownerLiveStop,
+    pushRecorded,
     liveDocument,
     editors,
     reserved,
@@ -184,6 +188,107 @@ describe("named browser invitations", () => {
       createdAtMs: 1, revokedAtMs: null, browserInvitationUrl}]});
     expect(await h.invoke(relayShareOperations.listRelayShares.channel)).toMatchObject({granted: [{grantId: "exact-grant", browserInvitationUrl,
       shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!})}]});
+  });
+});
+
+describe("sync before live hosting", () => {
+  const editShare = {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"};
+  const shareSent = (h: ReturnType<typeof harness>) => h.request.mock.calls.some(([, path, init]) => path === "/sync/workspace/shares" && init?.method === "POST");
+
+  it("sends an edit share only after sync sends what it recorded", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const created = h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    expect(shareSent(h)).toBe(false);
+    pushed.resolve();
+    await created;
+    expect(shareSent(h)).toBe(true);
+  });
+
+  it("sends the share at 10 s when sync takes longer", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      const h = harness();
+      h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+      h.pushRecorded.mockReturnValue(new Promise(() => {}));
+      const created = h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(shareSent(h)).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await created;
+      expect(shareSent(h)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends the share at once when sync fails", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness();
+      h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+      h.pushRecorded.mockRejectedValue(new Error("server unreachable"));
+      await h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+      expect(shareSent(h)).toBe(true);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("syncs before edit links, Resume, and retry, but not before view access", async () => {
+    const h = harness();
+    h.request.mockResolvedValue(linkResult);
+    await h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput);
+    await h.invoke(relayShareOperations.createRelayShare.channel, {...editShare, access: "view"});
+    expect(h.pushRecorded).not.toHaveBeenCalled();
+    await h.invoke(relayShareOperations.createRelayShareLink.channel, {...linkInput, access: "edit"});
+    await h.invoke(relayShareOperations.addRelayShareLink.channel, {workspaceId, shareId: "share", access: "edit"});
+    h.request.mockResolvedValue({ok: true, documents: [{path: "live.md", objectId: "object", status: "ready"}]});
+    await h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"});
+    h.request.mockResolvedValue({ok: true, path: "live.md", objectId: "object", status: "ready"});
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {workspaceId, path: "live.md"});
+    expect(h.pushRecorded).toHaveBeenCalledTimes(4);
+    expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId);
+  });
+
+  it("syncs before retuning a link to Edit", async () => {
+    const h = harness();
+    const retune = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view"}});
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...retune, access: "view"})).resolves.toEqual({outcome: "narrowed"});
+    expect(h.pushRecorded).not.toHaveBeenCalled();
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "edit", url: "https://relay.example/new"}});
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...retune, access: "edit"})).resolves.toMatchObject({outcome: "widened"});
+    expect(h.pushRecorded).toHaveBeenCalledOnce();
+    expect(h.pushRecorded.mock.invocationCallOrder[0]).toBeLessThan(h.request.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it("syncs the window's workspace before Undo restores the share", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const undone = h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    expect(h.accountRequest).not.toHaveBeenCalled();
+    pushed.resolve();
+    await expect(undone).resolves.toEqual({shareId: "share"});
+    expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {method: "POST", body: JSON.stringify({undoId: "undo-1"})});
+  });
+
+  it("doesn't restore the share when the window changes workspaces while Undo syncs", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const undone = h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    h.retireRenderer();
+    pushed.resolve();
+    await expect(undone).rejects.toThrow(relayShareOperations.undoRelayShare.inactiveMessage);
+    expect(h.accountRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -264,16 +369,32 @@ describe("owner live document enrollment", () => {
       {path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged",canResume:false},
     ],nextCursor:null});
   });
+  it("offers no Resume after the real relay retires a held document and forgets its running hold", async () => {
+    const f = await heldDocumentFixture(workspaceId);
+    try {
+      expect((await f.stop()).status).toBe(200);
+      expect(f.host.holdReason()).toBeUndefined();
+      const h = harness();
+      h.request.mockImplementation(async (_credentials, path) => {
+        const response = await f.handle(new Request(`https://relay.test${path}`, {headers: {authorization: "Bearer owner-token"}}));
+        return response.json();
+      });
+      await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [{
+        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", canResume: false,
+      }], nextCursor: null});
+    } finally {await f.close();}
+  });
+
   // Proves: a deferred Stop does not offer Resume on a document whose server
   // copy misses an edit made while live editing was off.
-  it("offers no Resume for a deferred Stop on a document edited while live editing was off",async () => {
+  it.each(["live-edit-unadmitted", "conflict-parent-withheld"])("offers no Resume for a deferred Stop with %s",async reason => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
       ? {ok:true,documents:[],nextCursor:null}
-      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason:"live-edit-unadmitted"}]});
+      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"edited.md",objectId:"object",status:"unavailable",reason:"live-edit-unadmitted",canResume:false,deferredStop:{unsentEdits:1,editable:true}},
+      {path:"edited.md",objectId:"object",status:"unavailable",reason,canResume:false,deferredStop:{unsentEdits:1,editable:true}},
     ],nextCursor:null});
   });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
@@ -362,6 +483,22 @@ describe("owner live document enrollment", () => {
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([
       "/sync/workspace/live-host", "/sync/workspace/live-host?retired=1&after=older.md",
     ]);
+  });
+
+  it("lists each restore queue as save-only beside the current document, including an unhosted note", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [], nextCursor: null}
+      : {ok: true, documents: [{path: "note.md", objectId: "object", status: "ready"}]});
+    h.ownerLiveQuarantines.mockReturnValue(["old-1", "old-2"].map(incident => ({objectId: "object", path: "note.md",
+      reason: "restore-fenced", storedOn: "this-computer" as const, recovery: "paused" as const, saveOnly: true as const, incident})));
+    const listed = await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
+    expect(listed).toEqual({documents: [{path: "note.md", objectId: "object", status: "ready", canResume: false},
+      ...["old-1", "old-2"].map(incident => ({path: "note.md", objectId: "object", status: "paused", canResume: false,
+        quarantine: "paused", storedOn: "this-computer", incident, saveOnly: true}))], nextCursor: null});
+    h.request.mockResolvedValue({ok: true, documents: [], nextCursor: null});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toMatchObject({documents: [
+      {path: "note.md", incident: "old-1", saveOnly: true}, {path: "note.md", incident: "old-2", saveOnly: true}]});
   });
 
   it("uses the server owner credential session for retire and resume", async () => {
@@ -673,6 +810,21 @@ describe("owner live document enrollment", () => {
   it("refuses mismatched action responses instead of claiming another file stopped", async () => {
     const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", objectId:"other-object", status: "retired", acceptedCursor: 0});
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
+  });
+
+  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+    const h = harness();
+    const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown("retired")], nextCursor: "unknown.md"}
+      : {ok: true, documents: [unknown("ready"), {path: "live.md", objectId: "live", status: "ready"},
+        {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
+      {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      {path: "live.md", objectId: "live", status: "ready", canResume: false},
+      {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
+    ], nextCursor: "unknown.md"});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "unknown.md"})).rejects.toThrow("list changed");
   });
 
   it("refuses invalid retired paging cursors and malformed document paths", async () => {
@@ -1058,7 +1210,7 @@ describe("share roster refresh", () => {
     h.accountRequest.mockResolvedValue({ok: true, undo});
     await h.invoke(relayShareOperations.revokeRelayShare.channel, {shareId: "share"});
     h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
-    await h.invoke(relayShareOperations.undoRelayShare.channel, {shareId: "share", undoId: "undo-1"});
+    await h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
     expect(h.sharesChanged.mock.calls).toEqual([[null], [null]]);
   });
 
@@ -1202,9 +1354,8 @@ describe("registered account share handlers", () => {
 
   it("restores a removal through the account transport with the receipt's id", async () => {
     const h = harness();
-    h.retirePhysical();
     h.accountRequest.mockResolvedValue({ ok: true, shareId: "share" });
-    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { shareId: "share", undoId: "undo-1" }))
+    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { workspaceId, shareId: "share", undoId: "undo-1" }))
       .resolves.toEqual({ shareId: "share" });
     expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {
       method: "POST", body: JSON.stringify({ undoId: "undo-1" }),
@@ -1215,7 +1366,7 @@ describe("registered account share handlers", () => {
   it("rejects an undo answer that names another share", async () => {
     const h = harness();
     h.accountRequest.mockResolvedValue({ ok: true, shareId: "other" });
-    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { shareId: "share", undoId: "undo-1" }))
+    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { workspaceId, shareId: "share", undoId: "undo-1" }))
       .rejects.toThrow("sharing failed (500)");
   });
 
@@ -1344,7 +1495,7 @@ const ownerInputs = {
   listRelayShares: undefined,
   getRelayReceivedShare: {shareId: "share"},
   revokeRelayShare: {shareId: "share"},
-  undoRelayShare: {shareId: "share", undoId: "undo-1"},
+  undoRelayShare: {workspaceId, shareId: "share", undoId: "undo-1"},
   pollRelayShareDiscussionActivity: pollInput,
   cancelRelayShareDiscussionActivity: {pollId: pollInput.pollId},
   createRelayShare: {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"},
@@ -1379,7 +1530,6 @@ describe("owner operation admission", () => {
     h.retireRenderer();
     if (name === "getRelayReceivedShare") h.request.mockResolvedValue({kind: "missing", removed: false});
     if (name === "revokeRelayShare") h.accountRequest.mockResolvedValue({ok: true});
-    if (name === "undoRelayShare") h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
     await h.invoke(row.channel, input);
     expect(h.workspaceOperations).not.toHaveBeenCalled();
     expect(h.remote).not.toHaveBeenCalled();

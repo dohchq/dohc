@@ -58,6 +58,15 @@ import {
 const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+
+/** Capture was still working when its settle budget ran out. */
+export class EngineCaptureNotSettledError extends Error {
+  constructor(workspaceId: string) {
+    super(`Engine capture for ${workspaceId} did not settle.`);
+    this.name = "EngineCaptureNotSettledError";
+  }
+}
+
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
@@ -1447,9 +1456,7 @@ export function createCaptureLiveStores(
       captureWaitSignal?.throwIfAborted();
       const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
       let finished = false;
-      const didNotSettle = () => new Error(
-        `Engine capture for ${workspace.workspaceId} did not settle.`,
-      );
+      const didNotSettle = () => new EngineCaptureNotSettledError(workspace.workspaceId);
       const assertActive = () => {
         captureWaitSignal?.throwIfAborted();
         if (finished) throw didNotSettle();

@@ -5,7 +5,7 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Lock, Play, Share2 } from "lucide-react";
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -103,7 +103,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
@@ -196,6 +196,43 @@ export function EngineMayHoldDocumentNotice(props: {
   );
 }
 
+// An Open externally control, then a lock and "Read-only copy" when the file
+// is from someone else. Main answers by the open's own rule. Until it answers
+// for this file, or when it can't, no words show, and the open decides alone.
+export function OpenExternallyControl(props: {
+  workspaceId: string;
+  path: string;
+  className?: string;
+  children: (describedBy: string | undefined) => ReactNode;
+}) {
+  const id = useId();
+  const asked = `${props.workspaceId}\u0000${props.path}`;
+  const [answer, setAnswer] = useState<{ asked: string; readOnlyCopy: boolean } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void Promise.resolve()
+      .then(() => bridge().readExternalOpen({ workspaceId: props.workspaceId, relativePath: props.path }))
+      .then(({ readOnlyCopy }) => {
+        if (live) setAnswer({ asked, readOnlyCopy });
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [asked, props.workspaceId, props.path]);
+  const readOnlyCopy = answer?.asked === asked && answer.readOnlyCopy;
+  return (
+    <span className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}>
+      {props.children(readOnlyCopy ? id : undefined)}
+      {readOnlyCopy ? (
+        <span className="inline-flex items-center gap-1 text-subtle">
+          <Lock aria-hidden size={12} className="shrink-0" />
+          <span id={id}>Read-only copy</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 // Opens a read-only note in the system's app for the file.
 export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   const openExternally = () => {
@@ -206,14 +243,19 @@ export function OpenExternallyLink(props: { workspaceId: string; path: string; o
       );
   };
   return (
-    <button
-      type="button"
-      data-testid="lossy-note-open-externally"
-      onClick={openExternally}
-      className="whitespace-nowrap text-subtle hover:text-ink"
-    >
-      Open externally
-    </button>
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+      {(describedBy) => (
+        <button
+          type="button"
+          data-testid="lossy-note-open-externally"
+          aria-describedby={describedBy}
+          onClick={openExternally}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Open externally
+        </button>
+      )}
+    </OpenExternallyControl>
   );
 }
 
@@ -261,7 +303,7 @@ export function LossyNoteNotice(props: {
       role="status"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
-      <span className="flex min-w-0 items-center gap-1.5">
+      <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0" />
         dohc can't edit this document yet without changing parts it can't show.
       </span>
@@ -326,9 +368,20 @@ async function historyKeeps(workspaceId: string, path: string, contentHash: stri
   return hex === contentHash ? "kept" : "not-recorded";
 }
 
+// Opens a file in the system's app for it. A failure goes to the shell's
+// toasts and Notices, with Try again.
+export function openExternally(props: { workspaceId: string; path: string; onError?: ReportButtonError }): void {
+  void bridge()
+    .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+    .catch((error: unknown) =>
+      props.onError?.("dohc could not open this file externally.", error, () => openExternally(props), `open-externally:${props.path}`),
+    );
+}
+
 export function EngineArtifactAssetsInvalidNotice(props: {
   workspaceId: string;
   path: string;
+  onError?: ReportButtonError;
 }) {
   return (
     <div
@@ -338,36 +391,33 @@ export function EngineArtifactAssetsInvalidNotice(props: {
       <span>
         dohc could not verify this drawing's images. The drawing is read-only.
       </span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
 
 // The next step in a file view that cannot show its file: the system's app
 // for it.
-export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
+export function OpenExternallyButton(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
-    <SecondaryButton
-      onClick={() =>
-        void bridge().openFileExternally({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-        })
-      }
-    >
-      Open externally
-    </SecondaryButton>
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path} className="text-xs">
+      {(describedBy) => (
+        <SecondaryButton aria-describedby={describedBy} onClick={() => openExternally(props)}>
+          Open externally
+        </SecondaryButton>
+      )}
+    </OpenExternallyControl>
   );
 }
 

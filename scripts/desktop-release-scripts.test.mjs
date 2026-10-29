@@ -139,20 +139,33 @@ test("a nightly publishes every platform the workflow builds", () => {
   assert.doesNotThrow(() => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases: [] }));
 });
 
-test("at most one nightly publishes per UTC day, counted by when it published", () => {
+test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, counted by when it published", () => {
   const now = new Date("2026-10-19T09:00:00Z");
   const check = (releases, at = now) => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases, now: at });
-  // A run that started before midnight and published after it holds the day it published on.
-  const lateRun = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
-  assert.throws(() => check([lateRun]), (error) => error.message.startsWith("v0.1.1-nightly.20261018.37.1 published at 2026-10-19T00:30:00Z, so 2026-10-19 (UTC) already has its nightly."));
-  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /2026-10-19 \(UTC\) already has its nightly/);
-  // A draft never reached an updater, and earlier days and stable releases do not count.
+  // Last night's scheduled nightly refuses a morning dispatch, and says when the next one can publish.
+  const lastNight = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-18T20:30:00Z");
+  assert.throws(() => check([lastNight]), (error) => error.message ===
+    "v0.1.1-nightly.20261018.37.1 published at 2026-10-18 20:30 UTC, and one nightly publishes per nightly day, which starts at 18:00 UTC. The next nightly can publish from 2026-10-19 18:00 UTC. Before then, use dry_run=true.");
+  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /can publish from 2026-10-19 18:00 UTC/);
+  // A nightly published by hand before 18:00 UTC doesn't hold back that evening's scheduled one.
+  const manual = publishedRelease("v0.1.1-nightly.20261019.38.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
+  assert.throws(() => check([manual]), /can publish from 2026-10-19 18:00 UTC/);
+  assert.doesNotThrow(() => check([manual], new Date("2026-10-19T20:00:00Z")));
+  // On 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still publishes.
+  const morning = publishedRelease("v0.1.1-nightly.20261026.152.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-26T07:00:00Z");
+  assert.doesNotThrow(() => check([morning], new Date("2026-10-26T20:00:00Z")));
+  // The day turns at 18:00 UTC exactly.
+  const beforeTurn = publishedRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"], "2026-10-19T17:59:00Z");
+  assert.throws(() => check([beforeTurn], new Date("2026-10-19T17:59:59Z")), /can publish from 2026-10-19 18:00 UTC/);
+  assert.doesNotThrow(() => check([beforeTurn], new Date("2026-10-19T18:00:00Z")));
+  const atTurn = publishedRelease("v0.1.1-nightly.20261019.40.1", ["nightly.yml"], "2026-10-19T18:00:00Z");
+  assert.throws(() => check([atTurn], new Date("2026-10-20T17:59:59Z")), /can publish from 2026-10-20 18:00 UTC/);
+  // A draft never reached an updater, and earlier nightly days and stable releases do not count.
   assert.doesNotThrow(() => check([
     draftRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"]),
-    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T23:59:59Z"),
+    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T17:59:59Z"),
     publishedRelease("v0.1.0", ["latest.yml"], "2026-10-19T08:00:00Z"),
   ]));
-  assert.doesNotThrow(() => check([lateRun], new Date("2026-10-20T00:00:01Z")));
 });
 
 test("publication history fails closed on incomplete input", () => {
@@ -177,7 +190,7 @@ test("the publication check exits unsuccessfully when a release breaks a rule", 
   const { stdout } = await promisify(execFile)(process.execPath, args);
   assert.match(stdout, /meets the publication rules/);
   await writeHistory(new Date().toISOString());
-  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /already has its nightly/.test(error.stderr));
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /The next nightly can publish from/.test(error.stderr));
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -479,8 +492,8 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
   assert.equal(jobs["unused-version"].permissions.contents, "write");
   // Publishing checks the release history: a nightly ships every workflow platform at
-  // most once a UTC day, and a channel keeps every platform it has published. The check
-  // runs before packaging, and again in Publish, because a run can publish after midnight.
+  // most once a nightly day, and a channel keeps every platform it has published. The check
+  // runs before packaging, and again in Publish, because a run can publish after the nightly day turns.
   const rulesBeforePackaging = releaseStep(jobs["unused-version"], "check-desktop-release-publication.mjs");
   const rulesBeforePublishing = releaseStep(jobs.publish, "check-desktop-release-publication.mjs");
   assert.equal(rulesBeforePackaging.if, "needs.preflight.outputs.dry_run != 'true'");
@@ -1623,9 +1636,14 @@ test("the nightly job dispatches only a new main that passed verification", () =
 
   const quiet = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
   assert.deepEqual([quiet.kind, quiet.report], ["skip", false], "a night with nothing new is not reported");
-  const sameDay = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T01:00:00Z" } });
-  assert.deepEqual([sameDay.kind, sameDay.report], ["skip", false]);
-  assert.match(sameDay.reason, /one nightly publishes per UTC day/);
+  // A nightly published by hand before 18:00 UTC leaves tonight's to go ahead.
+  assert.deepEqual(nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T01:00:00Z" } }), { kind: "dispatch" });
+  assert.deepEqual(nightlyDecision({ ...night, now: Date.parse("2026-10-26T20:00:00Z"), lastNightly: { ...YESTERDAY, publishedAt: "2026-10-26T07:00:00Z" } }), { kind: "dispatch" },
+    "on 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still dispatches");
+  // One published after 18:00 UTC is tonight's, so main stays unpublished, and that is reported.
+  const sameDay = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T19:00:00Z" } });
+  assert.deepEqual([sameDay.kind, sameDay.report], ["skip", true]);
+  assert.equal(sameDay.reason, "v0.1.1-nightly.20261019.41.1 published at 2026-10-20 19:00 UTC, and one nightly publishes per nightly day, which starts at 18:00 UTC. main's head aaaaaaaaa stays unpublished until the next nightly, which can publish from 2026-10-21 18:00 UTC.");
 
   const unverified = nightlyDecision({ ...night, verifiedHead: "c".repeat(40) });
   assert.deepEqual([unverified.kind, unverified.report], ["skip", true]);

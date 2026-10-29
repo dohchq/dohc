@@ -97,6 +97,7 @@ Check that the action exists on that surface before you name it.
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
 - Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- When more can load, show the loaded count as a lower bound, `49+`, read aloud as "49 or more files". Never show a loaded count as the total.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
@@ -127,6 +128,11 @@ Existing strings do not all follow these rules, and some surfaces use two words 
 The editor's link picker says `page links` in its accessible name and `No files match` in its empty state.
 Settle the word across every surface before you change any string.
 A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
+When a list waits on a cause, say what the list will show once the cause is fixed.
+Do not reuse another surface's question.
+Signed out, the Sharing view's **Shared with me** says `Connect a server to get what others share with you.`
+About's Access asks who has access, so it keeps `Connect your server to check who has access.`
+Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
 
 ## Where messages go
@@ -134,20 +140,27 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | Situation | Where it goes |
 | --- | --- |
 | The whole workspace is unusable | A full-height state over the workbench, which goes inert |
-| One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
+| One thing failed, and the workspace still works | A toast at the bottom right, then a row in Notices until it is retried or dismissed |
+| An update is available or downloaded | The Update button at the top right of the title bar. No toast and no row |
 | Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
 | An action whose result the person can see | No toast and no row |
 | A control's own input is wrong | Inline, beside the control |
 
 - Use these places. Do not add a new one for a new message.
+- Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
+- Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
-- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
+- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
+- A later success for the same thing takes back its failure's toast and row, whichever control started it.
+- Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
@@ -155,6 +168,8 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
+
+A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
 
 The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
@@ -236,6 +251,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 - Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
 - Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
 - In a panel, give the parent `px-1`.
+- A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its focus outline.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
 It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.
@@ -284,6 +300,7 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+   Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
 5. Does each string do one job, and does every error and empty state give a Next?
 6. Does every noun match the surrounding UI?

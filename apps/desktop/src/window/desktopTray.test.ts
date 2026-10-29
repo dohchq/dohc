@@ -5,8 +5,9 @@ import type { MenuItemConstructorOptions } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopTray } from "./desktopTray";
 import { createChatDispatchService } from "../agents/chatDispatchService";
-import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, listAgents } from "../settings/userSettings";
 import { readCachedUserSettingsFile, replaceUserSettingsFile } from "../settings/userSettingsStore";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -23,9 +24,8 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const resourcesPath = join(root, "resources");
   const iconRoot = packaged ? resourcesPath : join(root, "build");
   await mkdir(iconRoot, { recursive: true });
-  const configure = (enabled: boolean, command = "agent run") => replaceUserSettingsFile(stateRoot, {
-    ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { enabled, command, timeoutMinutes: 30 },
-  });
+  const configure = (enabled: boolean) => replaceUserSettingsFile(stateRoot,
+    settingsWithAgent({ name: "Nova", enabled, launch: { command: "agent run" } }));
   await configure(true);
   const service = createChatDispatchService({
     workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
@@ -33,8 +33,8 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
     startSelfTestThread: async () => { throw new Error("No self-test should start"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
-    readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,
-    identityFor: async () => ({ displayName: "Nova", ownerDisplayName: "Local" }), stateDir: () => stateRoot,
+    readDispatchAgents: async () => listAgents((await readCachedUserSettingsFile(stateRoot)).settings),
+    stateDir: () => stateRoot,
     appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
     onMessagePosted: () => undefined,
     setRunAttribution: () => undefined,
@@ -366,9 +366,9 @@ describe("desktop tray owner", () => {
     expect(h.created[0]!.setContextMenu).toHaveBeenCalledTimes(1);
   });
 
-  it("requires a nonblank runner command even when an injected settings source marks it enabled", async () => {
+  it("shows no tray without an agent", async () => {
     const h = await harness();
-    h.readSettings.mockResolvedValue({ source: "stored", settings: { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { enabled: true, command: " \t ", timeoutMinutes: 30 } } });
+    h.readSettings.mockResolvedValue({ source: "stored", settings: DEFAULT_USER_SETTINGS });
     await expect(h.owner.refreshDispatchTray()).resolves.toBe(false);
     expect(h.created).toEqual([]);
   });

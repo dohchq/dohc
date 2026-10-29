@@ -32,10 +32,11 @@ const orMissing = <T>(work: Promise<T>): Promise<T | null> => work.catch((error:
 // lived before `.dohc/local`. That old folder syncs and holds the account's
 // Collection data, so it goes too. Remove it from here once no workspace has
 // it (#2474). A record names a copies folder, one copy in it, or an old folder.
-// A copy's folder name starts with its account's tag, so a cleanup removes
-// only the copies of accounts that left. A name with no tag is from before
-// tags, and counts as an account that left.
-const KEY = /^(?:[0-9a-f]{16}-)?[0-9a-f]{64}$/, COPIES = [".dohc", "local", "dataset-copies"], OLD_COPIES = [".dohc", "dataset-copies"];
+// A copy's folder name is its account's tag and a short hash, so a cleanup
+// removes only the copies of accounts that left. Two older names count as an
+// account that left: a long hash with no tag, from before tags, and a tag
+// with a long hash, which made Windows paths too long (#2652).
+const KEY = /^(?:[0-9a-f]{16}-)?[0-9a-f]{64}$|^[0-9a-f]{16}-[0-9a-f]{16}$/, COPIES = [".dohc", "local", "dataset-copies"], OLD_COPIES = [".dohc", "dataset-copies"];
 function placeOf(path: string): { root: string; inside: string[] } | null {
   if (!isAbsolute(path)) return null;
   const parts = resolve(path).split(sep), name = parts.at(-1)!;
@@ -61,7 +62,7 @@ async function realFolder(path: string): Promise<{ folder: string; real: boolean
 }
 
 const ownerTag = (ownerKey: string) => hash(["dataset-copy-owner", ownerKey]).slice(0, 16);
-const tagOf = (name: string) => name.length > 64 ? name.slice(0, 16) : null;
+const tagOf = (name: string) => name.length === 33 ? name.slice(0, 16) : null;
 
 // What a recorded path stands for now: a copies folder stands for each copy
 // in it of an account that left. dohc never wrote a copy through a link, so a
@@ -249,7 +250,7 @@ export function createOwnerDatasetCopyRegistry(options: {
       current(); await barrier.catch(() => undefined); current();
       // Its old copies go at the next account change, even if this one never opens.
       requested.add(input.rootPath);
-      const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, input.datasetId, origin.origin, input.ownerKey])}`;
+      const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, input.datasetId, origin.origin, input.ownerKey]).slice(0, 16)}`;
       let entry = entries.get(key);
       if (entry && (entry.closed || entry.lifetime !== input.lifetime)) { await close(entry); current(); if (entries.get(key) === entry) entries.delete(key); entry = entries.get(key); }
       if (!entry) {

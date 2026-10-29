@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { settingsWithAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AddAgentForm } from "./AddAgentForm";
 
@@ -15,11 +16,10 @@ vi.mock("../bridge", () => ({
   bridge: () => bridgeMock,
 }));
 
-const FILLED_SETTINGS = {
-  ...DEFAULT_USER_SETTINGS,
-  profile: { preferredName: "Sam", agentName: "Nova" },
-  runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs" },
-};
+const FILLED_SETTINGS = settingsWithAgent(
+  { name: "Nova", launch: { command: "node agent.mjs" }, enabled: false },
+  { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam" } },
+);
 
 function backdrop(): HTMLElement {
   const element = document.querySelector<HTMLElement>('[data-dohc-modal="true"]');
@@ -111,7 +111,7 @@ describe("AddAgentForm", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check").textContent).toBe("Checking…"),
     );
-    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
     expectDismissBlocked(onCancel);
 
     await act(async () => {

@@ -16,6 +16,7 @@ import { formatShortTime } from "../time";
 import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
 import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
+import { settingsWithAgent } from "../../testing/agentSettings";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -289,6 +290,16 @@ describe("About Access", () => {
     expect(screen.queryByTestId("about-access-count")).toBeNull();
     await userEvent.setup().click(within(unknown).getByText(label));
     expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks who has access to a file shared here, not what others share", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
+    render(<Access path="shared-with-me/alex/notes.md" facts={SIGNED_OUT} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("signed-out");
+    expect(unknown.querySelector("p")?.textContent).toBe("Connect your server to check who has access.");
+    await userEvent.setup().click(within(unknown).getByRole("button", { name: "Connect server" }));
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -1347,6 +1358,13 @@ function HistorySection(props: {
   );
 }
 
+// What a section shows under its header: the body its toggle controls.
+const sectionBody = (id: string) =>
+  document.getElementById(screen.getByTestId(`about-${id}-toggle`).getAttribute("aria-controls")!)!;
+// The lines of the delayed skeleton, when it is all a section's body shows.
+const loadingLines = (id: string) =>
+  sectionBody(id).querySelectorAll(":scope > .dohc-reveal-if-slow:only-child > span");
+
 describe("About History", () => {
   it("reads the file's newest changes by its object id and opens one", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue(
@@ -1365,9 +1383,15 @@ describe("About History", () => {
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
   });
 
-  it("keeps its place while the file's read runs, and offers that read's Try again when it fails", async () => {
+  it("keeps its place while the file's read runs or waits, and offers that read's Try again when it fails", async () => {
     const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
     expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    expect(loadingLines("history")).toHaveLength(2);
+    expect(screen.queryByTestId("about-history-updating")).toBeNull();
+    // While the engine reads the workspace in, History says it is adding changes.
+    rerender(<HistorySection file={{ status: "updating" }} />);
+    expect(screen.getByTestId("about-history-updating").textContent).toBe("Adding recent changes to History");
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     const retry = vi.fn();
     rerender(<HistorySection file={{ status: "failed", retry }} />);
@@ -1388,6 +1412,7 @@ describe("About History", () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
+    expect(loadingLines("history")).toHaveLength(2);
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
@@ -1551,7 +1576,7 @@ describe("About History authors", () => {
       expanded onToggle={() => undefined} onOpenMoment={() => undefined} />);
     return screen.getByTestId("about-history-open");
   }
-  afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS.appearance));
+  afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS));
 
   it.each([
     ["a person you shared with", { namedAuthor: { userId: "sam", label: "Sam Rivera" }, authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }] }, "Sam Rivera"],
@@ -1566,7 +1591,7 @@ describe("About History authors", () => {
   });
 
   it("applies your chosen colour to your own moments only", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" });
+    setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" } });
     const authors = [{ kind: "human" as const, humanId: "device" }];
     expect(row({ personAuthorName: "Ice", authors, authorPresentations: [token("teal", true)] }).querySelector('[title="Ice"]')?.className).toContain("text-hue-rose");
     cleanup();
@@ -1575,7 +1600,7 @@ describe("About History authors", () => {
   });
 
   it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the file mark", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourAgentColor: "teal" });
+    setChosenColors(settingsWithAgent({ hue: "teal" }));
     const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
     expect(row({ agentAuthorName: "Nova", authors: [agent], authorPresentations: [token(null, true)] }).querySelector('[title="Nova"]')?.className).toContain("text-hue-teal");
     cleanup();

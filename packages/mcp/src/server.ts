@@ -192,11 +192,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
   register("dohc_duplicate_file", {description: "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.", inputSchema: {path: z.string()}}, async args => text(await duplicateWorkspaceFile(ctx, args, agentName())));
   register("dohc_read_operation", {
-    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
+    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.",
     inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
   }, async args => text(await readOperation(ctx, args)));
   register("dohc_undo_operation", {
-    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
+    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
 
@@ -253,7 +253,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_retry_kept_edits",
     {
       description:
-        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
+        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
     },
     async (args) => text(await retryKeptEdits(ctx, args)),
@@ -430,7 +430,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -534,9 +534,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
+        "Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.",
       inputSchema: {
-        threadId: z.string().min(1).max(200),
+        threadId: z.string().min(1).max(200).optional(),
+        group: z.string().min(1).max(500).optional(),
+        before: z.object({
+          createdAtMs: z.number().int().nonnegative(),
+          lane: z.enum(["posts", "chat"]),
+          id: z.string().min(1).max(200),
+        }).strict().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
       },
     },
     async (args) => text(await readChat(ctx, args)),

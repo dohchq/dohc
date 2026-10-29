@@ -22,6 +22,18 @@ let currentLook: LookSettings = DEFAULT_USER_SETTINGS;
 // Counts applied settings, so a late startup read cannot undo newer ones.
 let lookRevision = 0;
 
+// The block controls clear a list number's period and space (styles.css): 2ch
+// in a monospaced font, 1ch otherwise. An installed font is measured; where no
+// canvas can measure (a test DOM), it counts as proportional.
+function numberSuffix(fontFamily: string): string | null {
+  if (fontFamily === "mono") return "2";
+  if ((EDITOR_FONTS as readonly string[]).includes(fontFamily)) return null;
+  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  if (!context) return null;
+  context.font = `100px "${fontFamily}", ${getComputedStyle(document.documentElement).getPropertyValue("--font-sans")}`;
+  return context.measureText(".").width === context.measureText("0").width ? "2" : null;
+}
+
 function setProperty(name: string, value: string | null): void {
   const style = document.documentElement.style;
   if (value === null) style.removeProperty(name);
@@ -67,6 +79,7 @@ function applyLook(look: LookSettings): void {
       : `"${editor.fontFamily}", var(--font-sans)`,
   );
   setProperty("--dohc-editor-font-size", `${editor.fontSize}px`);
+  setProperty("--dohc-editor-number-suffix", numberSuffix(editor.fontFamily));
   // appearance.zoomLevel is deliberately not applied here: zoom is a window
   // property main owns (windowZoom.ts) — main applies it on window load, on
   // every zoom step, and on every settings save.
@@ -76,7 +89,7 @@ function applyLook(look: LookSettings): void {
 export function applyLookSettings(settings: DesktopUserSettings): void {
   lookRevision += 1;
   applyLook(settings);
-  setChosenColors(settings.appearance);
+  setChosenColors(settings);
 }
 
 /**

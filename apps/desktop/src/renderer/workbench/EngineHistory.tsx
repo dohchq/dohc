@@ -50,7 +50,9 @@ export type HistoryCollections = ReadonlyMap<string, {
 export function HistoryUpdating(props: { testId: string; className?: string }) {
   return (
     <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
-      <span aria-hidden className="size-2 shrink-0 animate-pulse rounded-full bg-accent" />
+      <span aria-hidden className={MARK_BOX}>
+        <span className="size-2 animate-pulse rounded-full bg-accent" />
+      </span>
       Adding recent changes to History
     </p>
   );
@@ -69,7 +71,7 @@ export function isHistoryPaused(syncStatus: SyncStatusResult | null | undefined)
 export function HistoryPaused(props: { testId: string; className?: string }) {
   return (
     <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
-      <span aria-hidden className="grid size-4 shrink-0 place-items-center">
+      <span aria-hidden className={MARK_BOX}>
         <span className="size-2 rounded-full bg-warning" />
       </span>
       History paused
@@ -389,7 +391,7 @@ export function missingSourcesWords(
 
 // One timeline row: 30px, inset, with no rule between rows. Hover and the
 // open change take the list ladder's fills. A mark takes an avatar's 18px.
-const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
+export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
 const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
 const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
@@ -519,7 +521,7 @@ export function MomentRow(props: {
   nested?: "pass" | "run";
   // The change open in the focused editor group.
   selected?: boolean;
-  fold?: { count: number; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
+  fold?: { count: number; more?: boolean; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { moment, nested, fold } = props;
@@ -585,6 +587,7 @@ export function MomentRow(props: {
   // A collapsed run holding the open change takes the selected ink; the
   // change keeps aria-current for itself, and the count says where it is.
   const holdsOpen = fold.holdsOpen === true;
+  const countWords = `${fold.count}${fold.more ? " or more" : ""} changes`;
   return (
     <div className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}>
       {open}
@@ -592,13 +595,13 @@ export function MomentRow(props: {
         type="button"
         data-testid="engine-moment-run-toggle"
         aria-expanded={fold.expanded}
-        aria-label={`${fold.count} changes`}
+        aria-label={countWords}
         aria-describedby={holdsOpen ? holdsOpenId : undefined}
-        title={`${fold.count} changes`}
+        title={countWords}
         onClick={fold.onToggle}
         className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
-        <span className={COUNT}>{fold.count}</span>
+        <span className={COUNT}>{fold.count}{fold.more ? "+" : null}</span>
       </button>
       {description}
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
@@ -610,6 +613,7 @@ export function MomentRow(props: {
 // lists the earlier ones under it.
 function RunRow(props: {
   group: EngineHistoryGroup;
+  more: boolean;
   expanded: boolean;
   onToggle: () => void;
   openMomentId: string | null;
@@ -622,7 +626,7 @@ function RunRow(props: {
       <MomentRow
         moment={newest!}
         selected={newest!.id === props.openMomentId}
-        fold={{ count: props.group.moments.length, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
+        fold={{ count: props.group.moments.length, more: props.more, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
         onOpenMoment={props.onOpenMoment}
       />
       {props.expanded ? (
@@ -644,6 +648,7 @@ function RunRow(props: {
 
 function GroupRow(props: {
   group: EngineHistoryGroup;
+  more: boolean;
   expanded: boolean;
   onToggle: () => void;
   openMomentId: string | null;
@@ -681,7 +686,8 @@ function GroupRow(props: {
         <span className="min-w-0 flex-1" />
         <span className={COUNT}>
           {group.moments.length}
-          <span className="sr-only"> files</span>
+          {props.more ? <span aria-hidden>+</span> : null}
+          <span className="sr-only">{props.more ? " or more files" : " files"}</span>
         </span>
         <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
           {formatClock(group.recordedAtMs)}
@@ -850,6 +856,9 @@ export function EngineHistoryView(props: {
   const normalizedQuery = query.trim().toLowerCase();
   const { collections, entries } = props;
   const items = useMemo(() => groupTimeline(props.entries), [props.entries]);
+  // While earlier changes remain, the oldest loaded row may continue on the
+  // next page, so its count is only a lower bound.
+  const moreKey = props.hasMore ? items.at(-1)?.key ?? null : null;
   const labelOf = useCallback(
     (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
     [collections],
@@ -895,8 +904,8 @@ export function EngineHistoryView(props: {
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const openMomentId = props.openMomentId ?? null;
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId, moreKey }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId, moreKey],
   );
   const toggleGroup = (key: string) => setExpandedGroups((current) => {
     const next = new Set(current);
@@ -1047,6 +1056,7 @@ export function EngineHistoryView(props: {
               item.item.group.run ? (
                 <RunRow
                   group={item.item.group}
+                  more={item.key === moreKey}
                   expanded={expandedGroups.has(item.key)}
                   onToggle={() => toggleGroup(item.key)}
                   openMomentId={openMomentId}
@@ -1055,6 +1065,7 @@ export function EngineHistoryView(props: {
               ) : (
                 <GroupRow
                   group={item.item.group}
+                  more={item.key === moreKey}
                   expanded={expandedGroups.has(item.key)}
                   onToggle={() => toggleGroup(item.key)}
                   openMomentId={openMomentId}

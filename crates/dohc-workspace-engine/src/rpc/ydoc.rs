@@ -498,6 +498,43 @@ fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
     Ok(bytes)
 }
 
+fn restore_fenced_page(
+    rows: Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>,
+    limit: usize,
+    max_frame_bytes: usize,
+) -> Result<Value, WireError> {
+    let corrupt = |_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
+    let too_large = || {
+        WireError::new(
+            ErrorCode::LimitExceeded,
+            "owner-outbox-page-exceeds-wire-limit",
+        )
+    };
+    let mut bytes = 256usize;
+    let fetched = rows.len();
+    let mut queues = Vec::new();
+    let mut next = None;
+    let mut truncated = false;
+    for row in rows {
+        let row_bytes = serde_json::to_vec(&row).map_err(corrupt)?.len();
+        let cursor_bytes = serde_json::to_vec(&row.outbox_id).map_err(corrupt)?.len();
+        if bytes.saturating_add(row_bytes).saturating_add(cursor_bytes) > max_frame_bytes {
+            truncated = true;
+            break;
+        }
+        bytes += row_bytes + 1;
+        next = Some(row.outbox_id.clone());
+        queues.push(row);
+    }
+    if truncated && queues.is_empty() {
+        return Err(too_large());
+    }
+    if !truncated && fetched < limit {
+        next = None;
+    }
+    Ok(json!({"queues": queues, "next": next}))
+}
+
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
@@ -821,6 +858,35 @@ impl EngineService {
             "oldestEntryAtMs": result.oldest_entry_at_ms,
             "state": result.state.as_str(),
         }))
+    }
+
+    pub(super) async fn owner_ydoc_outbox_list_restore_fenced(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            after: Option<String>,
+            limit: usize,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = open
+            .actor
+            .owner_ydoc_list_restore_fenced(
+                open.workspace_id.clone(),
+                params.after,
+                params.limit,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        restore_fenced_page(rows, params.limit, ctx.max_frame_bytes as usize)
     }
 
     pub(super) async fn owner_ydoc_outbox_read_pending(
@@ -2169,6 +2235,7 @@ impl EngineService {
                     lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
+                    record_facts: Vec::new(),
                 },
                 Some(draft.descriptor),
             ),
@@ -2190,6 +2257,13 @@ impl EngineService {
                 None,
             ),
         };
+        // Post-commit: the resync's drain committed these history rows, and no
+        // other path fires a parked update's events. Never claims —
+        // drained updates are synced, and only the origin device claims its
+        // automation triggers (ADR 0008).
+        for facts in &state.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session
                 .set_lineage_claim(state.lineage_claim_id.clone())
@@ -4260,6 +4334,43 @@ mod tests {
         assert!(total_wire_bytes > 1_048_576);
         assert!(base_pages >= 2, "one base must span pages");
         assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[test]
+    fn restore_fenced_discovery_pages_fit_the_actual_wire_envelope() {
+        use dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced;
+        let params = owner_outbox_append_params("workspace", "append");
+        let binding: dohc_engine_collab::LiveObjectBinding =
+            serde_json::from_value(params["binding"].clone()).unwrap();
+        let rows: Vec<_> = (0..3)
+            .map(|index| OwnerOutboxRestoreFenced {
+                outbox_id: format!("queue-{index}-\"\\"),
+                binding: binding.clone(),
+                pending_bytes: 12,
+            })
+            .collect();
+        let id = dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
+        let wire_bytes = |result| {
+            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response {
+                id,
+                result,
+            }))
+            .unwrap()
+            .len()
+        };
+        let budget = 256
+            + serde_json::to_vec(&rows[0]).unwrap().len()
+            + serde_json::to_vec(&rows[0].outbox_id).unwrap().len();
+        let first = restore_fenced_page(rows.clone(), 3, budget).unwrap();
+        assert_eq!(first["queues"].as_array().unwrap().len(), 1);
+        assert_eq!(first["next"], rows[0].outbox_id);
+        assert!(wire_bytes(first) <= budget);
+        assert!(restore_fenced_page(rows.clone(), 3, budget - 1).is_err());
+        let all = restore_fenced_page(rows, 64, usize::MAX).unwrap();
+        assert_eq!(all["queues"].as_array().unwrap().len(), 3);
+        assert!(all["next"].is_null());
+        let empty = restore_fenced_page(Vec::new(), 64, budget).unwrap();
+        assert_eq!(empty, json!({"queues": [], "next": null}));
     }
 
     #[tokio::test]

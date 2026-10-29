@@ -206,6 +206,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "newer-version": NEWER_DOHC,
     "*": null,
   },
+  // A file from another person that dohc could not prepare to open in
+  // another app. Its message is the system's own, for Copy details only.
+  MarkedCopyError: { "*": null },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -367,6 +370,14 @@ export function withErrorWords(sentence: string, error: unknown): string {
     : words || sentence;
 }
 
+/** The class of a save refused because an agent it adds is in the settings file by then. */
+export const AGENT_ID_TAKEN_ERROR = "AgentIdTakenError";
+
+/** Whether a settings save was refused because an agent it adds is in the file by then. */
+export function isAgentIdTaken(error: unknown): boolean {
+  return parse(error).name === AGENT_ID_TAKEN_ERROR;
+}
+
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
 export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
   const { name, code, retryAfterMs, message } = parse(error);
@@ -462,6 +473,18 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
 /** Main refused to run an app's code because the workspace is in Restricted Mode. */
 export function isWorkspaceRestricted(error: unknown): boolean {
   return parse(error).name === "WorkspaceRestrictedError";
+}
+
+/** An exclusive create found the path taken. */
+export function isPathTaken(error: unknown): boolean {
+  return parse(error).code === "EEXIST";
+}
+
+/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
+export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
+  const { name, code } = parse(error);
+  if (name !== "VersionedTextStoreError") return null;
+  return code === "version-name-conflict" ? "taken" : code === "invalid-version-name" ? "invalid" : null;
 }
 
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */

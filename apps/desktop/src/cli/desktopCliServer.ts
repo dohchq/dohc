@@ -104,7 +104,8 @@ interface DesktopCliServerDependencies<State> {
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
-    dispatchedAgentRun(workspaceId: string): boolean;
+    dispatchedAgent(workspaceId: string): string | null;
+    dispatchedRunId(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
@@ -249,6 +250,8 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
+          linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
+            history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
       });
@@ -281,7 +284,7 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
+      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
       ...(dependencies.stopWorkspaceSync ? { stopSync: author =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
@@ -495,11 +498,12 @@ export function createDesktopCliServer<State>(
             ...(ownerLiveRecovery ? {
               keptEdits: {
                 list: () => withOwnerLiveRecovery(async operation =>
-                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier }) =>
-                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}) }))),
+                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier, saveOnly }) =>
+                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}), ...(saveOnly ? { saveOnly } : {}) }))),
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  if (kept.saveOnly && kept.recovery !== "unreadable") throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
                   await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
                 }),
                 // Only a Stop that kept the edits runs again; any other Stop belongs to Live documents.
@@ -587,7 +591,8 @@ export function createDesktopCliServer<State>(
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
-      dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
+      dispatchedAgent: (workspaceId) => activity.dispatchedAgent(workspaceId),
+      dispatchedRunId: (workspaceId) => activity.dispatchedRunId(workspaceId),
       agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

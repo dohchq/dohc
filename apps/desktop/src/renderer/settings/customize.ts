@@ -20,7 +20,7 @@ export const CUSTOMIZE_TARGETS: Record<CustomizePart, CustomizeTarget> = {
   chats: {
     section: "appearance",
     row: "settings-row-your-color",
-    keys: ["appearance.yourColor", "appearance.yourAgentColor"],
+    keys: ["appearance.yourColor", "agents.*.hue"],
     subject: "chat colors",
   },
   editor: {

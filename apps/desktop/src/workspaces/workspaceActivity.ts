@@ -809,6 +809,11 @@ export function createWorkspaceActivity(
     if (snapshot.authExpired || snapshot.updateRequired || snapshot.syncFailure) throw new Error(unsynced);
   }
 
+  // Pushes everything the workspace recorded so far. Rejects when a pass fails.
+  async function pushRecorded(state: WorkspaceActivityState): Promise<void> {
+    await state.entry?.engine?.pushRecorded();
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
@@ -916,10 +921,20 @@ export function createWorkspaceActivity(
     return state.agentRun?.run.depth ?? 0;
   }
 
-  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
-  // the CLI drops any name a write claims and the run stays one actor.
-  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
-    return state.agentRun?.run.dispatch !== undefined;
+  // The agent of a run dohc dispatched while it holds the slot, or null. The
+  // CLI writes as that agent whatever name a write claims, so the run stays
+  // one actor.
+  function dispatchedAgent(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch !== undefined ? run.agentId : null;
+  }
+
+  // The engine's id for the run dohc dispatched while it holds the slot, or
+  // null. The engine reads that run's agent from its record to choose whose
+  // place in a thread the CLI reads and moves. A self-test has no record.
+  function dispatchedRunId(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch === "run" ? run.agentRunId : null;
   }
 
   // The agent run holding the slot, as a local app's invocation is
@@ -993,6 +1008,7 @@ export function createWorkspaceActivity(
     queueCloudSync,
     retryCloudSync,
     syncNow,
+    pushRecorded,
     queueCloudPull,
     pullStarting,
     retryFileObservation,
@@ -1004,7 +1020,8 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
-    dispatchedAgentRun,
+    dispatchedAgent,
+    dispatchedRunId,
     agentRun,
     agentRunState,
     engineCaptureFor,

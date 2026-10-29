@@ -54,9 +54,8 @@ export async function createInstalledAppCompiler(resourcesRoot: string) {
   // This installed module and its dependencies stay outside app.asar. It
   // resolves the worker and supervisor assets relative to its own location.
   const adapter = await import(/* @vite-ignore */ pathToFileURL(join(root, "adapter.mjs")).href);
-  const runtime = process.platform === "win32"
-    ? { nodeExecutable: join(root, "node.exe"), workerPath: join(root, "worker.mjs") }
-    : { nodeExecutable: join(root, "node"), workerPath: join(root, "worker.mjs"), ownerExecutable: join(root, "compiler-owner") };
+  const exe = process.platform === "win32" ? ".exe" : "";
+  const runtime = { nodeExecutable: join(root, `node${exe}`), workerPath: join(root, "worker.mjs"), ownerExecutable: join(root, `compiler-owner${exe}`) };
   return async (request: ClosedAppBuildRequest, bounds: CompilerProcessBounds, signal?: AbortSignal): Promise<ClosedAppBuild> => {
     try {
       return await adapter.compileClosedAppInProcess(runtime, request, bounds, signal);

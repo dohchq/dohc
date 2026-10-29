@@ -16,7 +16,10 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, WORKSPACE_ACTIVITY_REFRESH_MAX_WAI
 import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbench/workbenchState";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
+import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -27,6 +30,16 @@ vi.mock("./shell/useWorkspaceListing", { spy: true });
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
+
+// A new page titled Lisbon with "Day one" typed in its body, as its file
+// would hold it.
+const LISBON = "---\ntitle: Lisbon\n---\n\nDay one\n";
+// What recovery holds for the workspace, as a restart brings it back.
+function recovered() {
+  return loadStoredDrafts(Date.now(), { bindHandles: false })
+    .filter((draft) => draft.workspaceId === WORKSPACE.workspaceId)
+    .map(({ path, text }) => ({ path, text }));
+}
 
 describe("workspace switch performance timeline", () => {
   it("reads agent setup once and run state once when a workspace opens", async () => {
@@ -142,7 +155,7 @@ describe("global letter shortcut ownership", () => {
 
     dispatchShortcut("n", {}, editor);
 
-    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    expect(await screen.findByTestId("new-page")).toBeTruthy();
     editor.remove();
   });
 
@@ -191,7 +204,7 @@ describe("global letter shortcut ownership", () => {
 
     dispatchShortcut("N");
 
-    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
   it("leaves New file closed when its shortcut is typed in a View share view", async () => {
@@ -201,7 +214,7 @@ describe("global letter shortcut ownership", () => {
     const event = dispatchShortcut("n");
 
     expect(event.defaultPrevented).toBe(true);
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
   });
 
   it("routes uppercase K to the command palette", async () => {
@@ -298,7 +311,7 @@ describe("global letter shortcut ownership", () => {
     expect(newFile.defaultPrevented).toBe(false);
     expect(sidebar.defaultPrevented).toBe(false);
     expect(closeTab.defaultPrevented).toBe(false);
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.getByTestId("side-panel")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
@@ -588,7 +601,7 @@ describe("collection folders", () => {
     // The palette renders and lists something, so the misses below are the
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
-    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New folder", "New collection", "Import files"]) {
       expect(within(palette).queryByText(label)).toBeNull();
     }
     await user.keyboard("{Escape}");
@@ -597,7 +610,7 @@ describe("collection folders", () => {
       act(() => bridge.emitMenuCommand(command));
     }
     await act(async () => {});
-    expect(screen.queryByRole("heading", { name: "New file" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.queryByLabelText("New folder name")).toBeNull();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
@@ -625,7 +638,7 @@ describe("collection folders", () => {
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
     await within(palette).findByText("New editor group right");
-    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New folder", "New collection", "Import files"]) {
       expect(within(palette).queryByText(label)).toBeNull();
     }
   });
@@ -637,7 +650,7 @@ describe("collection folders", () => {
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    for (const label of ["New file", "New drawing", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New collection", "Import files"]) {
       expect(await within(palette).findByText(label)).toBeTruthy();
     }
     expect(within(palette).queryByText("New folder")).toBeNull();
@@ -670,10 +683,10 @@ describe("start surface", () => {
     return within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
   }
 
-  it("opens the New file dialog from the document tile", async () => {
+  it("opens a new page from the document tile", async () => {
     const start = await startSurface();
     fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
-    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
   it("opens the New collection dialog from Collection", async () => {
@@ -1278,8 +1291,9 @@ describe("open editors", () => {
 
     await screen.findAllByTestId("tree-row");
     await user.click(screen.getByLabelText("New file"));
-    expect(await screen.findByLabelText("New file name")).toBeTruthy();
-    await user.keyboard("{Escape}");
+    const page = await screen.findByTestId("new-page");
+    expect(document.activeElement).toBe(within(page).getByLabelText("Page title"));
+    expect(screen.queryByTestId("tree-edit-input")).toBeNull();
 
     await user.click(screen.getByLabelText("New folder"));
     expect(await screen.findByLabelText("New folder name")).toBeTruthy();
@@ -1306,13 +1320,15 @@ describe("open editors", () => {
 
     await user.click(await screen.findByText("docs"));
     await user.click(screen.getByLabelText("New file"));
-    await user.keyboard("notes.md{Enter}");
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+    await user.keyboard("Notes{Enter}");
 
     await waitFor(() =>
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
-        relativePath: "docs/notes.md",
+        relativePath: "docs/Notes.md",
         initialText: "",
+        exclusive: true,
       }),
     );
 
@@ -1326,6 +1342,168 @@ describe("open editors", () => {
         relativePath: "docs/assets",
       }),
     );
+  });
+
+  it("writes a new page's typed title when the app quits, and shows its file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Itinerary");
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Itinerary.md",
+      initialText: expect.stringMatching(/^---\ntitle: Itinerary\n---\n/),
+      exclusive: true,
+    });
+    expect(hasPendingEditorDrafts()).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+  });
+
+  it("keeps what a new page holds when its tab is left before the editor takes it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // No file opens, so no editor ever takes the page.
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    await user.click(screen.getByText("a.md"));
+    await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+    await user.click(screen.getByRole("tab", { name: /Lisbon/ }));
+    const body = await screen.findByLabelText("Page body");
+    expect((body as HTMLTextAreaElement).value).toBe("Day one");
+
+    // Quitting first puts it in recovery, by its file, once.
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
+    expect(hasPendingEditorDrafts()).toBe(false);
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
+  });
+
+  it("keeps what is typed into a new page after a quit stops", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // No file opens, so no editor ever takes the page.
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+
+    // Another window stopped the quit, so the page is still being typed in.
+    // Blank lines alone are new text.
+    await user.keyboard("{Enter}{Enter}");
+    expect(hasPendingEditorDrafts()).toBe(true);
+    await user.click(screen.getAllByLabelText(/^Close Lisbon/)[0]!);
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
+    expect(recovered()).toEqual([
+      { path: "Lisbon.md", text: LISBON },
+      { path: "Lisbon.md", text: "---\ntitle: Lisbon\n---\n\nDay one\n\n\n" },
+    ]);
+  });
+
+  it("holds a quit for a body typed while its page's file is being created", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const created = deferred<{ path: string }>();
+    bridge.createWorkspaceFile.mockImplementationOnce(() => created.promise);
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    const settled = settlePendingEditorDrafts();
+    await act(async () => created.resolve({ path: "Untitled.md" }));
+    await expect(settled).resolves.toBe(true);
+    expect(recovered()).toEqual([{ path: "Untitled.md", text: "Day one\n" }]);
+  });
+
+  it("writes a new page's body into its file when the page is written as it closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.createWorkspaceFile.mockRejectedValueOnce(new Error("The disk is full."));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await user.click(screen.getAllByLabelText("Close Lisbon")[0]!);
+
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenLastCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Lisbon.md",
+      initialText: LISBON,
+      exclusive: true,
+    }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
+  });
+
+  it.each([
+    ["writes a body typed alone into an Untitled file", "Day one", "Day one\n"],
+    ["writes nothing for a body of blank space alone", "  {Enter}", null],
+  ])("%s when its page is written as it closes", async (_name, typed, written) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.createWorkspaceFile.mockRejectedValueOnce(new Error("The disk is full."));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard(`{Enter}${typed}`);
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await user.click(screen.getAllByLabelText("Close Untitled")[0]!);
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull());
+    if (written === null) {
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1);
+    } else {
+      expect(bridge.createWorkspaceFile).toHaveBeenLastCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "Untitled.md",
+        initialText: written,
+        exclusive: true,
+      });
+    }
+  });
+
+  it("closes a new page whose file is being created, and keeps what was typed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const created = deferred<{ path: string }>();
+    bridge.createWorkspaceFile.mockImplementationOnce(() => created.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await user.click(screen.getAllByLabelText("Close Lisbon")[0]!);
+    await act(async () => created.resolve({ path: "Lisbon.md" }));
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
+    expect(screen.queryByTestId("new-page")).toBeNull();
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
   });
 
   it("collapses all expanded folders from the files title action", async () => {
@@ -1687,7 +1865,7 @@ describe("customize", () => {
 
   it("hands a Chats setting to the person's agent in the agent's chat", async () => {
     const agentChannel: ChatChannelRecord = {
-      id: "channel-agent", name: "Agent", slug: "agent", kind: "agent",
+      id: "channel-agent", name: "Agent", slug: "my-agent", kind: "agent", agentId: "default",
       createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
     };
     // Share answers unlock the channel's composer; without them it fails closed.
@@ -1704,11 +1882,7 @@ describe("customize", () => {
       workspace={WORKSPACE}
       workspaces={[WORKSPACE]}
       {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: {
-        ...DEFAULT_USER_SETTINGS,
-        profile: { agentName: "Nova" },
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
-      } }}
+      userSettings={{ source: "stored", settings: settingsWithAgent({ name: "Nova" }) }}
       onSwitchWorkspace={() => {}}
     />);
 
@@ -1721,13 +1895,14 @@ describe("customize", () => {
 
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
-    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
+    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-lane-composer");
     await waitFor(() => expect(composer.value).toBe([
-      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "appearance.yourAgentColor" keys in my dohc settings file, /state/dohc-settings.json.',
+      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
       "dohc applies the file when it is saved.",
       "What I want: ",
     ].join("\n")));
-    expect(document.activeElement).toBe(composer);
+    // The conversation takes input, and focus, once it has loaded.
+    await waitFor(() => expect(document.activeElement).toBe(composer));
     expect(composer.selectionStart).toBe(composer.value.length);
   });
 });
@@ -1910,7 +2085,6 @@ describe("workbench render cost", () => {
       const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
-      const tryStates = bridge.getTryInVersionState.mock.calls.length;
 
       act(() =>
         bridge.emitWorkspaceActivity({
@@ -1931,7 +2105,6 @@ describe("workbench render cost", () => {
       // Run state arrives from main's pushes, so a refresh does not read it.
       expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
       expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
-      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
       act(() => bridge.emitWorkspaceActivity({
         workspaceId: WORKSPACE.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: false,
       }));

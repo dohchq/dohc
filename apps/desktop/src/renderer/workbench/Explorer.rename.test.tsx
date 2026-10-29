@@ -42,7 +42,8 @@ function explorerProps(): ExplorerProps {
     pinned: [],
     openEditorsHeight: 180,
     onOpenEditorsHeightChange: vi.fn(),
-    createRequest: null,
+    newFolderRequest: null,
+    onNewPage: vi.fn(),
     onOpenFile: vi.fn(),
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
@@ -106,9 +107,9 @@ describe("Explorer rename", () => {
     await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
   });
 
-  it.each(["file", "folder"] as const)("validates a Windows new %s inline before mutation", async kind => {
+  it("validates a Windows new folder inline before mutation", async () => {
     window.dohcDesktop!.platform = "win32";
-    render(<Explorer {...explorerProps()} createRequest={{ id: 1, kind }} />);
+    render(<Explorer {...explorerProps()} newFolderRequest={1} />);
     const input = await screen.findByTestId("tree-edit-input");
     fireEvent.change(input, { target: { value: "a?b" } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -330,13 +331,13 @@ it("returns to the original row after an optimistic rename rolls back", async ()
   expect((document.activeElement as HTMLElement).dataset.path).toBe("hello.m");
 });
 
-it("does not close a new file input while a rename waits to begin", async () => {
+it("does not close a new folder input while a rename waits to begin", async () => {
   const begin = deferred<null>();
   const props = { ...explorerProps(), onBeginChanges: vi.fn().mockReturnValueOnce(begin.promise) };
   const view = render(<Explorer {...props} />);
   await renameTo("hello.m", "renamed.md");
   expect((screen.getByTestId("tree-edit-input") as HTMLInputElement).readOnly).toBe(true);
-  view.rerender(<Explorer {...props} createRequest={{ id: 1, kind: "file" }} />);
+  view.rerender(<Explorer {...props} newFolderRequest={1} />);
   const nextInput = screen.getByTestId("tree-edit-input");
   expect((nextInput as HTMLInputElement).readOnly).toBe(false);
   await act(async () => { begin.resolve(null); });

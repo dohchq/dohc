@@ -261,7 +261,7 @@ export function PostCard(props: {
               ) : "Unknown author"}
             </span>
             {isAgent ? (
-              <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} presentation={message!.presentation} />
+              <AgentBadge testIdPrefix="chats-post" author={message!} presentation={message!.presentation} />
             ) : null}
             {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" /> : null}
             {message?.authorKind === "automation" ? (

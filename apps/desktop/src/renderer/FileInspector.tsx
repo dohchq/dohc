@@ -1,7 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
 import {
@@ -13,6 +13,8 @@ import {
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
+  OpenExternallyControl,
+  openExternally,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -243,25 +245,25 @@ function useTextContent(
   };
 }
 
-function TruncatedNotice(props: { workspaceId: string; path: string }) {
+function TruncatedNotice(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
     <div
       data-testid="truncated-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       <span>Showing the start of a large file.</span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open the full file externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open the full file externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
@@ -328,6 +330,9 @@ type FileInspectorProps = {
   // finish its read and, when applicable, bind its live document session.
   surfaceKey?: string;
   onSurfaceReady?: (path: string, surfaceKey: string) => void;
+  // A new page's file: its editor takes the keystrokes the page held, and
+  // null says none will.
+  onEditorReady?: (editor: PageEditor | null) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -654,10 +659,21 @@ export const FileInspector = memo(function FileInspector(
       onScrollConsumed?.(scrollTarget.nonce);
     }
   }, [scrollTarget, props.path, textReady, onScrollConsumed]);
+  // A failed read of a note still waiting for its check shows the failure,
+  // even over an earlier text: that note opens only once a read checks it.
+  const readFailedUnchecked = error && lossyNote === "checking";
+  const reading = isText && !engineDocBound && (text === null || loadedPath !== props.path || readFailedUnchecked);
+  // A new page waiting on this file hears when no document opens here to
+  // take what was typed; MarkdownView answers for one that does.
+  const { onEditorReady } = props;
+  const noDocument = notInVersion || engine.documentUnavailable || (reading && error);
+  useEffect(() => {
+    if (noDocument) onEditorReady?.(null);
+  }, [noDocument, onEditorReady]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
   const truncatedNotice =
     isText && truncated ? (
-      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
+      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
     ) : null;
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
@@ -758,10 +774,7 @@ export const FileInspector = memo(function FileInspector(
     );
   }
 
-  // A failed read of a note still waiting for its check shows the failure,
-  // even over an earlier text: that note opens only once a read checks it.
-  const readFailedUnchecked = error && lossyNote === "checking";
-  if (isText && !engineDocBound && (text === null || loadedPath !== props.path || readFailedUnchecked)) {
+  if (reading) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (
@@ -782,6 +795,7 @@ export const FileInspector = memo(function FileInspector(
           <EngineArtifactAssetsInvalidNotice
             workspaceId={props.workspaceId}
             path={props.path}
+            onError={props.onButtonError}
           />
         ) : null}
         {engine.removalInProgress ? (
@@ -861,6 +875,7 @@ export const FileInspector = memo(function FileInspector(
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}
+            onEditorReady={props.onEditorReady}
           />
         </div>
       );
@@ -890,6 +905,7 @@ export const FileInspector = memo(function FileInspector(
           onRetryEngineOpen={retryEngineOpen}
           presenceFactory={props.drawingCollaboration}
           localBuffer={localBuffer}
+          onButtonError={props.onButtonError}
         />
       );
     case "csv":
@@ -987,7 +1003,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );
@@ -1025,7 +1041,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );

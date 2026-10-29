@@ -8,7 +8,7 @@ import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import { WorkspaceUiState } from "./bridgeContract";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type DesktopUserSettingsResult, type ThemeMode } from "../settings/userSettings";
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
@@ -19,6 +19,7 @@ import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "..
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
+import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
@@ -36,6 +37,7 @@ const settingsRequests = [
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
+  [settingsOperations.orderAgents.channel, { order: ["default"] }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
   [settingsOperations.getUserSettingsFilePath.channel, undefined],
@@ -91,7 +93,7 @@ async function harness() {
   let preferredName: string | undefined = "Before";
   const effects: Array<{ kind: string; value: unknown; persisted: DesktopUserSettings }> = [];
   const persisted = () => JSON.parse(readFileSync(join(stateDirectory, userSettingsStore.USER_SETTINGS_FILE), "utf8")) as DesktopUserSettings;
-  const setCachedPreferredName = vi.fn((value: string | undefined) => {
+  const setCachedNames = vi.fn((value: string | undefined) => {
     preferredName = value;
     effects.push({ kind: "name", value, persisted: persisted() });
   });
@@ -107,7 +109,7 @@ async function harness() {
   const openPath = vi.fn<(path: string) => Promise<string>>(async () => "");
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
-    stateDir: () => stateDirectory, setCachedPreferredName,
+    stateDir: () => stateDirectory, setCachedNames,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
@@ -127,7 +129,7 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
+    zoom: capability.stepWindowZoom, setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -186,7 +188,7 @@ describe("registered settings IPC", () => {
     for (const channel of [settingsOperations.setUserSettings.channel, ...workspaceRequests.map(([channel]) => channel)]) {
       await expect(h.invoke(channel, {})).rejects.toThrow();
     }
-    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: { ...DEFAULT_USER_SETTINGS, runner: { command: " ", enabled: true, timeoutMinutes: 30 } }, base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
+    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: settingsWithAgent({ launch: { command: " " } }), base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: -1 } })).rejects.toThrow();
     for (const port of [writes, workspaceReads, workspaceWrites, resets, uiReads, uiWrites]) expect(port).not.toHaveBeenCalled();
     expect(h.effects).toEqual([]);
@@ -244,7 +246,7 @@ describe("registered settings IPC", () => {
       // the file rather than saving into it.
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
       // Every change puts the whole file into effect, the zoom step included.
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
+      expect(h.setCachedNames.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
@@ -303,7 +305,7 @@ describe("registered settings IPC", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => { logged.resolve(); });
     h.refreshDispatchTray.mockImplementationOnce(async () => { trayReached.resolve(); await trayRelease.promise; });
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     const result = h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS });
     try {
       await trayReached.promise;
@@ -328,11 +330,39 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const error = new Error("tray unavailable");
     h.refreshDispatchTray.mockRejectedValueOnce(error);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(3);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("scans when any agent dohc starts changes, not only the first", async () => {
+    const h = await harness();
+    const one = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: one, base: DEFAULT_USER_SETTINGS });
+    await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
+    h.scanWorkspace.mockClear();
+    const off = { ...one, agents: { ...one.agents, codex: testAgent({ name: "Codex", enabled: false }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: one });
+    // An agent that is off does not change what dohc starts.
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
+    await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
+  });
+
+  it("tells every window and the tray when only the agents' order changes", async () => {
+    const h = await harness();
+    const two = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Claude Code" }), codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: two, base: DEFAULT_USER_SETTINGS });
+    h.broadcastUserSettings.mockClear();
+    h.refreshDispatchTray.mockClear();
+    await h.invoke(settingsOperations.orderAgents.channel, { order: ["codex"] });
+    expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
+    const [sent] = h.broadcastUserSettings.mock.lastCall as [DesktopUserSettingsResult];
+    expect(Object.keys(sent.settings.agents)).toEqual(["codex", "default"]);
+    expect(h.refreshDispatchTray).toHaveBeenCalledOnce();
   });
 
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
@@ -392,6 +422,7 @@ describe("registered settings IPC", () => {
       settings: { appearance: { zoomLevel: 4 }, profile: { preferredName: "Ada" } },
     });
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      version: 2,
       appearance: { themeMode: "system", zoomLevel: 4 },
       profile: { preferredName: "Ada" },
     });
@@ -416,9 +447,9 @@ describe("registered settings IPC", () => {
     expect(h.applyZoomLevelToWindows).not.toHaveBeenCalled();
   });
 
-  it("scans for waiting runner work only when the runner or the agent's name changes", async () => {
+  it("scans for waiting runner work only when the agent that answers changes", async () => {
     const h = await harness();
-    const runner = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const runner = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: runner, base: DEFAULT_USER_SETTINGS });
     await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
     h.scanWorkspace.mockClear();

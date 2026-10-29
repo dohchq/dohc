@@ -91,11 +91,13 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 
 impl EngineStore {
     /// A bounded wait for the next checkpoint cycle, run off the writer.
-    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub fn checkpoint_cycle(&self) -> impl Fn() -> crate::CheckpointWait + Send + Sync + use<> {
         let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
         move || {
             if let Some(wait) = &wait {
-                wait();
+                wait()
+            } else {
+                crate::CheckpointWait::Finished
             }
         }
     }

@@ -1,19 +1,27 @@
 import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { lstat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { HistoryOperationId, HistoryOperationLinks, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import type { OperationRecovery } from "./workspaceDeleteRecovery";
-import { readRecoveryRecordText, saveRecoveryRecord, scheduleRecoveryPrune, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
+import { listRecoveryRecordTexts, readRecoveryRecordText, saveRecoveryRecord, scheduleRecoveryPrune, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 
 const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: z.string() });
+const Mover = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("human"), humanId: z.string() }).strict(),
+  z.object({ kind: z.literal("agent"), agentId: z.string(), onBehalfOf: z.string(), agentRunId: z.string().optional(), depth: z.number().optional() }).strict(),
+  z.object({ kind: z.literal("automation"), automationId: z.string(), onBehalfOf: z.string().optional(), depth: z.number() }).strict(),
+]);
 const FileRecord = Roots.extend({
   entries: z.array(z.string()),
   tracked: z.boolean(), pending: z.array(z.string()).optional(), replaced: z.boolean().optional(),
   engine: z.union([z.object({ requested: z.literal(true) }).strict(), z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).strict()]).optional(),
   progress: HistoryOperationUndoResult.options[1].optional(), result: HistoryOperationUndoResult.options[1].optional(),
+  links: HistoryOperationLinks.optional(),
+  linkRewrite: z.object({ requestId: z.string(), author: Mover }).strict().optional(),
 }).strict();
 const FolderRecord = Roots.extend({ kind: z.literal("folder"), noUndo: z.string() }).strict();
 const Record = z.union([FolderRecord, FileRecord]);
@@ -21,11 +29,25 @@ export type FileMoveRecoveryRecord = z.infer<typeof FileRecord>;
 export type MoveRecoveryRecord = z.infer<typeof Record>;
 export const moveWord = (from: string, to: string) => dirname(from) === dirname(to) ? "rename" : "move";
 export const moveBack = (word: "move" | "rename") => word === "rename" ? "Rename it back yourself." : "Move it back yourself.";
+export const linkUndoRefusal = (error: unknown) => error instanceof Error ? /^domain error: Undo refused: ([^:]+): (.+)$/su.exec(error.message) : null;
+export const canRewriteMoveLinks = (record: FileMoveRecoveryRecord) => record.tracked && !record.replaced &&
+  record.from.toLowerCase() !== record.to.toLowerCase() && !!record.linkRewrite && !record.engine && !record.progress && !record.result;
 export const folderMoveReason = (from: string, to: string) => `Undo for a folder ${moveWord(from, to)} isn't available yet. ${moveBack(moveWord(from, to))}`;
 export const caseOnlyMoveReason = "Cannot undo the rename. It changed only the letter case. Rename it back yourself.";
 export const missingMoveRecoveryReason = (word: "move" | "rename") => `Cannot undo the ${word}. Its recovery record is missing or expired. ${moveBack(word)}`;
 const invalid = (word: "move" | "rename") => `Cannot undo the ${word}. Its recovery record is invalid. ${moveBack(word)}`;
 const absent = (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT";
+
+export async function listMoveRecoveries(root: string): Promise<string[]> {
+  const ids: string[] = [];
+  for (const {name, text} of await listRecoveryRecordTexts(root, "move")) {
+    try {
+      const record = Record.parse(JSON.parse(text));
+      if (name === `move-${createHash("sha256").update(record.operationId).digest("hex")}.json`) ids.push(record.operationId);
+    } catch { /* One damaged record does not prevent other moves from resuming. */ }
+  }
+  return ids;
+}
 
 // An untrusted record reads as an invalid one: Undo refuses and changes nothing.
 export async function readMoveRecovery(root: string, id: string): Promise<MoveRecoveryRecord | undefined> {
@@ -51,20 +73,27 @@ export async function finishFolderMoveRecovery(workspace: LocalStateWorkspace, o
   return { operationId, undo: { available: false, reason: noUndo, paths: [] } };
 }
 
-export async function finishMoveRecovery(workspace: LocalStateWorkspace, plan: DeleteRecoveryPlan, from: string, to: string, replaced: boolean): Promise<OperationRecovery> {
+export async function finishMoveRecovery(workspace: LocalStateWorkspace, plan: DeleteRecoveryPlan, from: string, to: string, replaced: boolean,
+  linkRewrite?: FileMoveRecoveryRecord["linkRewrite"]): Promise<{ recovery: OperationRecovery; record?: FileMoveRecoveryRecord }> {
   const word = moveWord(from, to);
+  let linksNotUpdated = false;
   try {
     if (!plan.record || plan.noUndo) throw new Error("Recovery collection failed");
     const record: FileMoveRecoveryRecord = { operationId: plan.operationId, from, to,
-      entries: [...plan.record.paths, ...plan.record.emptyFolders], tracked: plan.record.tracked, ...(replaced ? { replaced } : {}) };
+      entries: [...plan.record.paths, ...plan.record.emptyFolders], tracked: plan.record.tracked, ...(replaced ? { replaced } : {}),
+      ...(linkRewrite ? { linkRewrite } : {}) };
+    if (canRewriteMoveLinks(record)) {
+      linksNotUpdated = true;
+      record.links = {state: "updating"};
+    }
     await saveRecoveryRecord(workspace, record, "move");
     scheduleRecoveryPrune(workspace);
-    return { operationId: plan.operationId, undo: replaced
+    return { record, recovery: { operationId: plan.operationId, undo: replaced
       ? { available: false, paths: [], reason: replacedMoveReason(record) }
-      : { available: true } };
+      : { available: true } } };
   } catch {
-    return { operationId: plan.operationId, undo: { available: false, paths: [],
-      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information. ${moveBack(word)}` } };
+    return { recovery: { operationId: plan.operationId, undo: { available: false, paths: [],
+      reason: `${word === "rename" ? "Rename" : "Move"} finished. dohc could not save Undo information${linksNotUpdated ? " or update links to this file" : ""}. ${moveBack(word)}` } } };
   }
 }
 export function replacedMoveReason(record: FileMoveRecoveryRecord): string {
@@ -83,8 +112,20 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
   const word = moveWord(record.from, record.to);
   const refuse = (detail: string): never => { throw new Error(`Cannot undo the ${word}. ${detail}`); };
   const engineUndo = async () => {
-    assertCurrent(); return history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
-      requestId: `move-undo:${record.operationId}`, author });
+    assertCurrent();
+    try { return await history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
+      requestId: `move-undo:${record.operationId}`, author }); }
+    catch (error) {
+      const directRefusal = linkUndoRefusal(error);
+      const refusal = directRefusal ?? (error instanceof Error ? linkUndoRefusal(error.cause) : null);
+      if (record.linkRewrite && refusal && !["Operation already undone", "Undo in progress"].includes(refusal[1]!)) {
+        delete record.engine;
+        await saveRecoveryRecord(workspace, record, "move");
+      }
+      if (directRefusal?.[1] === "link changed after rename") throw new Error(`Cannot undo the ${word}. The link in ${directRefusal[2]} changed after the ${word}. ${moveBack(word)}`);
+      if (directRefusal?.[1] === "linking document removed") throw new Error(`Cannot undo the ${word}. ${directRefusal[2]} is no longer in this workspace. ${moveBack(word)}`);
+      throw error;
+    }
   };
   assertCurrent();
   if (record.replaced) throw new Error(replacedMoveReason(record));
@@ -121,7 +162,9 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
   const result: z.infer<typeof HistoryOperationUndoResult.options[1]> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
     restored: record.progress?.restored ?? [], remaining: (record.engine.notRestored ?? []).map(path => ({ path,
-      retry: false, reason: "dohc could not restore this file. Restore it from History." })) };
+      retry: false, reason: path === record.from || path === record.to
+        ? "dohc could not restore this file. Restore it from History."
+        : `dohc could not restore links in ${path}. Update those links yourself.` })) };
   for (const path of [...(record.pending ?? record.entries)]) {
     assertCurrent();
     if (record.engine.notRestored?.some(skipped => skipped === path || skipped === record.to)) {

@@ -19,7 +19,7 @@ A memory-safety bug in V8 or esbuild could give that source code execution insid
 
 Electron main sets the bounds in `main.ts`. `compilerProcessSupervisor.ts` enforces the pipe sizes on both platforms.
 
-| Bound | Windows: `windowsCompilerJob.ps1` | macOS: `crates/dohc-compiler-owner` | Linux: `crates/dohc-compiler-owner` |
+| Bound | Windows: `windowsCompilerOwner.cs` | macOS: `crates/dohc-compiler-owner` | Linux: `crates/dohc-compiler-owner` |
 | --- | --- | --- | --- |
 | 60 s | The job owner's deadline | The owner's deadline. RLIMIT_CPU of 61 s per core outlives the owner | As on macOS |
 | 1 GiB | Committed memory of the whole job. An allocation past it fails | The summed physical footprint of the tree, sampled every 10 ms | The summed anonymous and shared resident memory of the tree, sampled every 10 ms |
@@ -149,6 +149,9 @@ Node needs `allow-jit`. Scoping entitlements to Node alone would need a custom s
 The defaults also grant `allow-unsigned-executable-memory` and `disable-library-validation`.
 The sandbox limits library loads to the signed bundle and the OS.
 The hardened runtime still ignores `DYLD_` variables and refuses debuggers.
+
+On Windows, staging compiles `windowsCompilerOwner.cs` into `compiler-owner.exe` with the .NET Framework `csc.exe` that ships with Windows, as it compiles `agentProbeOwner.exe`.
+electron-builder signs both as it copies them into the resources folder. Its `signExts` leaves only the official `node.exe` as Node signed it.
 
 On Linux, dohc builds apps on x64 only. Staging for Linux arm64 ships only esbuild, which Collection actions compile with.
 

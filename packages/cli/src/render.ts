@@ -4,7 +4,7 @@ import type {
   CliResultByVerb,
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
-import { renderThreadMarkdown } from "./threadMarkdown";
+import { formatStreamPosition, messageMetadata, renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
 import { formatStoredBytes } from "./account";
 
@@ -60,13 +60,42 @@ function decisionCount(count: number): string {
 }
 
 export function renderShowMarkdown(result: ShowResult): string {
-  return renderThreadMarkdown(result);
+  return "stream" in result ? renderStream(result.stream) : renderThreadMarkdown(result);
+}
+
+type StreamResult = Extract<ShowResult, { stream: unknown }>["stream"];
+
+// A group's stream, oldest first: each post with what its thread holds, and
+// each conversation message. The person's read position is marked.
+function renderStream(stream: StreamResult): string {
+  const lines = [`# #${stream.group.slug}`];
+  if (stream.nextBefore) lines.push(`older: --before ${formatStreamPosition(stream.nextBefore)}`);
+  const read = stream.readPosition && formatStreamPosition(stream.readPosition);
+  for (const item of stream.items) {
+    const metadata = messageMetadata(item.message, item.post ? item.threadId : item.message.id);
+    const { post } = item;
+    if (post) {
+      metadata.push(countLabel(post.replyCount, "reply", "replies"));
+      if (post.repliers.length > 0) {
+        metadata.push(`from ${post.repliers.map((replier) => renderAuthorDisplayName(replier.author)).join(", ")}`);
+      }
+      if (post.lastReplyAtMs !== undefined) metadata.push(`last reply ${dateTime(post.lastReplyAtMs)}`);
+      if (post.openDecisionCount > 0) metadata.push(`open decisions: ${post.openDecisionCount}`);
+    }
+    lines.push("", metadata.join(" · "), item.message.body);
+    if (post?.latestAgentReply) {
+      const reply = post.latestAgentReply;
+      lines.push(`> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`);
+    }
+    if (read === formatStreamPosition(item.position)) lines.push("", "--- read up to here ---");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 export function renderGroups(result: GroupsResult): string {
   return result.groups
     .map((group) => {
-      const name = group.kind === "agent" ? "my-agent" : lineSafe(group.name);
+      const name = group.kind === "agent" ? lineSafe(group.slug) : lineSafe(group.name);
       return `${name} · #${group.slug} · ${group.kind} · ${group.id}`;
     })
     .join("\n");
@@ -379,7 +408,11 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "historyOperation": {
       const operation = result as CliResultByVerb["historyOperation"];
       if (!operation.ok) return operation.reason;
-      return [...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
+      const links = operation.links;
+      return [...(links ? links.state === "updating" ? ["Updating links…"]
+        : [`Link updates committed in History: ${links.documents} documents. Disk writes follow.`,
+          ...(links.uncheckedCount ? [`${links.uncheckedCount} linking documents not checked.`, ...links.unchecked.map(path => `Not checked: ${lineSafe(path)}`)] : [])] : []),
+        ...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
         ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
         ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
     }

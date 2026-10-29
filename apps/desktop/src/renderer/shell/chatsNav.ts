@@ -1,5 +1,6 @@
 import { chatTabPath } from "../workbench/workbenchState";
 import type { ChatsNav } from "../workbench/ChatsView";
+import { agentChatIdentity, type SettingsAgent } from "../workbench/agentChat";
 
 function chatsDestinationKey(nav: ChatsNav | null): string {
   if (!nav) return "channels";
@@ -33,10 +34,11 @@ export function chatsNavigationRequiresRemount(
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.
-export function chatEditorTitle(nav: ChatsNav | null, agentName?: string): string {
+// An agent's chat takes its own agent's name.
+export function chatEditorTitle(nav: ChatsNav | null, agents: readonly SettingsAgent[]): string {
   if (!nav || nav.level === "feed") return "Home";
   if (nav.level === "channel" || nav.level === "thread") {
-    return nav.channel.kind === "agent" ? agentName ?? "My agent" : `#${nav.channel.name}`;
+    return nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, agents).label : `#${nav.channel.name}`;
   }
   if (nav.level === "dm") return nav.dm.peerLabel;
   return nav.level === "dm-new" ? "New message" : "Chats";

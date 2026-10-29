@@ -91,6 +91,8 @@ pub struct YdocResyncState {
     pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    /// Record facts the resync's deferred drain committed, in drain order.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -344,6 +346,32 @@ impl ActorHandle {
                     conn,
                     &workspace_id,
                     &writes,
+                )
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_list_restore_fenced(
+        &self,
+        workspace_id: String,
+        after: Option<String>,
+        limit: usize,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &workspace_id,
+                    after.as_deref(),
+                    limit,
                 )
             }))
         })
@@ -3451,6 +3479,7 @@ fn ydoc_resync_on_store(
         lineage_originated_here,
         recovered_paths,
         artifact_assets,
+        record_facts: drained.record_facts,
     })
 }
 

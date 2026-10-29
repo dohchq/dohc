@@ -2041,6 +2041,40 @@ fn fence_next_generation(f: &mut Fixture, operation: &str) {
     try_fence_next_generation(f, operation).unwrap();
 }
 
+#[test]
+fn restore_fenced_discovery_excludes_desktop_hosted_queues() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    native_tail_edit(&mut f, "Owner typed before the restore.", 11);
+    fence_next_generation(&mut f, "desktop-hosted-restore");
+    f.store
+        .read_with(|conn| {
+            let queues: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM owner_ydoc_outboxes WHERE state='quarantined' AND quarantine_reason='restore-fenced' AND pending_bytes>0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(queues > 0);
+            let bindings: i64 = conn
+                .query_row("SELECT count(*) FROM ydoc_owner_bindings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(bindings, 0);
+            assert!(
+                crate::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &f.binding.workspace_id,
+                    None,
+                    64,
+                )?
+                .is_empty()
+            );
+            Ok::<_, crate::owner_outbox::OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
 fn try_fence_next_generation(f: &mut Fixture, operation: &str) -> Result<(), ApplicationError> {
     let adoption_id: String = f
         .store

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { chatListMessage } from "./messages";
+import { chatListMarkdown, chatListMessage } from "./messages";
 import { ChatMessageList, type ChatMessageListHandle } from "../../../src/renderer/workbench/chatMessages";
 import type {} from "./api";
 import "./styles.css";
@@ -14,6 +14,13 @@ function ChatFixture() {
   const [opened, setOpened] = useState("");
   window.chatListFixture = {
     append: () => setMessages((current) => [...current, message(current.length)]),
+    appendMarkdown: () => setMessages((current) => [
+      ...current,
+      { ...message(current.length), authorKind: "agent", body: chatListMarkdown(current.length) },
+    ]),
+    markdown: (id) => setMessages((current) => current.map((item, index) => item.id === id
+      ? { ...item, body: chatListMarkdown(index) }
+      : item)),
     grow: (id) => setMessages((current) => current.map((item) => item.id === id
       ? { ...item, body: item.body + "\nExpanded content. ".repeat(40) }
       : item)),
