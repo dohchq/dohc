@@ -775,6 +775,11 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
+        // No native fence commits here, so a Decline ends the restore at its old generation, under the binding it began with.
+        case "liveApplication.cancelRestoreFence": {
+          const basis = JSON.parse(String(raw.prepare("SELECT basis_json FROM sync_relay_live_restore_operations WHERE operation_id=?").get(request.params.operationId as string)!.basis_json));
+          return reply({status: "cancelled", hostId: request.params.hostId, generation: (request.params.newFence as number) - 1, binding: basis.ownerBinding});
+        }
         case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
         case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
         case "ydoc.ownerOutbox.readPending": {
@@ -858,6 +863,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     return () => f.storage.commitLiveUpdateJournal({host: coordinate, actor, expectedAuthority: live.authority,
       metadata: {deliveryId: `edit-${value}`, updateDigest: sha256(updateBytes), binding: live.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 5});
   };
+  // The owner's restore begins and revokes the share's only Edit grant. `restore` also fences it.
+  const beginRestore = () => {
+    const plan = f.storage.readStopRestorePlan({document, ownerUserId: "owner", operationId: "restore", shareId: "share", grantId: "grant",
+      restorePointCursor: 0, restorePointReceiptDigest: document.lineageClaimId, maxOutputBytes: 1_000_000});
+    f.storage.beginStopRestore(plan.intent, 40);
+  };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
@@ -896,10 +907,9 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
       return restarted;
     },
     park(method: string) { parked = {method, entered: deferred<void>(), release: deferred<void>()}; return parked; },
+    beginRestore,
     restore() {
-      const plan = f.storage.readStopRestorePlan({document, ownerUserId: "owner", operationId: "restore", shareId: "share", grantId: "grant",
-        restorePointCursor: 0, restorePointReceiptDigest: document.lineageClaimId, maxOutputBytes: 1_000_000});
-      f.storage.beginStopRestore(plan.intent, 40);
+      beginRestore();
       f.storage.advanceStopRestoreFence({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}, 50);
     }};
 }
@@ -2392,6 +2402,40 @@ it("keeps a released document hosted while its retirement waits for a restore", 
   expect(retiredRow(o).retired).toBe(true);
 });
 
+// Proves: a restore whose revocation of the last Edit grant opens its
+// document's retirement keeps its route through the host until it ends. While
+// it is unfinished, retirement passes send the engine nothing and keep the
+// document's activation target, which a restarted host rebuilds, so the
+// restore fences and is declined through the host. The engine then releases
+// the activation at the generation the Decline restored, and it retires.
+it.each([false, true])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: %s", async restart => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  // The current daemon's engine requests that reconcile or release a retiring activation.
+  const retiring = () => o.calls(0).filter(method => method === "liveApplication.reconcileActivation" || method === "liveApplication.releaseActivation");
+  const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  o.beginRestore();
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 40});
+  await o.depart();
+  await passed();
+  expect(retiring()).toEqual([]);
+  let host = o.host;
+  if (restart) {
+    await o.host.close(); log.mockClear();
+    host = await restartedHost(o);
+    await passed();
+    expect(retiring()).toEqual([]);
+  }
+  // The owner prepares the restore, which fences it, then declines it.
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  expect(retiring()).toEqual([]);
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(retiring()).toContain("liveApplication.releaseActivation");
+});
 type Enrolled = Awaited<ReturnType<typeof enrolledServiceHost>>;
 // Each engine request for `method` after the first `count` is never answered, as when its daemon stops first.
 const unansweredAfter = (o: Enrolled, method: string, count: number) => {

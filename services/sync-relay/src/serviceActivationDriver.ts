@@ -413,6 +413,10 @@ export class ServiceActivationDriver {
   async retire(target:ServiceActivationTarget,objectId:string,signal:AbortSignal,scope:RetirementScope):Promise<RetirementStep|undefined>{
     const o=this.options,open=o.storage.serviceActivationRetirement({workspaceId:target.workspaceId,objectId});
     if(!open)return undefined;
+    const slot=targetKey(target);
+    // An unfinished restore moves the generation the key names and continues through the
+    // document's owner and target, so nothing retires, or leaves activation, until it ends.
+    if(this.#store.restoreInProgress(open.workspaceId,open.objectId))return {kind:"pending",reason:"Waiting for its restore to finish."};
     const workspace=o.workspace(target.workspaceId),maxApplications=o.maxApplications;
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     if(maxApplications===undefined)throw new Error("Service activation retirement requires live settlement.");
@@ -422,7 +426,6 @@ export class ServiceActivationDriver {
       check();
       return response.result;
     };
-    const slot=targetKey(target);
     this.#retirements.set(slot,(this.#retirements.get(slot)??0)+1);
     this.#drop(slot);this.#dormant.delete(slot);this.#targets=this.#targets.filter(row=>targetKey(row)!==slot);
     const document=parseLiveDocumentKey({workspaceId:open.workspaceId,mainVersionId:"main",objectId:open.objectId,lineageClaimId:open.lineageClaimId});
@@ -476,7 +479,7 @@ export class ServiceActivationDriver {
     }
     // An activation that never adopted may release before its document parks; it retires only once it has.
     if(!owned && !scope.parked())return {kind:"pending",reason:"Waiting for its hosted replica to confirm the document parked."};
-    // A retirement that carries a restore waits for it; the next pass replays the release.
+    // A key at a restore's accepted row waits for that restore's settlement to publish; the next pass replays the release.
     if(this.#store.completeRetirement({workspaceId:open.workspaceId,key,boundary:released.boundary as RetainedPrefixBody|null,
       host:o.host,registeredAtMs:Date.now(),nowMs:Date.now(),guard:check}).status==="pending"){
       return {kind:"pending",reason:"Waiting for its restore to finish."};

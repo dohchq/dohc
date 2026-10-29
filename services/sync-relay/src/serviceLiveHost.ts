@@ -1106,7 +1106,11 @@ export async function startServiceLiveHost(options: {
             if (uncopied(document)) retained.set(documentKey({workspaceId, objectId: document.objectId}), document);
             continue;
           }
-          if (!hosted.has(key)) {hosted.set(key, document); leaving.add(key); recovering.add(key);}
+          if (!hosted.has(key)) {
+            hosted.set(key, document); leaving.add(key); recovering.add(key);
+            // A retiring document keeps its target, which its unfinished restore continues through, until its retirement drops it.
+            if (storage.serviceActivationRetirement({workspaceId, objectId: document.objectId})) activation.addTarget(document.target, document.objectId);
+          }
         }
       }
       // A departing document is confirmed gone only by a pull that starts after this.
