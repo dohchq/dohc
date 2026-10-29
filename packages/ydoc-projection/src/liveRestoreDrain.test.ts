@@ -3908,23 +3908,25 @@ it.each(["proposal","admission"])("rejects a same-length source rewrite by anoth
     expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
   }finally{f.close();}
 });
-// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged, and compare the stored proposal in SQL; ACKs read none.
-it("keeps restore writers to one stored-proposal comparison and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
+// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged, and compare the stored proposal in SQL; admission and ACKs read none.
+// Admission's freshness checks count journal rows in subqueries, so only a top-level journal read counts there.
+it("keeps restore writers to one stored-proposal comparison and admission and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
-  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,acknowledging=false,compared=0;
+  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,admitting=false,acknowledging=false,compared=0;
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
     if(writing && acknowledging && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
+    if(writing && admitting && /^SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in admission writer");
     if(writing && (/SELECT\s+proposal_bytes=\? AS proposal_matches\b/.test(sql) || /"proposal_bytes" IS \?/.test(sql)))compared++;
     else if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
     return prepare(sql);
   });
-  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing && acknowledging)throw Error("byte comparison in writer");return compare(a,b);});
-  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&acknowledging&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
+  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing && (admitting||acknowledging))throw Error("byte comparison in writer");return compare(a,b);});
+  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&(admitting||acknowledging)&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
   try {
     const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
     expect((await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200)).replayed).toBe(true);
-    const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);acknowledging=true;
+    admitting=true;const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);admitting=false;acknowledging=true;
     expect(compared).toBe(1);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
       localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
