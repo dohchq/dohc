@@ -108,7 +108,7 @@ function menuQueryAt(value: string, caret: number): boolean {
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
 // an @-mention menu is open Enter/Tab accept the highlighted candidate instead
-// of sending — so directing a message at "@agent" is one obvious gesture.
+// of sending — so directing a message at an agent is one obvious gesture.
 //
 // The mention roster is the agents in the workspace plus the user; picking one
 // inserts "@handle " and the parent parses the sent body to decide who to
@@ -134,9 +134,8 @@ export function MentionComposer(props: {
   onRosterPick?: (pick: AgentRosterPick | null) => void;
   rosterScope?: string;
   // What sending to the picked agent does. The parent derives it from the
-  // pick it was told about; Set up opens Settings → Agents.
+  // pick it was told about.
   agentOffer?: AgentAddressedOffer | null;
-  onSetUpAgent?: () => void;
   // Bars on a stream composer's top edge, such as Replying to. The agent
   // offer floats above them.
   above?: ReactNode;
@@ -166,14 +165,16 @@ export function MentionComposer(props: {
   const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // A composer asked for focus at mount takes it once, when it first takes
+  // input: a later render must not pull focus back.
+  const pendingFocus = useRef(props.autoFocus === true);
   useEffect(() => {
     const node = textareaRef.current;
-    if (!props.autoFocus || !node) return;
+    if (!pendingFocus.current || !node || props.disabled) return;
+    pendingFocus.current = false;
     node.focus();
     node.setSelectionRange(node.value.length, node.value.length);
-    // Only on mount: a later render must not pull focus back.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.disabled]);
   const rosterPick = useRef<AgentRosterPick | null>(null);
   const beforeInput = useRef<{ from: number; to: number } | null>(null);
   useEffect(() => {
@@ -875,7 +876,7 @@ export function MentionComposer(props: {
             ) : null}
             {pollButton("post")}
             {props.agentOffer ? (
-              <AgentOffer offer={props.agentOffer} surface="post" onSetUp={props.onSetUpAgent} />
+              <AgentOffer offer={props.agentOffer} surface="post" />
             ) : (
               <span className="flex-1" />
             )}
@@ -957,7 +958,7 @@ export function MentionComposer(props: {
       {pollBlock}
       {form}
       {props.agentOffer ? (
-        <AgentOffer offer={props.agentOffer} surface="stream" onSetUp={props.onSetUpAgent} />
+        <AgentOffer offer={props.agentOffer} surface="stream" />
       ) : null}
     </div>
   );

@@ -95,7 +95,7 @@ it.each(["Claude Code", "Codex"])("saves %s as a profile and checks through the 
   expect(screen.getByRole("button", { name: "OpenCode" }).hasAttribute("disabled")).toBe(true);
   expect(screen.queryByTestId("chats-add-agent-check-result")).toBeNull();
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));
-  await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" }));
+  await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a", agentId: "default" }));
   expect(f.props.onSave).toHaveBeenLastCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
     enabled: true, launch: { tool: name === "Codex" ? "codex" : "claude", executable: name === "Codex" ? "C:\\Tools\\codex.cmd" : "C:\\Tools\\claude.exe" },
   }) } }), f.props.settings);
@@ -156,7 +156,7 @@ it.each([undefined, "Sam"])("adds and checks an agent without editing the existi
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   await userEvent.click(screen.getByTestId("chats-add-agent-check"));
-  await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" }));
+  await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a", agentId: "default" }));
   await screen.findByTestId("chats-add-agent-check-result");
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
   await waitFor(() => expect(f.props.onDone).toHaveBeenCalledOnce());

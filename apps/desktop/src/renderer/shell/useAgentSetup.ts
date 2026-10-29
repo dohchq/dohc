@@ -1,4 +1,4 @@
-import { firstAgent, firstAgentWithLaunch } from "../../settings/userSettings";
+import { firstAgent, firstAgentWithLaunch, listAgents } from "../../settings/userSettings";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
@@ -30,6 +30,8 @@ export function useAgentSetup(
       runnerConfigured: runner !== null,
       runnerEnabled: runner?.enabled === true,
       agentRunActive: agentRunStatus.run.activeRun !== null,
+      agents: listAgents(userSettings.settings)
+        .flatMap(({ id, name, enabled, launch }) => launch ? [{ id, name, enabled }] : []),
     };
   }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
 

@@ -5,11 +5,13 @@ const FOCUSABLE_SELECTOR =
 
 // Toasts sit above every dialog. F6 moves focus from the dialog to its toasts
 // and back, and Tab cycles within whichever of the two holds focus, so focus
-// never reaches the workbench behind the dialog.
+// never reaches the workbench behind the dialog. Notices opens above every
+// dialog too, and Tab cycles within it the same way.
 const TOASTS_SELECTOR = "[data-dohc-toasts]";
+const NOTICES_SELECTOR = "[data-focus-surface='notices']";
 
-function toastRegion(element: Element | null): HTMLElement | null {
-  return element?.closest<HTMLElement>(TOASTS_SELECTOR) ?? null;
+function regionAboveDialogs(element: Element | null): HTMLElement | null {
+  return element?.closest<HTMLElement>(`${TOASTS_SELECTOR}, ${NOTICES_SELECTOR}`) ?? null;
 }
 
 // Where F6 left each dialog, so F6 or Escape from a toast goes back there,
@@ -23,7 +25,7 @@ export function trapModalTabKey(
   dialog: HTMLElement | null,
 ): void {
   if (event.key !== "Tab" || !dialog) return;
-  const container = toastRegion(focusedElementIn(dialog)) ?? dialog;
+  const container = regionAboveDialogs(focusedElementIn(dialog)) ?? dialog;
   const focusable = modalFocusableElements(container);
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -49,11 +51,14 @@ export function trapModalTabKey(
 }
 
 // Moves focus between a dialog and the toasts above it, and answers whether it
-// did. Escape in a toast goes back too, so it never closes the dialog.
+// did. Escape in a toast goes back too, so it never closes the dialog. Escape
+// in Notices is left to Notices, which closes and hands focus back.
 export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | null): boolean {
   if (!dialog || (event.key !== "F6" && event.key !== "Escape")) return false;
   const active = focusedElementIn(dialog);
-  if (toastRegion(active)) {
+  const region = regionAboveDialogs(active);
+  if (region?.matches(NOTICES_SELECTOR) && event.key === "Escape") return true;
+  if (region) {
     event.preventDefault();
     event.stopPropagation();
     const back = leftAt.get(dialog);

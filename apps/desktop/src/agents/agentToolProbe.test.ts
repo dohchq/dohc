@@ -5,7 +5,8 @@ import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentP
 function fixture(overrides: Partial<AgentProbeDependencies> = {}): AgentProbeDependencies {
   return { platform: "win32", home: "C:\\Users\\ice", workspaceRoot: "C:\\Workspace", realPath: (path) => path,
     env: { PATH: 'relative;.;"C:\\Tools"', APPDATA: "C:\\Users\\ice\\AppData\\Roaming" }, isExecutable: () => false,
-    signal: new AbortController().signal, run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })), ...overrides };
+    signal: new AbortController().signal, run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })),
+    codexMayRunWithoutLogin: () => false, ...overrides };
 }
 
 describe("read-only agent detection", () => {
@@ -87,12 +88,23 @@ describe("read-only agent detection", () => {
     expect(parseAgentAuth("claude", { exitCode: 1, stdout: '{"loggedIn":false}', stderr: "" })).toBe("signed-out");
     expect(parseAgentAuth("claude", { exitCode: 1, stdout: "bad json", stderr: "network failure" })).toBe("unknown");
     expect(parseAgentAuth("codex", { exitCode: 0, stdout: "", stderr: "Logged in using ChatGPT" })).toBe("signed-in");
+    expect(parseAgentAuth("codex", { exitCode: 0, stdout: "", stderr: "API key configured - sk-proj-***ABCD" })).toBe("signed-in");
     expect(parseAgentAuth("codex", { exitCode: 1, stdout: "", stderr: "Not logged in" })).toBe("signed-out");
     expect(parseAgentAuth("opencode", { exitCode: 0, stdout: "2 credentials", stderr: "" })).toBe("credentials-found");
     expect(parseAgentAuth("opencode", { exitCode: 0, stdout: "0 credentials", stderr: "" })).toBe("unknown");
     expect(parseAgentAuth("cursor", { exitCode: 0, stdout: '{"isAuthenticated":true,"userInfo":{"email":"private@example.com"}}', stderr: "" })).toBe("signed-in");
     expect(parseAgentAuth("cursor", { exitCode: 0, stdout: '{"isAuthenticated":false}', stderr: "" })).toBe("signed-out");
     expect(parseAgentAuth("cursor", { exitCode: 1, stdout: "", stderr: "Unsupported format" })).toBe("unknown");
+  });
+  it("keeps Codex's sign-in unknown when it isn't logged in but may reach a model another way", async () => {
+    const codex = (codexMayRunWithoutLogin: boolean) => fixture({
+      isExecutable: (path) => path === "C:\\Tools\\codex.EXE", codexMayRunWithoutLogin: () => codexMayRunWithoutLogin,
+      run: vi.fn(async (_path: string, args: readonly string[]) => args[0] === "--version"
+        ? { exitCode: 0, stdout: "codex-cli 0.163.0", stderr: "" }
+        : { exitCode: 1, stdout: "", stderr: "Not logged in" }),
+    });
+    expect((await probeAgentTools(codex(false)))[1]).toMatchObject({ probe: "detected", auth: "signed-out" });
+    expect((await probeAgentTools(codex(true)))[1]).toMatchObject({ probe: "detected", auth: "unknown" });
   });
   it("does not authenticate after a failed version probe", async () => {
     const deps = fixture({ isExecutable: (path) => path.endsWith("claude.EXE"), run: vi.fn(async () => ({ exitCode: 1, stdout: "secret error", stderr: "" })) });

@@ -65,6 +65,7 @@ export type ShellErrorKind =
   | "record-history-run"
   | "reports"
   | "schedule-host"
+  | "update"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -89,6 +90,8 @@ export interface ShellError {
   // A line after the message that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // A terminal command the message asks the person to run, shown with its copy.
+  command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
@@ -96,8 +99,9 @@ export interface ShellError {
   retry: (() => void | false) | null;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
-  // `ends` the notice removes its row when it runs.
-  action?: { label: string; run: () => void; ends?: boolean; additional?: {label: string; run: () => void}[] };
+  // `ends` the notice removes its row when it runs; one that `reads` it
+  // closes its toast and keeps the row.
+  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
@@ -367,6 +371,7 @@ export function useShellError(workspaceId: string) {
       quiet?: boolean;
       message: string;
       cause?: unknown;
+      command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: ShellError["retry"];
       onDismiss?: () => void;
@@ -387,6 +392,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.tone ? { tone: failure.tone } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
+        ...(failure.command ? { command: failure.command } : {}),
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
@@ -635,6 +641,9 @@ export function useShellError(workspaceId: string) {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
+    else if (target?.action?.reads) {
+      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true } : error)));
+    }
     target?.action?.run();
   }, []);
   // A kind makes a newer message replace the row of an older one, such as

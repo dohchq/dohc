@@ -59,6 +59,24 @@ function actions(path: string): string[] {
     .map((button) => button.textContent);
 }
 
+it("distinguishes retired and hosted held notes and offers no Resume or Stop on retired notes", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(page([
+    row("docs/held.md", {status: "retired", reason: "conflict-parent-withheld"}),
+    row("docs/hosted.md", {status: "unavailable", reason: "conflict-parent-withheld"}),
+    row("docs/diverged.md", {status: "retired", reason: "session-host-diverged"}),
+  ]));
+  render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+  const held = await screen.findByTestId("live-document-row-docs/held.md");
+  expect(held.children[1]?.textContent).toBe("Can't resume");
+  expect(within(held).getByText("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits won't reach them.")).toBeDefined();
+  const hosted = screen.getByTestId("live-document-row-docs/hosted.md");
+  expect(within(hosted).getByText("A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.")).toBeDefined();
+  expect(actions("docs/held.md")).toEqual([]);
+  expect(actions("docs/hosted.md")).toEqual(["Stop live editing"]);
+  expect(actions("docs/diverged.md")).toEqual([]);
+});
+
 function paths(): string[] {
   return screen
     .getAllByTestId(/^live-document-row-/)
@@ -71,6 +89,19 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("keeps each restore queue beside the live note and offers only its own recovery copy", async () => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("note.md"), ...["old-1", "old-2"].map(incident =>
+      row("note.md", {quarantine: "paused", saveOnly: true, storedOn: "this-computer", incident}))], "next"));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const first = await screen.findByTestId("live-document-row-note.md-old-1");
+    expect(actions("note.md")).toEqual(["Stop live editing"]);
+    expect(within(first).queryAllByRole("button").map(button => button.textContent)).toEqual(["Save recovery copy"]);
+    expect(first.textContent).toContain("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
+    await userEvent.setup().click(within(first).getByRole("button", {name: "Save recovery copy of note.md"}));
+    expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
+    expect(screen.getByTestId("live-document-row-note.md-old-2")).toBeTruthy();
+  });
   it("offers Resume on a live row with a deferred Stop after local clear failed", async () => {
     const h=harness();
     h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));
@@ -114,6 +145,17 @@ describe("LiveDocumentsDialog", () => {
       expect(screen.getByTestId(`live-document-row-${path}`).children[1]?.textContent).toBe("Server copy doesn't match");
       expect(actions(path)).toEqual([]);
     }
+  });
+  it.each([0, 2])("does not suggest Resume for a conflict hold with %s deferred edits", async unsentEdits => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("held.md", {status: "unavailable", reason: "conflict-parent-withheld",
+      canResume: false, deferredStop: {unsentEdits, editable: true}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const held = await screen.findByTestId("live-document-row-held.md");
+    expect(held.children[1]?.textContent).toBe("Can't resume");
+    expect(held.textContent).toContain("your edits may not reach them.");
+    expect(held.textContent).not.toContain("Resume");
+    expect(actions("held.md")).toEqual([]);
   });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
@@ -264,6 +306,11 @@ describe("LiveDocumentsDialog", () => {
           canResume: false,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
+        row("docs/held.md", {
+          status: "unavailable",
+          reason: "conflict-parent-withheld",
+          canResume: false,
+        }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
     );
@@ -284,6 +331,7 @@ describe("LiveDocumentsDialog", () => {
       "Not started",
       "Server copy doesn't match",
       "Can't resume",
+      "Can't resume",
       "Stopped",
       "Stopped",
     ]);
@@ -294,6 +342,10 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
     expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
+    const held = "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
+    expect(screen.getAllByText(held)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
+    expect(actions("docs/held.md")).toEqual(["Stop live editing"]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";

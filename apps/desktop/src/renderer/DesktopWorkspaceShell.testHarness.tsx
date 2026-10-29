@@ -79,7 +79,6 @@ import type {
   SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -166,9 +165,19 @@ const IDLE_UPDATE_STATE: UpdateStateEvent = {
   canInstall: false,
 };
 
+const AVAILABLE_UPDATE_STATE: UpdateStateEvent = {
+  status: "available",
+  message: "dohc 1.2.4 is available.",
+  currentVersion: "1.2.3",
+  channel: "latest",
+  canCheck: false,
+  canInstall: false,
+  version: "1.2.4",
+};
+
 export const READY_UPDATE_STATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to install it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,
@@ -554,6 +563,10 @@ function makeBaseBridge(
     getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
     checkForUpdates: vi.fn(async () => ({
       checked: true,
+      state: AVAILABLE_UPDATE_STATE,
+    })),
+    downloadUpdate: vi.fn(async () => ({
+      accepted: true,
       state: READY_UPDATE_STATE,
     })),
     installUpdate: vi.fn(async () => ({
@@ -857,11 +870,7 @@ export function makeBridge(
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
-    // drive a real review card and a real version switch through them.
-    getTryInVersionState: vi.fn(
-      async (): Promise<TryInVersionStateResult> => ({ state: null }),
-    ),
-    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
+    // drive a real version switch through it.
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
         activeVersionId: "main", ...historyPageFields,

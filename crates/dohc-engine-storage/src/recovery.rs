@@ -391,6 +391,18 @@ pub fn create_earlier_store_for_test(path: &Path, missing: usize) -> Result<(), 
     Ok(())
 }
 
+/// Create the store at `path` as a build that stopped before migration `id`
+/// left it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn create_store_before_migration_for_test(path: &Path, id: &str) -> Result<(), StorageError> {
+    use crate::migration::BASELINE_MIGRATIONS;
+    let before = BASELINE_MIGRATIONS
+        .iter()
+        .position(|migration| migration.id == id)
+        .expect("a known migration id");
+    create_earlier_store_for_test(path, BASELINE_MIGRATIONS.len() - before)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,10 +664,10 @@ mod tests {
         std::fs::create_dir(&store).unwrap();
         let source = store.join("engine.db");
         earlier_store(&source);
-        // The last migration creates this table, so on this store it fails.
+        // The last migration creates an index of this name, so on this store it fails.
         Connection::open(&source)
             .unwrap()
-            .execute_batch("CREATE TABLE owner_ydoc_outbox_refusals (planted INTEGER)")
+            .execute_batch("CREATE TABLE idx_chat_threads_channel_lane_created (planted INTEGER)")
             .unwrap();
         let before = contents(&store);
         let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();

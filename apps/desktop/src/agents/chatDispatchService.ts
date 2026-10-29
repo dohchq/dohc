@@ -1,6 +1,7 @@
-import type { ChatDispatchNotice } from "../ipc/bridgeContract";
+import type { ChatDispatchNotice, ChatDispatchStoppedRun, RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import { cutText } from "@dohc/automation-executor/automation-chat";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";
@@ -18,8 +19,8 @@ import type {
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { AgentWithLaunch } from "../settings/userSettings";
-import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
+import type { Agent, AgentWithLaunch } from "../settings/userSettings";
+import type { AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
   type AgentDispatchRequestOptions,
@@ -58,31 +59,29 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
   }
 }
 
-const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
-  "no-reply": "produced no reply",
-  "timed-out": "timed out",
-  failed: "failed",
-  "not-started": "failed to start",
-  restarted: "stopped when dohc restarted",
-  quit: "stopped when dohc quit",
-  stopped: "stopped",
-  restricted: "did not start in Restricted Mode",
-};
+const NOTICE_AGENT_NAME_MAX_CHARS = 32;
 
-// "Your agent finished in "Plan day 2"" or "Your agent's run in "Plan day
-// 2" failed", shortening the thread's name to fit. Without a name, the
-// sentence names no thread.
-function runNoticeTitle(outcome: RunOutcome, thread: string): string {
-  const sentence = (name: string | null) => {
-    const where = name === null ? "" : ` in "${name}"`;
-    if (outcome === "stopped") return `Stopped the run${where}`;
-    return outcome === "finished"
-      ? `Your agent finished${where}`
-      : `Your agent's run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
-  };
-  if (!thread) return sentence(null);
-  const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
-  return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
+// "Atlas's run failed in "Plan day 2"" or "Restricted Mode blocked Atlas's
+// run in "Plan day 2"". What happened comes first and names last, so a clamp
+// cuts only a name: the agent's Settings name at 32 characters, then the
+// thread's to fit. An agent no longer in Settings is "Your agent".
+function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
+  const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
+  const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
+  const sentence = {
+    finished: `${agent ?? "Your agent"} finished`,
+    stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
+    "no-reply": `${whose(true)} produced no reply`,
+    "timed-out": `${whose(true)} timed out`,
+    failed: `${whose(true)} failed`,
+    "not-started": `${whose(true)} failed to start`,
+    restarted: `dohc restarted and stopped ${whose(false)}`,
+    quit: `dohc quit and stopped ${whose(false)}`,
+    restricted: `Restricted Mode blocked ${whose(false)}`,
+  } satisfies Record<RunOutcome, string>;
+  const what = sentence[outcome];
+  if (!thread) return what;
+  return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
 }
 
 // A run that failed to start says why and what to do next.
@@ -106,6 +105,8 @@ function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?:
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
 const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
 export const CHAT_DISPATCH_BUDGET_MAX = 10;
+// A long title or name can't push the next step out of a notice.
+const NOTICE_NAME_MAX_CHARS = 40;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
 const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
@@ -123,16 +124,15 @@ const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
 const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
 const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
+function clip(name: string): string {
+  const chars = [...name];
+  return chars.length <= NOTICE_NAME_MAX_CHARS ? name : `${chars.slice(0, NOTICE_NAME_MAX_CHARS - 1).join("")}…`;
+}
+
 export interface ChatDispatchWorkspace {
   workspaceId: string;
   rootPath: string;
   attachmentId?: symbol;
-}
-
-export interface ChatDispatchIdentity {
-  displayName: string;
-  ownerDisplayName: string;
-  verifiedUserId?: string;
 }
 
 export interface ChatDispatchPresenceInput {
@@ -162,16 +162,13 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
+  // Starts the self-test's own thread in the agent DM, apart from its conversation.
   startSelfTestThread(workspace: ChatDispatchWorkspace, input: { channelId: string; title: string; body: string }): Promise<string>;
   dispatchStoreFor(
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
-  // The agent that answers chats, or null when none is set up.
-  readDispatchAgent(): Promise<AgentWithLaunch | null>;
-  identityFor(
-    workspace: ChatDispatchWorkspace,
-    target?: { channelId: string } | { threadId: string },
-  ): Promise<ChatDispatchIdentity>;
+  // The person's agents, in the order the settings file lists them.
+  readDispatchAgents(): Promise<Agent[]>;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
@@ -180,8 +177,13 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  // A request to answer a message started waiting, started running, failed or
+  // finished. The group is the thread's; null when the change spans groups.
+  onAgentRequestsChanged?(workspace: ChatDispatchWorkspace, channelId: string | null): void;
   onPausedChanged?(paused: boolean): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
+  // A paused thread resumed, so its pause notice is over.
+  onThreadResumed?(workspace: ChatDispatchWorkspace, threadId: string): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth, for the person main names.
   setRunAttribution(
@@ -194,11 +196,13 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
     workspaceId: string;
     attachmentId?: symbol;
     triggerMessageId: string;
+    agentId: string;
     runId: string;
   }): boolean | Promise<boolean>;
   hasPendingRunMessageLink?(workspace: ChatDispatchWorkspace, runId: string): boolean;
   listAppQuitRecoveries?(
     workspace: ChatDispatchWorkspace,
+    threadId?: string,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
   nowMs?: () => number;
   createId?: () => string;
@@ -215,12 +219,13 @@ interface ChatDispatchThreadState {
   liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
-  pausedReason?: string;
+  stoppedRun?: ChatDispatchStoppedRun;
 }
 
 interface LiveRun {
   workspace: ChatDispatchWorkspace;
   claim: AgentDispatchClaim;
+  agentName: string;
   child: RunnerProcess;
   logPath: string;
   timeoutMinutes: number;
@@ -247,16 +252,6 @@ interface PendingPreRunFailure {
   failed: boolean;
 }
 
-interface PendingInterruptedRequeue {
-  workspace: ChatDispatchWorkspace;
-  input: {
-    workspaceId: string;
-    attachmentId?: symbol;
-    triggerMessageId: string;
-    runId: string;
-  };
-}
-
 interface SelfTestState {
   workspace: ChatDispatchWorkspace;
   child: RunnerProcess;
@@ -265,7 +260,7 @@ interface SelfTestState {
   poll: ReturnType<typeof setTimeout> | null;
   timeout: ReturnType<typeof setTimeout>;
   killEscalation: ReturnType<typeof setTimeout> | null;
-  resolve(result: { ok: boolean; detail: string }): void;
+  resolve(result: RunnerSelfTestResult): void;
   // Ends the self-test with this answer and stops its runner.
   cancel(detail: string): Promise<void>;
 }
@@ -297,6 +292,8 @@ function replyToolCall(threadId: string, runId: string): string {
 // A Claude Code run loads only the person's own Claude Code settings
 // (agentToolCatalog.ts), and a Codex run doesn't trust the workspace
 // (codexRunConfig.ts). Both leave out the workspace's instruction files.
+// Both tools' profiles refuse anything that needs approval, so the run hears
+// it before a refusal turns its reply into an explanation.
 function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
   const form = replyFormFor(tool);
   const instructionsFile = tool === "claude"
@@ -304,6 +301,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
     : tool === "codex"
       ? "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there. "
       : "";
+  const approvals = tool ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line. " : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -314,7 +312,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${approvals}Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -351,10 +349,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
   >();
   const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
-  const pendingInterruptedRequeues = new Map<
-    string,
-    PendingInterruptedRequeue
-  >();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
@@ -374,12 +368,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  function notifyRunUpdated(workspace: ChatDispatchWorkspace): void {
+  function notifyRunUpdated(workspace: ChatDispatchWorkspace, threadId?: string): void {
     try {
       options.onRunUpdated?.(workspace);
     } catch (error) {
       reportError(error);
     }
+    const onAgentRequestsChanged = options.onAgentRequestsChanged;
+    if (!onAgentRequestsChanged) return;
+    // A closed workspace's store throws before it returns a promise.
+    void (threadId === undefined
+      ? Promise.resolve(null)
+      : Promise.resolve()
+          .then(() => options.chatStoreFor(workspace)
+            .findThreadChannelId({ workspaceId: workspace.workspaceId, threadId }))
+          .catch(() => null)
+    ).then((channelId) => onAgentRequestsChanged(workspace, channelId)).catch(reportError);
   }
 
   function enqueue<Result>(
@@ -518,28 +522,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   function finishPresence(live: LiveRun): void {
     if (live.presenceHeartbeat) clearInterval(live.presenceHeartbeat);
     live.presenceHeartbeat = null;
-    void options
-      .identityFor(live.workspace)
-      .then(async (identity) => {
-        const base = {
-          workspaceId: live.workspace.workspaceId,
-          ...(live.workspace.attachmentId
-            ? { attachmentId: live.workspace.attachmentId }
-            : {}),
-          threadId: live.claim.run.threadId,
-          clientId: `agent:${live.workspace.workspaceId}`,
-        };
-        await presence({
-          ...base,
-          state: {
-            displayName: identity.displayName,
-            agent: true,
-            activity: "idle",
-          },
-        });
-        await presence({ ...base, leave: true });
-      })
-      .catch(() => undefined);
+    const base = {
+      workspaceId: live.workspace.workspaceId,
+      ...(live.workspace.attachmentId
+        ? { attachmentId: live.workspace.attachmentId }
+        : {}),
+      threadId: live.claim.run.threadId,
+      clientId: `agent:${live.workspace.workspaceId}`,
+    };
+    void presence({
+      ...base,
+      state: { displayName: live.agentName, agent: true, activity: "idle" },
+    }).then(() => presence({ ...base, leave: true }));
   }
 
   function actualLogPath(runId: string, storedPath?: string): string {
@@ -563,6 +557,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     );
     if (current?.failureHandled) return;
     await dispatch.markFailureHandled(run.runId, durableDispatchRequest);
+    // A completed run's request reads as failed from here.
+    notifyRunUpdated(workspace, run.threadId);
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
@@ -663,7 +659,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           });
         }
         live.terminalDurable = true;
-        notifyRunUpdated(live.workspace);
+        notifyRunUpdated(live.workspace, live.claim.run.threadId);
         await settleRunNotice(live.workspace, live.claim.run.runId);
       } catch (error) {
         reportError(error);
@@ -700,7 +696,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reason: `${RUN_TIMEOUT} ${live.timeoutMinutes}m`,
       });
       live.terminalDurable = true;
-      notifyRunUpdated(live.workspace);
+      notifyRunUpdated(live.workspace, live.claim.run.threadId);
       await settleRunNotice(live.workspace, live.claim.run.runId);
     } catch (error) {
       reportError(error);
@@ -742,6 +738,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         } else {
           const linked = await dispatch.listRunMessages(workspaceId, runId, durableDispatchRequest);
           outcome = linked.length === 0 ? "no-reply" : "finished";
+          // After a restart, no in-memory check is left to mark it failed.
+          if (outcome === "no-reply") await markRunFailureHandled(workspace, run);
         }
         // A request Restricted Mode stopped whose requeue landed before
         // dohc could drop the notice is back in line, so the notice is stale.
@@ -758,9 +756,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   // Whether a run's own request is pending again. A later run in its
   // thread does not cover it: the engine coalesces only pending requests.
+  // Another agent's request for the same message is not this run's.
   async function backInLine(dispatch: AwaitableAgentDispatchStore, run: AgentRunRecord): Promise<boolean> {
     return (await dispatch.listPending(run.workspaceId))
-      .some((each) => each.triggerMessageId === run.triggerMessageId);
+      .some((each) => each.triggerMessageId === run.triggerMessageId && each.agentId === run.agentId);
   }
 
   // Posts every notice this workspace still owes, after a crash or a failed
@@ -804,7 +803,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
+      title: runNoticeTitle(
+        outcome,
+        await threadTitle(workspace, run.threadId),
+        (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
+      ),
       body: runNoticeBody(run, outcome, nodeAvailable),
       target: { thread: run.threadId, run: run.runId },
     });
@@ -823,6 +826,28 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       reportError(error);
       return "";
+    }
+  }
+
+  // What the person opens to resume, named as chat names it and cut short: a
+  // post by its title, a conversation by its place, the agent's current name
+  // in its DM and #group elsewhere. Its group lets Open land on it.
+  async function pausedThread(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+  ): Promise<{ place: string; channelId?: string }> {
+    try {
+      const { workspaceId } = workspace;
+      const { thread, channel } = await options.chatStoreFor(workspace).getThread({ workspaceId, threadId });
+      const agentName = async (agentId: string | undefined) =>
+        (await options.readDispatchAgents()).find(({ id }) => id === agentId)?.name;
+      const place = !channel || thread.lane !== "chat" ? `"${clip(thread.title.replace(/\s+/gu, " ").trim() || threadId)}"`
+        : channel.kind === "agent" ? `"${clip(await agentName(channel.agentId) ?? channel.name)}"`
+          : `#${clip(channel.name)}`;
+      return { place, ...(channel ? { channelId: channel.id } : {}) };
+    } catch (error) {
+      reportError(error);
+      return { place: `"${threadId}"` };
     }
   }
 
@@ -852,21 +877,24 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   // requeue lands.
   async function endPreRunFailure(failure: PendingPreRunFailure): Promise<void> {
     const { workspace } = failure;
-    const { runId, triggerMessageId } = failure.claim.run;
+    const { runId, triggerMessageId, agentId } = failure.claim.run;
     if (!failure.failed) {
       await oweRunNotice(workspace, runId);
       await options.dispatchStoreFor(workspace).failRun({ runId, reason: failure.reason });
       failure.failed = true;
-      notifyRunUpdated(workspace);
+      notifyRunUpdated(workspace, failure.claim.run.threadId);
     }
     const requeued = failure.requeue && (await options.requeueFailedTrigger?.({
       workspaceId: workspace.workspaceId,
       ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
       triggerMessageId,
+      agentId,
       runId,
     })) === true;
-    if (requeued) await options.runNotices?.owed.remove(workspace.workspaceId, runId).catch(reportError);
-    else await settleRunNotice(workspace, runId);
+    if (requeued) {
+      notifyRunUpdated(workspace, failure.claim.run.threadId);
+      await options.runNotices?.owed.remove(workspace.workspaceId, runId).catch(reportError);
+    } else await settleRunNotice(workspace, runId);
   }
 
   async function recoverPreRunFailure(
@@ -892,7 +920,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function startClaim(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    agent: AgentWithLaunch,
+    agent: AgentWithLaunch | undefined,
     releaseWorkspace: (() => Promise<void>) | null,
     assertMayStart: () => void,
   ): Promise<void> {
@@ -900,9 +928,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
     runReservations.add(workspace.workspaceId);
     try {
-      const identity = await options.identityFor(workspace);
+      // A claim from before a lost response can name an agent turned off since.
+      if (!agent) throw new Error("this agent is off or no longer set up");
       await options.setRunAttribution(workspace, {
-        agentId: UNNAMED_AGENT_ID,
+        agentId: agent.id,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
         dispatch: "run",
@@ -912,6 +941,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         store: options.chatStoreFor(workspace),
         workspaceId: workspace.workspaceId,
         threadId: claim.run.threadId,
+        askingMessageId: claim.run.triggerMessageId,
+        // An MCP-form run's server offers only the reply tool, so it cannot
+        // read what was left out.
+        ...(replyFormFor(launchProfile(agent.launch)?.tool) === "argument"
+          ? { readEarlier: `dohc chat show ${claim.run.threadId} --peek` }
+          : {}),
       });
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
@@ -932,6 +967,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const live: LiveRun = {
         workspace,
         claim,
+        agentName: agent.name,
         child,
         logPath,
         timeoutMinutes: agent.timeoutMinutes,
@@ -960,13 +996,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         });
       });
-      notifyRunUpdated(workspace);
+      notifyRunUpdated(workspace, claim.run.threadId);
       const publishWorking = () =>
         presence(
           workingPresenceInput(
             workspace,
             claim.run.threadId,
-            identity.displayName,
+            agent.name,
           ),
         );
       void publishWorking();
@@ -1014,33 +1050,42 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ) {
       return;
     }
-    const agent = await options.readDispatchAgent();
-    const dispatch = options.dispatchStoreFor(workspace);
-    if (!agent?.enabled) {
-      const threadIds = new Set(
-        (await dispatch.listPending(workspace.workspaceId))
-          .map((pending) => pending.threadId),
-      );
-      for (const threadId of threadIds) {
-        const failedCount = await dispatch.failPendingForThread({
-          workspaceId: workspace.workspaceId,
-          threadId,
-          reason: "no-runner",
-        });
-        if (failedCount > 0) notifyRunUpdated(workspace);
-        if (failedCount === 0) continue;
-        try {
-          options.onDispatchNotice?.(workspace, {
-            reason: "no-runner", threadId,
-            message: `No agent could take this request. ${agent ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
-          });
-        } catch (error) {
-          reportError(error);
-        }
-      }
-      return;
+    const agents = await options.readDispatchAgents();
+    const runnable = new Map<string, AgentWithLaunch>();
+    for (const agent of agents) {
+      if (agent.enabled && agent.launch) runnable.set(agent.id, { ...agent, launch: agent.launch });
     }
-    const command = launchCommand(agent.launch);
+    const dispatch = options.dispatchStoreFor(workspace);
+    // A request for an agent this computer cannot start fails here, so it
+    // does not wait in line forever. Each agent's requests fail on their own.
+    const listed = await dispatch.listPending(workspace.workspaceId);
+    const unrunnable = new Map<string, { threadId: string; agentId: string }>();
+    for (const pending of listed) {
+      if (!runnable.has(pending.agentId)) {
+        unrunnable.set(`${pending.threadId}\u0000${pending.agentId}`, pending);
+      }
+    }
+    for (const { threadId, agentId } of unrunnable.values()) {
+      const failedCount = await dispatch.failPendingForThread({
+        workspaceId: workspace.workspaceId,
+        threadId,
+        agentId,
+        reason: "no-runner",
+      });
+      if (failedCount === 0) continue;
+      notifyRunUpdated(workspace, threadId);
+      const agent = agents.find(({ id }) => id === agentId);
+      const message = !agent
+        ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
+        : agent.launch ? `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`
+          : `${clip(agent.name)} has no chat runner set up. Set one up in Settings → Agents.`;
+      try {
+        options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
+      } catch (error) {
+        reportError(error);
+      }
+    }
+    if (runnable.size === 0) return;
     const assertMayStart = await agentStartCheck(workspace);
     if (!assertMayStart) {
       await holdForTrust(workspace, dispatch);
@@ -1049,6 +1094,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (stopped || paused || workspaceProcessReserved(workspace)) {
       return;
     }
+    const pending = listed.filter(({ agentId }) => runnable.has(agentId));
+    const pauseStates = new Map(
+      await Promise.all(
+        [...new Set(pending.map(({ threadId }) => threadId))].map(
+          async (threadId) =>
+            [
+              threadId,
+              await dispatch.getThreadDispatchPauseState(
+                workspace.workspaceId,
+                threadId,
+              ),
+            ] as const,
+        ),
+      ),
+    );
+    // The engine claims the oldest request in a thread that is not paused,
+    // and the claim records the listed request's agent's command. A request
+    // written since the list was read can win the claim. Its own agent still
+    // runs, but the run records the listed agent's command.
+    const next = pending.find(({ threadId }) => pauseStates.get(threadId)?.paused !== true);
+    const nextAgent = (next && runnable.get(next.agentId)) ?? [...runnable.values()][0]!;
     if (dispatch.resolveUncertainClaim) {
       runReservations.add(workspace.workspaceId);
       let uncertainClaim: AgentDispatchClaim | null;
@@ -1056,7 +1122,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         uncertainClaim = await dispatch.resolveUncertainClaim(
           workspace.workspaceId,
           {
-            command,
+            command: launchCommand(nextAgent.launch),
             logPath: logPathTemplate(),
           },
         );
@@ -1079,26 +1145,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           if (bypassBudget) budgetBypassThreads.add(bypassKey);
           throw error;
         }
-        await startClaim(workspace, uncertainClaim, agent, releaseWorkspace, assertMayStart);
+        await startClaim(workspace, uncertainClaim, runnable.get(uncertainClaim.run.agentId), releaseWorkspace, assertMayStart);
         return;
       }
       runReservations.delete(workspace.workspaceId);
     }
-    const pending = await dispatch.listPending(workspace.workspaceId);
-    const pauseStates = new Map(
-      await Promise.all(
-        [...new Set(pending.map(({ threadId }) => threadId))].map(
-          async (threadId) =>
-            [
-              threadId,
-              await dispatch.getThreadDispatchPauseState(
-                workspace.workspaceId,
-                threadId,
-              ),
-            ] as const,
-        ),
-      ),
-    );
     for (const candidate of pending) {
       if (pauseStates.get(candidate.threadId)?.paused === true) {
         continue;
@@ -1119,11 +1170,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           paused: true,
           reason: "re-dispatch budget exceeded",
         });
-        notifyRunUpdated(workspace);
+        notifyRunUpdated(workspace, candidate.threadId);
         try {
+          const { place, channelId } = await pausedThread(workspace, candidate.threadId);
           options.onDispatchNotice?.(workspace, {
             reason: "budget-paused", threadId: candidate.threadId,
-            message: `Agent dispatch paused after 10 runs in 10 minutes. Open "${await threadTitle(workspace, candidate.threadId) || candidate.threadId}" and choose Resume to continue.`,
+            ...(channelId ? { channelId } : {}),
+            message: `Agents ran ${CHAT_DISPATCH_BUDGET_MAX} times in ${CHAT_DISPATCH_BUDGET_WINDOW_MS / 60_000} minutes in ${place}. Choose Resume there to continue.`,
           });
         } catch (error) {
           reportError(error);
@@ -1152,7 +1205,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       let claim: AgentDispatchClaim | null;
       try {
         claim = await dispatch.claimNextPending(workspace.workspaceId, {
-          command,
+          command: launchCommand(runnable.get(candidate.agentId)!.launch),
           logPath: logPathTemplate(),
         });
       } catch (error) {
@@ -1167,82 +1220,28 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
-      await startClaim(workspace, claim, agent, releaseWorkspace, assertMayStart);
+      await startClaim(workspace, claim, runnable.get(claim.run.agentId), releaseWorkspace, assertMayStart);
       return;
     }
   }
 
-  async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
-    const [identity, agent] = await Promise.all([
-      options.identityFor(workspace),
-      options.readDispatchAgent(),
-    ]);
-    // The agent channel is part of opting into local dispatch. A background
-    // scan must not create an agent conversation in every new workspace.
-    if (agent?.enabled) {
-      await options.chatStoreFor(workspace).ensureAgentChannel({
-        workspaceId: workspace.workspaceId,
-      });
-    }
-    const recordedCount = await options
-      .dispatchStoreFor(workspace)
-      .recordEligibleTriggers({
-        workspaceId: workspace.workspaceId,
-        ...(identity.verifiedUserId
-          ? { verifiedUserId: identity.verifiedUserId }
-          : {}),
-      });
-    if (recordedCount > 0) notifyRunUpdated(workspace);
-  }
-
-  async function persistInterruptedRequeue(
-    recovery: PendingInterruptedRequeue,
-  ): Promise<boolean> {
-    const requeue = options.requeueFailedTrigger;
-    if (!requeue) return true;
-    const key = runKey(recovery.input.workspaceId, recovery.input.runId);
-    try {
-      const persisted = await requeue(recovery.input);
-      if (!persisted) {
-        throw new Error(
-          `Interrupted agent run ${recovery.input.runId} was not requeued.`,
-        );
+  // Each agent dohc can start has its own chat. A background pass must not
+  // create a chat for an agent that is off. One agent's chat that cannot be
+  // made does not keep the others from theirs, and a later scan tries again.
+  async function ensureAgentChats(workspace: ChatDispatchWorkspace): Promise<void> {
+    for (const agent of await options.readDispatchAgents()) {
+      if (!agent.enabled || !agent.launch) continue;
+      try {
+        await options.chatStoreFor(workspace).ensureAgentChannel({
+          workspaceId: workspace.workspaceId,
+          agentId: agent.id,
+          name: agent.name,
+        });
+      } catch (error) {
+        reportError(error);
+        scheduleRecoveryScan(workspace);
       }
-      if (pendingInterruptedRequeues.get(key) === recovery) {
-        pendingInterruptedRequeues.delete(key);
-      }
-      return true;
-    } catch (error) {
-      reportError(error);
-      scheduleRecoveryScan(recovery.workspace);
-      return false;
     }
-  }
-
-  async function requeueInterruptedRun(
-    workspace: ChatDispatchWorkspace,
-    input: PendingInterruptedRequeue["input"],
-  ): Promise<boolean> {
-    if (!options.requeueFailedTrigger) return true;
-    const recovery = { workspace, input };
-    pendingInterruptedRequeues.set(
-      runKey(input.workspaceId, input.runId),
-      recovery,
-    );
-    return await persistInterruptedRequeue(recovery);
-  }
-
-  async function recoverInterruptedRequeues(
-    workspace: ChatDispatchWorkspace,
-  ): Promise<boolean> {
-    const pending = [...pendingInterruptedRequeues.values()].filter(
-      (recovery) =>
-        recovery.workspace.workspaceId === workspace.workspaceId,
-    );
-    for (const recovery of pending) {
-      if (!(await persistInterruptedRequeue(recovery))) return false;
-    }
-    return true;
   }
 
   async function startupSweep(workspace: ChatDispatchWorkspace): Promise<boolean> {
@@ -1263,26 +1262,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
-      notifyRunUpdated(workspace);
+      notifyRunUpdated(workspace, claim.run.threadId);
       await settleRunNotice(workspace, claim.run.runId);
-      if (claim.dispatch.attemptCount < 2) {
-        if (
-          !(await requeueInterruptedRun(workspace, {
-            workspaceId: workspace.workspaceId,
-            ...(workspace.attachmentId
-              ? { attachmentId: workspace.attachmentId }
-              : {}),
-            triggerMessageId: claim.run.triggerMessageId,
-            runId: claim.run.runId,
-          }))
-        ) {
-          return false;
-        }
-      }
     }
     const recoveries =
       (await options.listAppQuitRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
+      // A handled run's notice is already owed, by this sweep or an earlier
+      // one. A stopped run stays in this list until someone tries it again.
+      if (recovery.run.failureHandled) continue;
       await oweRunNotice(workspace, recovery.run.runId);
       await settleRunNotice(workspace, recovery.run.runId);
       const linked = await dispatch.listRunMessages(
@@ -1291,30 +1279,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         durableDispatchRequest,
       );
       if (linked.length > 0) {
-        if (!recovery.run.failureHandled) {
-          await dispatch.markFailureHandled(
-            recovery.run.runId,
-            durableDispatchRequest,
-          );
-        }
-        continue;
-      }
-      if (!recovery.run.failureHandled) {
+        await markRunFailureHandled(workspace, recovery.run);
+      } else {
         await markRunFailureHandled(workspace, recovery.run).catch(reportError);
-      }
-      if (recovery.attemptCount < 2) {
-        if (
-          !(await requeueInterruptedRun(workspace, {
-            workspaceId: workspace.workspaceId,
-            ...(workspace.attachmentId
-              ? { attachmentId: workspace.attachmentId }
-              : {}),
-            triggerMessageId: recovery.run.triggerMessageId,
-            runId: recovery.run.runId,
-          }))
-        ) {
-          return false;
-        }
       }
     }
     sweptWorkspaces.add(workspace.workspaceId);
@@ -1364,11 +1331,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (recovering?.finalized) {
       if (!(await finishLiveRun(recovering, null, null))) return;
     }
-    if (!(await recoverInterruptedRequeues(workspace))) return;
     await recoverNoReplyChecks(workspace);
     await recoverRunNotices(workspace);
     if (!(await startupSweep(workspace))) return;
-    await scanTriggers(workspace);
+    await ensureAgentChats(workspace);
     await drain(workspace);
   }
 
@@ -1511,7 +1477,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           durableDispatchRequest,
         );
       }
-      notifyRunUpdated(live.workspace);
+      notifyRunUpdated(live.workspace, live.claim.run.threadId);
     });
     return stoppedRun;
   }
@@ -1589,7 +1555,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId,
         paused: false,
       });
-      notifyRunUpdated(workspace);
+      notifyRunUpdated(workspace, threadId);
+      try {
+        options.onThreadResumed?.(workspace, threadId);
+      } catch (error) {
+        reportError(error);
+      }
       budgetBypassThreads.add(threadKey(workspaceId, threadId));
       await scanAndDrain(workspace);
     });
@@ -1602,9 +1573,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
-    const [pauseState, pending] = await Promise.all([
+    const [pauseState, pending, stopped] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
       dispatch.listPending(workspaceId),
+      stoppedRunForThread(workspace, threadId),
     ]);
     const live = liveRuns.get(workspaceId);
     return {
@@ -1615,15 +1587,83 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
-      ...(pauseState?.paused && pauseState.reason
-        ? { pausedReason: pauseState.reason }
-        : {}),
+      ...(stopped ? { stoppedRun: stopped.stopped } : {}),
     };
+  }
+
+  // The one place that decides which run Try again can run again: the
+  // conversation's newest run that a quit or restart stopped, while it is
+  // still its agent's latest run there and its request is still stopped.
+  // Another agent's run in the conversation doesn't hide it, and neither
+  // does a run that has used both its attempts. Once the request is back in
+  // line, the conversation shows it waiting instead. Runs live in this
+  // computer's engine, so another computer's runs never show here.
+  async function stoppedRunForThread(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+  ): Promise<{ stopped: ChatDispatchStoppedRun; agentId: string } | null> {
+    const recoveries = (await options.listAppQuitRecoveries?.(workspace, threadId)) ?? [];
+    const dispatch = options.dispatchStoreFor(workspace);
+    let exhausted: { stopped: ChatDispatchStoppedRun; agentId: string } | null = null;
+    for (const { run, attemptCount } of recoveries.toReversed()) {
+      const ending = savedRunOutcome(run);
+      if (ending !== "restarted" && ending !== "quit") continue;
+      const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
+      if (latest?.runId !== run.runId) continue;
+      const found = {
+        stopped: {
+          runId: run.runId,
+          triggerMessageId: run.triggerMessageId,
+          ending,
+          retryable: attemptCount < 2,
+        },
+        agentId: run.agentId,
+      };
+      if (found.stopped.retryable) return found;
+      exhausted ??= found;
+    }
+    return exhausted;
+  }
+
+  // Try again on a stopped run puts its request back in line. False when
+  // the run can't be tried again any more, as after a second press.
+  async function retryStoppedRun(
+    workspaceId: string,
+    threadId: string,
+    runId: string,
+  ): Promise<boolean> {
+    return await enqueue(workspaceId, async () => {
+      const workspace = options.workspaceFor(workspaceId);
+      if (!workspace) throw new Error("This workspace is not open. Open it again.");
+      const found = await stoppedRunForThread(workspace, threadId);
+      if (found?.stopped.runId !== runId || !found.stopped.retryable) return false;
+      // A request for an agent this computer can't start would fail as soon
+      // as it was back in line, so it stays stopped and the person learns why.
+      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.agentId);
+      if (!agent?.enabled || !agent.launch) {
+        const why = !agent
+          ? "That agent is not set up on this computer."
+          : agent.launch ? `${agent.name} is off.` : `${agent.name} has no command to start it.`;
+        throw new Error(`${why} Check it in Settings → Agents, then try again.`);
+      }
+      const requeued = (await options.requeueFailedTrigger?.({
+        workspaceId,
+        ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
+        triggerMessageId: found.stopped.triggerMessageId,
+        agentId: found.agentId,
+        runId,
+      })) === true;
+      if (!requeued) return false;
+      notifyRunUpdated(workspace, threadId);
+      await scanAndDrain(workspace);
+      return true;
+    });
   }
 
   async function runnerSelfTest(
     workspaceId: string,
-  ): Promise<{ ok: boolean; detail: string }> {
+    agentId: string,
+  ): Promise<RunnerSelfTestResult> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
@@ -1636,8 +1676,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let reservationHeldByProcess = false;
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
-      const agent = await options.readDispatchAgent();
-      if (!agent) return { ok: false, detail: "Configure a runner command first." };
+      const agent = (await options.readDispatchAgents()).find((candidate) => candidate.id === agentId);
+      if (!agent?.launch) return { ok: false, detail: "Configure a runner command first." };
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
@@ -1658,7 +1698,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
 
       const chat = options.chatStoreFor(workspace);
-      const agentChannel = await chat.ensureAgentChannel({ workspaceId });
+      const agentChannel = await chat.ensureAgentChannel({ workspaceId, agentId: agent.id, name: agent.name });
       const summaries = await chat.listChannelThreads({
         workspaceId,
         channelId: agentChannel.id,
@@ -1712,7 +1752,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
         await options.setRunAttribution(workspace, {
-          agentId: UNNAMED_AGENT_ID,
+          agentId: agent.id,
           agentRunId: runId,
           depth: 0,
           dispatch: "self-test",
@@ -1727,8 +1767,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           prompt,
           assertMayStart,
         });
-        return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
-          const complete = async (result: { ok: boolean; detail: string }) => {
+        return await new Promise<RunnerSelfTestResult>((resolveResult) => {
+          const complete = async (result: RunnerSelfTestResult) => {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             test.settled = true;
@@ -1811,7 +1851,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             void complete({
               ok: false,
-              detail: `Runner self-test timed out after 120 seconds. Log: ${logPath}`,
+              detail: "Runner self-test timed out after 120 seconds.",
+              logPath,
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
@@ -1830,7 +1871,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             reportError(error);
             void complete({
               ok: false,
-              detail: `Runner self-test failed to start. Log: ${logPath}`,
+              detail: "Runner self-test failed to start.",
+              logPath,
             });
           });
           child.onExit(() => {
@@ -1840,7 +1882,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               if (current && !current.settled) {
                 await complete({
                   ok: false,
-                  detail: `Runner exited before reporting self-test success. Log: ${logPath}`,
+                  detail: "Runner exited before reporting self-test success.",
+                  logPath,
                 });
               }
             })();
@@ -1858,9 +1901,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (error instanceof WorkspaceRestrictedError) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
-          detail: `Runner self-test could not start. ${
-            error instanceof Error && error.message ? `${error.message} ` : ""
-          }Log: ${logPath}`,
+          detail: `Runner self-test could not start.${
+            error instanceof Error && error.message ? ` ${error.message}` : ""
+          }`,
+          logPath,
         };
       }
     } finally {
@@ -1940,7 +1984,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     budgetBypassThreads.clear();
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
-    pendingInterruptedRequeues.clear();
     await Promise.all(quitTerminations);
     await Promise.all(
       [
@@ -1965,10 +2008,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     liveRuns.clear();
   }
 
+  // Queues a message the scan does not find, such as an automation's wake, and
+  // shows its waiting request.
+  async function recordTrigger(
+    workspace: ChatDispatchWorkspace,
+    input: { triggerMessageId: string; threadId: string; agentId: string },
+  ): Promise<boolean> {
+    const queued = await options.dispatchStoreFor(workspace)
+      .recordTrigger({ workspaceId: workspace.workspaceId, ...input });
+    if (queued) notifyRunUpdated(workspace, input.threadId);
+    return queued;
+  }
+
   return {
     start,
     stop,
     scanWorkspace,
+    recordTrigger,
     betweenScans,
     stopAgentRun,
     stopForRestrictedMode,
@@ -1978,6 +2034,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     trustChanged,
     resumeThreadDispatch,
     dispatchStateForThread,
+    retryStoppedRun,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,

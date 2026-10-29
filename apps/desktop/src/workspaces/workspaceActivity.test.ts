@@ -486,7 +486,7 @@ describe("workspaceActivity agent run state", () => {
       expect(status.historyRecordingUnavailable).toBe(true);
       expect(stop).toHaveBeenCalledOnce();
       expect(start).not.toHaveBeenCalled();
-      expect(activity.dispatchedAgentRun(state)).toBe(true);
+      expect(activity.dispatchedAgent(state)).toBe("dohc-mcp");
       observation.facts([{ path: "note.md", kind: "changed" }]);
       expect(observeFileEvents).not.toHaveBeenCalled();
     } finally {
@@ -522,19 +522,19 @@ describe("workspaceActivity agent run state", () => {
     await activity.stopAll();
   });
 
-  it("reads whether dohc dispatched the run from the slot", async () => {
+  it("reads the agent of a run dohc dispatched from the slot", async () => {
     const { activity } = await opened();
-    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    expect(activity.dispatchedAgent(id)).toBeNull();
     await activity.claimAgentRun(id, run("cli-run"));
-    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    expect(activity.dispatchedAgent(id)).toBeNull();
     await activity.clearAgentRun(id, "cli-run");
-    await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" });
-    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.claimAgentRun(id, { ...run("dispatch-1", "codex"), dispatch: "run" });
+    expect(activity.dispatchedAgent(id)).toBe("codex");
     await activity.clearAgentRun(id, "dispatch-1");
-    await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" });
-    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.claimAgentRun(id, { ...run("self-test", "default"), dispatch: "self-test" });
+    expect(activity.dispatchedAgent(id)).toBe("default");
     await activity.clearAgentRun(id, "self-test");
-    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    expect(activity.dispatchedAgent(id)).toBeNull();
     await activity.stopAll();
   });
 
@@ -667,7 +667,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       },
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -709,7 +709,7 @@ describe("workspaceActivity cloud sync nudge", () => {
   describe("the Collections wait across signing in and out", () => {
     // Signing in attaches this engine; it knows nothing about the wait.
     const syncEngine = () => ({
-      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, stop: async () => {},
+      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, pushRecorded: async () => undefined, stop: async () => {},
       snapshot: () => ({
         syncFailure: null, retrying: false, syncing: true, lastSyncedAtMs: null, pendingChangeCount: 0,
         conflictCount: 0, authExpired: false, sharingDeclined: [],
@@ -913,7 +913,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => { passes += 1; },
+      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined,
       snapshot: () => ({
         syncFailure: failure, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
         // A conflict shows first in the status, and must not hide a failed pass.
@@ -939,7 +939,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -975,7 +975,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined,
       snapshot: () => ({
         syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
         retrying,
@@ -1010,7 +1010,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -1064,7 +1064,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined,
+          retryNow: async () => undefined, pushRecorded: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1124,7 +1124,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined,
+          retryNow: async () => undefined, pushRecorded: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1295,7 +1295,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         queueSync: () => undefined,
         queueWatchedUpload: () => {},
         queuePull: () => undefined,
-        retryNow: async () => undefined,
+        retryNow: async () => undefined, pushRecorded: async () => undefined,
         snapshot: () => ({
           syncFailure: null,
           retrying: false,

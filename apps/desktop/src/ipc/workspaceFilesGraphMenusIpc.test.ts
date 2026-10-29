@@ -692,7 +692,7 @@ describe("registered native menu handlers", () => {
     h.setCanInstall(true);
     await h.invoke(CHANNELS.showWorkbenchMenu, { workspaceId: "workspace", context: "status" });
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: "Update and Restart", enabled: true }),
+      expect.objectContaining({ label: "Restart to Update", enabled: true }),
     ]));
   });
 

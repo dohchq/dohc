@@ -4,9 +4,11 @@ import {
   loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
   nullPrototypeRecord,
+  sameFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
-import { Plus, X } from "lucide-react";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { Lock, Plus, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
@@ -16,6 +18,7 @@ import {
   frontmatterEntries,
   frontmatterEntriesFromPairs,
   type FrontmatterEntry,
+  listItems,
 } from "./markdown/frontmatter";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
 
@@ -74,8 +77,10 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
   );
 }
 
-function hasDuplicateKeys(entries: FrontmatterEntry[]): boolean {
-  return duplicateKeySet(entries).size > 0;
+// Whether another row saves under this name, whatever its case.
+function nameTaken(index: number, key: string, entries: FrontmatterEntry[]): boolean {
+  const name = key.trim().toLowerCase();
+  return name !== "" && entries.some((entry, i) => i !== index && propertyKey(entry)?.trim().toLowerCase() === name);
 }
 
 function shouldDeferKeyCommit(
@@ -118,15 +123,34 @@ function entryValue(entry: FrontmatterEntry): unknown {
   if (entry.sourceValue === entry.value && Object.hasOwn(entry, "rawValue")) {
     return entry.rawValue;
   }
-  return entry.value;
+  return entry.list ? listItems(entry.value) : entry.value;
 }
 
+// A pill added here has no key until it saves, so it carries a number of its own.
+type Row = FrontmatterEntry & { added?: number };
+
+function rowId(row: Row): string | number | undefined {
+  return row.sourceKey ?? row.added;
+}
+
+// Rows read from storage, in the order they show. Each pill added here that
+// storage doesn't hold yet keeps its place, so saving one pill never moves
+// another under the person typing.
+function withAdded(read: FrontmatterEntry[], shown: Row[]): Row[] {
+  const rows: Row[] = inShownOrder(read, shown);
+  shown.forEach((row, index) => {
+    if (row.sourceKey === undefined && !read.some((entry) => entry.sourceKey === propertyKey(row))) {
+      rows.splice(Math.min(index, rows.length), 0, row);
+    }
+  });
+  return rows;
+}
+
+// The key a row saves under. A name left as it was read keeps that exact key,
+// spaces included, and so does a name cleared or changed to a reserved one.
 function propertyKey(entry: FrontmatterEntry): string | null {
-  const key = editableKey(entry);
-  if (!key) {
-    return entry.sourceKey && !isReserved(entry.sourceKey) ? entry.sourceKey : null;
-  }
-  return key;
+  const key = entry.key === entry.sourceKey ? entry.key : (editableKey(entry) ?? entry.sourceKey);
+  return key && !isReserved(key) ? key : null;
 }
 
 function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> {
@@ -156,15 +180,16 @@ function renamedKeys(
   return renamed;
 }
 
-// A live document's map adds a renamed key last. Rows keep the order they
-// show, so the row being renamed stays under the person typing. A key renamed
-// on another device takes the row its old key left; other new keys follow.
+// A live document's map adds a renamed key last, and a file adds a new key
+// last. Rows keep the order they show, so the row being named stays under the
+// person typing. A key renamed elsewhere takes the row its old key left; a
+// pill storage never held left no row. Other new keys follow.
 function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
   const rows = entries.map((entry) => {
     const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
     return held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
   });
-  const left = shown.flatMap((_, row) => (rows.includes(row) ? [] : [row]));
+  const left = shown.flatMap((candidate, row) => (rows.includes(row) || candidate.sourceKey === undefined ? [] : [row]));
   const added = rows.flatMap((row, index) => (row === -1 ? [index] : []));
   if (left.length === 1 && added.length === 1) rows[added[0]!] = left[0]!;
   return entries
@@ -209,6 +234,31 @@ function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
     .map(({ entry }) => entry);
 }
 
+// A value the pill shows but can't change, such as a list with a comma in an
+// item. The lock is always there; the pointer or keyboard focus shows why,
+// with the whole value.
+function ReadOnlyValue(props: { label: string; value: string; reason: string }) {
+  const tooltip = useTooltip();
+  return (
+    <span {...tooltip.hoverProps} className="relative inline-flex min-w-0 items-center gap-1">
+      <input
+        {...tooltip.focusProps}
+        data-testid="property-value"
+        aria-label={props.label}
+        value={props.value}
+        readOnly
+        spellCheck={false}
+        className={`${PILL_FIELD} cursor-default text-ink`}
+      />
+      <Lock size={11} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      <Tooltip {...tooltip.tooltipProps}>
+        <span className="block wrap-anywhere">{props.value}</span>
+        <span data-testid="property-read-only" className="mt-0.5 block text-muted">{props.reason}</span>
+      </Tooltip>
+    </span>
+  );
+}
+
 export function PropertiesPanel(props: PropertiesPanelProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
@@ -218,7 +268,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     () => (ydoc ? liveEntries(ydoc) : frontmatterEntries(body)),
     [body, ydoc, ydocRevision],
   );
-  const [entries, setEntries] = useState<FrontmatterEntry[]>(() =>
+  const [entries, setEntries] = useState<Row[]>(() =>
     editableEntries(sourceEntries),
   );
 
@@ -234,7 +284,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     // This can apply after the person's next keystroke has changed the
     // document, so a live document's rows read the document as it is now.
     setEntries((shown) =>
-      ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries),
+      withAdded(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), shown),
     );
     setEditRefused(false);
   }, [sourceEntries, ydoc]);
@@ -249,7 +299,6 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (refused) return;
     const previous = editableEntries(sourceEntries);
     setEntries(next);
-    if (hasDuplicateKeys(next)) return;
     try {
       if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
@@ -268,13 +317,33 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       }
       setEditRefused(false);
     } catch {
-      setEntries(previous);
+      setEntries(withAdded(previous, entries));
       setEditRefused(true);
     }
   }
 
+  // A name another property has can't be saved. It stays on its pill, apart
+  // from the rows that save, so every other property keeps saving as you type.
+  // It goes once its pill goes or no other property has the name.
+  const [heldName, setHeldName] = useState<{ row: string | number | undefined; text: string } | null>(null);
+  const heldRow = heldName
+    ? entries.findIndex((entry, index) => rowId(entry) === heldName.row && nameTaken(index, heldName.text, entries))
+    : -1;
+  useLayoutEffect(() => {
+    if (heldName && heldRow === -1) setHeldName(null);
+  });
+
   function setKey(index: number, key: string) {
-    const next = entries.map((entry, i) => (i === index ? { ...entry, key } : entry));
+    const entry = entries[index];
+    if (entry && nameTaken(index, key, entries)) {
+      setHeldName({ row: rowId(entry), text: key });
+      // The row keeps the name it was read with until the new name is free.
+      const read = entry.sourceKey ?? "";
+      if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
+      return;
+    }
+    if (index === heldRow) setHeldName(null);
+    const next = entries.map((row, i) => (i === index ? { ...row, key } : row));
     if (shouldDeferKeyCommit(index, key, next)) {
       setEntries(next);
       return;
@@ -282,8 +351,32 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
+  // The list being typed in: its row, the key it was read with, and the text
+  // so far. Each edit saves at once, as any other value does. The row shows
+  // the text as typed, such as a trailing comma, while it still reads as the
+  // list the document holds; once the document holds another list, the row
+  // shows that.
+  const [listDraft, setListDraft] = useState<{ index: number; key: string; text: string } | null>(null);
+  function draftText(index: number): string | undefined {
+    const entry = entries[index];
+    return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
+      && sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
+      ? listDraft.text
+      : undefined;
+  }
+  useLayoutEffect(() => {
+    if (listDraft && draftText(listDraft.index) === undefined) setListDraft(null);
+  });
+
+  // A list edit that leaves the same items writes nothing, so the file keeps
+  // the list as it was written.
   function setValue(index: number, value: string) {
-    commit(entries.map((entry, i) => (i === index ? { ...entry, value } : entry)));
+    const entry = entries[index];
+    if (entry?.list) {
+      setListDraft({ index, key: entry.sourceKey ?? entry.key, text: value });
+      if (sameFrontmatterValue(listItems(value), entryValue(entry))) return;
+    }
+    commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
   }
 
   // Where focus goes once the pills render: a pill's name, or the +.
@@ -299,9 +392,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     element?.focus();
   });
 
+  const added = useRef(0);
   function add() {
     focusNext.current = entries.length;
-    setEntries((current) => [...current, { key: "", value: "" }]);
+    added.current += 1;
+    const row: Row = { key: "", value: "", added: added.current };
+    setEntries((current) => [...current, row]);
   }
 
   // Focus moves to the next pill, else the one before, else the +.
@@ -323,14 +419,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
-          const duplicate = duplicates.has(entry.key.trim().toLowerCase());
+          const held = index === heldRow ? heldName?.text : undefined;
+          const duplicate = held !== undefined || duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (
             <div key={index} data-testid="property-row" className={PILL}>
               <input
                 data-testid="property-key"
                 aria-label={`Property ${index + 1} name`}
-                value={entry.key}
+                value={held ?? entry.key}
                 placeholder="Property"
                 spellCheck={false}
                 readOnly={refused}
@@ -348,14 +445,20 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   reserved name
                 </span>
               ) : duplicate ? (
-                <span data-testid="property-duplicate" className={TOPMATTER_FLAG} title="Use a unique property name.">
+                <span
+                  data-testid="property-duplicate"
+                  className={TOPMATTER_FLAG}
+                  title={held === undefined ? "Use a unique property name." : "This name isn't saved. Another property has it."}
+                >
                   duplicate name
                 </span>
+              ) : entry.readOnly !== undefined ? (
+                <ReadOnlyValue label={`Property ${entry.key || index + 1} value`} value={entry.value} reason={entry.readOnly} />
               ) : (
                 <input
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
-                  value={entry.value}
+                  value={draftText(index) ?? entry.value}
                   // A value longer than the pill ends in an ellipsis; its
                   // tooltip holds all of it.
                   title={entry.value || undefined}
@@ -363,6 +466,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
+                  // Leaving the list shows it as the document holds it. Switching
+                  // to another window blurs the field without leaving it.
+                  onBlur={entry.list
+                    ? (event) => {
+                        if (event.currentTarget.ownerDocument.activeElement !== event.currentTarget) setListDraft(null);
+                      }
+                    : undefined}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}

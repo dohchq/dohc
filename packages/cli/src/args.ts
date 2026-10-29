@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -45,7 +45,7 @@ type CliCommandBody =
   | { verb: "groups" }
   | { verb: "threads"; group: string }
   | { verb: "inbox" }
-  | { verb: "show"; target: string; peek: boolean }
+  | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
       verb: "post";
       group: string;
@@ -174,6 +174,13 @@ function integerFlag(value: string, flag: string, options: { allowZero: boolean 
     fail(`${flag} requires a ${options.allowZero ? "non-negative" : "positive"} whole number`);
   }
   return parsed;
+}
+
+// A stream position prints as <ms>:<lane>:<id>.
+function streamPosition(value: string): CliStreamPosition {
+  const match = /^(\d+):(posts|chat):(.+)$/u.exec(value);
+  if (!match) fail("--before requires a position such as 1730000000000:posts:th_1");
+  return { createdAtMs: Number(match[1]), lane: match[2] as CliStreamPosition["lane"], id: match[3]! };
 }
 
 function noExtraArgs(tokens: readonly string[], verb: string): void {
@@ -334,6 +341,7 @@ const DOCUMENT_VERBS = {
     operands: "",
     notes: ["storedOn is this-computer, or server for a document the server hosts.",
       "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again.",
       "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
@@ -434,16 +442,26 @@ const CHAT_VERBS = {
   },
   show: {
     capabilityId: "chat.show",
-    summary: "Show a thread or message and mark the thread read.",
-    operands: "<thread-or-message>",
+    summary: "Show a thread or message and mark the thread read, or show a group's posts and conversation.",
+    operands: "<thread-message-or-group>",
     flags: [
       { name: "--peek", text: "Show it without changing what is marked read. A read-only shared view requires it." },
+      { name: "--before", value: "position", text: "For a group, show the page older than this position, as printed after older:." },
+      { name: "--limit", value: "count", text: "For a group, show at most this many items. The default is 50, the most 100." },
     ],
     parse: (input) => {
       const [target, ...extra] = input.operands;
-      if (!target) fail("show requires a thread or message id");
+      if (!target) fail("show requires a thread, message or group");
       noExtraArgs(extra, "show");
-      return { verb: "show", target, peek: input.flags.has("--peek") };
+      const before = lastValue(input, "--before");
+      const limit = lastValue(input, "--limit");
+      return {
+        verb: "show",
+        target,
+        peek: input.flags.has("--peek"),
+        ...(before === undefined ? {} : { before: streamPosition(before) }),
+        ...(limit === undefined ? {} : { limit: Math.min(integerFlag(limit, "--limit", { allowZero: false }), 100) }),
+      };
     },
   },
   post: {

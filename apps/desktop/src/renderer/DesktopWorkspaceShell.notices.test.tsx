@@ -44,6 +44,26 @@ describe("edits the server refused", () => {
     ({...SYNC_STATUS, ownerLiveQuarantines: rows});
   const TITLE = "Live editing paused for notes/plan.md";
   const BODY = "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
+  it.each([0, 1])("keeps each restore queue in its own save-only notice: %i", async index => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined(...["old-1:delivery:0", "old-2:delivery:0"].map(incident =>
+      ({...quarantine, reason: "restore-fenced", saveOnly: true as const, incident}))));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const rows = within(notices).getAllByText("Edits not written to notes/plan.md").map(title => title.closest("li")!);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(within(row).queryByRole("button", {name: "Try again"})).toBeNull();
+      expect(within(row).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+      expect(row.textContent).toContain("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
+    }
+    await user.click(within(rows[index]!).getByRole("button", {name: "Save recovery copy"}));
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId,
+      path: "notes/plan.md", incident: index === 0 ? "old-2:delivery:0" : "old-1:delivery:0"});
+  });
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", objectId: "object-other", status: "ready", canResume: false},
@@ -758,9 +778,8 @@ describe("engine store recovery", () => {
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
-  // Restarting closes the app, so every Restart asks once first. The stop
-  // state's button opens the same prompt the update notice uses.
-  it("asks before restarting into a ready update from the stop state", async () => {
+  // The button names the restart, so pressing it restarts at once.
+  it("restarts into a ready update from the stop state without asking again", async () => {
     const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => status);
@@ -773,22 +792,8 @@ describe("engine store recovery", () => {
     await user.click(
       await within(blocked).findByRole("button", { name: "Restart to update" }),
     );
-    const dialog = await screen.findByTestId("restart-to-update-dialog");
-    expect(dialog.textContent).toContain("Restart dohc to apply the update?");
-    expect(dialog.textContent).toContain("Update 1.2.4 is downloaded.");
-    expect(bridge.installUpdate).not.toHaveBeenCalled();
-
-    await user.click(within(dialog).getByRole("button", { name: "Not now" }));
-    expect(screen.queryByTestId("restart-to-update-dialog")).toBeNull();
-    expect(bridge.installUpdate).not.toHaveBeenCalled();
-
-    await user.click(within(blocked).getByRole("button", { name: "Restart to update" }));
-    await user.click(
-      within(await screen.findByTestId("restart-to-update-dialog")).getByRole("button", {
-        name: "Restart now",
-      }),
-    );
     await waitFor(() => expect(bridge.installUpdate).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it(
@@ -3568,12 +3573,8 @@ describe("unavailable MCP launcher settings", () => {
     expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
       "dohc could not prepare its MCP launcher. Restart dohc to try again.",
     );
-    expect(screen.queryByTestId("mcp-config-snippet")).toBeNull();
-    const configSection = screen.getByRole("heading", { name: "MCP config" }).closest("section");
-    if (!configSection) throw new Error("The MCP config section did not render.");
     expect(
-      (within(configSection).getByRole("button", { name: "Copy" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled,
     ).toBe(true);
   });
 });

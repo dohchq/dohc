@@ -16,8 +16,9 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
-import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
+import { AgentName, ChatAvatar, LinkHolderMark, useAgentInk } from "./ChatAvatar";
+import { neutralPresentation } from "./actorPresentation";
+import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -107,7 +108,8 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
+import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -118,7 +120,7 @@ import { publishAboutConversation, type AboutConversationEntry } from "./aboutCo
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
-import type { PresenceScopeInput } from "../../ipc/bridgeContract";
+import type { ActorPresentation, PresenceScopeInput } from "../../ipc/bridgeContract";
 import {
   CHAT_AGENT_PRESENCE_TOPIC,
   resolveAgentPresenceActivity,
@@ -148,6 +150,8 @@ export interface AgentSetupSummary {
   runnerConfigured: boolean;
   runnerEnabled: boolean;
   agentRunActive: boolean;
+  // The agents dohc can start, in the order the settings file lists them.
+  agents: Array<{ id: string; name: string; enabled: boolean }>;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -384,6 +388,16 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
   );
 }
 
+// An agent chat's mark beside its name, in its agent's hue.
+function AgentMark(props: { presentation: ActorPresentation }) {
+  const ink = useAgentInk(props.presentation);
+  return (
+    <span aria-hidden data-testid="chats-channel-agent-mark" className={`shrink-0 font-mono text-[12px] ${ink}`}>
+      ◈
+    </span>
+  );
+}
+
 // One row of the chat nav: an icon, a name, and what is waiting on the right.
 // The active row is the one the panel currently shows.
 function NavRow(props: {
@@ -470,7 +484,7 @@ export function runnerProgram(command: string): string {
     if (tokens.length === 2) break;
   }
   const basename = (token: string): string => token.split(/[\\/]/u).pop() ?? token;
-  const program = tokens[0] ? basename(tokens[0]) : "";
+  const program = tokens[0] ? basename(tokens[0]).replace(/\.exe$/iu, "") : "";
   const script = tokens[1] ? basename(tokens[1]) : "";
   return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
@@ -483,7 +497,8 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onError: (message: string, cause?: unknown) => void;
+  // A retry, when given, is the failure's Try again.
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
   // Removing a member is undoable for a while. The shell shows that notice
   // and holds the Undo, so it outlives this panel; a refused removal goes to
   // the same shell with Try again.
@@ -592,6 +607,10 @@ export function ChatsView(props: {
   const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
+  // For openChannel and openThread: an agent's chat opened without its agent
+  // takes the listed chat (withListedAgent).
+  const latestChannels = useRef<readonly ChatChannelRecord[]>([]);
+  latestChannels.current = overview.status === "ready" ? overview.channels : [];
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, PostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
@@ -1098,10 +1117,12 @@ export function ChatsView(props: {
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
 
+  // The sidebar shows each agent's chat, which dohc makes for each agent it can start.
+  const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings) : [], [props.userSettings]);
   const awaitingAgentChannel = Boolean(
-    props.userSettings && firstAgentWithLaunch(props.userSettings)?.enabled &&
-    overview.status === "ready" &&
-    !overview.channels.some((channel) => channel.kind === "agent"),
+    props.userSettings && overview.status === "ready" &&
+    runnableAgents(props.userSettings).some((agent) =>
+      !overview.channels.some((channel) => channel.kind === "agent" && channel.agentId === agent.id)),
   );
   useEffect(() => {
     if (!awaitingAgentChannel) return;
@@ -1601,7 +1622,7 @@ export function ChatsView(props: {
     async (channel: ChatChannelRecord) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel });
+      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -1904,7 +1925,7 @@ export function ChatsView(props: {
       const refreshSeq = ++threadRefreshSeq.current;
       setNav({
         level: "thread",
-        channel,
+        channel: withListedAgent(channel, latestChannels.current),
         thread,
         ...(focusMessageId ? { focusMessageId } : {}),
       });
@@ -2797,10 +2818,10 @@ export function ChatsView(props: {
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
     [joinedByWire],
   );
-  const agentChannel =
-    overview.status === "ready"
-      ? overview.channels.find((channel) => channel.kind === "agent") ?? null
-      : null;
+  const agentChats = useMemo(
+    () => overview.status === "ready" ? orderAgentChats(overview.channels, settingsAgents) : [],
+    [overview, settingsAgents],
+  );
   // Agents shared by other people that reach this workspace: an agent that posted in
   // a channel shared to the user belongs to whoever shared it. Derived from
   // the Home items already read, so it costs nothing and lists exactly the
@@ -3009,15 +3030,20 @@ export function ChatsView(props: {
   // scope. With no agent channel/collaboration this channel is never built.
   const agentSummaryPresence = usePresence({
     enabled:
-      collaboration !== null && agentChannel !== null && scopeResolved,
+      collaboration !== null && agentChats.length > 0 && scopeResolved,
     transport: workspacePresenceTransport,
     topic: CHAT_AGENT_PRESENCE_TOPIC,
     clientId: collaboration?.clientId ?? "",
     displayName: collaboration?.displayName ?? "",
   });
   const conversationAgentActivity = resolveAgentPresenceActivity(presence.others);
-  const agentSummaryActivity = resolveAgentPresenceActivity(
-    agentSummaryPresence.others,
+  // The workspace runs one agent at a time, and its presence carries that
+  // agent's Settings name, so each agent's chat shows only its own activity.
+  const agentSummaryOthers = agentSummaryPresence.others;
+  const agentActivity = useCallback(
+    (name: string) => resolveAgentPresenceActivity(agentSummaryOthers.filter((peer) =>
+      (peer.state as { displayName?: unknown } | null)?.displayName === name)),
+    [agentSummaryOthers],
   );
   const peoplePresence = useMemo(
     () =>
@@ -3027,7 +3053,6 @@ export function ChatsView(props: {
 
   // About for this tab: the conversation it shows, who is here, and whether
   // it came through someone else's share. Only a tab's own page publishes.
-  const agentName = props.agentSetup?.agentName;
   const aboutConversation = useMemo<AboutConversationEntry | null>(() => {
     if (!props.editorTabPath) return null;
     if (activeDm) {
@@ -3058,7 +3083,7 @@ export function ChatsView(props: {
     if (activeChannel.kind === "agent") {
       return {
         kind: "agent",
-        name: chatEditorTitle(nav, agentName),
+        name: chatEditorTitle(nav, settingsAgents),
         channelWireId: activeWireId,
         received: false,
         // The agent is the conversation, so its own presence is not a face,
@@ -3074,7 +3099,7 @@ export function ChatsView(props: {
       received: joined === undefined ? null : joined !== null,
       present: presence.others,
     };
-  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
+  }, [activeChannel, activeDm, activeWireId, settingsAgents, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
   useEffect(() => {
     if (!props.editorTabPath || aboutConversation === null) return;
     return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
@@ -3337,8 +3362,9 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
-  // Which lane a "both" group shows.
+  // Which lane a "both" group shows. An agent DM opens on its conversation.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
+  const [agentLane, setAgentLane] = useState<"posts" | "chat">("chat");
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -3653,6 +3679,33 @@ export function ChatsView(props: {
     }
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
+  const stoppedRun = dispatchState?.stoppedRun ?? null;
+  const retryStoppedRun = useCallback(async () => {
+    if (nav.level !== "thread" || !stoppedRun?.retryable || dispatchActionBusy) return;
+    const { id: threadId, title } = nav.thread;
+    const { runId } = stoppedRun;
+    const token = liveToken.current;
+    const refreshSeq = ++threadRefreshSeq.current;
+    const current = () => token === liveToken.current && refreshSeq === threadRefreshSeq.current;
+    const failed = (error: unknown) => withErrorWords(`dohc could not start your agent's run in "${title}" again.`, error);
+    setDispatchActionBusy(true);
+    try {
+      await bridge().retryStoppedRun({ workspaceId, threadId, runId });
+      const next = await bridge().chatDispatchStateForThread({ workspaceId, threadId });
+      if (current()) setDispatchState(next);
+    } catch (error) {
+      // A refresh of the conversation meanwhile doesn't answer the failure.
+      if (token !== liveToken.current) return;
+      // The failure's Try again can come from another conversation, so it
+      // only asks again. The run's update refreshes whichever one is open.
+      const again = () => void bridge().retryStoppedRun({ workspaceId, threadId, runId })
+        .catch((retryError: unknown) => props.onError(failed(retryError), retryError, again));
+      props.onError(failed(error), error, again);
+    } finally {
+      if (token === liveToken.current) setDispatchActionBusy(false);
+    }
+  }, [dispatchActionBusy, nav, props.onError, stoppedRun, workspaceId]);
+
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
   const onKeyDownCapture = useCallback(
@@ -3801,7 +3854,7 @@ export function ChatsView(props: {
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
                     : item.channel.kind === "agent"
-                      ? "Agent"
+                      ? agentChatIdentity(withListedAgent(item.channel, overview.channels), settingsAgents).label
                       : `#${item.channel.name}`
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
@@ -4016,7 +4069,6 @@ export function ChatsView(props: {
             onRosterPick={agentOffer.onRosterPick}
             rosterScope={agentOffer.scope}
             agentOffer={agentOffer.offer}
-            onSetUpAgent={props.onSetupAgent}
           />
         </div>
       </div>
@@ -4108,7 +4160,6 @@ export function ChatsView(props: {
               onRosterPick={agentOffer.onRosterPick}
               rosterScope={agentOffer.scope}
               agentOffer={agentOffer.offer}
-              onSetUpAgent={props.onSetupAgent}
             />
           ) : (
             <ComposerNotice testId="chats-dm-ended">
@@ -4212,13 +4263,13 @@ export function ChatsView(props: {
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
-            <span>dispatch paused on this computer — </span>
+            <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
               <button
                 type="button"
                 data-testid="chats-resume-computer-dispatch"
                 onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
-                  props.onError(withErrorWords("dohc could not resume agent dispatch.", error), error))}
+                  props.onError(withErrorWords("dohc could not resume agent replies on this computer.", error), error))}
                 className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
               >
                 Resume
@@ -4230,10 +4281,9 @@ export function ChatsView(props: {
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            title={dispatchState.pausedReason}
             className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
           >
-            <span>dispatch paused — </span>
+            <span>Agent replies paused</span>
             {!threadLocked ? (
               <button
                 type="button"
@@ -4270,11 +4320,15 @@ export function ChatsView(props: {
           >
             <ThreadMessages
               nav={nav}
+              channelLabel={nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents).label : `#${nav.channel.name}`}
               messages={messages}
               messagesLoading={messagesLoading}
               threadLocked={threadLocked}
               flashMessageId={flashMessageId}
               runRecords={runRecords}
+              stoppedRun={stoppedRun}
+              stoppedRunBusy={dispatchActionBusy}
+              onRetryStoppedRun={threadLocked ? undefined : retryStoppedRun}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4367,7 +4421,6 @@ export function ChatsView(props: {
                 onRosterPick={agentOffer.onRosterPick}
                 rosterScope={agentOffer.scope}
                 agentOffer={agentOffer.offer}
-                onSetUpAgent={props.onSetupAgent}
               />
             </div>
           )}
@@ -4381,8 +4434,18 @@ export function ChatsView(props: {
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
-    const groupType = nav.channel.type ?? "posts";
-    const showLane = groupType === "chat" || (groupType === "both" && groupLane === "chat");
+    const channelAgent = nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents) : null;
+    const channelSettingsAgent = channelAgent ? settingsAgents.find((agent) => agent.id === nav.channel.agentId) : undefined;
+    // The strip under an agent's chat describes that agent's own runner.
+    const channelLaunch = channelSettingsAgent?.enabled ? channelSettingsAgent.launch : undefined;
+    const channelCommand = channelLaunch ? launchCommand(channelLaunch) : "";
+    // An agent DM is one conversation. Its older posts stay under Posts, which
+    // takes no new ones.
+    const agentDm = nav.channel.kind === "agent";
+    const groupType = agentDm ? "both" : nav.channel.type ?? "posts";
+    const lane = agentDm ? agentLane : groupLane;
+    const setLane = agentDm ? setAgentLane : setGroupLane;
+    const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -4416,20 +4479,19 @@ export function ChatsView(props: {
           }
         >
           {(
-            [
-              ["posts", "Posts"],
-              ["chat", "Chat"],
-            ] as const
+            agentDm
+              ? ([["chat", "Chat"], ["posts", "Posts"]] as const)
+              : ([["posts", "Posts"], ["chat", "Chat"]] as const)
           ).map(([value, label]) => (
             <button
               key={value}
               type="button"
               role="tab"
-              aria-selected={groupLane === value}
+              aria-selected={lane === value}
               data-testid={`chats-group-lane-${value}`}
-              onClick={() => setGroupLane(value)}
+              onClick={() => setLane(value)}
               className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                groupLane === value
+                lane === value
                   ? "bg-selected text-ink"
                   : "text-muted hover:bg-hover hover:text-ink"
               }`}
@@ -4448,14 +4510,12 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <ChatHeader
-          label={nav.channel.kind === "agent" ? "My agent" : nav.channel.name}
+          label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
           onBack={variant === "panel" ? goBack : undefined}
           icon={
-            nav.channel.kind === "agent" ? (
-              <span aria-hidden className="shrink-0 font-mono text-[12px] text-agent">
-                ◈
-              </span>
+            channelAgent ? (
+              <AgentMark presentation={channelAgent.presentation} />
             ) : (
               <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
             )
@@ -4469,7 +4529,7 @@ export function ChatsView(props: {
             <>
               {nav.channel.kind === "agent" ? (
                 <AgentPresenceHint
-                  activity={agentSummaryActivity}
+                  activity={channelSettingsAgent ? agentActivity(channelSettingsAgent.name) : null}
                   testId="chats-channel-agent-presence"
                 />
               ) : null}
@@ -4513,21 +4573,21 @@ export function ChatsView(props: {
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
-            data-state={agentReady ? "ready" : "needs-setup"}
+            data-state={channelLaunch ? "ready" : "needs-setup"}
             className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
             <Bot size={12} aria-hidden className="shrink-0 text-agent" />
             <span
               data-testid="chats-agent-screen-runner"
               className="min-w-0 flex-1 truncate"
-              title={agentReady ? (props.userSettings ? firstAgentCommand(props.userSettings) : undefined) : undefined}
+              title={channelCommand || undefined}
             >
-              {agentReady
-                ? props.userSettings && firstAgentCommand(props.userSettings)
-                  ? `Runs ${runnerProgram(firstAgentCommand(props.userSettings))}`
+              {channelLaunch
+                ? channelCommand
+                  ? `Runs ${runnerProgram(channelCommand)}`
                   : "Runner on"
-                : props.agentSetup.runnerConfigured
-                  ? "Runner configured · dispatch is off"
+                : channelSettingsAgent?.launch
+                  ? "Chat runner is off in Settings"
                   : props.agentSetup.agentRunActive
                     ? "Agent run active · connect an agent to reply here"
                     : "No runner yet · add an agent under Agents"}
@@ -4677,9 +4737,18 @@ export function ChatsView(props: {
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
-            onSetupAgent={props.onSetupAgent}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            {...(agentDm ? {
+              ...(channelSettingsAgent ? { agentName: channelSettingsAgent.name } : {}),
+              draft: {
+                value: newThreadBody,
+                onChange: setNewThreadBody,
+                poll: newThreadPoll,
+                onPollChange: (next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id }),
+                autoFocus: props.focusNewPost,
+              },
+            } : {})}
           />
         ) : (
         <PostFeedList
@@ -4691,7 +4760,7 @@ export function ChatsView(props: {
           bottomPadding={64}
           topPadding={0}
           header={<>
-            {!channelLocked ? (
+            {!channelLocked && !agentDm ? (
               <div className="mb-4 mt-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
@@ -4701,11 +4770,7 @@ export function ChatsView(props: {
                   sending={startingThread}
                   surface="post"
                   authorName={collaboration?.displayName || "You"}
-                  placeholder={
-                    nav.channel.kind === "agent"
-                      ? "Message your agent…"
-                      : `What's happening in #${nav.channel.name}?`
-                  }
+                  placeholder={`What's happening in #${nav.channel.name}?`}
                   sendLabel="Start post"
                   candidates={mentionCandidates}
                   fileCandidates={fileMentionCandidates}
@@ -4717,7 +4782,6 @@ export function ChatsView(props: {
                   onRosterPick={agentOffer.onRosterPick}
                   rosterScope={agentOffer.scope}
                   agentOffer={agentOffer.offer}
-                  onSetUpAgent={props.onSetupAgent}
                 />
               </div>
             ) : null}
@@ -4731,10 +4795,10 @@ export function ChatsView(props: {
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
                 <span className="text-[13px] text-subtle">
-                  {nav.channel.kind === "agent"
-                    ? "No posts yet."
+                  {agentDm
+                    ? "No posts."
                     : `No posts in #${nav.channel.name} yet.`}
-                  {channelLocked ? "" : " Start one above."}
+                  {channelLocked || agentDm ? "" : " Start one above."}
                 </span>
               </div>
             )}
@@ -4811,7 +4875,6 @@ export function ChatsView(props: {
       : null;
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
-  const agentLabel = props.agentSetup?.agentName ?? "Your agent";
   const beginNewDm = () => {
     // Always start compose from a clean slate — never inherit a
     // recipient/draft left over from a previous compose.
@@ -5051,44 +5114,46 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChannel || props.userSettings || otherAgents.length > 0 ? (
+          {agentChats.length > 0 || props.userSettings || otherAgents.length > 0 ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mb-1 mt-4 px-4">
                 Agents
               </SectionLabel>
-              {agentChannel ? (
-                <NavRow
-                  testId="chats-my-agent"
-                  data={{ "data-channel-id": agentChannel.id }}
-                  active={selectedChannelId === agentChannel.id}
-                  onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar presentation={ownAgentPresentation} name={agentLabel} kind="agent" size="strip" />}
-                  label={agentLabel}
-                  labelTestId="chats-my-agent-name"
-                  trailing={
-                    <>
-                      {agentReady ? null : (
-                        <span
-                          data-testid="chats-my-agent-state"
-                          className="shrink-0 text-[10px] text-subtle"
-                        >
-                          not set up
-                        </span>
-                      )}
-                      <AgentPresenceHint
-                        activity={agentSummaryActivity}
-                        program={
-                          agentReady && props.userSettings
-                            ? runnerProgram(firstAgentCommand(props.userSettings))
-                            : null
-                        }
-                        testId="chats-my-agent-presence"
-                      />
-                      <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
-                    </>
-                  }
-                />
-              ) : null}
+              {agentChats.map((channel) => {
+                const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
+                const { label, presentation } = agentChatIdentity(channel, settingsAgents);
+                const launch = agent?.enabled ? agent.launch : undefined;
+                return (
+                  <NavRow
+                    key={channel.id}
+                    testId="chats-my-agent"
+                    data={{ "data-channel-id": channel.id, ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}) }}
+                    active={selectedChannelId === channel.id}
+                    onClick={() => openConversation({ level: "channel", channel })}
+                    icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
+                    label={label}
+                    labelTestId="chats-my-agent-name"
+                    trailing={
+                      <>
+                        {launch ? null : (
+                          <span
+                            data-testid="chats-my-agent-state"
+                            className="shrink-0 text-[10px] text-subtle"
+                          >
+                            {agent?.launch ? "off" : "not set up"}
+                          </span>
+                        )}
+                        <AgentPresenceHint
+                          activity={agent ? agentActivity(agent.name) : null}
+                          program={launch ? runnerProgram(launchCommand(launch)) : null}
+                          testId="chats-my-agent-presence"
+                        />
+                        <UnreadPill count={channel.unreadCount} testId="chats-my-agent-unread" />
+                      </>
+                    }
+                  />
+                );
+              })}
               {otherAgents.length > 0 ? (
                 <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
                   {otherAgents.map((agent) => (
@@ -5135,7 +5200,7 @@ export function ChatsView(props: {
                   {agentReady ? (
                     <>
                       <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
-                      Manage agent
+                      Manage agents
                     </>
                   ) : (
                     <>

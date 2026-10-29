@@ -91,28 +91,23 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-manage-agent")).toBeVisible();
 
     // The agent's screen states what runs it.
-    await page.getByTestId("chats-my-agent").click();
-    await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
+    await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
     await expect(page.getByTestId("chats-agent-screen")).toBeVisible();
     await shoot(page, "agent-screen");
 
     // A question with choices is a poll; picking one answers it.
-    await page.getByTestId("chats-new-thread-composer").fill("plan the release");
-    await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
-    const question = page.getByTestId("chats-message").filter({ hasText: "Which day do we ship?" });
+    await page.getByTestId("chats-lane-composer").fill("plan the release");
+    await page.getByTestId("chats-lane-composer").press("Enter");
+    const question = page.getByTestId("chats-lane-message").filter({ hasText: "Which day do we ship?" });
     await expect(question).toHaveCount(1);
-    await expect(question.getByTestId("chats-comment-decision-open")).toHaveText("Poll open");
+    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Poll open");
     await shoot(page, "agent-question-open");
 
-    const options = question.getByTestId("chats-comment-poll-option");
-    await options.nth(1).click();
-    await expect(page.getByTestId("chats-resolving-mode")).toContainText("Monday");
-    await shoot(page, "agent-question-choosing");
-    await page.getByTestId("chats-composer").press("Enter");
-    await expect(question.getByTestId("chats-comment-decision-resolved")).toHaveText("Answered");
+    await question.getByTestId("chats-lane-poll-option").nth(1).click();
+    await expect(question.getByTestId("chats-lane-decision-resolved")).toHaveText("Answered");
     await expect(
-      page.getByTestId("chats-message").filter({ hasText: "going with Monday" }),
+      page.getByTestId("chats-lane-message").filter({ hasText: "going with Monday" }),
     ).toHaveCount(1);
     await shoot(page, "agent-question-answered");
   } finally {

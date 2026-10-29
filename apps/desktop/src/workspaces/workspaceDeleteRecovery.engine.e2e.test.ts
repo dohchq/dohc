@@ -264,7 +264,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const socketHome = await createTestScratch("cli-");
     server = await startCliServer({ stateDir: socketHome, listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
-      agentRunDepth: () => 0, dispatchedAgentRun: () => false, agentRunWorkspace: () => undefined });
+      agentRunDepth: () => 0, dispatchedAgent: () => null, dispatchedRunId: () => null, agentRunWorkspace: () => undefined });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
     const request = async (verb: "fileMove" | "historyUndo", args: object) => {
       const socket = createConnection(server!.socketPath); socket.setEncoding("utf8");

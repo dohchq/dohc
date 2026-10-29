@@ -34,6 +34,7 @@ import {
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
+  type CliStreamPosition,
   type CliVerb,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
@@ -1968,8 +1969,20 @@ export async function listFileChats(ctx: ToolContext, args: { path: string }) {
   return requestCli(ctx, "fileChats", args);
 }
 
-export async function readChat(ctx: ToolContext, args: { threadId: string }) {
-  return requestCli(ctx, "chat", args);
+export async function readChat(ctx: ToolContext, args: {
+  threadId?: string;
+  group?: string;
+  before?: CliStreamPosition;
+  limit?: number;
+}) {
+  const { threadId, group, before, limit } = args;
+  if (threadId !== undefined && group === undefined && before === undefined && limit === undefined) {
+    return requestCli(ctx, "chat", { threadId });
+  }
+  if (group !== undefined && threadId === undefined) {
+    return requestCli(ctx, "chat", { group, ...(before ? { before } : {}), ...(limit ? { limit } : {}) });
+  }
+  return { ok: false as const, reason: "Pass a threadId to read a thread, or a group to read its stream." };
 }
 
 // --- groups (PR 12/15 slice, WS-E) ----------------------------------------

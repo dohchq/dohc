@@ -9,7 +9,8 @@ export const TRUST_READ_FAILED_MESSAGE = "dohc could not read whether it trusts 
 const RESTRICTED_WORKSPACE_WORDS = "In Restricted Mode, dohc does not run this workspace's app code.";
 
 // The workspace's Restricted Mode, beside its save state in the title bar.
-// It opens main's trust dialog.
+// It opens main's trust dialog. Below 1100px, where the title bar's names
+// would start to cut, it narrows to its shield.
 export function RestrictedModeIndicator(props: { asking: boolean; onTrust: () => void }) {
   return (
     <button
@@ -21,7 +22,7 @@ export function RestrictedModeIndicator(props: { asking: boolean; onTrust: () =>
       className="titlebar-no-drag flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait"
     >
       <ShieldAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
-      <span className="whitespace-nowrap">Restricted Mode</span>
+      <span className="whitespace-nowrap max-[1100px]:sr-only">Restricted Mode</span>
     </button>
   );
 }

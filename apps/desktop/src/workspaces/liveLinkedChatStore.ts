@@ -190,6 +190,14 @@ export function createLiveLinkedChatStore(
       await invoke(async (adapter) => await adapter.sendMessage(input)),
     listMessages: async (input) =>
       await invokeRead(async (adapter) => await adapter.listMessages(input)),
+    listMessagesPage: async (input) =>
+      await invokeRead(async (adapter) => await adapter.listMessagesPage(input)),
+    listGroupStream: async (input) =>
+      await invokeRead(async (adapter) => await adapter.listGroupStream(input)),
+    getThread: async (input) => {
+      const found = await invokeRead(async (adapter) => await adapter.getThread(input));
+      return { ...found, channel: found.channel ? toStoreChannel(found.channel) : null };
+    },
     getMessage: async (input) =>
       await invokeRead(async (adapter) => await adapter.getMessage(input)),
     getThreadRevision: async (input) =>
@@ -216,10 +224,15 @@ export function createLiveLinkedChatStore(
       await invoke(
         async (adapter) => await adapter.markThreadReadByAgent(input),
       ),
-    listAgentUnreadThreads: async (workspaceId) =>
+    listAgentUnreadThreads: async (workspaceId, runId) =>
       await invokeRead(
         async (adapter) =>
-          await adapter.listAgentUnreadThreads(workspaceId),
+          await adapter.listAgentUnreadThreads(workspaceId, runId),
+      ),
+    listAgentUnreadRequests: async (workspaceId, runId) =>
+      await invokeRead(
+        async (adapter) =>
+          await adapter.listAgentUnreadRequests(workspaceId, runId),
       ),
     listMentionsForHandle: async (workspaceId, handle, options) =>
       await invokeRead(

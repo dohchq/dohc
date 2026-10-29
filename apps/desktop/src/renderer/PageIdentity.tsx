@@ -7,6 +7,7 @@ import {
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
+import { announceOverlayOpen } from "./overlayStack";
 import { Smile } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
@@ -347,6 +348,8 @@ export function PageIdentity(props: PageIdentityProps) {
   // place when the picker unmounts.
   useEffect(() => {
     if (!pickerOpen) return;
+    // Notices closes, as it does for any dialog.
+    announceOverlayOpen();
     const container = pickerRef.current;
     if (container) modalFocusableElements(container)[0]?.focus();
 

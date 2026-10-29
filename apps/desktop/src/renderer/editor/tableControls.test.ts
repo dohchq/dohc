@@ -4,6 +4,7 @@ import { Collaboration } from "@tiptap/extension-collaboration";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import { closeHistory } from "@tiptap/pm/history";
+import { columnResizingPluginKey } from "@tiptap/pm/tables";
 import { prosemirrorJSONToYXmlFragment } from "@tiptap/y-tiptap";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -230,6 +231,7 @@ type JsonNode = {
     colspan?: number;
     rowspan?: number;
     height?: number | null;
+    colwidth?: number[] | null;
   };
   content?: JsonNode[];
   text?: string;
@@ -259,6 +261,246 @@ function tableTextGrid(editor: Editor): string[][] {
     ),
   );
 }
+
+async function createSyncedTableEditors() {
+  const { local: editor, peer: collaborator } = await createSyncedEditors();
+  const editors = [editor, collaborator];
+  editors.forEach((each) => document.body.append(each.view.dom));
+  const destroy = () => {
+    editors.forEach((each) => {
+      const dom = each.view.dom;
+      each.destroy();
+      dom.remove();
+    });
+  };
+  return { editor, collaborator, destroy };
+}
+
+describe("table gestures while the note changes", () => {
+  let pair: Awaited<ReturnType<typeof createSyncedTableEditors>> | undefined;
+  const errors: unknown[] = [];
+  const recordError = (event: ErrorEvent) => {
+    errors.push(event.error);
+    event.preventDefault();
+  };
+
+  afterEach(() => {
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    window.removeEventListener("error", recordError);
+    pair?.destroy();
+    pair = undefined;
+    elementFromPointResult = null;
+    vi.restoreAllMocks();
+    expect(errors.splice(0)).toEqual([]);
+  });
+
+  async function setup() {
+    window.addEventListener("error", recordError);
+    pair = await createSyncedTableEditors();
+    return pair;
+  }
+
+  function editAbove(editor: Editor) {
+    editor.view.dispatch(editor.state.tr.insertText("New text ", 1));
+  }
+
+  function expectNoDragChrome(editor: Editor) {
+    expect(editor.view.dom.querySelector(
+      ".is-reordering, .is-dragging, .is-drop-target, .dohc-table-drag-source, .dohc-table-drop-before, .dohc-table-drop-after, [aria-grabbed='true']",
+    )).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator")).toBeNull();
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
+      .toBe("Table reorder cancelled.");
+  }
+
+  it.each([
+    { band: "row", origin: "synced" },
+    { band: "column", origin: "synced" },
+    { band: "row", origin: "local" },
+    { band: "column", origin: "local" },
+  ])("cancels a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
+    const { editor, collaborator } = await setup();
+    const before = tableTextGrid(editor);
+    const selector = `.dohc-table-grip--${band === "column" ? "col" : "row"}`;
+    const grips = editor.view.dom.querySelectorAll(selector);
+    const source = grips[0]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+    expect(source.getAttribute("aria-grabbed")).toBe("true");
+    expect(document.body.querySelector(".dohc-table-drop-indicator.is-visible")).not.toBeNull();
+
+    editAbove(origin === "synced" ? collaborator : editor);
+    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    expectNoDragChrome(editor);
+    elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
+    dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)).toEqual(before);
+    expect(tableTextGrid(collaborator)).toEqual(before);
+    expect(source.getAttribute("aria-grabbed")).toBe("false");
+    expectNoDragChrome(editor);
+
+    // The grip stays in place through the edit, so a new drag from it works.
+    drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
+    const moved = band === "row"
+      ? [before[1]!, before[2]!, before[0]!]
+      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+    expect(tableTextGrid(editor)).toEqual(moved);
+    expect(tableTextGrid(collaborator)).toEqual(moved);
+  });
+
+  function mouse(target: EventTarget, type: string, clientX: number) {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 20, button: 0, buttons: 1 });
+    Object.defineProperty(event, "which", { value: 1 });
+    target.dispatchEvent(event);
+  }
+
+  function startColumnResize(editor: Editor) {
+    const cell = editor.view.dom.querySelectorAll("th")[1] as HTMLTableCellElement;
+    vi.spyOn(cell, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 0, 100, 40));
+    Object.defineProperty(cell, "offsetWidth", { configurable: true, value: 100 });
+    elementFromPointResult = cell;
+    mouse(cell, "mousemove", 199);
+    const handle = columnResizingPluginKey.getState(editor.state)!.activeHandle;
+    expect(editor.state.doc.nodeAt(handle)?.textContent).toBe("A2");
+    mouse(cell, "mousedown", 199);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
+    mouse(window, "mousemove", 239);
+    expect(editor.view.dom.querySelectorAll("col")[1]?.style.width).toBe("140px");
+    return handle;
+  }
+
+  function widths(editor: Editor) {
+    return tableNode(editor).content?.map((row) => row.content?.map((cell) => cell.attrs?.colwidth ?? null));
+  }
+
+  it("cancels a column width resize after a synced edit invalidates its handle", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableNode(editor);
+    const table = editor.view.dom.querySelector("table")!;
+    const beforeSize = [table.style.width, table.style.minWidth];
+    startColumnResize(editor);
+
+    editAbove(collaborator);
+    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(tableNode(editor)).toEqual(before);
+    expect(tableNode(collaborator)).toEqual(before);
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", "", ""]);
+    const currentTable = editor.view.dom.querySelector("table")!;
+    expect([currentTable.style.width, currentTable.style.minWidth]).toEqual(beforeSize);
+    expect(editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle")).toBeNull();
+  });
+
+  it("finishes a column width resize on the same column after a local edit above the table", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableTextGrid(editor);
+    const handle = startColumnResize(editor);
+
+    editAbove(editor);
+    expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle + "New text ".length);
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    expect(tableTextGrid(editor)).toEqual(before);
+  });
+
+  function deleteColumnOf(editor: Editor, label: string) {
+    let cell = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === "tableHeader" && node.textContent === label) cell = pos;
+    });
+    editor.chain().setTextSelection(cell + 2).deleteColumn().run();
+  }
+
+  it.each(["synced", "local"])("cancels a column width resize when a %s edit deletes its column", async (origin) => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(origin === "synced" ? collaborator : editor, "A2");
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "A3"]);
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", ""]);
+  });
+
+  it("cancels a column width resize when a local edit replaces its cell", async () => {
+    const { editor, collaborator } = await setup();
+    const handle = startColumnResize(editor);
+    const cell = editor.state.doc.nodeAt(handle)!;
+
+    editor.view.dispatch(editor.state.tr.replaceWith(
+      handle,
+      handle + cell.nodeSize,
+      cell.type.create(cell.attrs, editor.schema.nodes.paragraph!.create(null, editor.schema.text("X2"))),
+    ));
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "X2", "A3"]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+  });
+
+  it("finishes a column width resize on the same column after a local edit deletes the column before it", async () => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(editor, "A1");
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A2", "A3"]);
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [[160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    // Saving the width changes the cell, but the handle stays on its edge.
+    expect(editor.state.doc.nodeAt(columnResizingPluginKey.getState(editor.state)!.activeHandle)?.textContent)
+      .toBe("A2");
+  });
+
+  it("cancels a row height resize after a synced edit above the table", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableNode(editor);
+    const row = editor.view.dom.querySelector("tr")!;
+    const handle = editor.view.dom.querySelector(".dohc-table-row-resize")!;
+    vi.spyOn(row, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 300, 40));
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    editAbove(collaborator);
+    dispatchPointer(editor.view.dom, "pointermove", { clientY: 150 });
+    dispatchPointer(editor.view.dom, "pointerup", { clientY: 150 });
+
+    expect(errors).toEqual([]);
+    expect(tableNode(editor)).toEqual(before);
+    expect(tableNode(collaborator)).toEqual(before);
+    expect(row.style.height).toBe("");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    expect(editor.view.dom.querySelector(".is-resizing, [aria-grabbed='true']")).toBeNull();
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
+      .toBe("Row 1 resize cancelled.");
+  });
+});
 
 describe("table controls grips", () => {
   let editor: Editor | undefined;

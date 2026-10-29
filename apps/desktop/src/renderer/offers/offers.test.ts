@@ -5,7 +5,7 @@ import { observeFolderAppOffers, readFolderAppOffer } from "./folderApp";
 const candidate = { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Agent" };
 const pick = { candidate, from: 0, to: 6 };
 const facts: AddressedAgentFacts = { workspaceId: "one", agentId: candidate.id, presentation: { group: "", hue: null, self: true },
-  runner: { command: true, enabled: true }, runActive: false, paused: false, liveRun: false, reach: "C:\\work" };
+  runActive: false, paused: false, liveRun: false, reach: "C:\\work" };
 
 describe("CSV preview offer", () => {
   it.each([0, MAX_CSV_PREVIEW_ROWS - 1, MAX_CSV_PREVIEW_ROWS])("does not offer at %i rows", totalRows => {
@@ -35,11 +35,8 @@ describe("agent pick offer", () => {
     ["working", { runActive: true }],
     ["working", { liveRun: true }],
     ["paused", { paused: true, liveRun: true }],
-    // Dispatch fails the request before a pause or a busy agent matters.
-    ["runner-off", { runner: { command: true, enabled: false }, paused: true }],
-    ["no-command", { runner: { command: false, enabled: true } }],
-    ["no-command", { runner: { command: false, enabled: false } }],
-    ["unknown", { runner: null }],
+    // Settings not read yet.
+    ["unknown", { runActive: null }],
     ["unknown", { paused: null }],
     ["unknown", { liveRun: null }],
   ] as const)("is %s by dispatch's rule for %j", (state, override) => {
