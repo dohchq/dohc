@@ -352,6 +352,8 @@ export function createChatWrites(dependencies: {
     title?: string;
     // The thread a new post starts; a Group's chat lane keeps its running one.
     threadId?: string;
+    // Desktop's own thread in an agent DM; see LinkedChatStore.startChannelThread.
+    ownThread?: true;
   }) {
     const target = { channelId: input.channelId };
     let started;
@@ -363,6 +365,7 @@ export function createChatWrites(dependencies: {
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.title ? { title: input.title } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         ...fields,
       }), admission, input.signal);
     } catch (error) {

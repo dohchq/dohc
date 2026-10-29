@@ -1657,6 +1657,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 message_id: "m-now".to_owned(),
                 title: None,
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ice".to_owned(),
                 author_owner_display_name: None,

@@ -530,6 +530,10 @@ impl EngineService {
                 self.owner_ydoc_outbox_read_pending(&ctx, request.workspace, request.params, id)
                     .await?
             }
+            "ydoc.ownerOutbox.listRestoreFenced" => {
+                self.owner_ydoc_outbox_list_restore_fenced(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.ownerOutbox.acknowledge" => {
                 self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
                     .await?
@@ -795,6 +799,14 @@ impl EngineService {
             }
             "chats.threads.findChannelId" => {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.threads.get" => {
+                self.chats_threads_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.stream.list" => {
+                self.chats_stream_list(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.threads.getProjection" => {
@@ -1581,8 +1593,10 @@ mod tests {
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
             "chats.readState.markThreadRead",
+            "chats.stream.list",
             "chats.threads.create",
             "chats.threads.findChannelId",
+            "chats.threads.get",
             "chats.threads.getProjection",
             "chats.threads.list",
             "chats.threads.listForChannel",

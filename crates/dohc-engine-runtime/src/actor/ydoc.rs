@@ -359,6 +359,32 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn owner_ydoc_list_restore_fenced(
+        &self,
+        workspace_id: String,
+        after: Option<String>,
+        limit: usize,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &workspace_id,
+                    after.as_deref(),
+                    limit,
+                )
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_list_drafts(
         &self,
         workspace_id: String,

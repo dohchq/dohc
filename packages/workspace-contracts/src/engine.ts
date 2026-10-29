@@ -822,6 +822,53 @@ export interface ChannelThreadSummary {
   };
 }
 
+// Where an item sits in a group's stream. Items sort by time, then lane (a
+// post before a conversation message in the same millisecond), then id: the
+// thread id for a post, the message id for a conversation message.
+interface ChatStreamPosition {
+  createdAtMs: number;
+  lane: ChatThreadLane;
+  id: string;
+}
+
+// What a post's thread holds beyond its first message.
+interface ChatStreamPost {
+  replyCount: number;
+  // Distinct repliers, newest first, at most three.
+  repliers: Array<{ author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>;
+  lastReplyAtMs?: number;
+  // The latest agent reply, cut to its first 280 characters.
+  latestAgentReply?: {
+    id: ChatMessageId;
+    author: ChatActor;
+    authorOwnerDisplayName?: string;
+    authorUserId?: string;
+    authorAgentId?: string;
+    createdAtMs: number;
+    bodyExcerpt: string;
+  };
+  openDecisionCount: number;
+}
+
+// One top-level item: a post's first message, or a conversation message.
+export interface ChatStreamItem {
+  position: ChatStreamPosition;
+  message: ChatMessage;
+  reactions: ChatReaction[];
+  // Set for, and only for, a post.
+  post?: ChatStreamPost;
+}
+
+// A page of a group's stream, oldest first.
+interface ChatStreamPage {
+  items: ChatStreamItem[];
+  // Pass as `before` to read the older page. Null at the oldest item.
+  nextBefore: ChatStreamPosition | null;
+  // The newest item the person has read: a post whose thread they have read
+  // into, or a conversation message under the conversation's read cursor.
+  readPosition: ChatStreamPosition | null;
+}
+
 type ChatDecisionState = "open" | "resolved";
 
 interface ChatDecisionRecord {
@@ -873,6 +920,21 @@ export interface ChatMessage {
   // The agent that wrote the message in one of its runs. Provenance only.
   authorAgentId?: string;
   attachments: ChatAttachment[];
+  // Thread and stream reads name each open agent request: one per agent that
+  // was asked to answer this message and has not finished. Absent when none.
+  agentRequests?: ChatStreamAgentRequest[];
+}
+
+// Where one agent's request to answer a message stands. A failure carries its
+// run's reason, exit code and log as recorded; it holds no wording.
+interface ChatStreamAgentRequest {
+  agentId: string;
+  state: "waiting" | "running" | "failed";
+  runId?: string;
+  startedAtMs?: number;
+  failureReason?: string;
+  exitCode?: number;
+  logPath?: string;
 }
 
 interface ChatAgentReadState {
@@ -1086,6 +1148,10 @@ export interface LinkedChatStore {
     namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
+    // Desktop's own thread in an agent DM, an automation's wake thread or the
+    // runner self-test, stays its own post instead of joining the DM's
+    // conversation. People, the CLI and MCP never set it.
+    ownThread?: boolean;
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1124,6 +1190,18 @@ export interface LinkedChatStore {
     upToSequence: number;
     expectedRevision?: number;
   }): Promise<ChatThreadReadState>;
+  // A group's posts and conversation messages in one order, read a page at a
+  // time from the newest end. The limit defaults to 50, at most 100.
+  listGroupStream(input: {
+    workspaceId: WorkspaceId;
+    channelId: ChatChannelId;
+    before?: ChatStreamPosition;
+    limit?: number;
+  }): Promise<ChatStreamPage>;
+  getThread(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<{ thread: ChatThread; channel: ChatChannel | null; messageCount: number }>;
   listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
@@ -1170,6 +1248,14 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  // One page of a thread's messages in order. Message orders count from zero;
+  // the page starts after `afterMessageOrder`, or at the first message.
+  listMessagesPage(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    afterMessageOrder?: number;
+    limit: number;
+  }): Promise<{ messages: ChatMessage[]; nextAfterMessageOrder: number | null }>;
   getThreadRevision(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

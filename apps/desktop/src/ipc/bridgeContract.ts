@@ -1,4 +1,5 @@
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
@@ -437,6 +438,8 @@ export const OwnerLiveQuarantine = z.object({
   recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
   // The server keeps them in an earlier copy of the workspace, copied or not, so Try again cannot reach them.
   earlier: z.literal(true).optional(),
+  // A restore set these edits aside; only a recovery copy can return them.
+  saveOnly: z.literal(true).optional(),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
@@ -471,6 +474,7 @@ export const OwnerLiveDocument = z.object({
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,
+  saveOnly: OwnerLiveQuarantine.shape.saveOnly,
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),
@@ -489,7 +493,7 @@ export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
 }).strict();
 export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
 export const OwnerLiveDocumentsResult = z.object({
-  documents: z.array(OwnerLiveDocument).max(128),
+  documents: z.array(OwnerLiveDocument).max(128 + RESTORE_FENCED_RECOVERY_LIMIT),
   nextCursor: SAFE_RELATIVE_PATH.nullable(),
 }).strict();
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
@@ -1425,7 +1429,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
-  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -3038,55 +3042,6 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
   typeof ResolveWorkspaceVersionConflictResult
 >;
 
-// "Try it in a version" (PR 0N-2): one gesture — fork a version named after
-// the task, switch into it, start a dohc-tracked agent run. Gated in main on
-// the workspace's engine capture like every version operation.
-const TRY_IN_VERSION_TASK_MAX = 2000;
-
-export const TryInWorkspaceVersionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  task: z
-    .string()
-    .min(1)
-    .max(TRY_IN_VERSION_TASK_MAX)
-    .refine((value) => value.trim().length > 0, {
-      message: "task must not be blank",
-    }),
-});
-export type TryInWorkspaceVersionPayload = z.infer<
-  typeof TryInWorkspaceVersionPayload
->;
-
-export const TryInWorkspaceVersionResult = z.object({
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-});
-export type TryInWorkspaceVersionResult = z.infer<
-  typeof TryInWorkspaceVersionResult
->;
-
-export const TryInVersionRunState = z.object({
-  status: z.enum(["running", "review"]),
-  task: z.string().min(1).max(TRY_IN_VERSION_TASK_MAX),
-  versionId: OPAQUE_ID,
-  versionName: z.string().min(1).max(200),
-  runId: OPAQUE_ID,
-  startedAtMs: z.number(),
-  endedAtMs: z.number().optional(),
-  runOutcome: z.enum(["complete", "failed"]).optional(),
-  // Review only. null = the count could not be computed; the card says so
-  // rather than guessing.
-  changedFileCount: z.number().int().min(0).nullable().optional(),
-  mergeAvailable: z.boolean(),
-});
-export type TryInVersionRunState = z.infer<typeof TryInVersionRunState>;
-
-export const TryInVersionStateResult = z.object({
-  state: TryInVersionRunState.nullable(),
-});
-export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
-
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits in the engine's staging directory until
 // saveKeptCopy moves it to a visible copy. That answer is `saved` with the
@@ -3220,21 +3175,6 @@ export const workspaceVersionOperations = {
     capabilityId: "file.retained.delete",
     channel: "desktop:delete-retained-copies",
     payload: DeleteRetainedCopiesPayload, result: DeleteRetainedCopiesResult, ...retainedCopiesGuard,
-  },
-  tryInWorkspaceVersion: {
-    capabilityId: "version.try",
-    channel: "desktop:try-in-workspace-version",
-    payload: TryInWorkspaceVersionPayload, result: TryInWorkspaceVersionResult, ...versionGuard,
-  },
-  getTryInVersionState: {
-    capabilityId: "version.try.read",
-    channel: "desktop:get-try-in-version-state",
-    payload: WorkspaceIdPayload, result: TryInVersionStateResult, ...versionGuard,
-  },
-  dismissTryInVersionReview: {
-    capabilityId: "version.try.dismiss",
-    channel: "desktop:dismiss-try-in-version-review",
-    payload: WorkspaceIdPayload, ...versionGuard,
   },
 } satisfies OperationTable;
 
@@ -3951,6 +3891,8 @@ export const RelayShareRevokeResponse = z.object({
 
 export const UndoRelaySharePayload = z
   .object({
+    // The workspace the removal came from.
+    workspaceId: WORKSPACE_ID,
     shareId: OPAQUE_ID,
     undoId: RelayShareUndoReceipt.shape.undoId,
   })
@@ -5837,7 +5779,6 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  pausedReason: z.string().min(1).max(500).optional(),
   // The conversation's latest run, when dohc's restart or quit stopped it.
   stoppedRun: ChatDispatchStoppedRun.optional(),
 }).strict();
@@ -5963,6 +5904,12 @@ export const UpdateStateEvent = z.object({
   // A Linux .deb that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
+  // The step that failed, while its state stands; `message` says why. A new
+  // id is a new failure to report.
+  failure: z.object({
+    step: z.enum(["check", "download", "install"]),
+    id: z.number().int().positive(),
+  }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
@@ -6001,6 +5948,19 @@ export const UpdateCheckResult = z.object({
   state: UpdateStateEvent,
 });
 export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
+
+// Starts the download a person chose. Progress and the result arrive as
+// update state.
+export const updateDownloadOperations = {
+  downloadUpdate: {
+    capabilityId: "device.update.download",
+    scope: "device",
+    channel: "desktop:download-update",
+    payload: z.object({}),
+    result: UpdateActionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
 
 // Per-workspace UI state persisted to .dohc/local/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
@@ -6666,15 +6626,19 @@ export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   reason: z.enum(["no-runner", "budget-paused", "restricted"]),
   threadId: z.string().min(1),
+  // The paused thread's group, so Open lands on the thread itself.
+  channelId: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),
   message: z.string().min(1),
 });
 export type ChatDispatchNotice = z.infer<typeof ChatDispatchNotice>;
+// One notice for each of the other reasons, and one for each paused chat.
+export const CHAT_DISPATCH_NOTICES_MAX = 64;
 export const ChatDispatchNoticesEvent = z.object({
   workspaceId: z.string().min(1),
   revision: z.number().int().nonnegative(),
-  notices: z.array(ChatDispatchNotice).max(3),
+  notices: z.array(ChatDispatchNotice).max(CHAT_DISPATCH_NOTICES_MAX),
 });
 export type ChatDispatchNoticesEvent = z.infer<typeof ChatDispatchNoticesEvent>;
 export const chatDispatchNoticeOperations = {
@@ -6716,6 +6680,13 @@ export const agentRunStateOperations = {
 // wait while it is paused. The pause lasts until it is resumed or dohc quits.
 export const ChatDispatchPausedEvent = z.strictObject({ paused: z.boolean() });
 export type ChatDispatchPausedEvent = z.infer<typeof ChatDispatchPausedEvent>;
+// An agent request in this group started waiting, started running, failed or
+// finished. A null group means any group in the workspace.
+export const ChatAgentRequestsChangedEvent = z.strictObject({
+  workspaceId: z.string().min(1),
+  channelId: z.string().min(1).nullable(),
+});
+export type ChatAgentRequestsChangedEvent = z.infer<typeof ChatAgentRequestsChangedEvent>;
 export const chatDispatchPauseOperations = {
   readChatDispatchPaused: {
     capabilityId: "chat.dispatch.pause.read",
@@ -7264,6 +7235,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
@@ -7523,6 +7495,9 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  // An agent request changed state in a group this window shows: re-read
+  // that group's page.
+  onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

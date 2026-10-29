@@ -25,6 +25,7 @@ import {
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Overlay } from "./Overlay";
 import {
+  onRestartStopped,
   RecoveryCloseGuard,
   requestGuardedReload,
   requestGuardedUpdateInstall,
@@ -1023,7 +1024,11 @@ describe("RecoveryCloseGuard", () => {
       window.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(true);
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
     await user.click(await screen.findByTestId("recovery-close-goback"));
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting…").toHaveBeenCalledOnce();
     resetOrphanedDrafts();
 
     await requestGuardedUpdateInstall();

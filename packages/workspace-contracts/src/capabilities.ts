@@ -1,7 +1,7 @@
 // Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
-export const RETIRED_CAPABILITY_IDS: readonly string[] = [];
+export const RETIRED_CAPABILITY_IDS: readonly string[] = ["version.try", "version.try.read", "version.try.dismiss"];
 
 type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 export interface CapabilityMetadata {
@@ -134,9 +134,6 @@ export const CAPABILITIES = {
   "file.kept.save": capability("Save a kept copy beside its file.", {ipc: ["saveKeptCopy"], mcp: {owner: ["dohc_save_kept_copy"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "file.retained.list": capability("List old file copies kept on a drive that cannot tell whether a program uses them.", {ipc: ["listRetainedCopies"], mcp: {owner: ["dohc_list_retained_copies"]}, mcpReason: "Shared profiles omit this owner maintenance read. Socket admission and per-verb checks remain the gates."}),
   "file.retained.delete": capability("Delete listed old file copies after accepting that a program still using one may lose its next write.", {ipc: ["deleteRetainedCopies"], mcp: {owner: ["dohc_delete_retained_copies"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
-  "version.try": capability("Try changes in a workspace version.", {ipc: ["tryInWorkspaceVersion"]}),
-  "version.try.read": capability("Read the current version trial.", {ipc: ["getTryInVersionState"]}),
-  "version.try.dismiss": capability("Dismiss a version trial review.", {ipc: ["dismissTryInVersionReview"]}),
   "search.start": capability("Start a streamed workspace search.", {ipc: ["searchWorkspace"]}),
   "search.cancel": capability("Cancel a streamed workspace search.", {ipc: ["cancelWorkspaceSearch"]}),
   "crash.read": capability("Read a crash report on this computer.", {ipc: ["readCrashReport"]}),
@@ -291,6 +288,7 @@ export const CAPABILITIES = {
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
   "workspace.name.suggest": capability("Suggest a new workspace's folder name that is free in a location dohc offered.", {ipc: ["suggestWorkspaceFolderName"]}),
   "device.motion.read": capability("Read this computer's reduced-motion preference.", {ipc: ["getSystemReducedMotion"]}),
+  "device.update.download": capability("Download the dohc update the last check found.", {ipc: ["downloadUpdate"]}),
   "device.privacy.open": capability("Open macOS privacy settings at Files & Folders.", {ipc: ["openSystemPrivacySettings"]}),
   "account.delete.preview": capability("Review what deleting the connected server account removes.", {ipc: ["previewServerAccountDeletion"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
   "account.delete": capability("Delete the connected server account with its password.", {ipc: ["deleteServerAccount", "retryServerAccountDisconnect"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),

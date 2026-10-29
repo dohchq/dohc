@@ -1895,13 +1895,14 @@ describe("customize", () => {
 
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
-    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
+    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-lane-composer");
     await waitFor(() => expect(composer.value).toBe([
       'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
       "dohc applies the file when it is saved.",
       "What I want: ",
     ].join("\n")));
-    expect(document.activeElement).toBe(composer);
+    // The conversation takes input, and focus, once it has loaded.
+    await waitFor(() => expect(document.activeElement).toBe(composer));
     expect(composer.selectionStart).toBe(composer.value.length);
   });
 });
@@ -2084,7 +2085,6 @@ describe("workbench render cost", () => {
       const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
-      const tryStates = bridge.getTryInVersionState.mock.calls.length;
 
       act(() =>
         bridge.emitWorkspaceActivity({
@@ -2105,7 +2105,6 @@ describe("workbench render cost", () => {
       // Run state arrives from main's pushes, so a refresh does not read it.
       expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
       expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
-      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
       act(() => bridge.emitWorkspaceActivity({
         workspaceId: WORKSPACE.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: false,
       }));

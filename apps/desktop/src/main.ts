@@ -233,7 +233,7 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
-import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { confirmDownloadDialog, confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
@@ -487,7 +487,6 @@ import {
   createAgentIntegration,
   type AgentRunRecord,
 } from "./agents/AgentIntegration";
-import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
   type ChatDispatchPresenceInput,
@@ -1753,7 +1752,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
-  tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
   operationLanes: Map<string, Promise<void>>;
@@ -1805,7 +1803,6 @@ function createDesktopWorkspaceAuthorityState(
         target.send(CHANNELS.sitePreviewReplaced, parsed.data);
       },
     }),
-    tryInVersionSessions: createTryInVersionSessionsFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
     shareViewFiles: new ShareViewFilesState(),
     operationLanes: new Map(),
@@ -1892,7 +1889,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
         agentIntegration.disposeState(state.agentIntegration),
       ),
       state.sitePreviews.stopWorkspace(binding.workspaceId),
-      state.tryInVersionSessions.settled(),
       ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
@@ -2683,6 +2679,8 @@ const activity = {
     withWorkspaceActivityState(workspaceId, lease => workspaceActivity.retryFileObservation(lease.state.activity)),
   syncNow: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.syncNow(lease.state.activity)),
+  pushRecorded: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.pushRecorded(lease.state.activity)),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       // Started inside the promise, so a workspace closing under the loop
@@ -2840,99 +2838,12 @@ const agentIntegration = createAgentIntegration({
       release: () => lease.release(),
     };
   },
-  // Every terminal run path funnels through endAgentRun (a Settings stop or
-  // the endAgentRun IPC) — the try-in-version review card listens on that
-  // single seam.
-  // tryInVersionSessions is initialized just below, before any run can end.
-  onRunEnded: ({ attachmentId, workspaceId, runId, status }) => {
-    tryInVersionSessions.handleRunEnded(
-      { workspaceId, attachmentId },
-      runId,
-      status,
-    );
+  onRunEnded: ({ attachmentId, workspaceId }) => {
     void chatDispatchService.scanWorkspace(workspaceId, attachmentId).catch((error) => {
       console.error("[desktop] post-panel-run dispatch scan:", error);
     });
   },
 });
-// "Try it in a version" (PR 0N-2): one gesture composing existing operations
-// — fork-and-switch on the engine capture chain, then a dohc-tracked run —
-// and a review state when the run ends. Resolution of the capture mirrors
-// requireEngineCapture (workspace identity from the registry, engine flag
-// gate); a workspace without a capture rejects with the same product message.
-function createTryInVersionSessionsFor(
-  binding: WorkspaceAuthorityBinding<RegistryEntry>,
-) {
-  return createTryInVersionSessions({
-  operationsFor: async () => {
-    return workspaceAuthorities.withBinding(binding, async (lease) => {
-      desktopMarks.mark("try-in-version-ops-start");
-      const workspace = canonicalWorkspaceFor(lease);
-      await openWorkspaceActivity(workspace);
-      lease.assertCurrent();
-      const capture = workspaceActivity.engineCaptureFor(lease.state.activity);
-      if (!capture) {
-        throw new Error(captureRefusal("Versions"));
-      }
-      desktopMarks.measureSince(
-        "try-in-version-ops",
-        "try-in-version-ops-start",
-      );
-      return capture;
-    });
-  },
-  startRun: async (workspaceId) => {
-    return workspaceAuthorities.withBinding(binding, async (lease) => {
-      assertChatRunnerIdle(workspaceId);
-      desktopMarks.mark("try-in-version-run-start-begin");
-      const run = await startAgentRunWithWorkspaceActivity(
-        canonicalWorkspaceFor(lease),
-      );
-      desktopMarks.measureSince(
-        "try-in-version-run-start",
-        "try-in-version-run-start-begin",
-      );
-      return run;
-    });
-  },
-  onStateChanged: (workspaceId) =>
-    withWorkspaceAttachment(
-      { workspaceId, attachmentId: binding.attachmentId },
-      () => notifyRenderer({ workspaceId }),
-    ),
-  });
-}
-
-const tryInVersionSessions = {
-  start(workspaceId: string, task: string) {
-    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.tryInVersionSessions.start(workspaceId, task),
-    );
-  },
-  handleRunEnded(
-    workspace: { workspaceId: string; attachmentId: symbol },
-    runId: string,
-    status: "complete" | "failed",
-  ): void {
-    withWorkspaceAttachment(workspace, (lease) =>
-      lease.state.tryInVersionSessions.handleRunEnded(
-        workspace.workspaceId,
-        runId,
-        status,
-      ),
-    );
-  },
-  snapshot(workspaceId: string) {
-    return withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.tryInVersionSessions.snapshot(workspaceId),
-    ) ?? null;
-  },
-  dismiss(workspaceId: string): boolean {
-    return withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.tryInVersionSessions.dismiss(workspaceId),
-    ) ?? false;
-  },
-};
 // Linked chats and dispatch use the same physical authority as every other
 // workspace-owned resource. Each call into either store reacquires that exact
 // binding, so a detached and reattached workspace cannot reuse the old store.
@@ -3538,7 +3449,7 @@ function rememberPendingCliRunMessageLink(
 }
 
 // Sends a workspace's event only to windows showing that workspace.
-function sendToWorkspaceWindows(channel: string, event: { workspaceId: string }): void {
+function sendToWorkspaceWindows<Event extends { workspaceId: string }>(channel: string, event: Event): void {
   sendToWorkspaceWindowsOf({
     windows: BrowserWindow.getAllWindows(),
     workspaceIdOf: (webContents) => rendererWorkspaceSessions.current(webContents)?.workspaceId,
@@ -3558,6 +3469,9 @@ const chatDispatchService = createChatDispatchService({
   onDispatchNotice: (workspace, notice) => {
     withWorkspaceAttachment(workspace, () => chatDispatchNotices.report(workspace.workspaceId, notice));
   },
+  onThreadResumed: (workspace, threadId) => {
+    withWorkspaceAttachment(workspace, () => chatDispatchNotices.clear(workspace.workspaceId, "budget-paused", threadId));
+  },
   runNotices: {
     post: (input) => noticeStore().postNotice(input),
     owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
@@ -3569,6 +3483,7 @@ const chatDispatchService = createChatDispatchService({
   startSelfTestThread: (workspace, input) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const started = await chatWrites.startThread({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) }, {
       ...input,
+      ownThread: true,
       // CLI origin keeps this person's test message from starting an agent run.
       writer: { via: "cli", actor: "human" },
       resolveAttachments: async () => [],
@@ -3629,6 +3544,10 @@ const chatDispatchService = createChatDispatchService({
   onRunUpdated: (workspace) =>
     withWorkspaceAttachment(workspace, () =>
       notifyRenderer({ workspaceId: workspace.workspaceId }),
+    ),
+  onAgentRequestsChanged: (workspace, channelId) =>
+    withWorkspaceAttachment(workspace, () =>
+      sendToWorkspaceWindows(CHANNELS.chatAgentRequestsChanged, { workspaceId: workspace.workspaceId, channelId }),
     ),
   setRunAttribution: (workspace, run) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
@@ -3920,11 +3839,11 @@ async function wakeAutomationAgent(
         return (await place.store.ensureAgentChannel({ workspaceId, agentId: agent.id, name: agent.name })).id;
       },
       threadExists: async (threadId) => (await place.store.findThreadChannelId({ workspaceId, threadId })) !== null,
-      start: ({ channelId, message: wake }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId }),
+      start: ({ channelId, message: wake, ownThread }) => chatWrites.startThread(place, { ...local, channelId, threadId: wake.threadId, ownThread }),
       send: ({ message: wake }) => chatWrites.sendMessage(place, { ...local, threadId: wake.threadId }),
-      recordTrigger: ({ triggerMessageId, threadId, agentId }) => {
+      recordTrigger: (trigger) => {
         signal.throwIfAborted();
-        return agentDispatchStoreHandleFor(workspace).store.recordTrigger({ workspaceId, triggerMessageId, threadId, agentId });
+        return chatDispatchService.recordTrigger(workspace, trigger);
       },
       scan: () => {
         signal.throwIfAborted();
@@ -6257,6 +6176,7 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
 // release can still reach the release that fixes it.
 const updateAfterFailure = createUpdateAfterFailure({
   controller: startUpdates,
+  confirmDownload: (failure, version) => confirmDownloadDialog({ showMessageBox }, failure, version),
   showDownloading: (failure, version, signal) => showDownloadingDialog({ showMessageBox }, failure, version, signal),
   confirmRestart: (failure, version) => confirmRestartDialog({ showMessageBox }, failure, version),
   install: installUpdate,
@@ -6611,6 +6531,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
+    pushRecorded: activity.pushRecorded,
     ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {
@@ -7382,7 +7303,7 @@ function registerIpcHandlers(): void {
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
-    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+    requireEngineCapture, notifyRenderer, activity,
     onRefusalsChanged: notifyNoticesChanged,
   }), rendererUsage.version);
 
@@ -7557,8 +7478,9 @@ function registerIpcHandlers(): void {
 
   workspaceEngineIpc.registerYDoc();
 
-  registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
+  registerUpdatesIpcHandlers({
     registerHandler: handleIpc,
+    boundary: operationBoundary,
     assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });

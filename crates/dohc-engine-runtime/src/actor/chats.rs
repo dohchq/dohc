@@ -8,7 +8,8 @@ use dohc_engine_domain::{
     ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
     DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
     ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, ThreadDispatchPause, UnreadFileThread,
+    StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel,
+    UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -228,6 +229,34 @@ impl ActorHandle {
         self.run_chats(move |chats| {
             chats
                 .list_channel_threads_in_lane(&workspace_id, &channel_id, lane, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn chat_stream_list(
+        &self,
+        workspace_id: String,
+        channel_id: String,
+        before: Option<StreamPosition>,
+        limit: i64,
+    ) -> Result<StreamPage, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .list_group_stream(&workspace_id, &channel_id, before.as_ref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn chat_thread_get(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+    ) -> Result<ThreadWithChannel, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .get_thread(&workspace_id, &thread_id)
                 .map_err(RuntimeError::from)
         })
         .await

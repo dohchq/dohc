@@ -4,6 +4,19 @@ import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { OwnerLiveDocumentsResult } from "./bridgeContract";
+
+it("bounds recovery replies with room for the capped restore queues", () => {
+  const rows = Array.from({length: 384}, (_, index) => ({objectId: "object", path: "note.md", reason: "restore-fenced",
+    storedOn: "this-computer", incident: `queue-${index}:delivery:0`, recovery: "paused", saveOnly: true}));
+  const status = {state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+    historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveQuarantines: rows};
+  expect(SyncStatusResult.parse(status).ownerLiveQuarantines).toEqual(rows);
+  expect(SyncStatusResult.safeParse({...status, ownerLiveQuarantines: [...rows, rows[0]]}).success).toBe(false);
+  const documents = rows.slice(0, 256).map(({reason: _reason, recovery, ...row}) => ({...row, status: "ready", canResume: false, quarantine: recovery}));
+  expect(OwnerLiveDocumentsResult.parse({documents, nextCursor: null}).documents).toEqual(documents);
+  expect(OwnerLiveDocumentsResult.safeParse({documents: [...documents, documents[0]], nextCursor: null}).success).toBe(false);
+});
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
@@ -101,9 +114,6 @@ import {
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
-  TryInVersionRunState,
-  TryInVersionStateResult,
-  TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
   WorkspaceVersionConflict,
@@ -3293,86 +3303,6 @@ describe("workspace versions IPC contract", () => {
         workspaceId: "ws-versions",
         conflictId: "conflict-1",
         resolution: { kind: "keep-combined" },
-      }).success,
-    ).toBe(false);
-  });
-});
-
-describe("try-in-version IPC contract", () => {
-  it("accepts a well-formed gesture payload and state shapes", () => {
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-      }).task,
-    ).toBe("tidy the notes");
-    expect(
-      TryInVersionStateResult.parse({ state: null }).state,
-    ).toBeNull();
-    expect(
-      TryInVersionStateResult.parse({
-        state: {
-          status: "running",
-          task: "tidy the notes",
-          versionId: "version-1",
-          versionName: "Try: tidy the notes",
-          runId: "run-1",
-          startedAtMs: 1,
-          mergeAvailable: true,
-        },
-      }).state?.status,
-    ).toBe("running");
-    // Review state: an unavailable count is null, never invented.
-    expect(
-      TryInVersionRunState.parse({
-        status: "review",
-        task: "tidy the notes",
-        versionId: "version-1",
-        versionName: "Try: tidy the notes",
-        runId: "run-1",
-        startedAtMs: 1,
-        endedAtMs: 2,
-        runOutcome: "complete",
-        changedFileCount: null,
-        mergeAvailable: false,
-      }).changedFileCount,
-    ).toBeNull();
-  });
-
-  it("rejects blank or oversized tasks and malformed states", () => {
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "   ",
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "x".repeat(2001),
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "watching",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        mergeAvailable: true,
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "review",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        changedFileCount: -1,
-        mergeAvailable: true,
       }).success,
     ).toBe(false);
   });
