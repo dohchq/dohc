@@ -88,7 +88,8 @@ it("encodes a replica cancellation entry in order and without byte spans", () =>
   const cancellation:ReplicaRestoreCancellation={relayDatabaseNamespace:"relay",journalCursor:8,cancellation:{
     fence:{operation:{point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...binding,restoreFenceGeneration:0},hostId:"host",newFence:1,
       origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
-    binding,endpoint:{terminalReceipt:null,eventCount:0,historyEvidenceDigest:"b".repeat(64)},recordedAtMs:11}};
+    binding,endpoint:{terminalReceipt:null,eventCount:0,historyEvidenceDigest:"b".repeat(64)},recordedAtMs:11},
+    authority:{lineageClaimId:binding.lineageClaimId,baselineSequence:1,restoreFenceGeneration:1}};
   const bytes=encodeReplicaJournalPage([cancellation,{admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"c".repeat(64),journalCursor:9,authority:null,restore:null}]);
   let offset=0;
   const field=()=>{const size=bytes.readUInt32LE(offset);offset+=4;const value=bytes.subarray(offset,offset+size);offset+=size;return value;};
@@ -3324,10 +3325,11 @@ describe("EngineClient", () => {
     const transport = client(peer);
     peer.acknowledge();
     await transport.ready();
-    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 });
+    const cancelling = new AbortController();
+    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancelling.signal);
     await nextImmediate();
-    await transport.cancelRequest(50);
-    expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+    cancelling.abort();
+    await vi.waitFor(() => expect(peer.received).toContainEqual({ type: "cancel", id: 1 }));
     // Its handler had answered; the engine writes the cancellation instead.
     peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "held document answer cancelled", retry: "no" } });
     await expect(reading).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
