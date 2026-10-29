@@ -738,6 +738,38 @@ describe("RecoveryCloseGuard", () => {
     );
   });
 
+  // After the round proceeded, a late draft's warning holds the restart.
+  // Dismissing that draft, from that warning or one a second unload attempt
+  // put in its place, takes the restart back as Go back does.
+  it.each([1, 2])("takes back a held restart when its warning empties by dismissal (%i unload attempts)", async (attempts) => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+      });
+    }
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    await user.click(await screen.findByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
+    expect(main.answers(), "every window would keep showing Restarting… for a restart that is off").toContainEqual({ roundId: 1, decision: "cancel" });
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
   // Go back leaves the person in the app. An approval a previous local
   // warning granted for D1 must not outlive that choice, or dismissing D2
   // leaves D1 unguarded for an unrelated close until the fail-safe timer.

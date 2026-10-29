@@ -408,6 +408,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     setCloseWarning(null);
     if (round !== undefined && activeRound?.id === round) {
       answerRound(round, hasUnsettledWrites() ? "cancel" : "clear");
+    } else if (heldRound !== null) {
+      // A proceeded exit this window's veto held is not resumed here. It is
+      // taken back, as Go back takes it, so no window keeps it under way.
+      const held = heldRound;
+      const exit = forgetRoundIntent(held);
+      if (exit === "update") for (const listener of restartStoppedListeners) listener();
+      if (exit !== null) {
+        rearmGuard();
+        answerRound(held, "cancel");
+      }
     }
     // closeWarning is read once, at the moment the count reaches zero.
     // eslint-disable-next-line react-hooks/exhaustive-deps
