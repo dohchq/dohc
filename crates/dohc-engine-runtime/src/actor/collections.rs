@@ -2770,6 +2770,7 @@ mod collection_relation_cleanup_tests {
             &NoFaults,
             &CancellationToken::new(),
             None,
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
         .unwrap();
     }
@@ -2924,6 +2925,7 @@ mod collection_relation_cleanup_tests {
             None,
             super::super::ydoc::SettlementKind::Document,
             false,
+            None,
         )
         .unwrap()
         .into_settlement_for_internal_caller()
