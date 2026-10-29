@@ -2499,8 +2499,10 @@ mod tests {
             .execute_batch(
                 "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='invalid-update'; \
                  UPDATE owner_ydoc_outbox_entries SET native_source_json='{\"origin\":{\"kind\":\"adoptionSeed\"}}'; \
-                 INSERT INTO live_device_application_bindings SELECT 'namespace',workspace_id,main_version_id,object_id,\
-                 lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,'host',1,'instance','connection',0 \
+                 INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,\
+                 object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,\
+                 instance_id,connection_id,available,activation_id) SELECT 'namespace',workspace_id,main_version_id,object_id,\
+                 lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,'host',1,'instance','connection',0,NULL \
                  FROM owner_ydoc_outboxes;",
             )
             .unwrap();
@@ -2615,17 +2617,19 @@ mod tests {
     /// binding and hosted identity of the detached store at `reference`. Its
     /// schema comes from the genuine migration prefix.
     fn earlier_copy_of(reference: &Path, earlier: &Path) {
-        older_copy_of(reference, earlier, 1);
+        older_copy_of(reference, earlier, |db| {
+            dohc_engine_storage::recovery::create_earlier_store_for_test(db, 1).unwrap()
+        });
     }
 
-    /// The same, from a build that lacked this build's last `missing` migrations.
-    fn older_copy_of(reference: &Path, earlier: &Path, missing: usize) {
+    /// The same, from the older build whose store `create` makes at the path
+    /// it is given.
+    fn older_copy_of(reference: &Path, earlier: &Path, create: impl FnOnce(&Path)) {
         let token = crate::root_binding::read_root_binding(reference)
             .unwrap()
             .unwrap();
         crate::root_binding::write_root_binding(earlier, &token).unwrap();
-        dohc_engine_storage::recovery::create_earlier_store_for_test(&database(earlier), missing)
-            .unwrap();
+        create(&database(earlier));
         let conn = rusqlite::Connection::open(database(earlier)).unwrap();
         conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
         conn.execute(
@@ -2980,11 +2984,19 @@ mod tests {
                 .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
-        earlier_store(&service, &ctx, reference.path(), store.path()).await;
-        // The migration this build adds then fails on the copy.
+        detached_store(&service, &ctx, reference.path()).await;
+        host_identity(reference.path(), "epoch");
+        older_copy_of(reference.path(), store.path(), |db| {
+            dohc_engine_storage::recovery::create_store_before_migration_for_test(
+                db,
+                "v2-live-owner-activations",
+            )
+            .unwrap()
+        });
+        // That migration creates an index of this name, so it fails on the copy.
         rusqlite::Connection::open(database(store.path()))
             .unwrap()
-            .execute_batch("CREATE TABLE replication_log_conflict_resolution (planted INTEGER)")
+            .execute_batch("CREATE TABLE live_owner_adoptions_lineage (planted INTEGER)")
             .unwrap();
         let before = store_files(store.path());
         let handle = open_prepared(
@@ -3300,7 +3312,9 @@ mod tests {
         ctx.connection = Some(owner.handle());
         detached_store(&service, &ctx, reference.path()).await;
         host_identity(reference.path(), "epoch");
-        older_copy_of(reference.path(), store.path(), 10);
+        older_copy_of(reference.path(), store.path(), |db| {
+            dohc_engine_storage::recovery::create_earlier_store_for_test(db, 10).unwrap()
+        });
         let daemon = service
             .configured_live_host
             .get()
