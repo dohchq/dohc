@@ -7,6 +7,10 @@ const PATH: &str = "notes/held.md";
 const ORIGIN: &str = "held-peer";
 
 fn unsafe_witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
+    witness_reader(scratch, "witness-unsafe")
+}
+
+pub(super) fn witness_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
     use dohc_engine_storage::hex_sha256;
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
     let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
@@ -25,7 +29,7 @@ fn unsafe_witness_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
     let mut manifest = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
     let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &manifest.to_string())
-        .replace("MODE", "\"witness-unsafe\"");
+        .replace("MODE", &serde_json::to_string(mode).unwrap());
     let bundle = scratch.path().join("unsafe-witness-reader.cjs");
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();

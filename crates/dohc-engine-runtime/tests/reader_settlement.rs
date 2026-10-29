@@ -153,8 +153,7 @@ async fn absent_snapshot_reader_refusal_does_not_use_conversion_consent() {
     let before = dohc_engine_collab::load_persisted(&store, &key)
         .unwrap()
         .unwrap()
-        .doc
-        .encode_full_state();
+        .doc;
     drop(store);
     std::fs::remove_file(scratch.path().join("note.md")).unwrap();
     let consent = Arc::new(
@@ -204,9 +203,10 @@ async fn absent_snapshot_reader_refusal_does_not_use_conversion_consent() {
     let after = dohc_engine_collab::load_persisted(&store, &key)
         .unwrap()
         .unwrap()
-        .doc
-        .encode_full_state();
-    assert_eq!(after, before);
+        .doc;
+    assert!(
+        dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&before, &after).unwrap()
+    );
     store
         .read_with(|conn| {
             for table in [

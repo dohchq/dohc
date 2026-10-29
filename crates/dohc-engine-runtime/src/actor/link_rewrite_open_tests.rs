@@ -92,11 +92,20 @@ impl Fixture {
             .unwrap();
     }
     async fn settle_document(&self, object: &str) {
+        let config = super::super::super::reader_tests::fake_reader(&self.root, "witness-safe");
+        self.actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(config)),
+                )),
+            ))
+            .await
+            .unwrap();
         let key = DocKey::new(&self.ws, "main", object).unwrap();
         let path = format!("{object}.md");
         let root = self.root.to_path_buf();
         self.actor
-            .run(move |store, cache| {
+            .run_with_reader_retry(move |store, cache| {
                 assert!(super::super::super::link_documents::baseline(
                     store,
                     cache,

@@ -1,4 +1,5 @@
 //! Durable holds park actual relay and rollback placements, including replay.
+mod support;
 use dohc_engine_collab::{ContentKind, Ydoc};
 use dohc_engine_domain::{CaptureIngest, RollbackTextFileMutation, VersionedTextStore, WriteText};
 use dohc_engine_runtime::{CancellationToken, WorkspaceSupervisor, WriteConditions};
@@ -126,6 +127,7 @@ async fn capture_file_hold_parks_rollback_and_restart_replay() {
     std::fs::write(scratch.path().join(FILE), "Before.\n").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
+    support::configure_witness_reader(&actor, &scratch).await;
     let after = actor
         .versioned_text_publish(
             WriteText {
@@ -208,6 +210,7 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
     std::fs::write(scratch.path().join(FILE), "Before.\n").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
+    support::configure_witness_reader(&actor, &scratch).await;
     let state = actor
         .ydoc_open_state(
             WS.into(),

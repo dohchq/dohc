@@ -2485,6 +2485,7 @@ mod tests {
                 usize::from(capture_enabled)
                     + usize::from(seed_claim && !read_only)
                     + usize::from(!read_only)
+                    + usize::from(!read_only)
                     + 1,
             );
             for (index, task) in tasks.into_iter().enumerate() {

@@ -3173,6 +3173,10 @@ mod tests {
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
+        service.configure_reader(super::super::markdown_recovery::tests::witness_reader(
+            &scratch,
+            "witness-safe",
+        ));
         let opened = service.workspace_open(&RequestContext::unbounded(), json!({
             "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
         })).await.unwrap();

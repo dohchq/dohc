@@ -154,6 +154,7 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
         .map(|table| store.table_row_count(table).unwrap())
     };
     let before = counts();
+    let checks_before_settle = failed_reader.dispatch_count();
     let mut events = service.events().subscribe();
     let failed = service
         .ydoc_settle(
@@ -166,7 +167,7 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
     assert_eq!(failed.code, ErrorCode::Internal);
     assert_eq!(
         failed_reader.dispatch_count(),
-        1,
+        checks_before_settle + 1,
         "the witness checker failed after the append committed"
     );
     let accepted = counts();

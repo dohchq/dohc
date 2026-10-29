@@ -11497,7 +11497,10 @@ mod projection_tests {
             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
             MARKDOWN_SOURCE_READER_META_KEY,
         ] {
-            before[ROOT_META].as_object_mut().unwrap().remove(key);
+            before[ROOT_META]["value"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
         }
         let update = doc.clear_markdown_source_witness();
         assert!(!doc.has_markdown_witness());
