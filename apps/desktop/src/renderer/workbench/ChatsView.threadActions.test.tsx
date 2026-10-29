@@ -422,7 +422,6 @@ describe("ChatsView dispatch state", () => {
         liveRunId: null,
         pendingCount: 3,
         paused: true,
-        pausedReason: "budget",
       })
       .mockResolvedValue({ liveRunId: null, pendingCount: 3, paused: false });
     renderView();
@@ -431,8 +430,8 @@ describe("ChatsView dispatch state", () => {
     await user.click(await screen.findByTestId("chats-thread"));
 
     const status = await screen.findByTestId("chats-dispatch-status");
-    expect(status.textContent).toBe("dispatch paused — Resume");
-    expect(status.getAttribute("title")).toBe("budget");
+    expect(status.textContent).toBe("Agent replies pausedResume");
+    expect(status.hasAttribute("title")).toBe(false);
     await user.click(screen.getByTestId("chats-resume-dispatch"));
     expect(bridgeMock.resumeThreadDispatch).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -452,7 +451,6 @@ describe("ChatsView dispatch state", () => {
       liveRunId: null,
       pendingCount: 2,
       paused: true,
-      pausedReason: "budget",
     });
     renderView();
 
@@ -461,12 +459,12 @@ describe("ChatsView dispatch state", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("chats-dispatch-status").textContent).toBe(
-        "dispatch paused on this computer — Resume",
+        "Agent replies paused on this computerResume",
       ),
     );
     await user.click(screen.getByTestId("chats-resume-computer-dispatch"));
     expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: false });
-    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("dispatch paused — Resume");
+    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("Agent replies pausedResume");
   });
 });
 

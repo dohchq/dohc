@@ -5779,7 +5779,6 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  pausedReason: z.string().min(1).max(500).optional(),
   // The conversation's latest run, when dohc's restart or quit stopped it.
   stoppedRun: ChatDispatchStoppedRun.optional(),
 }).strict();
@@ -6624,15 +6623,19 @@ export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   reason: z.enum(["no-runner", "budget-paused", "restricted"]),
   threadId: z.string().min(1),
+  // The paused thread's group, so Open lands on the thread itself.
+  channelId: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),
   message: z.string().min(1),
 });
 export type ChatDispatchNotice = z.infer<typeof ChatDispatchNotice>;
+// One notice for each of the other reasons, and one for each paused chat.
+export const CHAT_DISPATCH_NOTICES_MAX = 64;
 export const ChatDispatchNoticesEvent = z.object({
   workspaceId: z.string().min(1),
   revision: z.number().int().nonnegative(),
-  notices: z.array(ChatDispatchNotice).max(3),
+  notices: z.array(ChatDispatchNotice).max(CHAT_DISPATCH_NOTICES_MAX),
 });
 export type ChatDispatchNoticesEvent = z.infer<typeof ChatDispatchNoticesEvent>;
 export const chatDispatchNoticeOperations = {
@@ -6674,6 +6677,13 @@ export const agentRunStateOperations = {
 // wait while it is paused. The pause lasts until it is resumed or dohc quits.
 export const ChatDispatchPausedEvent = z.strictObject({ paused: z.boolean() });
 export type ChatDispatchPausedEvent = z.infer<typeof ChatDispatchPausedEvent>;
+// An agent request in this group started waiting, started running, failed or
+// finished. A null group means any group in the workspace.
+export const ChatAgentRequestsChangedEvent = z.strictObject({
+  workspaceId: z.string().min(1),
+  channelId: z.string().min(1).nullable(),
+});
+export type ChatAgentRequestsChangedEvent = z.infer<typeof ChatAgentRequestsChangedEvent>;
 export const chatDispatchPauseOperations = {
   readChatDispatchPaused: {
     capabilityId: "chat.dispatch.pause.read",
@@ -7478,6 +7488,9 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  // An agent request changed state in a group this window shows: re-read
+  // that group's page.
+  onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

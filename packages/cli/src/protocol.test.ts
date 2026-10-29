@@ -61,6 +61,7 @@ it("refuses a link author on every chat write, for the CLI and MCP doors alike, 
     messages: [{ id: "msg_1", author: { kind: "link", displayName: "Guest" }, body: "Hi", createdAtMs: 0, attachments: [] }],
     dispatch: { paused: null, lastRun: null },
   });
+  if ("stream" in shown) throw new Error("expected a thread");
   expect(shown.messages[0]?.author.kind).toBe("link");
   expect(renderThreadMarkdown(shown)).toContain("**Guest** · link holder · ");
 });

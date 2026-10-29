@@ -16,6 +16,7 @@
   "blockRelayShareDiscussionPrincipal",
   "cancelRelayShareDiscussionActivity",
   "captureHolds",
+  "chatAgentRequestsChanged",
   "chatDispatchNotices",
   "chatDispatchPaused",
   "chatDispatchStateForThread",

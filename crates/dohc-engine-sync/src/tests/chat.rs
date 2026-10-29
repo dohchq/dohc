@@ -145,6 +145,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 message_id: "decision-message".to_owned(),
                 title: None,
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
                 author_owner_display_name: None,
@@ -3053,6 +3054,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 channel_id: "default-channel".to_owned(),
                 title: Some("Default thread".to_owned()),
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 body: "Default opening message".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
@@ -3280,6 +3282,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 message_id: "long-wire-local-message".to_owned(),
                 title: Some("Local follow-up".to_owned()),
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,
@@ -4060,6 +4063,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 message_id: "message-after-refused-thread".to_owned(),
                 title: Some("Valid local thread".to_owned()),
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
                 author_owner_display_name: None,
@@ -5664,7 +5668,8 @@ fn reserved_agent_channel_shapes_rejected() {
 fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    dohc_engine_storage::recovery::create_store_before_migration_for_test(&db, "v2-agent-ids")
+        .expect("earlier store");
     let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
     // The suffixes of these wire ids are not agent ids.
     let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";
@@ -5923,8 +5928,9 @@ fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEn
                 channel_id: channel_id.to_owned(),
                 thread_id: "notes-thread".to_owned(),
                 message_id: "notes-message".to_owned(),
-                title: Some("Notes".to_owned()),
+                title: None,
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,

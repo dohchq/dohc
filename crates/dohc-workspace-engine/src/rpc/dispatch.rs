@@ -801,6 +801,14 @@ impl EngineService {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.get" => {
+                self.chats_threads_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.stream.list" => {
+                self.chats_stream_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.threads.getProjection" => {
                 self.chats_threads_get_projection(&ctx, request.workspace, request.params)
                     .await?
@@ -1585,8 +1593,10 @@ mod tests {
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
             "chats.readState.markThreadRead",
+            "chats.stream.list",
             "chats.threads.create",
             "chats.threads.findChannelId",
+            "chats.threads.get",
             "chats.threads.getProjection",
             "chats.threads.list",
             "chats.threads.listForChannel",

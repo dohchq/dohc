@@ -40,12 +40,18 @@
 mod dispatch;
 mod pending_replay;
 mod reactions;
+mod stream;
 mod thread_projection;
 
 pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
 pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
+pub use stream::{
+    AGENT_REPLY_EXCERPT_CHARS, STREAM_LIMIT_DEFAULT, StreamAgentReply, StreamAgentRequest,
+    StreamAgentRequestState, StreamItem, StreamPage, StreamPosition, StreamPost, StreamReplier,
+    ThreadWithChannel,
+};
 pub use thread_projection::{linked_chat_projection_path, render_chat_thread_projection};
 
 use crate::automations::claim_group_message_in_tx;
@@ -856,6 +862,10 @@ pub struct StartChannelThread {
     pub message_id: String,
     pub title: Option<String>,
     pub lane: ChatThreadLane,
+    /// Desktop's own thread in an agent DM, an automation's wake thread or the
+    /// runner self-test, stays its own post instead of joining the DM's
+    /// conversation. People, the CLI and MCP never set it.
+    pub own_thread: bool,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
     pub author_owner_display_name: Option<String>,
@@ -990,6 +1000,8 @@ pub struct SaveBookmark {
 pub struct ChatMessagePage {
     pub messages: Vec<ChatMessage>,
     pub next_after_message_order: Option<i64>,
+    /// Each listed message's open agent requests, by message id.
+    pub agent_requests: HashMap<String, Vec<StreamAgentRequest>>,
 }
 
 // --------------------------------------------------------------- parity helpers
@@ -2859,7 +2871,20 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "chat channel identity cannot be replicated",
                 });
             }
-            let existing: Option<String> = if input.lane == ChatThreadLane::Chat {
+            // An agent DM is one conversation, so its new messages always join
+            // the chat lane. Its older posts stay where they are.
+            let lane = if channel.kind == ChatChannelKind::Agent && !input.own_thread {
+                if !title_c.is_empty() {
+                    return Err(DomainError::chat(
+                        "invalid-thread-title",
+                        "An agent DM has no posts, so its messages take no title.",
+                    ));
+                }
+                ChatThreadLane::Chat
+            } else {
+                input.lane
+            };
+            let existing: Option<String> = if lane == ChatThreadLane::Chat {
                 tx.query_row(
                     "SELECT thread_id FROM chat_threads \
                      WHERE workspace_id = ?1 AND channel_id = ?2 AND lane = 'chat' \
@@ -2885,7 +2910,7 @@ impl<'a> LinkedChatStore<'a> {
                         title_c,
                         now,
                         channel.channel_id,
-                        input.lane.as_str()
+                        lane.as_str()
                     ],
                 )
                 .map_err(DomainError::sql_persist)?;
@@ -4257,9 +4282,14 @@ impl<'a> LinkedChatStore<'a> {
             } else {
                 None
             };
+            let message_ids: Vec<String> =
+                messages.iter().map(|message| message.message_id.clone()).collect();
+            let agent_requests =
+                stream::agent_requests_for_messages(conn, workspace_id, &message_ids)?;
             Ok(ChatMessagePage {
                 messages,
                 next_after_message_order: next,
+                agent_requests,
             })
         })
     }
