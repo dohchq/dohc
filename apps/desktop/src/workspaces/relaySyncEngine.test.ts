@@ -987,6 +987,33 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  it("pushes what it recorded until a push leaves nothing behind", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockClear();
+    const more = { pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    pushMock.mockResolvedValueOnce(more).mockResolvedValueOnce(more);
+    await sync.pushRecorded();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    // The continuation the first pushes asked for does not push again.
+    await vi.runOnlyPendingTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    await sync.stop();
+    await sync.pushRecorded();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a push of what it recorded when the pass fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await expect(sync.pushRecorded()).rejects.toThrow(RelayUnreachableError);
+    expect(sync.snapshot().syncFailure?.cause).toBe("server-unreachable");
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
   it("starts a new failure after every success, however often they alternate", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     let pass = 0;

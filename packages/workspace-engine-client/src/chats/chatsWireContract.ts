@@ -20,11 +20,13 @@ export const CHATS_METHOD = {
   threadsListForFile: "chats.threads.listForFile",
   threadsListForChannel: "chats.threads.listForChannel",
   threadFindChannelId: "chats.threads.findChannelId",
+  threadGet: "chats.threads.get",
   threadGetProjection: "chats.threads.getProjection",
   threadRevision: "chats.threads.revision",
   messageSend: "chats.messages.send",
   messagesList: "chats.messages.list",
   messageGet: "chats.messages.get",
+  streamList: "chats.stream.list",
   readStateGet: "chats.readState.get",
   readStateMarkThreadRead: "chats.readState.markThreadRead",
   readStateListUnreadFileThreads: "chats.readState.listUnreadFileThreads",
@@ -149,6 +151,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   messageId: string;
   title?: string;
   lane?: ChatThreadLane;
+  ownThread?: boolean;
   authorKind: ChatMessageAuthorKind;
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
@@ -176,6 +179,13 @@ type ChatThreadsListForChannelParams = ChatPageParams & {
   lane?: ChatThreadLane;
 };
 type ChatThreadParams = ChatsJsonObject & { threadId: string };
+export type ChatStreamPosition = typeof ChatStreamPositionSchema.Type;
+export type ChatStreamPage = typeof ChatStreamPageSchema.Type;
+type ChatStreamListParams = ChatsJsonObject & {
+  channelId: string;
+  before?: ChatsJsonObject & ChatStreamPosition;
+  pageLimit?: number;
+};
 type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
@@ -386,11 +396,13 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.threadsListForFile]: ChatThreadsListForFileParams;
   [CHATS_METHOD.threadsListForChannel]: ChatThreadsListForChannelParams;
   [CHATS_METHOD.threadFindChannelId]: ChatThreadParams;
+  [CHATS_METHOD.threadGet]: ChatThreadParams;
   [CHATS_METHOD.threadGetProjection]: ChatThreadProjectionParams;
   [CHATS_METHOD.threadRevision]: ChatThreadParams;
   [CHATS_METHOD.messageSend]: ChatMessageSendParams;
   [CHATS_METHOD.messagesList]: ChatMessagesListParams;
   [CHATS_METHOD.messageGet]: ChatsJsonObject & { messageId: string };
+  [CHATS_METHOD.streamList]: ChatStreamListParams;
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
   [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThreadsParams;
@@ -540,6 +552,16 @@ const ChatAttachmentSchema = mutableStruct({
   headingOccurrence: Schema.optionalKey(NonnegativeInt),
   createdAtMs: AnyInt,
 });
+// One agent's request to answer a message. A finished request is left out.
+const ChatStreamAgentRequestSchema = mutableStruct({
+  agentId: Schema.NonEmptyString,
+  state: Schema.Literals(["waiting", "running", "failed"]),
+  runId: Schema.optionalKey(Schema.String),
+  startedAtMs: Schema.optionalKey(AnyInt),
+  failureReason: Schema.optionalKey(Schema.String),
+  exitCode: Schema.optionalKey(AnyInt),
+  logPath: Schema.optionalKey(Schema.String),
+});
 const ChatMessageSchema = mutableStruct({
   id: Schema.String,
   workspaceId: Schema.String,
@@ -555,6 +577,8 @@ const ChatMessageSchema = mutableStruct({
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorAgentId: Schema.optionalKey(Schema.String),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
+  // Thread and stream reads name each open agent request. Absent when none.
+  agentRequests: Schema.optionalKey(Schema.mutable(Schema.Array(ChatStreamAgentRequestSchema))),
 }).check(noAccountOnLinkMessage);
 const ChatDecisionSchema = mutableStruct({
   threadId: Schema.String,
@@ -776,6 +800,54 @@ const BookmarkTransitionSchema = mutableStruct({
   applied: Schema.Boolean,
 });
 
+// Where an item sits in a group's stream: a post by its thread id, a
+// conversation message by its message id.
+const ChatStreamPositionSchema = mutableStruct({
+  createdAtMs: NonnegativeInt,
+  lane: ThreadLaneSchema,
+  id: Schema.NonEmptyString,
+});
+const ChatStreamPostSchema = mutableStruct({
+  replyCount: NonnegativeInt,
+  repliers: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        author: ChatActorSchema,
+        authorUserId: Schema.optionalKey(Schema.String),
+        authorAgentId: Schema.optionalKey(Schema.String),
+        lastReplyAtMs: AnyInt,
+      }),
+    ),
+  ),
+  lastReplyAtMs: Schema.optionalKey(AnyInt),
+  latestAgentReply: Schema.optionalKey(
+    mutableStruct({
+      id: Schema.String,
+      author: ChatActorSchema,
+      authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+      authorUserId: Schema.optionalKey(Schema.String),
+      authorAgentId: Schema.optionalKey(Schema.String),
+      createdAtMs: AnyInt,
+      bodyExcerpt: Schema.String,
+    }),
+  ),
+  openDecisionCount: NonnegativeInt,
+});
+const ChatStreamPageSchema = mutableStruct({
+  items: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        position: ChatStreamPositionSchema,
+        message: ChatMessageSchema,
+        reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
+        post: Schema.optionalKey(ChatStreamPostSchema),
+      }),
+    ),
+  ),
+  nextBefore: Schema.NullOr(ChatStreamPositionSchema),
+  readPosition: Schema.NullOr(ChatStreamPositionSchema),
+});
+
 function pageSchema<const Fields extends Schema.Struct.Fields>(fields: Fields) {
   return mutableStruct({
     ...fields,
@@ -813,6 +885,11 @@ const ChatsResultSchemas = {
     threads: Schema.mutable(Schema.Array(ChatChannelThreadSummarySchema)),
   }),
   [CHATS_METHOD.threadFindChannelId]: Schema.NullOr(Schema.String),
+  [CHATS_METHOD.threadGet]: mutableStruct({
+    thread: ChatThreadSchema,
+    channel: Schema.NullOr(ChatChannelSchema),
+    messageCount: NonnegativeInt,
+  }),
   [CHATS_METHOD.threadGetProjection]: ChatProjectionSchema,
   [CHATS_METHOD.threadRevision]: mutableStruct({ revision: NonnegativeInt }),
   [CHATS_METHOD.messageSend]: ChatMessageSchema,
@@ -821,6 +898,7 @@ const ChatsResultSchemas = {
     nextAfterMessageOrder: NullableNonnegativeInt,
   }),
   [CHATS_METHOD.messageGet]: mutableStruct({ message: ChatMessageSchema }),
+  [CHATS_METHOD.streamList]: ChatStreamPageSchema,
   [CHATS_METHOD.readStateGet]: ChatThreadReadStateSchema,
   [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadStateSchema,
   [CHATS_METHOD.readStateListUnreadFileThreads]: Schema.mutable(

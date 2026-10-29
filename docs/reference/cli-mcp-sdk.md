@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced. In the owning works
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -180,11 +180,11 @@ Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine"
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
 
-Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.
+Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.
 
 No arguments.
 
-Returns `{ ok: true, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
+Returns `{ ok: true, outsideWriteCopies?, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
 
 ### `dohc_save_kept_copy`
 
@@ -209,7 +209,7 @@ Returns `{ ok: true, copyPath, packagePath, folder, storedOn, keptEdits } | { ok
 
 ### `dohc_retry_kept_edits`
 
-Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -302,7 +302,7 @@ Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
 
 ### `dohc_edit_document`
 
-Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
+Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -433,11 +433,14 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
-- `threadId`: `string`. Required.
+- `threadId`: `string`
+- `group`: `string`
+- `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
+- `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -793,7 +796,7 @@ dohc document edit <path> [-] [options]
 
 Replace matching text or append Markdown through the live document.
 
-Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
+Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
 
 - `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
 - `--agent <name>`: Record this agent name with the change.
@@ -855,9 +858,9 @@ dohc document kept-edits [options]
 
 List live documents whose edits the server refused, and where dohc keeps those edits.
 
-storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
 
-With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true }[] }`.
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[] }`.
 
 #### `dohc document save-recovery-copy`
 
@@ -934,14 +937,16 @@ With `--json`, prints `{ schemaVersion, threads: { lane?, id, title, commentCoun
 #### `dohc chat show`
 
 ```sh
-dohc chat show <thread-or-message> [options]
+dohc chat show <thread-message-or-group> [options]
 ```
 
-Show a thread or message and mark the thread read.
+Show a thread or message and mark the thread read, or show a group's posts and conversation.
 
 - `--peek`: Show it without changing what is marked read. A read-only shared view requires it.
+- `--before <position>`: For a group, show the page older than this position, as printed after older:.
+- `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 

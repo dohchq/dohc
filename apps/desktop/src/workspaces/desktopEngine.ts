@@ -249,8 +249,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
     // Only the queue of the generation this release takes. If the engine refuses
     // to read this document's queue head, the release fails: nothing would keep its edits.
-    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle, queue => queue.objectId === binding.objectId))
-      .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
+    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle,
+      queue => queue.objectId === binding.objectId && sameGeneration(queue, binding)))
+      .find(row => row.objectId === binding.objectId && !row.saveOnly && row.outboxId !== null && sameGeneration(row.binding, binding));
     if (kept?.recovery === "unreadable") throw new Error(`dohc could not read the edits it kept for ${kept.path}.`);
     let keptSnapshot: string | undefined;
     if (kept?.outboxId) {
@@ -296,10 +297,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // A refusal starts or renews a quarantine; one already read as waiting stays
   // as read. An acceptance can end only a quarantine already read.
   const quarantinesMayChange = (workspaceId: string, objectId: string, outcome: string) => {
-    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId)?.recovery;
+    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId && !row.saveOnly)?.recovery;
     return outcome === "frozen" ? recovery === undefined || recovery === "retrying" : outcome === "acknowledged" && recovery !== undefined;
   };
-  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).map(row => row.path));
+  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).filter(row => !row.saveOnly).map(row => row.path));
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
@@ -414,7 +415,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 assertCurrent();
                 const outcome = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent,
+                  onEnrolled: async () => {await readQuarantinesAfterPass(workspaceId, client, binding.workspace);}});
                 if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
                 return outcome;
               });
@@ -463,7 +465,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                 document, config, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
+                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent,
+                onEnrolled: async () => {await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);}});
               assertCurrent();
               if (quarantinesMayChange(document.binding.workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
@@ -809,8 +812,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // keeps. A record that can only be saved leaves the server's row its own.
     ownerLiveQuarantines(workspaceId: string): OwnerLiveQuarantine[] {
       const local: OwnerLiveQuarantine[] = (ownerQuarantines.get(workspaceId) ?? []).map(row => ({objectId: row.objectId, path: row.path, reason: row.reason,
-        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery}));
-      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write"))
+        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery, ...(row.saveOnly ? {saveOnly: true} : {})}));
+      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write" && !kept.saveOnly))
         .map((row): OwnerLiveQuarantine => ({objectId: row.objectId, path: row.path, reason: row.reason, storedOn: "server",
           incident: serverIncident(row), recovery: row.recovery, ...(row.earlier ? {earlier: true} : {})}))];
     },
@@ -837,8 +840,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       }
       await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
-        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
-        if (!row || row.outboxId === null || row.recovery !== "paused" || quarantineIncident(row) !== incident) {
+        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle))
+          .find(candidate => candidate.objectId === objectId && quarantineIncident(candidate) === incident);
+        if (row?.saveOnly) throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
+        if (!row || row.outboxId === null || row.recovery !== "paused") {
           throw new Error("This document changed. Open Live documents to check it.");
         }
         const outboxId = row.outboxId;

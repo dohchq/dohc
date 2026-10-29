@@ -11,6 +11,10 @@ afterEach(cleanup);
 const KEYS = Object.keys(SAVE_STATE) as SaveStateKey[];
 
 describe("StateMark", () => {
+  it("does not promise History has a changed outside file", () => {
+    expect(SAVE_STATE["changed-on-disk"].title).toBe("This file changed outside dohc.");
+  });
+
   it("has a row for every member of every save-state union", () => {
     // Each assignment narrows the map to one storage union. A member the map
     // has no row for fails here at compile time, before any test runs.

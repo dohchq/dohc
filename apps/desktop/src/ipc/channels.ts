@@ -241,6 +241,7 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",

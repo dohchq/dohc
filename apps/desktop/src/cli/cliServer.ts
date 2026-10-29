@@ -27,6 +27,8 @@ import {
   type CliRequest,
   type CliResultByVerb,
   type CliShowMessage,
+  type CliShowThreadResult,
+  type CliStreamPosition,
 } from "@dohc/cli/protocol";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
@@ -58,6 +60,7 @@ import type {
   ChannelThreadSummary,
   ChatChannelSummary,
   ChatMessage,
+  ChatStreamItem,
   ChatThread,
   LinkedChatStore,
   VersionedTextMoment,
@@ -241,7 +244,7 @@ export interface CliDocumentsPort {
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
@@ -536,8 +539,8 @@ function groupForCli(channel: ChatChannelSummary): CliGroup {
 }
 
 async function listCliChannelThreads(context: CliWorkspaceContext, channel: ChatChannelSummary) {
-  const lanes = channel.type === "both" ? ["posts", "chat"] as const : [channel.type === "chat" ? "chat" : "posts"] as const;
-  const pages = await Promise.all(lanes.map(lane => context.store.listChannelThreads({
+  // Any group can hold both lanes: an agent DM keeps its old posts beside its conversation.
+  const pages = await Promise.all((["posts", "chat"] as const).map(lane => context.store.listChannelThreads({
     workspaceId: context.workspaceId, channelId: channel.id, lane,
   })));
   return pages.flat();
@@ -586,7 +589,15 @@ function rawChatMessage(
       ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
+    ...agentRequestsFor(message),
   };
+}
+
+// The agents still asked to answer a message, as the engine reports them.
+function agentRequestsFor(message: ChatMessage) {
+  return message.agentRequests?.length
+    ? { agentRequests: message.agentRequests.map((request) => ({ ...request })) }
+    : {};
 }
 
 // A history row carries only facts the path admission checked. The moment's
@@ -1116,7 +1127,7 @@ async function buildThreadContent(
   loaded: LoadedThread,
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
-): Promise<Omit<CliResultByVerb["show"], "dispatch">> {
+): Promise<Omit<CliShowThreadResult, "dispatch">> {
   const decisions = await context.store.listThreadDecisions(
     context.workspaceId,
     loaded.thread.id,
@@ -1128,22 +1139,7 @@ async function buildThreadContent(
   const selected = rootMessage
     ? branchFromMessage(allMessages, rootMessage)
     : [...allMessages];
-  const messages: CliShowMessage[] = selected.map((message) => ({
-    id: cliMessageId(message.id),
-    author: authorForCli(message),
-    body: message.body,
-    createdAtMs: message.createdAtMs,
-    ...(message.parentMessageId
-      ? { parentMessageId: cliMessageId(message.parentMessageId) }
-      : {}),
-    ...(decisionByMessage.has(message.id)
-      ? { decisionState: decisionByMessage.get(message.id)! }
-      : {}),
-    attachments: message.attachments.map((attachment) => ({
-      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
-      ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
-    })),
-  }));
+  const messages = selected.map((message) => cliShowMessage(message, decisionByMessage.get(message.id)));
   return {
     thread: {
       id: cliThreadId(loaded.thread.id),
@@ -1155,12 +1151,110 @@ async function buildThreadContent(
   };
 }
 
+function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved" | undefined): CliShowMessage {
+  return {
+    id: cliMessageId(message.id),
+    author: authorForCli(message),
+    body: message.body,
+    createdAtMs: message.createdAtMs,
+    ...(message.parentMessageId
+      ? { parentMessageId: cliMessageId(message.parentMessageId) }
+      : {}),
+    ...(decisionState ? { decisionState } : {}),
+    attachments: message.attachments.map((attachment) => ({
+      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
+      ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
+    })),
+    ...agentRequestsFor(message),
+  };
+}
+
+// One page of a group's stream, read the same way by `dohc chat show <group>`
+// and dohc_read_chat. `ids` picks CLI handles or engine ids for what it names.
+async function readGroupStream(
+  context: CliWorkspaceContext,
+  channel: ChatChannelSummary,
+  page: { before?: CliStreamPosition; limit?: number },
+  ids: "cli" | "engine",
+) {
+  const before = page.before && {
+    ...page.before,
+    id: page.before.lane === "posts"
+      ? engineIdForHandle(page.before.id, "th_", "thread-")
+      : engineIdForHandle(page.before.id, "msg_", "message-"),
+  };
+  const stream = await context.store.listGroupStream({
+    workspaceId: context.workspaceId,
+    channelId: channel.id,
+    ...(before ? { before } : {}),
+    ...(page.limit ? { limit: page.limit } : {}),
+  });
+  // A conversation message's decision comes from its conversation's decisions.
+  const conversations = [...new Set(stream.items.filter((item) => !item.post).map((item) => item.message.threadId))];
+  const decisions = new Map((await Promise.all(conversations.map((threadId) =>
+    context.store.listThreadDecisions(context.workspaceId, threadId)))).flat().map((decision) => [decision.messageId, decision]));
+  const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
+  const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
+  const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
+    ...value,
+    id: value.lane === "posts" ? threadId(value.id) : messageId(value.id),
+  });
+  return {
+    items: stream.items.map((item) => ({
+      position: position(item.position),
+      threadId: threadId(item.message.threadId),
+      message: item.message,
+      decision: decisions.get(item.message.id),
+      ...(item.post ? {
+        post: {
+          replyCount: item.post.replyCount,
+          repliers: item.post.repliers.map((replier) => ({
+            author: { kind: replier.author.kind, displayName: replier.author.displayName },
+            lastReplyAtMs: replier.lastReplyAtMs,
+          })),
+          ...(item.post.lastReplyAtMs === undefined ? {} : { lastReplyAtMs: item.post.lastReplyAtMs }),
+          ...(item.post.latestAgentReply ? {
+            latestAgentReply: {
+              id: messageId(item.post.latestAgentReply.id),
+              author: {
+                kind: item.post.latestAgentReply.author.kind,
+                displayName: item.post.latestAgentReply.author.displayName,
+              },
+              createdAtMs: item.post.latestAgentReply.createdAtMs,
+              bodyExcerpt: item.post.latestAgentReply.bodyExcerpt,
+            },
+          } : {}),
+          openDecisionCount: item.post.openDecisionCount,
+        },
+      } : {}),
+    })),
+    nextBefore: stream.nextBefore && position(stream.nextBefore),
+    readPosition: stream.readPosition && position(stream.readPosition),
+  };
+}
+
+function engineIdForHandle(id: string, handlePrefix: string, enginePrefix: string): string {
+  return id.startsWith(handlePrefix) ? `${enginePrefix}${id.slice(handlePrefix.length)}` : id;
+}
+
+// A group named exactly, by name, #slug or id. A prefix names a thread or
+// message instead.
+function exactChannel(
+  input: string,
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
+): { engine: ChatChannelSummary; cli: CliGroup } | undefined {
+  const normalized = withoutChannelMarker(input);
+  const matches = channels.filter(({ engine, cli }) =>
+    [cli.slug, cli.name, cli.id, engine.name, engine.id].includes(normalized));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 async function buildShowResult(
   context: CliWorkspaceContext,
   loaded: LoadedThread,
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
-): Promise<CliResultByVerb["show"]> {
+): Promise<CliShowThreadResult> {
   return {
     ...await buildThreadContent(context, loaded, allMessages, rootMessage),
     dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, loaded.thread.id),
@@ -1503,7 +1597,7 @@ function chatReadTarget(
 ): { channelId: string } | { threadId: string } | undefined {
   switch (request.verb) {
     case "chat":
-      return { threadId: request.args.threadId };
+      return "group" in request.args ? { channelId: request.args.group } : { threadId: request.args.threadId };
     case "show":
       return { threadId: request.args.target };
     case "threads":
@@ -2525,21 +2619,41 @@ async function dispatchWorkspace(
     }
 
     case "chat": {
+      if ("group" in request.args) {
+        const { group, before, limit } = request.args;
+        try {
+          const channels = (await context.store.listChannels({ workspaceId: context.workspaceId }))
+            .map((engine) => ({ engine, cli: groupForCli(engine) }));
+          const channel = resolveChannel(group, channels).engine;
+          const page = await readGroupStream(context, channel, { ...(before ? { before } : {}), ...(limit ? { limit } : {}) }, "engine");
+          return {
+            ok: true as const,
+            stream: {
+              group: { id: channel.id, name: channel.kind === "agent" ? "my-agent" : channel.name, kind: cliGroupKind(channel.kind) },
+              ...page,
+              items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
+            },
+          };
+        } catch (error) {
+          return mcpFailure(error, `failed to read group: ${group}`);
+        }
+      }
+      const { threadId } = request.args;
       try {
         const messages = await context.store.listMessages({
           workspaceId: context.workspaceId,
-          threadId: request.args.threadId,
+          threadId,
         });
         const threads = await context.store.listThreads({
           workspaceId: context.workspaceId,
         });
         const thread = threads.find(
-          (candidate) => candidate.id === request.args.threadId,
+          (candidate) => candidate.id === threadId,
         );
         if (!thread) {
           return {
             ok: false as const,
-            reason: `chat thread not found: ${request.args.threadId}`,
+            reason: `chat thread not found: ${threadId}`,
           };
         }
         const currentPath = thread.linkedFile
@@ -2566,7 +2680,7 @@ async function dispatchWorkspace(
           },
         };
       } catch (error) {
-        return mcpFailure(error, `failed to read chat: ${request.args.threadId}`);
+        return mcpFailure(error, `failed to read chat: ${threadId}`);
       }
     }
 
@@ -2603,7 +2717,7 @@ async function dispatchWorkspace(
               id: entry.thread.id,
               title: entry.thread.title,
               messageCount: entry.messageCount,
-              ...(channel.type === "both" ? { lane: entry.thread.lane } : {}),
+              lane: entry.thread.lane,
               updatedAtMs: entry.thread.updatedAtMs,
             })),
           });
@@ -3205,7 +3319,7 @@ async function dispatchWorkspace(
         group: channel.cli,
         threads: summaries.map((summary) => ({
           id: cliThreadId(summary.thread.id),
-          ...(channel.engine.type === "both" ? { lane: summary.thread.lane } : {}),
+          lane: summary.thread.lane,
           title: summary.thread.title,
           commentCount: Math.max(0, summary.messageCount - 1),
           openDecisionCount: summary.openDecisionCount,
@@ -3338,6 +3452,23 @@ async function dispatchWorkspace(
     }
 
     case "show": {
+      const group = exactChannel(request.args.target, channels);
+      if (group) {
+        const page = await readGroupStream(context, group.engine, request.args, "cli");
+        return {
+          stream: {
+            group: group.cli,
+            ...page,
+            items: page.items.map(({ message, decision, ...item }) => ({
+              ...item,
+              message: cliShowMessage(message, decision?.state),
+            })),
+          },
+        };
+      }
+      if (request.args.before || request.args.limit) {
+        throw new CliCommandError("--before and --limit page a group's stream; name a group");
+      }
       const threads = await loadThreads(context, channels);
       const messagesByThread = await loadMessagesByThread(context, threads);
       const target = resolveThreadOrMessage(
@@ -3375,10 +3506,15 @@ async function dispatchWorkspace(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
+      // An agent DM is one conversation; the engine puts the message there.
+      if (channel.engine.kind === "agent" && request.args.title) {
+        throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
+      }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
         writer: cliChatWriter(actor, context, options),
         channelId: channel.engine.id,
+        // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
         body: request.args.body,

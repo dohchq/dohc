@@ -1580,6 +1580,7 @@ pub(crate) fn adopt_conflict_parent_text_result_in_tx(
     envelope: &ReplicationEnvelope,
     shadow: &serde_json::Value,
     search_policy: Option<&SearchPolicySnapshot>,
+    local_preimage: bool,
 ) -> Result<Vec<MomentMaterializationChange>, SyncError> {
     let (payload, _) = parse_tagged_shadow(
         shadow,
@@ -1595,6 +1596,24 @@ pub(crate) fn adopt_conflict_parent_text_result_in_tx(
         });
     }
     let text = require_blob_text(tx, &payload.payload_after_blob_sha256)?;
+    if local_preimage {
+        let local = select_snapshot_by_object(
+            tx,
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )?;
+        let before = local.map_or_else(
+            || moment_before_from_payload(tx, &payload),
+            |snapshot| Ok(MomentBefore::Present(Box::new(snapshot))),
+        )?;
+        record_conflict_parent_shadow_with_preimage_in_tx(
+            tx,
+            &envelope.workspace_id,
+            shadow,
+            Some(&before),
+        )?;
+    }
     upsert_snapshot(
         tx,
         &envelope.workspace_id,
@@ -1632,6 +1651,15 @@ pub(crate) fn record_conflict_parent_shadow_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     shadow: &serde_json::Value,
+) -> Result<(), SyncError> {
+    record_conflict_parent_shadow_with_preimage_in_tx(tx, workspace_id, shadow, None)
+}
+
+fn record_conflict_parent_shadow_with_preimage_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    shadow: &serde_json::Value,
+    local_before: Option<&MomentBefore>,
 ) -> Result<(), SyncError> {
     let (payload, owner) = parse_tagged_shadow(
         shadow,
@@ -1673,7 +1701,13 @@ pub(crate) fn record_conflict_parent_shadow_in_tx(
     validate_payload_sides(tx, &payload)?;
     let remote_before = moment_before_from_payload(tx, &payload)?;
     ensure_file_object(tx, workspace_id, &payload)?;
-    insert_moment(tx, workspace_id, &payload, &remote_before, true)
+    insert_moment(
+        tx,
+        workspace_id,
+        &payload,
+        local_before.unwrap_or(&remote_before),
+        local_before.is_none(),
+    )
 }
 
 pub(crate) fn validate_tagged_shadow_payload(

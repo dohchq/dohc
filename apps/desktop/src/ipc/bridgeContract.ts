@@ -1,4 +1,5 @@
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionsInput, ChatFileMentionsPage, ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
 import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
@@ -437,6 +438,8 @@ export const OwnerLiveQuarantine = z.object({
   recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
   // The server keeps them in an earlier copy of the workspace, copied or not, so Try again cannot reach them.
   earlier: z.literal(true).optional(),
+  // A restore set these edits aside; only a recovery copy can return them.
+  saveOnly: z.literal(true).optional(),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
@@ -471,6 +474,7 @@ export const OwnerLiveDocument = z.object({
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,
+  saveOnly: OwnerLiveQuarantine.shape.saveOnly,
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),
@@ -489,7 +493,7 @@ export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
 }).strict();
 export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
 export const OwnerLiveDocumentsResult = z.object({
-  documents: z.array(OwnerLiveDocument).max(128),
+  documents: z.array(OwnerLiveDocument).max(128 + RESTORE_FENCED_RECOVERY_LIMIT),
   nextCursor: SAFE_RELATIVE_PATH.nullable(),
 }).strict();
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
@@ -1395,6 +1399,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
+  outsideWriteCopyReadError: z.string().nullable().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Old versions of files the engine keeps on a drive that cannot tell it
   // whether a program still has one open, so it never deletes them: how
@@ -1425,7 +1431,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
-  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -3887,6 +3893,8 @@ export const RelayShareRevokeResponse = z.object({
 
 export const UndoRelaySharePayload = z
   .object({
+    // The workspace the removal came from.
+    workspaceId: WORKSPACE_ID,
     shareId: OPAQUE_ID,
     undoId: RelayShareUndoReceipt.shape.undoId,
   })
@@ -5773,7 +5781,6 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  pausedReason: z.string().min(1).max(500).optional(),
   // The conversation's latest run, when dohc's restart or quit stopped it.
   stoppedRun: ChatDispatchStoppedRun.optional(),
 }).strict();
@@ -6618,15 +6625,19 @@ export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
   reason: z.enum(["no-runner", "budget-paused", "restricted"]),
   threadId: z.string().min(1),
+  // The paused thread's group, so Open lands on the thread itself.
+  channelId: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
   logPath: z.string().min(1).optional(),
   message: z.string().min(1),
 });
 export type ChatDispatchNotice = z.infer<typeof ChatDispatchNotice>;
+// One notice for each of the other reasons, and one for each paused chat.
+export const CHAT_DISPATCH_NOTICES_MAX = 64;
 export const ChatDispatchNoticesEvent = z.object({
   workspaceId: z.string().min(1),
   revision: z.number().int().nonnegative(),
-  notices: z.array(ChatDispatchNotice).max(3),
+  notices: z.array(ChatDispatchNotice).max(CHAT_DISPATCH_NOTICES_MAX),
 });
 export type ChatDispatchNoticesEvent = z.infer<typeof ChatDispatchNoticesEvent>;
 export const chatDispatchNoticeOperations = {
@@ -6668,6 +6679,13 @@ export const agentRunStateOperations = {
 // wait while it is paused. The pause lasts until it is resumed or dohc quits.
 export const ChatDispatchPausedEvent = z.strictObject({ paused: z.boolean() });
 export type ChatDispatchPausedEvent = z.infer<typeof ChatDispatchPausedEvent>;
+// An agent request in this group started waiting, started running, failed or
+// finished. A null group means any group in the workspace.
+export const ChatAgentRequestsChangedEvent = z.strictObject({
+  workspaceId: z.string().min(1),
+  channelId: z.string().min(1).nullable(),
+});
+export type ChatAgentRequestsChangedEvent = z.infer<typeof ChatAgentRequestsChangedEvent>;
 export const chatDispatchPauseOperations = {
   readChatDispatchPaused: {
     capabilityId: "chat.dispatch.pause.read",
@@ -7472,6 +7490,9 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  // An agent request changed state in a group this window shows: re-read
+  // that group's page.
+  onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

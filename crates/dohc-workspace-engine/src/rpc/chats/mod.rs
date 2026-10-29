@@ -5,6 +5,7 @@ pub(super) mod feed;
 pub(super) mod follows;
 pub(super) mod messages;
 pub(super) mod read_state;
+pub(super) mod stream;
 pub(super) mod threads;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::deserialize_optional_non_null;

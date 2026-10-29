@@ -39,6 +39,7 @@ export type ShellErrorKind =
   | "typing-import"
   | "capture-recovery"
   | "capture-held"
+  | "outside-copy-read"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -98,8 +99,9 @@ export interface ShellError {
   retry: (() => void | false) | null;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
-  // `ends` the notice removes its row when it runs.
-  action?: { label: string; run: () => void; ends?: boolean; additional?: {label: string; run: () => void}[] };
+  // `ends` the notice removes its row when it runs; one that `reads` it
+  // closes its toast and keeps the row.
+  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
@@ -135,6 +137,8 @@ export function useShellError(workspaceId: string) {
   // stays dismissed until the workspace opens again.
   const shownKeptCopies = useRef(new Set<number>());
   const shownKeptCopiesMore = useRef(false);
+  // Sibling notices restored from local storage have a row without a toast.
+  const shownOutsideCopies = useRef(new Map<string, string>());
   // Listed kept typing already shown in this workspace.
   const shownCaptureRecoveries = useRef(new Set<string>());
   const shownCaptureHolds = useRef(new Set<string>());
@@ -303,6 +307,7 @@ export function useShellError(workspaceId: string) {
 
   useEffect(() => {
     setShellErrors([]);
+    shownOutsideCopies.current = new Map();
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
     shownCaptureRecoveries.current = new Set();
@@ -415,12 +420,12 @@ export function useShellError(workspaceId: string) {
   // interrupts; otherwise the row keeps whatever toast its predecessor had.
   const reportSyncFailure = useCallback(
     (
-      notice: { message: string; detail: string; toast: boolean },
+      notice: { title?: string; message: string; detail: string; toast: boolean },
       retry: () => void,
     ) =>
       push(
-        { message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
-        notice.toast ? false : "keep",
+        { ...(notice.title ? { title: notice.title } : {}), message: notice.message, details: [["Detail", notice.detail]], retry, kind: "cloud-sync" },
+        notice.toast ? false : "quiet",
       ),
     [push],
   );
@@ -636,6 +641,9 @@ export function useShellError(workspaceId: string) {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
+    else if (target?.action?.reads) {
+      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true } : error)));
+    }
     target?.action?.run();
   }, []);
   // A kind makes a newer message replace the row of an older one, such as
@@ -776,8 +784,54 @@ export function useShellError(workspaceId: string) {
       return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
     });
   }, []);
-  // What a Save copy did: a saved copy's row opens the copy, and a copy
-  // that was already gone says so.
+  // Visible sibling copies open directly; native displacements use Save copy.
+  const showOutsideCopies = useCallback((copies: readonly (readonly [string, string, string])[], open: (path: string) => void) => {
+    const key = `dohc:outside-write-copies:${workspaceId}`;
+    let saved: Record<string, { copy: string; dismissed: boolean }> = {};
+    let stored = "{}";
+    try {
+      stored = localStorage.getItem(key) ?? stored;
+      const parsed: unknown = JSON.parse(stored);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [path, value] of Object.entries(parsed)) {
+          if (value && typeof value === "object" && "copy" in value && typeof value.copy === "string" &&
+              "dismissed" in value && typeof value.dismissed === "boolean") saved[path] = { copy: value.copy, dismissed: value.dismissed };
+        }
+      }
+    } catch { /* A denied browser store leaves notices usable in this run. */ }
+    const persist = () => {
+      try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* Keep the in-session notice. */ }
+    };
+    const latest = new Map(copies.map(([path, copy, id]) => [path, { copy, id }]));
+    const present = new Set(copies.map(([, , id]) => id));
+    for (const entry of Object.keys(saved)) if (!present.has(entry)) delete saved[entry];
+    for (const path of shownOutsideCopies.current.keys()) if (!latest.has(path)) shownOutsideCopies.current.delete(path);
+    const listed = new Set([...latest].filter(([, { id }]) => !saved[id]?.dismissed).map(([path]) => `outside-copy:${path}`));
+    // Each status answer repeats the list, so an unchanged one renders and writes nothing.
+    const stays = (row: ShellError) => !row.identity?.startsWith("outside-copy:") || listed.has(row.identity);
+    if (!shellErrorsRef.current.every(stays)) setShellErrors(current => current.filter(stays));
+    for (const [path, { copy, id }] of latest) {
+      const identity = `outside-copy:${path}`;
+      const shownKey = id;
+      if (shownOutsideCopies.current.get(path) === id) continue;
+      shownOutsideCopies.current.set(path, id);
+      const previous = saved[shownKey];
+      if (previous?.copy === copy && previous.dismissed) continue;
+      const seen = previous?.copy === copy;
+      saved[shownKey] = { copy, dismissed: false };
+      const dismiss = () => {
+        // Read current state so an old row cannot dismiss a newer copy.
+        try { saved = JSON.parse(localStorage.getItem(key) ?? "{}"); } catch { /* Use the current run's state. */ }
+        if (saved[shownKey]?.copy === copy) { saved[shownKey]!.dismissed = true; persist(); }
+      };
+      push({ identity, title: `Kept a copy of ${path}`,
+        message: `It changed outside dohc. That change is now in ${copy}.`,
+        retry: null, tone: "warning", onDismiss: dismiss,
+        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true } }, seen);
+    }
+    if (JSON.stringify(saved) !== stored) persist();
+  }, [push, workspaceId]);
+  // A native copy that was saved opens from its new path.
   const showKeptCopySaved = useCallback(
     (message: string, open: (() => void) | null) => {
       push({
@@ -825,7 +879,7 @@ export function useShellError(workspaceId: string) {
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
-    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held"
+    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read"
       ? current
       : current.filter(error => error !== target));
   }, []);
@@ -864,6 +918,7 @@ export function useShellError(workspaceId: string) {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showOutsideCopies,
     showCaptureRecoveries,
     showCaptureHolds,
     hideShellError,

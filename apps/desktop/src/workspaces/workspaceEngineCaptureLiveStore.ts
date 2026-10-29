@@ -419,6 +419,7 @@ function momentFromWire(
 function momentSummaryFromWire(
   workspaceId: string,
   moment: HistoryMomentMetadata,
+  sha256?: string,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -433,6 +434,7 @@ function momentSummaryFromWire(
     ...(moment.afterByteLength !== null
       ? { byteLength: moment.afterByteLength }
       : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
     metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
@@ -1222,7 +1224,8 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null},
+            moment.afterBinarySha256 ?? moment.afterBlobSha256 ?? undefined),
         ),
       };
     },

@@ -49,8 +49,22 @@ const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
+// Where a group's stream page ends: an item's time, lane and id.
+const streamPositionSchema = z
+  .object({
+    createdAtMs: z.number().int().nonnegative(),
+    lane: z.enum(["posts", "chat"]),
+    id: z.string().min(1).max(200),
+  })
+  .strict();
+export type CliStreamPosition = z.infer<typeof streamPositionSchema>;
+const streamPageArgs = {
+  before: streamPositionSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+};
+// A thread or message shows that thread; a group shows its stream.
 const showArgsSchema = z
-  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean() })
+  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
 const postArgsSchema = z
   .object({
@@ -128,9 +142,10 @@ const momentArgsSchema = z
 const fileChatsArgsSchema = z
   .object({ ...argsBase, path: z.string().min(1).max(4096) })
   .strict();
-const chatArgsSchema = z
-  .object({ ...argsBase, threadId: z.string().min(1).max(200) })
-  .strict();
+const chatArgsSchema = z.union([
+  z.object({ ...argsBase, threadId: z.string().min(1).max(200) }).strict(),
+  z.object({ ...argsBase, group: z.string().min(1).max(500), ...streamPageArgs }).strict(),
+]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
 export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
   group: z.string().min(1).max(500),
@@ -654,6 +669,20 @@ const cliAttachmentSchema = z
   })
   .strict();
 
+// Where one agent's request to answer a message stands. Finished requests
+// are left out.
+const agentRequestSchema = z
+  .object({
+    agentId: z.string().min(1),
+    state: z.enum(["waiting", "running", "failed"]),
+    runId: z.string().min(1).optional(),
+    startedAtMs: z.number().int().nonnegative().optional(),
+    failureReason: z.string().min(1).optional(),
+    exitCode: z.number().int().optional(),
+    logPath: z.string().min(1).optional(),
+  })
+  .strict();
+
 const cliShowMessageSchema = z
   .object({
     id: z.string().min(1),
@@ -666,6 +695,7 @@ const cliShowMessageSchema = z
     decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -728,13 +758,50 @@ const threadDispatchSchema = z.object({
   }).strict().nullable(),
 }).strict();
 
-const showResultSchema = z
+const showThreadResultSchema = z
   .object({
     thread: cliShowThreadSchema,
     dispatch: threadDispatchSchema,
     messages: z.array(cliShowMessageSchema),
   })
   .strict();
+export type CliShowThreadResult = z.infer<typeof showThreadResultSchema>;
+
+// A group's posts and conversation messages in one order, oldest first. A
+// post carries what its thread holds beyond its first message.
+function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group: Group, message: Message) {
+  return z
+    .object({
+      group,
+      items: z.array(z.object({
+        position: streamPositionSchema,
+        threadId: z.string().min(1),
+        message,
+        post: z.object({
+          replyCount: z.number().int().nonnegative(),
+          repliers: z.array(z.object({ author: cliAuthorSchema, lastReplyAtMs: z.number().int().nonnegative() }).strict()),
+          lastReplyAtMs: z.number().int().nonnegative().optional(),
+          latestAgentReply: z.object({
+            id: z.string().min(1),
+            author: cliAuthorSchema,
+            createdAtMs: z.number().int().nonnegative(),
+            bodyExcerpt: z.string(),
+          }).strict().optional(),
+          openDecisionCount: z.number().int().nonnegative(),
+        }).strict().optional(),
+      }).strict()),
+      // Pass as `before` to read the older page. Null at the oldest item.
+      nextBefore: streamPositionSchema.nullable(),
+      // The newest item the person has read.
+      readPosition: streamPositionSchema.nullable(),
+    })
+    .strict();
+}
+
+const showResultSchema = z.union([
+  showThreadResultSchema,
+  z.object({ stream: streamSchema(cliGroupSchema, cliShowMessageSchema) }).strict(),
+]);
 const postResultSchema = z
   .object({
     group: cliGroupSchema,
@@ -933,6 +1000,7 @@ const rawChatMessageSchema = z
     options: z.array(z.string()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
   })
   .strict();
 const rawFailureSchema = z
@@ -950,7 +1018,7 @@ const fileChatsResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const chatResultSchema = z.discriminatedUnion("ok", [
+const chatResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
@@ -964,6 +1032,15 @@ const chatResultSchema = z.discriminatedUnion("ok", [
           text: z.string(),
         })
         .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      stream: streamSchema(
+        z.object({ id: rawChannelIdSchema, name: z.string().min(1), kind: z.enum(["group", "dm", "agent"]) }).strict(),
+        rawChatMessageSchema,
+      ),
     })
     .strict(),
   rawFailureSchema,
@@ -1148,6 +1225,7 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
 const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
+    outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),
@@ -1221,6 +1299,7 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       incident: keptEditsIncidentSchema,
       recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
       earlier: z.literal(true).optional(),
+      saveOnly: z.literal(true).optional(),
     }).strict()),
   }).strict(),
   rawFailureSchema,

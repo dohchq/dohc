@@ -44,6 +44,8 @@ struct ChatThreadStartParams {
     message_id: String,
     title: Option<String>,
     lane: Option<String>,
+    #[serde(default)]
+    own_thread: bool,
     author_kind: String,
     author_display_name: String,
     author_owner_display_name: Option<String>,
@@ -318,6 +320,7 @@ impl EngineService {
                     message_id: params.message_id,
                     title: params.title,
                     lane,
+                    own_thread: params.own_thread,
                     author_kind,
                     author_display_name: params.author_display_name,
                     author_owner_display_name: params.author_owner_display_name,

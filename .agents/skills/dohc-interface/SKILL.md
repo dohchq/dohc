@@ -221,6 +221,10 @@ Never uppercase a label.
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
 
+When the title bar is crowded, Go to… and the Restricted Mode pill give way first. Each narrows to its icon and keeps its words as its tooltip and accessible name.
+The Alpha pill stays. The workspace and version names keep at least three letters and an ellipsis, with the full name in the tooltip.
+Nothing in the title bar overlaps, and the buttons at its right never move.
+
 ### Radius and elevation
 
 | Element | Radius |

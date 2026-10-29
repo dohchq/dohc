@@ -67,26 +67,17 @@ describe("the agent offer", () => {
   it.each([
     ["runs", "Runs when you send", "reaches trip-planner", "run"],
     ["working", "Runs after the current run", "reaches trip-planner", "working"],
-    ["paused", "Dispatch paused · runs after Resume", "reaches trip-planner", null],
-    ["runner-off", "Agent dispatch is off", null, null],
-    ["no-command", "No agent runner is configured", null, null],
+    ["paused", "Replies paused · runs after Resume", "reaches trip-planner", null],
     // Alone, the folder says what it is.
     ["unknown", null, "Reaches trip-planner", null],
   ] as const)("%s says %j", (state, words, reach, mark) => {
-    const onSetUp = vi.fn();
-    render(<AgentOffer offer={offer(state)} surface="post" onSetUp={onSetUp} />);
+    render(<AgentOffer offer={offer(state)} surface="post" />);
     const node = screen.getByTestId("composer-agent-offer");
     expect(node.dataset.state).toBe(state);
     expect(screen.queryByTestId("composer-agent-offer-words")?.textContent ?? null).toBe(words);
     expect(screen.queryByTestId("composer-agent-offer-reach")?.textContent ?? null).toBe(reach);
     const run = screen.queryByTestId("composer-agent-offer-run");
     expect(run ? (run.className.includes("bg-agent") ? "working" : "run") : null).toBe(mark);
-    const setUp = screen.queryByTestId("composer-agent-offer-setup");
-    expect(setUp !== null).toBe(reach === null);
-    if (setUp) {
-      fireEvent.click(setUp);
-      expect(onSetUp).toHaveBeenCalledOnce();
-    }
   });
 
   it("shows only the agent when nothing is known, not even its folder", () => {

@@ -269,6 +269,7 @@ fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body
                 message_id: format!("{thread_id}-msg-0"),
                 title: None,
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,
