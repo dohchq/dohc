@@ -2872,9 +2872,57 @@ mod collection_relation_cleanup_tests {
             None,
         )
         .unwrap();
-        // Use the old fallback bytes with the same settlement write and marker.
-        // This fixture must also exist after cleanup stops producing these bytes.
-        settle_lossy_fixture(&scratch, &mut store, &mut cache, Some(REWRITTEN.into()), 9);
+        // Seed the completed settlement from before cleanup preserved the source.
+        // Current settlement must refuse to produce these bytes from this Y.Doc.
+        let native_state = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state();
+        store
+            .write_with(&NoFaults, |tx| {
+                let settled = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: WORKSPACE_ID.into(),
+                        version_id: VERSION_ID.into(),
+                        object_id: SOURCE_OBJECT_ID.into(),
+                        path: PACKING.into(),
+                        text: REWRITTEN.into(),
+                        moment_id: "packing-rewritten".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 9,
+                        request_id: None,
+                    },
+                )
+                .unwrap();
+                dohc_engine_collab::author_coverage::advance_in(tx, &key, false).unwrap();
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq=?4,last_settled_sha=?5,updated_at_ms=9 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        settled.moment.moment_order,
+                        settled.snapshot.blob_sha256,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::write(scratch.path().join(PACKING), REWRITTEN).unwrap();
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .encode_full_state(),
+            native_state
+        );
         assert_eq!(
             std::fs::read(scratch.path().join(PACKING)).unwrap(),
             REWRITTEN.as_bytes()
