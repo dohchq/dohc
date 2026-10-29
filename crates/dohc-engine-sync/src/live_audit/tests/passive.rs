@@ -1603,8 +1603,11 @@ fn a_successors_cancelled_restore_exports_and_imports_with_its_origin() {
     assert_eq!(generations(&refused), vec![Some(0)]);
 }
 
+/// An owner publishes its event zero before the source's event zero
+/// arrives. The import keeps both records without a conflict row, and the
+/// owner's publication still replays. Launch gives the lineage one event zero.
 #[test]
-fn an_event_zero_imported_after_owner_publication_can_still_disagree() {
+fn an_event_zero_imported_after_owner_publication_keeps_both_and_replays() {
     let (mut f, mut source, _, _) = imported_owner(false, false);
     assert_eq!(count(&f.store, "live_audit_bases"), 0);
     source
@@ -1628,14 +1631,11 @@ fn an_event_zero_imported_after_owner_publication_can_still_disagree() {
     assert_ne!(imported, published);
     assert_eq!(count(&f.store, "live_audit_base_conflicts"), 0);
     let before = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap();
-    assert!(matches!(
-        f.store.write_with(&NoFaults, |tx| {
+    f.store
+        .write_with(&NoFaults, |tx| {
             journal_live_base_in_tx(tx, "relay", &f.binding, 301)
-        }),
-        Err(SyncError::InvalidInput {
-            reason: "native event zero conflicts with imported audit"
         })
-    ));
+        .unwrap();
     assert_eq!(
         crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap(),
         before
@@ -1646,11 +1646,8 @@ fn an_event_zero_imported_after_owner_publication_can_still_disagree() {
 /// hosted store, which fences a restore under its adoption, cancels it, and
 /// accepts the next update. The update's record exports with the adoption
 /// and a fresh passive replica imports it after the source's event zero.
-/// Adoption now refuses publication of its conflicting Owner event zero and
-/// rolls back, before reaching the cancellation. Launch must continue the
-/// original audited history through an immutable adoption association.
 #[test]
-#[ignore = "adoption refuses a conflicting event zero; audited continuation needs the launch design"]
+#[ignore = "adoption republishes event zero instead of continuing the audited origin"]
 fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() {
     use dohc_engine_collab::live_update_application::{
         ApplicationHostCoordinate, NativeRestoreFence, RestoreDeliveryOrigin,
