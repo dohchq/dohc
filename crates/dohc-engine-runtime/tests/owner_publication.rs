@@ -991,12 +991,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
     assert!(appended.automation_claims.is_empty());
     assert_eq!(f.counts(), before);
     let refused = f.ordinary_settle(&actor).await.err().unwrap();
-    assert!(matches!(
-        refused,
-        dohc_engine_runtime::RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "owner-outbox-frozen"
-        })
-    ));
+    assert_eq!(refused.code(), "owner-outbox-frozen");
     assert_eq!(f.counts(), before);
     assert_eq!(
         std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap(),

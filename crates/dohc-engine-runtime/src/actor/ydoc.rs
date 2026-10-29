@@ -3457,7 +3457,7 @@ fn ydoc_settle_attempt_on_store(
             return Ok((None, false));
         }
         if live_audit.is_none() && adopted_owner {
-            return Err(DomainError::InvalidInput { reason: "owner-outbox-frozen" }.into());
+            return Err(CollabError::OwnerOutboxFrozen.into());
         }
         let preimage = if bootstrap_absent {
             Preimage::Absent
