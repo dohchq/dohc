@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -86,6 +86,9 @@ type CliCommandBody =
   | { verb: "versionList" }
   | { verb: "versionCompare"; version: string; afterPath?: string }
   | { verb: "versionConflicts"; afterConflictId?: string }
+  | { verb: "versionCreate"; name: string }
+  | { verb: "versionSwitch" | "versionMerge"; version: string }
+  | { verb: "versionResolve"; conflictId: string; keep: "current" | "incoming" | "combined"; text: string; stdin: boolean }
   | { verb: "historyUndo"; operationId: string }
   | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
@@ -242,6 +245,13 @@ const documentTextFlags: readonly CliFlag[] = [
   { name: "--text", value: "markdown", text: "Use this Markdown as the body. An empty string is allowed." },
   { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
+
+function versionOperand({ operands }: VerbInput, name: string): string {
+  const [version, ...extra] = operands;
+  if (!version) fail(`${name} requires a version name or id`);
+  noExtraArgs(extra, name);
+  return version;
+}
 
 function parsePath({ operands }: VerbInput, name: string): string {
   const [path, ...extra] = operands;
@@ -1267,8 +1277,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: HISTORY_VERBS,
   },
   version: {
-    summary: "Read the workspace's versions, how one differs from Main, and open conflicts.",
-    notes: ["Versions belong to the owning workspace."],
+    summary: "Read and change the workspace's versions and their open conflicts.",
+    notes: [
+      "Versions belong to the owning workspace.",
+      "A change first saves the edits open in dohc, or refuses when dohc can't.",
+    ],
     verbs: {
       list: {
         capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
@@ -1279,9 +1292,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
         flags: [{ name: "--after", value: "path", text: "Continue after this path from the previous page." }],
         notes: ["Name a version by its name or ID, as version list prints them. With --json, print both sides' text."],
         parse: input => {
-          const [version, ...extra] = input.operands;
-          if (!version) fail("version compare requires a version name or id");
-          noExtraArgs(extra, "version compare");
+          const version = versionOperand(input, "version compare");
           const afterPath = lastValue(input, "--after");
           return { verb: "versionCompare", version, ...(afterPath ? { afterPath } : {}) };
         },
@@ -1294,6 +1305,48 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
           noExtraArgs(input.operands, "version conflicts");
           const afterConflictId = lastValue(input, "--after");
           return { verb: "versionConflicts", ...(afterConflictId ? { afterConflictId } : {}) };
+        },
+      },
+      create: {
+        capabilityId: "version.create", summary: "Create a version from the active one and switch to it.", operands: "<name>",
+        parse: input => {
+          const [name, ...extra] = input.operands;
+          if (!name?.trim()) fail("version create requires a name");
+          noExtraArgs(extra, "version create");
+          if (name.trim().length > MAX_VERSION_NAME_LENGTH) fail(`a version name has at most ${MAX_VERSION_NAME_LENGTH} characters`);
+          return { verb: "versionCreate", name: name.trim() };
+        },
+      },
+      switch: {
+        capabilityId: "version.switch", summary: "Switch the workspace folder to a version.", operands: "<version>",
+        notes: ["Name a version by its name or ID, as version list prints them."],
+        parse: input => ({ verb: "versionSwitch", version: versionOperand(input, "version switch") }),
+      },
+      merge: {
+        capabilityId: "version.merge", summary: "Merge a version into Main.", operands: "<version>",
+        notes: ["Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves."],
+        parse: input => ({ verb: "versionMerge", version: versionOperand(input, "version merge") }),
+      },
+      resolve: {
+        capabilityId: "version.conflict.resolve", summary: "Resolve an open conflict.", operands: "<conflict> [-]",
+        flags: [
+          { name: "--keep", value: "side", text: "Keep current or incoming, as version conflicts names the sides." },
+          { name: "--text", value: "text", text: "Replace both sides with this combined text." },
+        ],
+        notes: [
+          "Use - to read the combined text from stdin. Give exactly one of --keep, --text or -.",
+          "In a merge, current is Main and incoming is the version. In sync, current is this computer.",
+        ],
+        parse: input => {
+          const [conflictId, body, ...extra] = input.operands;
+          if (!conflictId) fail("version resolve requires a conflict ID");
+          noExtraArgs(extra, "version resolve");
+          if (body !== undefined && body !== "-") fail("version resolve takes - to read combined text from stdin");
+          const keep = lastValue(input, "--keep");
+          const text = lastValue(input, "--text");
+          if ([keep, text, body].filter(value => value !== undefined).length !== 1) fail("use exactly one of --keep <side>, --text <text> or -");
+          if (keep !== undefined && keep !== "current" && keep !== "incoming") fail("--keep takes current or incoming");
+          return { verb: "versionResolve", conflictId, keep: keep ?? "combined", text: text ?? "", stdin: body === "-" };
         },
       },
     },

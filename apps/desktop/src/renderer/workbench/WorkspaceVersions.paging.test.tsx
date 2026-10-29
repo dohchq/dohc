@@ -160,14 +160,15 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     expect(collectionWritesPaused("ws-1")).toBe(false);
   });
 
-  it("releases the pause without announcing a failed resolution", async () => {
+  it("releases the pause and reopens the editors after a failed resolution", async () => {
     bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("Resolution refused"));
-    const changed = vi.fn();
+    const changed = vi.fn(() => { expect(collectionWritesPaused("ws-1")).toBe(true); });
     await openSurface(() => beginCollectionLineageOperation("ws-1"), changed);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
     expect(screen.getByTestId("version-conflict-error").textContent).toBe("Resolution refused");
-    expect(changed).not.toHaveBeenCalled();
+    // Main closed the open documents before the resolve failed.
+    expect(changed).toHaveBeenCalledOnce();
     expect(collectionWritesPaused("ws-1")).toBe(false);
   });
 

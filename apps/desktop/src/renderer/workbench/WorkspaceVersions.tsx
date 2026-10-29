@@ -1073,9 +1073,14 @@ function ConflictResolver(props: {
       setBusy(true);
       setError(null);
       let releaseOperation: (() => void) | null = null;
+      // Main closes the open documents before it resolves, so once the
+      // resolve has started, a failure reopens the editors too, as a failed
+      // switch does.
+      let resolveIssued = false;
       try {
         releaseOperation = await props.beginLineageOperation();
         if (!liveToken.isCurrent(token)) return;
+        resolveIssued = true;
         const result = await bridge().resolveWorkspaceVersionConflict({
           workspaceId,
           conflictId: conflict.conflictId,
@@ -1085,6 +1090,7 @@ function ConflictResolver(props: {
         if (!liveToken.isCurrent(token)) return;
         props.onResolved(result);
       } catch (caught) {
+        if (resolveIssued) props.onWorkspaceStateChanged();
         if (!liveToken.isCurrent(token)) return;
         const error = readError(caught).refusal === "synced-deletion"
           ? new SyncedDeletionRevivalError(conflict.path, { cause: caught })

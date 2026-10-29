@@ -5,9 +5,10 @@ import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
 import { createDohcMcpServer } from "./server";
 import type { ToolContext } from "./tools";
 
-const tools = ["dohc_list_versions", "dohc_compare_version", "dohc_list_version_conflicts"];
+const tools = ["dohc_list_versions", "dohc_compare_version", "dohc_list_version_conflicts",
+  "dohc_create_version", "dohc_switch_version", "dohc_merge_version", "dohc_resolve_version_conflict"];
 
-it("offers the version reads to the owner only and sends them as the agent", async () => {
+it("offers the version tools to the owner only and sends them as the agent", async () => {
   expect((await advertisedCapabilityTools(undefined)).map(tool => tool.name)).toEqual(expect.arrayContaining(tools));
   for (const shareAccess of ["view", "comment", "edit"] as const) {
     const names = (await advertisedCapabilityTools(shareAccess)).map(tool => tool.name);
@@ -22,6 +23,10 @@ it("offers the version reads to the owner only and sends them as the agent", asy
     await client.callTool({ name: "dohc_list_versions", arguments: {} });
     await client.callTool({ name: "dohc_compare_version", arguments: { version: "Draft", afterPath: "a.md" } });
     await client.callTool({ name: "dohc_list_version_conflicts", arguments: { afterConflictId: "c1" } });
+    await client.callTool({ name: "dohc_create_version", arguments: { name: "Ideas" } });
+    await client.callTool({ name: "dohc_switch_version", arguments: { version: "Draft" } });
+    await client.callTool({ name: "dohc_merge_version", arguments: { version: "Draft" } });
+    await client.callTool({ name: "dohc_resolve_version_conflict", arguments: { conflictId: "c1", resolution: { keep: "combined", text: "both" } } });
   } finally {
     await client.close();
     await server.close();
@@ -30,5 +35,10 @@ it("offers the version reads to the owner only and sends them as the agent", asy
     expect.objectContaining({ verb: "versionList", args: expect.objectContaining({ actor: "agent" }) }),
     expect.objectContaining({ verb: "versionCompare", args: expect.objectContaining({ actor: "agent", version: "Draft", afterPath: "a.md" }) }),
     expect.objectContaining({ verb: "versionConflicts", args: expect.objectContaining({ actor: "agent", afterConflictId: "c1" }) }),
+    expect.objectContaining({ verb: "versionCreate", args: expect.objectContaining({ actor: "agent", name: "Ideas" }) }),
+    expect.objectContaining({ verb: "versionSwitch", args: expect.objectContaining({ actor: "agent", version: "Draft" }) }),
+    expect.objectContaining({ verb: "versionMerge", args: expect.objectContaining({ actor: "agent", version: "Draft" }) }),
+    expect.objectContaining({ verb: "versionResolve", args: expect.objectContaining({ actor: "agent", conflictId: "c1",
+      resolution: { keep: "combined", text: "both" } }) }),
   ]);
 });

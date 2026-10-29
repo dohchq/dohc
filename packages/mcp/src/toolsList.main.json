@@ -218,6 +218,27 @@
       }
     },
     {
+      "name": "dohc_create_version",
+      "description": "Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_dataset",
       "description": "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
       "inputSchema": {
@@ -1380,6 +1401,11 @@
                     "type": "string",
                     "const": "approve"
                   },
+                  "agentLabel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
                   "preparationId": {
                     "type": "string",
                     "format": "uuid",
@@ -1388,11 +1414,6 @@
                   "revisionSha256": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
                   }
                 },
                 "required": [
@@ -1862,6 +1883,11 @@
                     "type": "string",
                     "const": "approveMigration"
                   },
+                  "agentLabel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
                   "preparationId": {
                     "type": "string",
                     "format": "uuid",
@@ -1874,11 +1900,6 @@
                   "approvalDigest": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "agentLabel": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 160
                   }
                 },
                 "required": [
@@ -2503,6 +2524,27 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_merge_version",
+      "description": "Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "version"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -3420,6 +3462,65 @@
       }
     },
     {
+      "name": "dohc_resolve_version_conflict",
+      "description": "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conflictId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "resolution": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "keep": {
+                    "type": "string",
+                    "enum": [
+                      "current",
+                      "incoming"
+                    ]
+                  }
+                },
+                "required": [
+                  "keep"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "keep": {
+                    "type": "string",
+                    "const": "combined"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "keep",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "conflictId",
+          "resolution"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_retry_automation_run",
       "description": "Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.",
       "inputSchema": {
@@ -3742,6 +3843,27 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_switch_version",
+      "description": "Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "version"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {

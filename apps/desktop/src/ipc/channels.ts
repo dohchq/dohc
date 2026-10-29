@@ -340,6 +340,11 @@ export const CHANNELS = {
   // carries a round id; each renderer answers clear, hold, or cancel with it.
   exitRound: "desktop:exit-round",
   exitRoundAnswer: "desktop:exit-round-answer",
+  // Version rounds: before the CLI or MCP changes a workspace's versions,
+  // main asks each window showing it to save its open edits. Each answers
+  // ready or refused with the round id, and hears the round's end.
+  versionRound: "desktop:version-round",
+  versionRoundAnswer: "desktop:version-round-answer",
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",

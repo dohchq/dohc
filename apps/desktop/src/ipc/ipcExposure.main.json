@@ -331,6 +331,8 @@
     "desktop:update-state",
     "desktop:usage-record-stopped",
     "desktop:user-settings-changed",
+    "desktop:version-round",
+    "desktop:version-round-answer",
     "desktop:window-full-screen",
     "desktop:withdraw-share-changes",
     "desktop:workspace-activated",
