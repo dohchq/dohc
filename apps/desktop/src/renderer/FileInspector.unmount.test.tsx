@@ -1381,6 +1381,26 @@ describe("markdown editor unmount flush", () => {
     expect(written).toContain("Draft!");
   });
 
+  it("keeps other properties' edits when the editor goes while a property name is held", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\nstatus: draft\nowner: Sam\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.type(screen.getByLabelText("Property owner value"), "a");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toContain("status: draft\nowner: Sama\n");
+  });
+
   it("keeps a list property still being typed when Ctrl+/ switches the editor to source", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
