@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -89,10 +90,8 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     document.documentElement.setAttribute("data-theme", value);
     void getComputedStyle(document.body).backgroundColor;
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    await Promise.allSettled(document.getAnimations()
-      .filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)))
-      .map((animation) => animation.finished));
   }, theme);
+  await waitForVisibleAnimations(page);
 }
 
 // The given parts, with room around them for the shadow.
