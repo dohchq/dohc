@@ -485,18 +485,26 @@ describe("ChatLane", () => {
     bridgeMock.stopAgentRun.mockImplementationOnce(async () => {
       bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
     });
+    expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe("Agent working");
     fireEvent.click(screen.getByRole("button", { name: "Stop agent run" }));
     await waitFor(() => expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull());
+    expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe("");
     expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", runId: "run-1" });
   });
 
-  it("shows a run that starts without a new message", async () => {
+  it("shows and announces a run that starts without a new message", async () => {
     render(lane("agent-dm", "workspace-a", "agent"));
     await screen.findByText("Old message");
     expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+    // The region is already mounted, so a screen reader hears its text change.
+    const announcement = screen.getByTestId("chats-lane-dispatch-announcement");
+    expect(announcement.getAttribute("role")).toBe("status");
+    expect(announcement.textContent).toBe("");
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, pendingCount: 2 });
     await act(async () => activity({ workspaceId: "workspace-a" }));
     expect((await screen.findByTestId("chats-lane-dispatch-status")).textContent).toBe("agent working · 2 queuedStop");
+    expect(screen.getByTestId("chats-lane-dispatch-announcement")).toBe(announcement);
+    expect(announcement.textContent).toBe("Agent working, 2 queued");
   });
 
   it("ignores a run answer from a workspace the reader left", async () => {

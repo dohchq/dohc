@@ -220,6 +220,23 @@ export function ComposerModeBar(props: {
   );
 }
 
+// A screen reader hears the dispatch strip through a status region that stays
+// mounted, so a run that starts without a new message is still announced. A
+// comma reads better aloud than the strip's middle dot.
+export function DispatchAnnouncement(props: { testId: string; text: string }) {
+  return (
+    <span data-testid={props.testId} role="status" aria-live="polite" className="sr-only">
+      {props.text}
+    </span>
+  );
+}
+
+export function dispatchAnnouncement(working: boolean, pendingCount: number): string {
+  const queued = pendingCount > 0 ? `${pendingCount} queued` : "";
+  if (!working) return queued;
+  return queued ? `Agent working, ${queued}` : "Agent working";
+}
+
 // The read-only / ended composer replacement: honest and quiet.
 export function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
   return (
