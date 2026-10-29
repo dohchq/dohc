@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RestrictedModeIndicator } from "./RestrictedMode";
 import { Titlebar, workspaceName } from "./Titlebar";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { initWindowFullScreen } from "./windowFullScreen";
@@ -210,6 +211,43 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("workspace-switcher").getAttribute("title")).toBe(
       "launch-readiness-and-self-hosting",
     );
+  });
+
+  // Below 1100px the names need the room, so Go to… and Restricted Mode show
+  // only their icons, and the shortcut. Each keeps its name for tooltips and
+  // screen readers, each name has a floor, Go to… stays clear of the names'
+  // end, and the right group starts after Go to…. jsdom does no layout: the
+  // window shots measure it.
+  it("sets the narrow classes, the name floors and Go to…'s anchor", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "win32" });
+    render(
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        onQuickOpen={() => undefined}
+        version={<button type="button" data-testid="stub-version">Main</button>}
+        workspaceStatus={<RestrictedModeIndicator asking={false} onTrust={() => undefined} />}
+        update={<span />}
+      />,
+    );
+
+    expect(screen.getByTestId("titlebar").className).toContain("max-[1100px]:[--quick-open-width:5rem]");
+    const quickOpen = screen.getByTestId("titlebar-quick-open");
+    expect(quickOpen.getAttribute("title")).toBe("Go to…");
+    // 5rem below 1100px, and narrower than its 20rem when the names take its room.
+    expect(quickOpen.className).toContain("@container");
+    expect(within(quickOpen).getByText("Go to…").className).toContain("@max-[8.5rem]:sr-only");
+    expect(quickOpen.querySelector("kbd")?.className).not.toContain("sr-only");
+    const restricted = screen.getByRole("button", { name: "Restricted Mode" });
+    expect(within(restricted).getByText("Restricted Mode").className).toContain("max-[1100px]:sr-only");
+
+    expect(screen.getByTestId("workspace-switcher").className).toContain("min-w-[calc-size(max-content,min(size,4rem))]");
+    expect(screen.getByTestId("stub-version").parentElement?.className).toContain("min-w-[calc-size(max-content,min(size,7.5rem))]");
+    expect(screen.getByTestId("titlebar").className).toContain("[anchor-scope:--titlebar-names-end]");
+    expect(document.querySelector('[class*="[anchor-name:--titlebar-names-end]"]')).not.toBeNull();
+    expect(quickOpen.getAttribute("style")).toContain("anchor(--titlebar-names-end right, 0px) + 12px");
+    expect(screen.getByTestId("titlebar-right-group").getAttribute("style")).toContain("anchor(--titlebar-names-end right, 0px) + 12px");
   });
 
   it("closes the workspace switcher on Escape and returns focus to it", () => {
