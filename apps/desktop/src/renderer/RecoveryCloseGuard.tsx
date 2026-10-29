@@ -360,7 +360,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
     // The exit round this dialog answers for, when main is waiting on it,
-    // or the proceeded round whose exit this window's veto holds.
+    // or the proceeded round whose exit this window's veto holds. A newer
+    // reload or close holds no round.
     round?: number;
   } | null>(null);
   // Live, not a snapshot: the dialog embeds Copy/Dismiss,
@@ -469,7 +470,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       showCloseWarning({
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,
-        ...(proceededRound ? { round: proceededRound.id } : {}),
+        ...(proceededRound && pending?.kind === proceededRound.kind ? { round: proceededRound.id } : {}),
       });
     };
     // Required contract, called directly. The bridge and the preload carry

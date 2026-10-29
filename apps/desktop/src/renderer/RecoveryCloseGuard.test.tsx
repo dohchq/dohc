@@ -624,6 +624,27 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
   });
 
+  it("keeps a newer reload's warning open when another window goes back on the approved restart", async () => {
+    const main = roundBridge({ reloadRenderer: vi.fn(async () => undefined) });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    act(() => requestGuardedReload());
+    captureOrphanedDraft("ws-1", "a.md", "Later");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway");
+
+    main.cancelled(1);
+    expect(screen.getByTestId("recovery-close-anyway").textContent, "a reload warning must not take the held restart's round").toBe("Reload anyway");
+  });
+
   // Dismissing the last at-risk draft from a round's warning removes the
   // dialog and its buttons. The round still owes main an answer.
   it("answers a held round clear when its warning empties by dismissal", async () => {
