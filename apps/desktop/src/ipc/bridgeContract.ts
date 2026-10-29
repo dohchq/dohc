@@ -3891,6 +3891,8 @@ export const RelayShareRevokeResponse = z.object({
 
 export const UndoRelaySharePayload = z
   .object({
+    // The workspace the removal came from.
+    workspaceId: WORKSPACE_ID,
     shareId: OPAQUE_ID,
     undoId: RelayShareUndoReceipt.shape.undoId,
   })

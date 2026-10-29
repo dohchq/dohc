@@ -78,6 +78,7 @@ export function useShareRemovalNotices(input: {
         busy = true;
         try {
           await bridge().undoRelayShare({
+            workspaceId: removal.workspaceId,
             shareId: removal.shareId,
             undoId: receipt.undoId,
           });
