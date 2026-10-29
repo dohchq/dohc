@@ -238,6 +238,7 @@ describe("useShellError", () => {
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(open).toHaveBeenCalledWith("note.md");
     expect(read).toHaveBeenCalledWith("held-save");
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
     expect(retry).not.toHaveBeenCalled();
   });
 

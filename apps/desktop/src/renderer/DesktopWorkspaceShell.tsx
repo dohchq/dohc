@@ -5404,19 +5404,20 @@ export function DesktopWorkspaceShell(props: {
       clearIdentity("file-observation");
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
-  const hideWorkspaceError = useCallback((id: string) => {
-    hideShellError(id);
+  // Reading a refusal's row stores its read mark. Closing its toast alone
+  // doesn't, so an unread one toasts again the next time dohc starts.
+  const readWorkspaceError = useCallback((id: string) => {
     const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
     if (!refusal) return;
     const askedFor = workspaceId;
     void props.sentNotices!.read([refusal]).catch(error => {
       if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
     });
-  }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
+  }, [props.sentNotices, workspaceId, reportShellError]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, hideWorkspaceError);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, hideWorkspaceError]);
+      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
   // The notes whose change dohc holds, for their band.
   const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
     notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
@@ -5796,7 +5797,8 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
-              onHideWorkspaceError={hideWorkspaceError}
+              onHideWorkspaceError={hideShellError}
+              onReadWorkspaceError={readWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}

@@ -789,6 +789,8 @@ export function NoticeCenter(props: {
   onRetryWorkspaceError?: (id: string) => void;
   onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
+  // Told when an error's row is read. Closing its toast doesn't read it.
+  onReadWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Told each time an error's toast comes on screen.
   onWorkspaceErrorShown?: (id: string) => void;
@@ -1198,8 +1200,11 @@ export function NoticeCenter(props: {
         ...(props.onDismissWorkspaceError
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
-        ...(!error.seen && props.onHideWorkspaceError
-          ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
+        ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
+          ? { onRead: () => {
+            if (!error.seen) props.onHideWorkspaceError?.(error.id);
+            if (!error.read) props.onReadWorkspaceError?.(error.id);
+          } }
           : {}),
         read: error.read === true,
         timeMs: error.atMs,
@@ -1458,6 +1463,7 @@ export function NoticeCenter(props: {
     props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
     props.onHideWorkspaceError,
+    props.onReadWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,

@@ -1761,6 +1761,43 @@ describe("notices sent to you", () => {
     expect(notices.dismiss).toHaveBeenCalledTimes(1);
   });
 
+  const HELD: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held", senderKind: null,
+    title: "Held a change to b.md", body: "Saving it would also change parts dohc can't show." };
+
+  it("keeps a held change's row unread when its toast closes", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([HELD]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(notices.read).not.toHaveBeenCalled();
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 1 unread");
+  });
+
+  it("reads a held change's row on Open note", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([HELD]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    await user.click(within(toast).getByRole("button", { name: "Open note" }));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledExactlyOnceWith([HELD]);
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  it("keeps a read held change read, with no toast, when dohc starts again", async () => {
+    const user = userEvent.setup();
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([{ ...HELD, readAtMs: 6_000 }]) });
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    await user.click(toggle);
+    await screen.findByTestId("notice-held");
+    expect(screen.queryByTestId("notice-held-unread")).toBeNull();
+    expect(toggle.getAttribute("aria-label")).toBe("Notices");
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+  });
+
   it("keeps a newer refusal after an older shell dismissal finishes", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
