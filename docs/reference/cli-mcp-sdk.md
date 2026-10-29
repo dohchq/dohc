@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced. In the owning works
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -209,7 +209,7 @@ Returns `{ ok: true, copyPath, packagePath, folder, storedOn, keptEdits } | { ok
 
 ### `dohc_retry_kept_edits`
 
-Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -855,9 +855,9 @@ dohc document kept-edits [options]
 
 List live documents whose edits the server refused, and where dohc keeps those edits.
 
-storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
 
-With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true }[] }`.
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[] }`.
 
 #### `dohc document save-recovery-copy`
 

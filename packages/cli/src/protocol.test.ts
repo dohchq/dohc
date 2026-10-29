@@ -12,6 +12,13 @@ import {
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
+it("preserves each save-only restore queue and its incident in kept edits", () => {
+  const keptEdits = ["old-1:delivery:0", "old-2:delivery:0"].map(incident => ({path: "note.md", reason: "restore-fenced",
+    storedOn: "this-computer", recovery: "paused", saveOnly: true, incident}));
+  expect(parseCliResult("liveKeptEdits", {ok: true, keptEdits})).toEqual({ok: true, keptEdits});
+  expect(() => parseCliResult("liveKeptEdits", {ok: true, keptEdits: [{...keptEdits[0], saveOnly: false}]})).toThrow();
+});
+
 it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {
   const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args: { ...argsBase, lane: "received" } };
   expect(cliRequestSchema.safeParse(request).success).toBe(true);

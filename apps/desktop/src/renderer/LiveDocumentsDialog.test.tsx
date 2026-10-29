@@ -89,6 +89,19 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("keeps each restore queue beside the live note and offers only its own recovery copy", async () => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("note.md"), ...["old-1", "old-2"].map(incident =>
+      row("note.md", {quarantine: "paused", saveOnly: true, storedOn: "this-computer", incident}))], "next"));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const first = await screen.findByTestId("live-document-row-note.md-old-1");
+    expect(actions("note.md")).toEqual(["Stop live editing"]);
+    expect(within(first).queryAllByRole("button").map(button => button.textContent)).toEqual(["Save recovery copy"]);
+    expect(first.textContent).toContain("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
+    await userEvent.setup().click(within(first).getByRole("button", {name: "Save recovery copy of note.md"}));
+    expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
+    expect(screen.getByTestId("live-document-row-note.md-old-2")).toBeTruthy();
+  });
   it("offers Resume on a live row with a deferred Stop after local clear failed", async () => {
     const h=harness();
     h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));

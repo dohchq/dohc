@@ -334,6 +334,7 @@ const DOCUMENT_VERBS = {
     operands: "",
     notes: ["storedOn is this-computer, or server for a document the server hosts.",
       "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again.",
       "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",

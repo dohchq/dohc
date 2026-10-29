@@ -1221,6 +1221,7 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       incident: keptEditsIncidentSchema,
       recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
       earlier: z.literal(true).optional(),
+      saveOnly: z.literal(true).optional(),
     }).strict()),
   }).strict(),
   rawFailureSchema,
