@@ -735,6 +735,10 @@ describe("desktop CLI workspace context", () => {
       vi.mocked(f.dependencies.liveDocuments.readDocument)
         .mockResolvedValueOnce({ path: "draft.md", state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")) });
       expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft" });
+      // A note nested deeper than the editor can show reads as its file too.
+      const nested = `${"*a ".repeat(17)}b${" a*".repeat(17)}\n`;
+      await writeFile(join(root, "nested.md"), nested);
+      expect(await context.documents!.read("nested.md")).toEqual({ path: "nested.md", markdown: nested });
 
       const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
       await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });

@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, sessionVerdict, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyMarkdownVerdict, lossyNoteRefusal, sameMarkdownMeaning, sessionVerdict, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -58,8 +58,9 @@ it('flags a note the editor cannot import', () => {
 it.each([
   `${'>'.repeat(121)} a\n`,
   `${'*a '.repeat(17)}b${' a*'.repeat(17)}\n`,
-])('leaves a nesting refusal to the rich editor instead of asking for lossy-note consent: %s', markdown => {
-  expect(isLossyMarkdown(markdown)).toBe(false)
+])('counts a nesting refusal as lossy, and tells the rich editor it refuses: %s', markdown => {
+  expect(lossyMarkdownVerdict(markdown)).toBe('refused')
+  expect(isLossyMarkdown(markdown)).toBe(true)
 })
 
 it('remembers a verdict by the digest it was given', () => {

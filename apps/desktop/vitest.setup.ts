@@ -98,7 +98,7 @@ vi.waitFor = (callback, options) =>
 // tests answer that one worker in-thread with the same check. Any other
 // worker still fails to construct, as it does without this.
 if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
-  const { isLossyMarkdown, sessionVerdict } = await import("@dohc/ydoc-projection/lossy-markdown");
+  const { lossyMarkdownVerdict, sessionVerdict } = await import("@dohc/ydoc-projection/lossy-markdown");
   class NoteCheckWorker {
     onmessage: ((event: { data: unknown }) => void) | null = null;
     onerror: ((event: unknown) => void) | null = null;
@@ -110,7 +110,7 @@ if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
     }
     postMessage(data: { id: number; markdown?: string; state?: Uint8Array }): void {
       void Promise.resolve().then(() => {
-        const answer = data.state ? sessionVerdict(data.state) : { lossy: isLossyMarkdown(data.markdown ?? "") };
+        const answer = data.state ? sessionVerdict(data.state) : { lossy: lossyMarkdownVerdict(data.markdown ?? "") === "lossy" };
         if (!this.#closed) this.onmessage?.({ data: { id: data.id, ...answer } });
       });
     }

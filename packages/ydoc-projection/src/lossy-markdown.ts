@@ -26,10 +26,10 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  *
  * A note dohc wrote is its own canonical Markdown, apart from the final
  * newline a save drops, so it skips the render. A note the editor cannot
- * import at all is lossy too, except nesting refusals the rich editor reports
- * directly.
+ * import at all is lossy too. `refused` is the lossy note whose nesting the
+ * rich editor refuses, which the editor reports itself.
  */
-export function isLossyMarkdown(markdown: string): boolean {
+export function lossyMarkdownVerdict(markdown: string): 'clean' | 'lossy' | 'refused' {
   let canonical: string
   try {
     const doc = markdownToYDoc(markdown)
@@ -39,12 +39,15 @@ export function isLossyMarkdown(markdown: string): boolean {
       doc.destroy()
     }
   } catch (error) {
-    // The rich editor shows its nesting refusal before offering an edit.
-    if (error instanceof MarkdownNestingRefusal) return false
-    return true
+    return error instanceof MarkdownNestingRefusal ? 'refused' : 'lossy'
   }
-  if (canonical === markdown.replace(/\r?\n$/u, '')) return false
-  return !sameMarkdownMeaning(markdown, canonical)
+  if (canonical === markdown.replace(/\r?\n$/u, '')) return 'clean'
+  return sameMarkdownMeaning(markdown, canonical) ? 'clean' : 'lossy'
+}
+
+/** Whether `markdown` is a lossy note, counting a nesting refusal as lossy. */
+export function isLossyMarkdown(markdown: string): boolean {
+  return lossyMarkdownVerdict(markdown) !== 'clean'
 }
 
 const VERDICT_LIMIT = 256
