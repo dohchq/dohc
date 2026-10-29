@@ -1,3 +1,4 @@
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -928,6 +929,29 @@ describe("stop and restore in main", () => {
       });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
       expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("continues mixed-file Stop and Undo past a synced deletion refusal", async () => {
+    const f = await capturedFiles(["docs/a.md", "notes/guarded.md", "docs/z.md"]);
+    const restore = f.engineCapture.restoreFileToBeforeMoment.bind(f.engineCapture);
+    const refusal = new SyncedDeletionRevivalError();
+    let blocked = f.files[1]!.momentId;
+    vi.spyOn(f.engineCapture, "restoreFileToBeforeMoment").mockImplementation(async (id, ...args) => {
+      if (id === blocked) throw refusal;
+      return restore(id, ...args);
+    });
+    try {
+      const target = {kind: "person", userId: "user_ana"};
+      const result = await f.call(CHANNELS.stopAndRestore, {target}) as {restored: {path: string; restoredMomentId: string}[]};
+      expect(result).toMatchObject({restored: [{path: "docs/a.md"}, {path: "docs/z.md"}],
+        review: [{path: "notes/guarded.md", reason: "restore-refused", detail: refusal.message, refusal: "synced-deletion"}], unfinished: null});
+      blocked = result.restored[1]!.restoredMomentId;
+      expect(await f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: result.restored.map(file => file.restoredMomentId)}))
+        .toMatchObject({files: [{kind: "refused", momentId: blocked, detail: refusal.message, refusal: "synced-deletion"}, {kind: "restored"}], errorMessage: null});
+      expect(await readFile(join(f.rootPath, "docs/a.md"), "utf8")).toBe("shared edit");
+      expect(await readFile(join(f.rootPath, "docs/z.md"), "utf8")).toBe("owner original");
+      expect(await readFile(join(f.rootPath, "notes/guarded.md"), "utf8")).toBe("shared edit");
     } finally { await f.engineCapture.stop(); }
   });
 

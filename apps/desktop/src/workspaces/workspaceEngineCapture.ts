@@ -1,4 +1,5 @@
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
+import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
@@ -7390,6 +7391,9 @@ export function createWorkspaceEngineCapture(
             if (code === "recovery-unavailable") throw new RestoreLocalChangesError(path, "dohc could not remove this file. Check folder access, then try again.");
             if (code === "file-locked") throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
             if (code?.startsWith("materialize-")) throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
+          }
+          if (error instanceof DaemonRefusalError && error.message === "synced-deletion-revival-refused") {
+            throw new SyncedDeletionRevivalError(path, { cause: error }, true);
           }
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }
