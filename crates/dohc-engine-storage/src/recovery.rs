@@ -663,8 +663,8 @@ mod tests {
         let (store, folder) = (scratch.path().join("store"), scratch.path().join("copy"));
         std::fs::create_dir(&store).unwrap();
         let source = store.join("engine.db");
-        earlier_store(&source);
-        // The last migration creates an index of this name, so on this store it fails.
+        create_store_before_migration_for_test(&source, "v2-chat-stream-order").unwrap();
+        // That migration creates an index of this name, so on this store it fails.
         Connection::open(&source)
             .unwrap()
             .execute_batch("CREATE TABLE idx_chat_threads_channel_lane_created (planted INTEGER)")
