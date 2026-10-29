@@ -618,7 +618,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // restore moved it past its queues'.
   const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; reconciledThrough?: number; unproven: string[]; journals: unknown[];
     unpushed: number; releasePending?: string; capture: NativeOwnerActivation; adoption: {activationId: string; throughCursor: number | null};
-    generation?: number} =
+    generation?: number; abandonableSeed?: boolean} =
     {capture, unproven: [], journals: [], unpushed: 0, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
   const ownerBoundary = () => {
     const tip = JSON.parse(String(raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json));
@@ -632,7 +632,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // A granted Try again keeps the document's unload pending, as the engine does.
   // Its head's append key tells an adoption seed from later work. Other queues the test adds keep their own state; the engine
   // answers one it no longer holds as not found. `checkpoint` is the accepted state a recovery copy reads.
-  type KeptOutbox = {binding: unknown; state: string; retryDeliveryId: string | null; appendKey: string; checkpoint?: Buffer};
+  // A drained one holds no pending entry, as once the engine abandoned its seed.
+  type KeptOutbox = {binding: unknown; state: string; retryDeliveryId: string | null; appendKey: string; checkpoint?: Buffer; drained?: boolean};
   const keptOutbox: KeptOutbox = {binding: undefined, state: "quarantined", retryDeliveryId: null, appendKey: "append-1"};
   const keptOutboxes = new Map<string, KeptOutbox | null>();
   const outboxOf = (request: {id: number; params: Record<string, unknown>}) => {
@@ -658,7 +659,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const keptPage = (request: {id: number; params: Record<string, unknown>}, queue = outboxOf(request)) => {
     const {params} = request;
     const header = {outboxId: params.outboxId, binding: queue.binding, baseUpdateDigest: (queue.binding as {lineageClaimId: string}).lineageClaimId,
-      baseByteLength: 1, state: queue.state, pendingBytes: 1, pendingEntryCount: 1, nextSequence: 2, oldestEntryAtMs: 1, quarantineReason: "invalid-update",
+      baseByteLength: 1, state: queue.state, pendingBytes: queue.drained ? 0 : 1, pendingEntryCount: queue.drained ? 0 : 1, nextSequence: 2, oldestEntryAtMs: 1, quarantineReason: "invalid-update",
       observedBinding: null, retryDeliveryId: queue.retryDeliveryId}, update = Buffer.from([7]);
     const snapshot = sha256(Buffer.from(JSON.stringify(header))), cursor = (part: string, sequence = 0) => ({snapshot, part, sequence, offset: 0});
     const requested = (params.cursor as ReturnType<typeof cursor> | undefined) ?? cursor("header");
@@ -667,7 +668,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     // a copy of a queue holding a refused seed, at any restore generation, must hold.
     const checkpointDigest = queue.checkpoint ? sha256(queue.checkpoint) : null;
     const refusedSeed = queue.state === "quarantined" && queue.appendKey.startsWith("owner-adoption:") && queue.retryDeliveryId === null;
-    const live = {firstEntryCursor: cursor("entryHeader", 1), frozenAtRefusedSeed: seeded(queue) && queue.retryDeliveryId === null,
+    const live = {firstEntryCursor: queue.drained ? null : cursor("entryHeader", 1), frozenAtRefusedSeed: seeded(queue) && queue.retryDeliveryId === null,
       checkpointDigest, recoveryCheckpointDigest: refusedSeed ? checkpointDigest : null};
     if (requested.part === "checkpoint" && !queue.checkpoint) return {kind: "readChanged"};
     const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, ...live})), cursor("base")] as const
@@ -743,6 +744,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           if (engine.refusal) throw engine.refusal;
           if (request.params.journal) {engine.journals.push(request.params.journal); engine.unproven = [];}
           if (engine.unproven.length) return reply({status: "pending", reason: "delivery", deliveries: engine.unproven});
+          // A refused seed holds the retirement until the journal proves it absent, and the engine abandons it
+          // only when nothing applied it: its queue keeps its quarantine and refusal for the owner's copy.
+          if (seedFrozen()) {
+            if (!request.params.journal || !engine.abandonableSeed) return reply({status: "pending", reason: "seed-quarantined", deliveries: ["refused"]});
+            for (const queue of [keptOutbox, ...keptOutboxes.values()]) if (seeded(queue)) Object.assign(queue, {appendKey: "append-1", drained: true});
+          }
           const after = (request.params.afterReceipt as {journalCursor: number} | null)?.journalCursor ?? 0;
           const cursor = (ack: Record<string, unknown>) => ack.journalCursor as number;
           const all = [...applied.values()].filter(ack => cursor(ack) > after && cursor(ack) <= (request.params.acceptedThrough as number))
@@ -1427,11 +1434,12 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
 }
 
 // Proves: a stopped document whose owner has no recovery copy of edits the
-// server kept retires once, then stays, with its workspace attached, through
-// later passes. A Try again granted before Stop ends once it retired, keeping
-// the queue. Once the owner confirms a copy, its workspace drains and its rows
-// go. Try again needs the live authority Stop ended; on a hosted document it
-// grants the refused head through the host's own connection.
+// server kept departs as an ordinary unload, then stays, with its workspace
+// attached, through later passes. A Try again granted before Stop ends,
+// keeping the queue. Once the owner confirms a copy, its retirement proves the
+// refused edit absent from the journal and completes, its workspace drains and
+// its rows go. Try again needs the live authority Stop ended; on a hosted
+// document it grants the refused head through the host's own connection.
 it("ends a Try again Stop left outstanding, and keeps the stopped document until its owner confirms a recovery copy", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1451,11 +1459,16 @@ it("ends a Try again Stop left outstanding, and keeps the stopped document until
   const pulls = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
   const seen = pulls();
   await vi.waitFor(() => expect(pulls()).toBeGreaterThan(seen + 1));
-  expect(new Set(o.calls(sent))).toEqual(new Set(retirement));
-  expect(o.host.retains(o.sibling)).toBe(true);
+  // Retiring would keep the refused edit out of the queue a copy reads, so nothing retires before the copy.
+  expect(o.calls(sent)).not.toContain("liveApplication.reconcileActivation");
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
   expect(o.host.drained("workspace")).toBe(false);
+  o.engine.unproven = ["refused"];
   expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  expect(o.calls(sent)).toContain("liveApplication.releaseActivation");
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
   expect(o.host.retains(o.sibling)).toBe(false);
   expect(k.row()).toBeNull();
   expect(k.engine("ydoc.ownerOutbox.quarantine")).toHaveLength(1);
@@ -1535,12 +1548,76 @@ it("lets a document refused at its adoption seed depart with later accepted work
   await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
   expect(o.keptOutbox).toMatchObject({state: "quarantined", retryDeliveryId: null});
   expect(k.row()).toMatchObject({retrying: false, copied: false});
-  // No registration or settlement, so nothing to publish: the one unload is all the departure asked of the engine.
-  expect(o.calls(sent)).toEqual(["liveApplication.unloadDocument"]);
+  // Its retirement asks the journal about the seed, which holds it: no registration or settlement, so nothing
+  // to publish, and the one unload is all the departure asked of the engine besides.
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  const departure = () => o.calls(sent).filter(method => method !== "liveApplication.reconcileActivation");
+  expect(departure()).toEqual(["liveApplication.unloadDocument"]);
   expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(k.row()).toBeNull();
-  expect(o.calls(sent).every(method => method === "liveApplication.unloadDocument")).toBe(true);
+  expect(departure().every(method => method === "liveApplication.unloadDocument")).toBe(true);
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
+});
+
+// Proves: Sol's F3. The relay refused the owner's adoption seed and nothing applied it. Stop's retirement asks
+// the journal, which proves the seed absent; the engine abandons it, and the retirement completes without
+// waiting for a recovery copy, which stays asked for. The first Resume activates the successor.
+it("retires a document refused at a seed nothing applied before its copy, and activates the successor on the first Resume", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.engine.abandonableSeed = true;
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull());
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  expect(k.row()).toMatchObject({copied: false});
+  expect(o.host.drained("workspace")).toBe(false);
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(k.row()).toMatchObject({copied: false});
+});
+
+// Proves: Opus's F2. Resume while a stopped document's retirement waits, on a queue frozen at a seed nothing
+// applied, leaves the retirement running on every pass, which proves the seed absent and abandons it. As for
+// any Resume before a retirement finished, the obligation stays until the document departs again; then it
+// completes without waiting for a recovery copy, and the next Resume activates the successor.
+it("keeps retiring a document resumed while its retirement on a refused seed waited, and activates the successor after it departs", async () => {
+  const o = await enrolledServiceHost({freshRegistrations: true}), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.engine.abandonableSeed = true;
+  o.stop();
+  // Its publication does not finish, so the retirement waits after it settled.
+  o.replies.push = {hasMore: true};
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThan(0));
+  expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
+  const resume = async () => {
+    o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+    await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  };
+  o.replies.push = {};
+  await resume();
+  const reconciled = o.calls(sent).filter(method => method === "liveApplication.reconcileActivation").length;
+  await o.nextPull();
+  await vi.waitFor(() => expect(o.calls(sent).filter(method => method === "liveApplication.reconcileActivation").length).toBeGreaterThan(reconciled));
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  // Stop again: the document departs, and the retirement completes with the copy still asked for.
+  o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 50, guard() {}});
+  await o.depart();
+  await vi.waitFor(() => expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull());
+  expect(k.row()).toMatchObject({copied: false});
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  await resume();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
 });
 
 // Proves: a refused seed of an earlier generation whose final accepted state

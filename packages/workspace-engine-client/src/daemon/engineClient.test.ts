@@ -3304,9 +3304,11 @@ describe("EngineClient", () => {
     const transport = client(peer);
     peer.acknowledge();
     await transport.ready();
-    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 });
+    const cancel = new AbortController();
+    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancel.signal);
     await nextImmediate();
-    await transport.cancelRequest(50);
+    cancel.abort();
+    await nextImmediate();
     expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
     // Its handler had answered; the engine writes the cancellation instead.
     peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "held document answer cancelled", retry: "no" } });

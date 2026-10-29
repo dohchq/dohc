@@ -1433,6 +1433,53 @@ fn undelivered_seed(
     Ok(!delivered)
 }
 
+/// The head of a kept relay refusal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeptHead {
+    Seed,
+    Edit,
+}
+
+/// The refused head `entry` waits at or behind, when the relay refused it and
+/// nothing can deliver `entry`: its outbox is quarantined without a Try again,
+/// the head is pending or kept by an earlier pass, and nothing accepted or
+/// applied `entry`'s delivery.
+fn kept_refusal(
+    conn: &Connection,
+    namespace: &str,
+    entry: &RetainedEntry,
+) -> Result<Option<KeptHead>, ApplicationError> {
+    conn.query_row(
+        "SELECT json_extract(h.native_source_json,'$.origin.kind')='adoptionSeed'
+         FROM owner_ydoc_outboxes o
+         JOIN owner_ydoc_outbox_refusals r ON r.outbox_id=o.outbox_id
+         JOIN owner_ydoc_outbox_entries h ON h.outbox_id=o.outbox_id AND h.delivery_id=r.delivery_id
+         WHERE o.outbox_id=?1 AND o.state='quarantined' AND o.retry_delivery_id IS NULL AND h.sequence<=?2
+           AND (h.pending=1 OR h.terminal_reason=?5)
+           AND NOT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries p WHERE p.outbox_id=o.outbox_id
+             AND p.sequence<h.sequence AND p.pending=1)
+           AND NOT EXISTS(SELECT 1 FROM live_accepted_updates WHERE relay_database_namespace=?3 AND delivery_id=?4)
+           AND NOT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?3 AND delivery_id=?4)
+         LIMIT 1",
+        params![
+            entry.outbox_id,
+            entry.sequence,
+            namespace,
+            entry.delivery_id,
+            crate::owner_outbox::RETIREMENT_KEPT
+        ],
+        |row| row.get::<_, Option<bool>>(0),
+    )
+    .optional()
+    .map_err(read_sql)
+    .map(|head| {
+        head.map(|seed| match seed {
+            Some(true) => KeptHead::Seed,
+            _ => KeptHead::Edit,
+        })
+    })
+}
+
 /// The one representation of a seed its activation never delivered, while
 /// current and after release. The terminal reason alone proves nothing.
 pub(crate) fn is_abandoned_seed(
@@ -1561,6 +1608,9 @@ fn reconcile_in_tx(
     let mut unresolved = Vec::new();
     let mut accepted: Vec<(String, Vec<OwnerDeliveryReceipt>)> = Vec::new();
     let mut abandoned = Vec::new();
+    let mut kept = Vec::new();
+    // Outboxes a refused seed holds: none of their entries changes.
+    let mut held = BTreeSet::new();
     // Outboxes whose next pending entry stays unproven or was never
     // delivered: nothing after it can be acknowledged.
     let mut stalled = BTreeSet::new();
@@ -1599,15 +1649,33 @@ fn reconcile_in_tx(
                     }
                 }
                 Some(Answer::Absent) => {
-                    // Only a seed its activation never delivered may go undelivered.
-                    if entry.update_blob.is_none()
-                        || entry.terminal_reason.is_some()
-                        || !undelivered_seed(tx, scope.namespace, &retiring, &entry)?
-                    {
+                    if entry.update_blob.is_none() || entry.terminal_reason.is_some() {
                         return Err(ApplicationError::Conflict);
                     }
-                    stalled.insert(entry.outbox_id.clone());
-                    abandoned.push((entry.outbox_id, entry.sequence));
+                    let seed = matches!(entry.source.origin, OwnerOutboxNativeOrigin::AdoptionSeed);
+                    // A seed its activation never delivered goes undelivered.
+                    if seed && undelivered_seed(tx, scope.namespace, &retiring, &entry)? {
+                        stalled.insert(entry.outbox_id.clone());
+                        abandoned.push((entry.outbox_id, entry.sequence));
+                        continue;
+                    }
+                    let refused = kept_refusal(tx, scope.namespace, &entry)?;
+                    if !seed && refused == Some(KeptHead::Edit) {
+                        // The relay refused an edit at the head and no Try
+                        // again can deliver it: it and what waits behind it
+                        // are kept, with their bytes.
+                        stalled.insert(entry.outbox_id.clone());
+                        kept.push((entry.outbox_id, entry.sequence));
+                    } else if entry.quarantined && (seed || refused == Some(KeptHead::Seed)) {
+                        // A refused seed no settlement may pass, or an edit
+                        // behind one, holds the retirement without failing it.
+                        seed_quarantined = true;
+                        held.insert(entry.outbox_id.clone());
+                        stalled.insert(entry.outbox_id);
+                        unresolved.push(entry.delivery_id);
+                    } else {
+                        return Err(ApplicationError::Conflict);
+                    }
                 }
                 None => {
                     seed_quarantined |= entry.quarantined
@@ -1646,8 +1714,14 @@ fn reconcile_in_tx(
             }
         }
     }
-    for (outbox, sequence) in &abandoned {
+    for (outbox, sequence) in abandoned
+        .iter()
+        .filter(|(outbox, _)| !held.contains(outbox))
+    {
         crate::owner_outbox::abandon_seed_in_tx(tx, outbox, *sequence).map_err(outbox_error)?;
+    }
+    for (outbox, sequence) in &kept {
+        crate::owner_outbox::keep_refused_in_tx(tx, outbox, *sequence).map_err(outbox_error)?;
     }
     for (outbox, receipts) in &accepted {
         crate::owner_outbox::acknowledge_in_tx(tx, outbox, receipts).map_err(outbox_error)?;

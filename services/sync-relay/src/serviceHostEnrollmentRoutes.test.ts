@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {EventEmitter} from "node:events";
 import type {ServerResponse} from "node:http";
-import {pipeResponseBody} from "@dohc/service-http";
+import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {afterEach, expect, it, vi} from "vitest";
 import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "./liveTickets.test-helper";
 import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement";
@@ -304,6 +304,38 @@ it("holds a recovery page's read slot until a slow client's socket drains it or 
   await abandoned;
   await vi.waitFor(() => expect(f.host.keptEdits.page).toHaveBeenCalledTimes(4));
   expect((await Promise.all(waiting)).map(response => response.status)).toEqual([200, 200]);
+});
+
+// Proves: a client that stops taking a recovery page loses it after the drain timeout,
+// so its read slot goes to the next read instead of staying taken.
+it("ends a recovery page a stalled client stopped taking and frees its read slot", async () => {
+  const f = await fixture();
+  for (const index of [1, 2, 3]) {
+    f.storage.recordServiceKeptEdits({identity, outboxId: `outbox-${index}`, binding: {...binding, objectId: `other-object-${index}`}, reason: "invalid-update",
+      headDeliveryId: "delivery-1", refusalKey: `refusal-${index}`, nowMs: 5});
+  }
+  const read = (index: number) => f.handle(f.request("POST", {action: "page", outboxId: `outbox-${index}`,
+    generation: f.storage.readServiceKeptEdits(queue(`outbox-${index}`))!.generation}, {}, "/kept-edits"));
+  const [one, two] = await Promise.all([read(1), read(2)]);
+  const waiting = read(3);
+  expect(one.headers.has(DRAIN_TIMEOUT_HEADER)).toBe(true);
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  try {
+    const stalled = new SlowSocket(), piped = pipeResponseBody(one, stalled as unknown as ServerResponse);
+    // Under fake timers vi.waitFor would advance them, so this lets the one write happen without time passing.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stalled.writes).toBe(1);
+    await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1);
+    expect(f.host.keptEdits.page).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await piped;
+    expect(stalled.destroyed).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+  await vi.waitFor(() => expect(f.host.keptEdits.page).toHaveBeenCalledTimes(3));
+  await two.body!.cancel();
+  expect((await waiting).status).toBe(200);
 });
 
 // Proves: more kept queues than one page never break the live host's answer; the rest follow its cursor.

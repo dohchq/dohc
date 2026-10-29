@@ -78,8 +78,11 @@ export interface RetirementScope {
   /** A pull confirmed it parked: it is no longer departed. */
   parked():boolean;
 }
-/** How one retirement pass ended. */
-export type RetirementStep={kind:"retired"}|{kind:"pending";reason:string};
+/**
+ * How one retirement pass ended. Held: the journal proved what the engine asked, and a refused
+ * adoption seed it cannot abandon still holds the retirement, which no later pass changes by itself.
+ */
+export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
 const RETIREMENT_ROUNDS=4;
 const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
 // The engine's answer for its `status`, with exactly that status's keys.
@@ -439,8 +442,10 @@ export class ServiceActivationDriver {
       const tip=owned?.tip ?? null;
       const reply=answer(await send("liveApplication.reconcileActivation",{...key,afterReceipt:tip && {...tip},maxApplications,...(journal?{journal}:{})}),
         {pending:["reason","deliveries"],reconciled:["adoption","applications","hasMoreApplications","settle"]});
+      const proved=journal!==undefined;
       journal=undefined;
       if(reply.status==="pending"){
+        if(proved && reply.reason==="seed-quarantined")return {kind:"held"};
         if(!Array.isArray(reply.deliveries) || !reply.deliveries.every(id=>typeof id==="string"))throw new Error("Invalid live retirement response.");
         const evidence=o.storage.retirementJournalEvidence(open,reply.deliveries);
         journal={receipts:evidence.receipts.map(receipt=>({...receipt})),absent:evidence.absent};

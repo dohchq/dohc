@@ -1700,7 +1700,12 @@ pub fn adopt_owner_committed(
                 // The accepted state at B, which local state must contain:
                 // merging it into a copy of local state adds nothing.
                 let through = succession.prefix.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
-                let accepted = accepted_history::read_state(tx, &held, through, cut.reconstruction)?;
+                // Adoption still answers a missing dependency as a conflict.
+                let accepted = accepted_history::read_state(tx, &held, through, cut.reconstruction)
+                    .map_err(|error| match error {
+                        ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                        error => error,
+                    })?;
                 let accepted_full = accepted.encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
                     .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
                 let merged = Ydoc::wire();
@@ -2016,9 +2021,16 @@ fn require_succession(
     })
 }
 
-/// A quarantine a successor may end: its predecessor's seed failed
-/// provenance and was strictly abandoned.
-const PROVENANCE_REFUSED: &str = "provenance-refused";
+/// Whether a retirement kept one of the outbox's refused entries, after the
+/// relay's journal proved it absent.
+fn retirement_kept(tx: &Transaction<'_>, outbox_id: &str) -> Result<bool, ApplicationError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_reason=?2)",
+        params![outbox_id, crate::owner_outbox::RETIREMENT_KEPT],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
 
 /// The quarantine a successor's adoption gives each outbox its coverage
 /// proved at an earlier binding of its restore generation, so the outbox at
@@ -2057,8 +2069,8 @@ struct RetainedOutboxes {
 /// earlier generation, which stays behind its restore fence. Any other
 /// outbox in this generation refuses the succession, even an empty one.
 /// A quarantined outbox counts only when its totals show nothing pending and
-/// - a seed's provenance refusal quarantined it, at its own binding, and the
-///   seed was strictly abandoned; or
+/// - a relay refusal quarantined it, at its own binding, and its retirement
+///   kept a refused entry or strictly abandoned the seed; or
 /// - an earlier succession retired it, and the binding it names is one an
 ///   adopted activation of the chain held after this outbox's.
 ///
@@ -2167,21 +2179,24 @@ fn retained_outbox_coverage(
                 retired.push(id.clone());
                 false
             }
-            ("quarantined", Some(PROVENANCE_REFUSED))
-                if drained
-                    && observed
-                        .as_ref()
-                        .is_none_or(|observed| *observed == binding) =>
-            {
-                abandoning.push(id.clone());
-                true
-            }
             ("quarantined", Some(SUCCESSION_RETIRED))
                 if drained
                     && observed
                         .as_ref()
                         .is_some_and(|observed| chain.followed(&binding, observed)) =>
             {
+                true
+            }
+            ("quarantined", reason)
+                if drained
+                    && reason != Some(SUCCESSION_RETIRED)
+                    && observed
+                        .as_ref()
+                        .is_none_or(|observed| *observed == binding) =>
+            {
+                if !retirement_kept(tx, &id)? {
+                    abandoning.push(id.clone());
+                }
                 true
             }
             _ => return Err(ApplicationError::Conflict),

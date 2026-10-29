@@ -592,6 +592,220 @@ fn a_quarantined_service_seed_is_reported_and_still_retires() {
     );
 }
 
+fn outbox_of(f: &Fixture, delivery: &str) -> String {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [delivery],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The relay's final refusal of the outbox's head, as delivery records it.
+fn refuse_head(f: &mut Fixture, delivery: &str, reason: &str) -> String {
+    let outbox = outbox_of(f, delivery);
+    owner_outbox::record_refusal(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: reason.into(),
+            observed_binding: None,
+        },
+        owner_outbox::OwnerOutboxRefusal {
+            delivery_id: delivery.into(),
+            key: format!("refusal-{delivery}"),
+        },
+        5,
+    )
+    .unwrap();
+    outbox
+}
+
+/// The outbox's state and how many refusals it keeps.
+fn quarantine_state(f: &Fixture, outbox: &str) -> (String, i64) {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state,(SELECT COUNT(*) FROM owner_ydoc_outbox_refusals r WHERE r.outbox_id=o.outbox_id)
+                 FROM owner_ydoc_outboxes o WHERE outbox_id=?1",
+                [outbox],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+/// The relay refused an ordinary edit, and nothing grants it a Try again.
+/// Once the journal proves it and the edit behind it absent, retirement
+/// keeps both with their bytes, and the outbox keeps its quarantine and
+/// refusal for the owner's recovery copy.
+#[test]
+fn a_kept_refusal_retires_with_its_bytes() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let first = native_tail_edit(&mut f, "# Refused\n", 11);
+    let second = native_tail_edit(&mut f, "# Behind\n", 12);
+    let outbox = refuse_head(&mut f, &first.delivery_id, "delivery-conflict");
+    assert_eq!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::PendingDelivery(vec![
+            first.delivery_id.clone(),
+            second.delivery_id.clone()
+        ])
+    );
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![first.delivery_id.clone(), second.delivery_id.clone()],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    let kept = |entry: &owner_outbox::OwnerOutboxEntry| {
+        (
+            entry.delivery_id.clone(),
+            false,
+            None,
+            None,
+            Some(entry.update_digest.clone()),
+            Some("retirement-kept".to_owned()),
+        )
+    };
+    assert_eq!(native_entries(&f), vec![kept(&first), kept(&second)]);
+    assert_eq!(pending_bytes(&f), 0);
+    assert_eq!(quarantine_state(&f, &outbox), ("quarantined".to_owned(), 1));
+    assert_eq!(entry_update(&f, &first.delivery_id), first.update);
+    // Every later pass reads the same kept entries.
+    assert!(matches!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+}
+
+/// A seed the relay refused and nothing applied is abandoned once, whatever
+/// the refusal. Its captured state stays for the owner's recovery.
+#[test]
+fn a_refused_seed_nothing_applied_is_abandoned_once() {
+    let (mut f, seed, full) = seeded();
+    refuse_head(&mut f, &seed, "delivery-conflict");
+    assert_eq!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::SeedQuarantined(vec![seed.clone()])
+    );
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![seed.clone()],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    assert_eq!(
+        native_entries(&f),
+        vec![(
+            seed.clone(),
+            false,
+            None,
+            None,
+            None,
+            Some("activation-released".into())
+        )]
+    );
+    let kept: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                [hex_sha256(&full)],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(kept, "the captured seed stays");
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)),
+        Ok(Reconciliation::Reconciled { .. })
+    ));
+}
+
+/// A refused seed with work applied after it may still have reached a
+/// collaborator, so retirement holds without abandoning it or failing.
+#[test]
+fn a_refused_seed_with_later_applied_work_holds_its_retirement() {
+    let (mut f, seed, _) = device_seeded();
+    refuse_head(&mut f, &seed, "delivery-conflict");
+    let event = remote_event(&mut f, 1);
+    assert!(matches!(
+        apply_event(&mut f, event).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let before = (native_entries(&f), pending_bytes(&f));
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![seed.clone()],
+    };
+    assert_eq!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::SeedQuarantined(vec![seed])
+    );
+    assert_eq!((native_entries(&f), pending_bytes(&f)), before);
+}
+
+/// Opus F3: the relay accepted a Try again, but its acknowledgement was lost
+/// and its grant ended. The journal's receipt still acknowledges it on the
+/// quarantined outbox.
+#[test]
+fn a_journal_receipt_acknowledges_a_lost_try_again_on_a_quarantined_outbox() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "# Retried\n", 11);
+    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
+    owner_outbox::retry(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxRetryInput {
+            outbox_id: outbox.clone(),
+            binding: f.binding.clone(),
+        },
+    )
+    .unwrap();
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox,
+            reason: "capacity-refused".into(),
+            observed_binding: None,
+        },
+        6,
+    )
+    .unwrap();
+    let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, 3);
+    let evidence = JournalEvidence {
+        receipts: vec![receipt.clone()],
+        absent: vec![],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&evidence)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    assert_eq!(
+        native_entries(&f)[0],
+        (
+            entry.delivery_id,
+            false,
+            Some(serde_json::to_string(&receipt).unwrap()),
+            None,
+            None,
+            None
+        )
+    );
+}
+
 /// Phase A ends one activation in its owner: only registrations tagged with
 /// it, and only its document's cache entry. Its binding row stays, and it
 /// never registers under this owner again.
@@ -1629,6 +1843,13 @@ fn a_restore_waits_while_its_activation_retires() {
             &mut f.store,
             None,
             NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: terminal.as_ref().map_or(0, |r| r.journal_cursor),
+                    receipt_digest: terminal.as_ref().map_or_else(
+                        || f.binding.lineage_claim_id.clone(),
+                        |r| r.update_digest.clone(),
+                    ),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: "namespace".into(),
                 old_binding: f.binding.clone(),
@@ -1844,6 +2065,10 @@ fn readers_after_a_release() {
     let bootstrap_tip = |f: &Fixture| {
         let held = f.handle.registration.lock().unwrap();
         let input = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),

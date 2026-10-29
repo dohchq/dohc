@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import {HELD_CHANGED, ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
-import {readBoundedJson} from "@dohc/service-http";
+import {DRAIN_TIMEOUT_HEADER, readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import type {SyncRelayStorage} from "./storage";
@@ -171,8 +171,9 @@ function readTurns(max: number) {
   };
 }
 // A page's body keeps its read slot until the client took all of it, cancels it
-// or goes away. The slot ends at the read after the body's one chunk, which a
-// writer under backpressure makes only once that chunk drained.
+// or goes away, or stops taking it for the drain timeout. The slot ends at the
+// read after the body's one chunk, which a writer under backpressure makes only
+// once that chunk drained.
 function heldResponse(body: unknown, release: () => void, signal: AbortSignal): Response {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
   let sent = false;
@@ -183,7 +184,7 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
       controller.close(); release();
     },
     cancel() {release();},
-  }, {highWaterMark: 0}), {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
+  }, {highWaterMark: 0}), {headers: {"content-type": "application/json", "cache-control": "private, no-store", [DRAIN_TIMEOUT_HEADER]: "1"}});
 }
 
 export function createServiceHostEnrollmentRoutes(options: {

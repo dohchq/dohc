@@ -1803,7 +1803,10 @@ fn validate_receipt(receipt: &OwnerDeliveryReceipt) -> Result<(), OwnerOutboxErr
 
 /// Acknowledge the pending prefix of `outbox_id` that `receipts` name, in
 /// order, keeping each receipt. Every receipt must name its entry's exact
-/// delivery and digest.
+/// delivery and digest. Only a retirement calls this, with receipts the
+/// relay's journal proved, so a quarantined outbox accepts them too: its
+/// freeze stops delivery, and a Try again whose grant ended may have been
+/// accepted before its acknowledgement was lost.
 pub(crate) fn acknowledge_in_tx(
     tx: &rusqlite::Transaction<'_>,
     outbox_id: &str,
@@ -1811,7 +1814,6 @@ pub(crate) fn acknowledge_in_tx(
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     validate_receipts(receipts)?;
     let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-    require_unfrozen(&parent, receipts)?;
     acknowledge_prefix_in(tx, &parent, receipts)
 }
 
@@ -1895,6 +1897,33 @@ pub(crate) fn abandon_seed_in_tx(
     .map_err(write_sql)?;
     refresh_pending_in_tx(tx, outbox_id)?;
     delete_binary_blob_if_unreferenced(tx, &digest)
+}
+
+/// The terminal reason of a refused entry a retirement kept: the relay's
+/// journal proved it absent, and nothing can deliver it again.
+pub(crate) const RETIREMENT_KEPT: &str = "retirement-kept";
+
+/// Retire a pending entry of a quarantined outbox the relay refused, which
+/// the caller proved was never accepted. Like a host refusal, it keeps the
+/// entry's bytes, and the outbox stays quarantined with its refusals and
+/// checkpoints.
+pub(crate) fn keep_refused_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(), OwnerOutboxError> {
+    let kept = tx
+        .execute(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,\
+             terminal_reason=?3 WHERE outbox_id=?1 AND sequence=?2 AND pending=1 AND accepted_receipt_json IS NULL \
+             AND update_blob_digest=update_digest",
+            params![outbox_id, sequence, RETIREMENT_KEPT],
+        )
+        .map_err(write_sql)?;
+    if kept != 1 {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    refresh_pending_in_tx(tx, outbox_id)
 }
 
 fn acknowledge_prefix_in(
