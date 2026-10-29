@@ -179,9 +179,9 @@ describe("main inventories", () => {
     }
   });
   it("records the nine remaining relay operation rows with their existing admission", () => {
-    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity", "undo-relay-share"]
       .map(name => `desktop:${name}`);
-    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
+    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "cancel-relay-share-discussion-activity"]
       .map(name => `desktop:${name}`);
     const channels = [...workspaceChannels, ...deviceChannels];
     const migrated = rows.filter(row => channels.includes(row.channel));

@@ -161,7 +161,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
   inbox: [["chat", "inbox"]],
-  show: [["chat", "show", "th_1", "--peek"]],
+  show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
   post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
@@ -189,7 +189,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.",
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },

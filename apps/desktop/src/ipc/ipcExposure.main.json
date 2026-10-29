@@ -19,6 +19,7 @@
     "desktop:cancel-relay-share-discussion-activity",
     "desktop:cancel-workspace-search",
     "desktop:capture-holds",
+    "desktop:chat-agent-requests-changed",
     "desktop:chat-dispatch-notices",
     "desktop:chat-dispatch-paused",
     "desktop:chat-dispatch-state-for-thread",

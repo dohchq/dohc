@@ -1861,8 +1861,8 @@ export function DesktopWorkspaceShell(props: {
     if (shownQuarantines.current.workspaceId!==workspaceId) shownQuarantines.current={workspaceId,shown:new Map()};
     const shown=shownQuarantines.current.shown;
     // An earlier Stop's edits keep their own row beside the document's current queue.
-    const identityOf=(row:{objectId:string;recovery:string}) =>
-      `owner-live-quarantine:${workspaceId}:${row.objectId}${row.recovery==="not-written" || row.recovery==="cannot-write" ? ":release" : ""}`;
+    const identityOf=(row:{objectId:string;recovery:string;incident:string;saveOnly?:true}) =>
+      `owner-live-quarantine:${workspaceId}:${row.objectId}${row.saveOnly ? `:${row.incident}` : row.recovery==="not-written" || row.recovery==="cannot-write" ? ":release" : ""}`;
     const rows=syncStatus.ownerLiveQuarantines ?? [];
     const listed=new Set(rows.map(identityOf));
     for (const identity of [...shown.keys()]) {
@@ -1888,6 +1888,11 @@ export function DesktopWorkspaceShell(props: {
         continue;
       }
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
+      if (row.saveOnly) {
+        reportShellFailure({title:`Edits not written to ${row.path}`,
+          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+        continue;
+      }
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
       // Its editors close wherever the document is now, since a record keeps the path it had.
       const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
@@ -2018,7 +2023,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("dohc could not trust this workspace.", error, () => void trustWorkspace());
     }
   }, [reportShellError, requestWorkspaceTrust]);
-  useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind, () => void trustWorkspace());
   // A send that asks an agent Restricted Mode holds opens main's dialog, only
   // for the workspace this shell still shows.
   const trustForHeldAgent = useCallback((forWorkspaceId: string) => {
@@ -2903,6 +2907,11 @@ export function DesktopWorkspaceShell(props: {
     setChatsThreadRevision((current) => current + 1);
   }, []);
   const openChatsNavInTab = chatEditors.open;
+  useChatDispatchNotices(
+    workspaceId, workspaceIsReady, reportShellFailure, clearKind, clearIdentity,
+    () => void trustWorkspace(),
+    (nav) => { openChatsNavInTab(nav); },
+  );
   const askAgent = useAskAgent({
     workspaceId,
     agentSetup,

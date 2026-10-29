@@ -2,6 +2,7 @@ import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type L
 import {EngineRequestError, type EngineClient, type OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
 import {recoverySnapshot, sameBinding, type UnwrittenRelease} from "./ownerLiveReleases";
+import {RESTORE_FENCED_RECOVERY_LIMIT} from "./ownerLiveRecoveryLimits";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
@@ -110,7 +111,7 @@ export async function readServerKeptEditsQueue(row: ServerKeptEdits, page: (curs
   } finally {outbox.dispose();}
 }
 
-// Enrollment recovers these by itself. Only a refusal waits for the owner.
+// Earlier restore-fenced queues are discovered separately from current drafts.
 const BINDING_QUARANTINES = new Set(["stale-binding", "restore-fenced", "binding-changed"]);
 // The engine's answers about one queue, not about the engine or the workspace.
 const QUEUE_REFUSALS = new Set(["INVALID_PARAMS", "INTERNAL"]);
@@ -126,8 +127,8 @@ const QUEUE_REFUSALS = new Set(["INVALID_PARAMS", "INTERNAL"]);
  */
 export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "unreadable";
 
-/** One document whose owner edits the server refused for good, as this computer's engine keeps them. */
-export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason: string} & ({
+/** Kept owner edits on this computer. A restore's earlier queues can only be saved. */
+export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason: string; saveOnly?: true} & ({
   /** The refused queue. */
   outboxId: string;
   /** The binding generation the queue was refused at, which a Try again names. */
@@ -175,12 +176,17 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
   const listed = new Map<string, string>();
   // A queue's head never changes without a new draft revision or size, except
   // for a Try again grant, which is never cached. The base is never needed.
-  const readFacts = async (draft: OwnerYDocDraftDescriptor & {outboxId: string}): Promise<HeadFacts> => {
-    const key = `${draft.revision}:${draft.pendingBytes}`, cached = heads?.get(draft.outboxId);
+  const readFacts = async (draft: Pick<OwnerYDocDraftDescriptor, "binding" | "pendingBytes"> & {outboxId: string; revision?: number}): Promise<HeadFacts | string> => {
+    const key = `${draft.revision ?? "retained"}:${draft.pendingBytes}`, cached = heads?.get(draft.outboxId);
     listed.set(draft.outboxId, key);
     if (cached?.key === key) return cached.facts;
     const head = await outbox.readDeliveryHead(draft.outboxId, draft.binding)
-      .catch((error: unknown) => {if (error instanceof TypeError) return outbox.readHead(draft.outboxId); throw error;});
+      .catch((error: unknown) => {if (error instanceof TypeError) return outbox.readHead(draft.outboxId); throw error;})
+      .catch((error: unknown) => {
+        if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(draft.binding)) throw error;
+        return error.message.slice(0, 128) || "unknown";
+      });
+    if (typeof head === "string") return head;
     const facts = {state: head.state, reason: head.quarantineReason, binding: head.binding,
       headDeliveryId: head.entry?.deliveryId ?? null, retryDeliveryId: head.retryDeliveryId};
     if (facts.retryDeliveryId === null) heads?.set(draft.outboxId, {key, facts}); else heads?.delete(draft.outboxId);
@@ -198,10 +204,7 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
         if (draft.state !== "quarantined" || draft.outboxId === null) continue;
         // The engine refusing one queue's head, as while an accepted update
         // waits on a missing dependency, leaves the other queues usable.
-        const head = await readFacts({...draft, outboxId: draft.outboxId}).catch((error: unknown) => {
-          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(draft.binding)) throw error;
-          return error.message.slice(0, 128) || "unknown";
-        });
+        const head = await readFacts({...draft, outboxId: draft.outboxId});
         if (typeof head === "string") {
           found.push({objectId: draft.binding.objectId, path: draft.binding.currentPath, reason: head,
             outboxId: draft.outboxId, binding: draft.binding, headDeliveryId: null, recovery: "unreadable"});
@@ -217,6 +220,24 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       }
       after = page.next;
     } while (after !== null);
+    let retainedAfter: string | undefined;
+    let retainedCount = 0;
+    do {
+      const page = await outbox.listRestoreFenced({after: retainedAfter, limit: Math.min(64, RESTORE_FENCED_RECOVERY_LIMIT - retainedCount)});
+      retainedCount += page.queues.length;
+      for (const queue of page.queues) {
+        const head = await readFacts(queue);
+        if (typeof head === "string") {
+          found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: head,
+            outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: null, recovery: "unreadable", saveOnly: true});
+          continue;
+        }
+        if (head.headDeliveryId === null || !sameBinding(head.binding, queue.binding)) continue;
+        found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: "restore-fenced",
+          outboxId: queue.outboxId, binding: head.binding, headDeliveryId: head.headDeliveryId, recovery: "paused", saveOnly: true});
+      }
+      retainedAfter = page.next ?? undefined;
+    } while (retainedAfter !== undefined && retainedCount < RESTORE_FENCED_RECOVERY_LIMIT);
     for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
     // A queue is read whole only when a record may have come from it, and once per draft revision and size.
     const snapshotOf = async (outboxId: string) => {
