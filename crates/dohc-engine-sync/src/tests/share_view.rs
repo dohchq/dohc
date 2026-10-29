@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn text_keep_received_share_continues_through_the_filtered_effect() {
+    let (_scratch, _path, mut engine) = open_store();
+    let kept = b"Trip destination: Tokyo\n".to_vec();
+    let later = b"Trip destination: Seoul\n".to_vec();
+    let kept_sha = dohc_engine_storage::hex_sha256(&kept);
+    let later_sha = dohc_engine_storage::hex_sha256(&later);
+    let mut effect = share_view_write_op(1, "docs/trip.txt", &kept_sha);
+    effect.payload["payloadBeforePath"] = json!("docs/trip.txt");
+    effect.payload["payloadBeforeBlobSha256"] = json!(kept_sha);
+    let mut edit = share_view_write_op(2, "docs/trip.txt", &later_sha);
+    edit.payload["payloadBeforePath"] = json!("docs/trip.txt");
+    edit.payload["payloadBeforeBlobSha256"] = json!(kept_sha);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [
+                (
+                    0,
+                    ShareViewResponse {
+                        ops: vec![share_view_write_op(0, "docs/trip.txt", &kept_sha)],
+                        next_cursor: 1,
+                        has_more: false,
+                    },
+                ),
+                (
+                    1,
+                    ShareViewResponse {
+                        ops: vec![effect],
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                ),
+                (
+                    2,
+                    ShareViewResponse {
+                        ops: vec![edit],
+                        next_cursor: 3,
+                        has_more: false,
+                    },
+                ),
+            ],
+        )
+        .with_view_blobs([(kept_sha, kept), (later_sha, later)]),
+    );
+    for expected in [
+        "Trip destination: Tokyo\n",
+        "Trip destination: Tokyo\n",
+        "Trip destination: Seoul\n",
+    ] {
+        let pull = client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(pull.skipped, 0);
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+            .unwrap();
+        assert_eq!(
+            VersionedTextStore::new(&mut engine)
+                .read_text("ws", "main", "docs/trip.txt")
+                .unwrap()
+                .unwrap()
+                .text,
+            expected
+        );
+    }
+    let conflicts: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(conflicts, 0);
+}
+
+#[test]
 fn received_collection_projection_reads_pulls_incrementally_without_owner_side_effects() {
     use dohc_engine_domain::{
         CollectionProjection, CollectionQuery, get_collection, get_collection_record,
