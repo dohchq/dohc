@@ -187,6 +187,9 @@ async function readToken(path: string): Promise<string> {
   return parsed.data;
 }
 
+// A version change waits up to 30 s for open windows to save before it runs.
+export const VERSION_CHANGE_VERBS: ReadonlySet<CliVerb> = new Set(["versionCreate", "versionSwitch", "versionMerge", "versionResolve"]);
+
 function readResponseLine(
   verb: CliVerb,
   socketPath: string,
@@ -226,7 +229,9 @@ function readResponseLine(
     socket.once("timeout", () => {
       rejectOnce(new DohcCliError(verb === "historyUndo"
         ? "Undo may still be finishing. Run the same command again to get its result."
-        : "desktop app did not respond"));
+        : VERSION_CHANGE_VERBS.has(verb)
+          ? "The version change may still be finishing. Run dohc version list or dohc version conflicts before you try again."
+          : "desktop app did not respond"));
     });
     socket.once("error", () => {
       rejectOnce(new DohcCliError("desktop app not running"));

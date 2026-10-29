@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
-import { sendCliRequest, type CliClientOptions } from "./client";
+import { sendCliRequest, VERSION_CHANGE_VERBS, type CliClientOptions } from "./client";
 import { cliErrorLine, DohcCliError } from "./errors";
 import { renderCliHelp } from "./help";
 import {
@@ -397,7 +397,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
           // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
           : command.verb === "saveRecoveryCopy" ? 420_000
-          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses"
+            || VERSION_CHANGE_VERBS.has(command.verb) ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
         env,
       });
     }
