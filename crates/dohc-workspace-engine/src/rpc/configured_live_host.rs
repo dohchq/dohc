@@ -500,10 +500,18 @@ impl Discovery {
 impl EngineService {
     /// Provision a fresh daemon from operator-owned roots before accepting RPC.
     pub async fn configured_live_host(
+        config: ConfiguredLiveHostConfig,
+    ) -> Result<(Arc<Self>, ConnectionOwner, LiveApplicationIngress), WireError> {
+        Self::new().configure_live_host(config).await
+    }
+
+    /// Provision operator-owned roots after configuring the service's reader.
+    pub async fn configure_live_host(
+        self,
         mut config: ConfiguredLiveHostConfig,
     ) -> Result<(Arc<Self>, ConnectionOwner, LiveApplicationIngress), WireError> {
         let ingress_config = config.canonicalize_and_validate()?;
-        let service = Arc::new(Self::new());
+        let service = Arc::new(self);
         let ingress = LiveApplicationIngress::new(service.clone(), ingress_config)?;
         if let Some(adoption) = &config.adoption {
             adoption
@@ -1370,6 +1378,201 @@ mod tests {
             service.configured_discovery(discovery)["workspaces"][index]["workspaceHandle"].clone(),
         )
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_host_reader_settles_an_imported_note_opened_at_startup() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_storage::{EngineStore, NoFaults, StorageError, hex_sha256};
+        use dohc_engine_testkit::{ScratchDir, engine_db_path};
+        use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+
+        let scratch = ScratchDir::new().unwrap();
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+        let source = "Imported note\n";
+        let imported = Ydoc::wire();
+        imported
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
+        let wire = yrs::Doc::new();
+        wire.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&imported.encode_full_state()).unwrap())
+            .unwrap();
+        wire.get_or_insert_map("meta")
+            .remove(&mut wire.transact_mut(), "dohcLineageEpoch");
+        wire.get_or_insert_map("meta").insert(
+            &mut wire.transact_mut(),
+            "dohcMarkdownSourceReader",
+            1,
+        );
+        let key = DocKey::new("w", "main", "note").unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        store.bind_root_token(token, &NoFaults).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(
+                    "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                     VALUES('w','origin','epoch','stream',1);\
+                     INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) \
+                     VALUES('w','origin',0);",
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("w", "main", 1, &NoFaults)
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "w".into(),
+                    version_id: "main".into(),
+                    object_id: "note".into(),
+                    path: "note.md".into(),
+                    text: source.into(),
+                    moment_id: "source".into(),
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &wire
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default()),
+            &NoFaults,
+            3,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET path='note.md'", [])
+                    .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        let doc = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        assert!(doc.has_reader_source());
+        let original_projection = doc.markdown_source_reference().unwrap().projection_sha256;
+        let update = doc.richdoc_append_paragraph("Safe edit after configured startup");
+        let expected = doc.project(ContentKind::Richdoc).unwrap().content;
+        drop(store);
+        std::fs::write(scratch.path().join("note.md"), source).unwrap();
+
+        let reader_files = ScratchDir::new().unwrap();
+        let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+        let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+        assert!(output.status.success());
+        let mut runtime: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let node = PathBuf::from(
+            runtime
+                .as_object_mut()
+                .unwrap()
+                .remove("path")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+        );
+        runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
+        let mut manifest = json!({
+            "version":1,"runtime":runtime,"buildSha256":"test",
+            "parentCwd":std::env::current_dir().unwrap()
+        });
+        let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
+            .replace("MANIFEST", &manifest.to_string())
+            .replace("MODE", "\"normal\"")
+            .replace(
+                "function answer(r) {",
+                "function answer(r) {\n\
+                 if (r.method === 'check-markdown-witness') return control({id:r.id,\
+                 kind:'witness-checked',sourceSha256:r.sourceSha256,\
+                 projectionSha256:r.projectionSha256,keepsMeaning:true});",
+            )
+            .replace(
+                "const fault = r.currentPath;",
+                "const fault = r.method === 'construct' ? 'note.md' : 'expired';",
+            )
+            .replace(
+                "projectionSha256:hash('projection')",
+                &format!(
+                    "projectionSha256:r.method === 'construct' ? {original_projection:?} : {:?}",
+                    hex_sha256(expected.as_bytes())
+                ),
+            );
+        let bundle = reader_files.path().join("reader.cjs");
+        std::fs::write(&bundle, &script).unwrap();
+        manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
+        manifest["sources"] = json!([]);
+        let manifest_path = reader_files.path().join("manifest.json");
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        let service = EngineService::new();
+        service.configure_reader(dohc_engine_reader::Config {
+            node,
+            bundle,
+            manifest: manifest_path,
+        });
+        let (service, owner, _ingress) = service
+            .configure_live_host(config(&[(scratch.path(), "w")]))
+            .await
+            .unwrap();
+        let workspace = handle(&service, 0);
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let (session, initial) = service
+            .ydoc_open(
+                &ctx,
+                Some(workspace.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}),
+                1,
+            )
+            .await
+            .unwrap();
+        let initial_doc = Ydoc::wire();
+        initial_doc.apply(&initial.bytes).unwrap();
+        assert!(initial_doc.has_reader_source());
+        drop(initial);
+        service
+            .ydoc_record_update(
+                &ctx,
+                Some(workspace.clone()),
+                None,
+                json!({
+                    "sessionId":session["sessionId"],"updateBase64":STANDARD.encode(update),
+                    "expectedLineageClaimId":session["lineageClaimId"],"actorOriginId":"editor",
+                    "attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}
+                }),
+            )
+            .await
+            .unwrap();
+        let settled = service
+            .ydoc_settle(
+                &ctx,
+                Some(workspace),
+                json!({"sessionId":session["sessionId"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled["content"], expected);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+            expected
+        );
+        assert!(service.reader.get().unwrap().dispatch_count() > 0);
+        close(&service).await;
     }
 
     #[tokio::test]
