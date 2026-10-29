@@ -74,11 +74,11 @@ function ForwardsOnCommit(props: { from: Y.Doc; to: Y.Doc }) {
   return null;
 }
 
-function ControlledPropertiesPanel(props: { initialBody: string }) {
+function ControlledPropertiesPanel(props: { initialBody: string; onShowSource?: () => void }) {
   const [body, setBody] = useState(props.initialBody);
   return (
     <>
-      <PropertiesPanel body={body} onChange={setBody} />
+      <PropertiesPanel body={body} onChange={setBody} onShowSource={props.onShowSource} />
       <output data-testid="current-body">{body}</output>
     </>
   );
@@ -1316,14 +1316,14 @@ describe("PropertiesPanel", () => {
     for (const [written] of onChange.mock.calls) expect(written).toBe(body);
   });
 
-  it("points a value the pills can't edit to Source, unless the page is read-only", () => {
+  it("points a value the pills can't edit to Source to view, unless the page is read-only", () => {
     const body = "---\nwhere: {lat: 35.5}\n---\n\nBody\n";
     const reason = () => {
       const where = screen.getByLabelText("Property where value");
       return document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent;
     };
     const { rerender } = render(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} />);
-    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here. Edit it in Source.");
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here. View it in Source.");
 
     rerender(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} readOnly />);
     expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here.");
@@ -1524,6 +1524,30 @@ describe("PropertiesPanel's Source button", () => {
   ])("opens Source from a record's properties when the block holds %s", (_, body) => {
     render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
     expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source when a duplicate name's flag hides a saved value", () => {
+    render(<PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n\nBody\n"} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source while a held name's flag hides its saved value", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
   it("shows a note you can only view as pills with no +, no × and no edits", async () => {

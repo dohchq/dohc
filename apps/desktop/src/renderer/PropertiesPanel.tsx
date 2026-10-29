@@ -481,7 +481,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   const isEmpty = entries.length === 0;
   const duplicates = duplicateKeySet(entries);
-  const showSource = props.onShowSource && unshown ? props.onShowSource : null;
+  // A duplicate or held name shows its flag in place of the saved value, so
+  // only Source still shows that value.
+  const showSource = props.onShowSource && (unshown || duplicates.size > 0 || heldRow !== -1)
+    ? props.onShowSource
+    : null;
   if (readOnly && isEmpty && !showSource) return null;
 
   return (
@@ -531,7 +535,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <ReadOnlyValue
                   label={`Property ${entry.key || index + 1} value`}
                   value={entry.value}
-                  reason={showSource && !refused ? `${entry.readOnly} Edit it in Source.` : entry.readOnly}
+                  reason={showSource && !refused ? `${entry.readOnly} View it in Source.` : entry.readOnly}
                 />
               ) : (
                 <input
