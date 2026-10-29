@@ -458,6 +458,9 @@ export function useShellError(workspaceId: string) {
         // Sync has moved past the refused saves, so there is nothing to try again.
         const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
         const path = notice.target?.path;
+        // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
+        const step = (label: string, run: () => void) =>
+          ({ action: { label, reads: true, run: () => { run(); read?.(notice.noticeId); } } });
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
           title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
           // The whole path: a title names only the file, and two folders can hold one name.
@@ -467,10 +470,10 @@ export function useShellError(workspaceId: string) {
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
-          ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}),
-          // Opening the note reads the row, so its toast closes. The row stays until the change is saved.
-          ...(markdownHeld && path && openFile ? { action: { label: "Open note", reads: true, run: () => { openFile(path); read?.(notice.noticeId); } } } : {}),
-          ...(attributionRefused && openHistory ? { action: { label: "Open History", run: openHistory } } : {}) };
+          ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
+          // A held note's row stays until the change is saved.
+          ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
+          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}) };
       }),
     ]);
   }, []);
