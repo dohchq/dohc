@@ -5362,6 +5362,35 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     await second.close({ settle: false });
     await engine.stop();
   });
+
+  it("closes the open documents before resolving a conflict", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "plan.md",
+      text: "main\n",
+    });
+    const order: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, undefined, undefined, (request) => {
+        if (request.method === "conflicts.list") order.push("resolve");
+      }),
+      openRustYDocProviderSession: async (options) => ({
+        ...(await recordingProvider([])(options)),
+        close: async () => { order.push("document closed"); },
+      }),
+    });
+
+    await engine.openYDocSession({ path: "plan.md", onRemoteUpdate: () => undefined });
+    await engine
+      .resolveConflict("missing-conflict", { kind: "keep-current" })
+      .catch(() => undefined);
+
+    expect(order, "remove resolveConflict's session vacate. The engine refuses to resolve a file an open document holds.").toEqual(["document closed", "resolve"]);
+    await engine.stop();
+  });
 });
 
 // The absent-head refusal reads the disk, and that read is

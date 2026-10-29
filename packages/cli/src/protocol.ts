@@ -217,6 +217,28 @@ const versionCompareArgsSchema = z.object({
   afterPath: z.string().min(1).max(4096).optional(),
 }).strict();
 const versionConflictsArgsSchema = z.object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() }).strict();
+// The versions menu's name field takes at most 80 characters.
+export const MAX_VERSION_NAME_LENGTH = 80;
+const versionCreateArgsSchema = z.object({ ...argsBase, name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) }).strict();
+const versionSwitchArgsSchema = z.object({ ...argsBase, version: z.string().min(1).max(200) }).strict();
+const versionMergeArgsSchema = versionSwitchArgsSchema;
+// Keep one side of a conflict, or replace both with combined text. Combined
+// text replaces the file, so it has the file write limit.
+export const versionResolutionSchema = z.discriminatedUnion("keep", [
+  z.object({ keep: z.enum(["current", "incoming"]) }).strict(),
+  z.object({
+    keep: z.literal("combined"),
+    text: z.string().refine((value) => fitsUtf8Bytes(value, MAX_FILE_WRITE_BYTES), {
+      message: "Combined text is at most 10 MiB as UTF-8.",
+    }),
+  }).strict(),
+]);
+export type VersionResolution = z.infer<typeof versionResolutionSchema>;
+const versionResolveArgsSchema = z.object({
+  ...argsBase,
+  conflictId: z.string().min(1).max(200),
+  resolution: versionResolutionSchema,
+}).strict();
 
 const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
@@ -519,6 +541,10 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCreate"), args: versionCreateArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionSwitch"), args: versionSwitchArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
@@ -602,6 +628,10 @@ export const CLI_CAPABILITIES = {
   versionList: ["version.list"],
   versionCompare: ["version.compare"],
   versionConflicts: ["version.conflicts.list"],
+  versionCreate: ["version.create"],
+  versionSwitch: ["version.switch"],
+  versionMerge: ["version.merge"],
+  versionResolve: ["version.conflict.resolve"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
@@ -1277,31 +1307,58 @@ const versionCompareResultSchema = z.union([
 ]);
 
 const conflictBinarySchema = z.object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) }).strict().nullable();
+// One page of open conflicts: from a merge, or from two computers editing
+// the same file while apart (origin "sync"). A side's text is null when that
+// side has no file or holds binary.
+const versionConflictsPage = {
+  conflicts: z.array(z.object({
+    conflictId: z.string().min(1),
+    path: z.string().min(1),
+    sourceVersionId: z.string().min(1),
+    targetVersionId: z.string().min(1),
+    origin: z.enum(["merge", "sync"]),
+    contentKind: z.enum(["text", "binary"]),
+    currentText: z.string().nullable(),
+    incomingText: z.string().nullable(),
+    baseText: z.string().nullable(),
+    currentBinary: conflictBinarySchema.optional(),
+    incomingBinary: conflictBinarySchema.optional(),
+    baseBinary: conflictBinarySchema.optional(),
+  }).strict()),
+  nextAfterConflictId: z.string().min(1).nullable(),
+};
 const versionConflictsResultSchema = z.union([
+  z.object({ ok: z.literal(true), ...versionConflictsPage }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const versionNameSchema = z.object({ id: z.string().min(1), name: z.string().min(1) }).strict();
+// The new version, now the active one.
+const versionCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema }).strict(),
+  rawFailureSchema,
+]);
+const versionSwitchResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema, changedFileCount: z.number().int().nonnegative() }).strict(),
+  rawFailureSchema,
+]);
+// conflictCount counts every conflict the merge left. The page lists the
+// open conflicts, from this merge and earlier ones, as version conflicts does.
+const versionMergeResultSchema = z.union([
   z.object({
     ok: z.literal(true),
-    // One page of open conflicts: from a merge, or from two computers editing
-    // the same file while apart (origin "sync"). A side's text is null when
-    // that side has no file or holds binary.
-    conflicts: z.array(z.object({
-      conflictId: z.string().min(1),
-      path: z.string().min(1),
-      sourceVersionId: z.string().min(1),
-      targetVersionId: z.string().min(1),
-      origin: z.enum(["merge", "sync"]),
-      contentKind: z.enum(["text", "binary"]),
-      currentText: z.string().nullable(),
-      incomingText: z.string().nullable(),
-      baseText: z.string().nullable(),
-      currentBinary: conflictBinarySchema.optional(),
-      incomingBinary: conflictBinarySchema.optional(),
-      baseBinary: conflictBinarySchema.optional(),
-    }).strict()),
-    nextAfterConflictId: z.string().min(1).nullable(),
+    version: versionNameSchema,
+    mergedFileCount: z.number().int().nonnegative(),
+    unchangedFileCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    ...versionConflictsPage,
   }).strict(),
   rawFailureSchema,
   historyPolicyUnreadableSchema,
 ]);
+// The open conflicts that remain, as version conflicts lists them.
+const versionResolveResultSchema = versionConflictsResultSchema;
 
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
@@ -1708,6 +1765,10 @@ export const cliResultSchemas = {
   versionList: versionListResultSchema,
   versionCompare: versionCompareResultSchema,
   versionConflicts: versionConflictsResultSchema,
+  versionCreate: versionCreateResultSchema,
+  versionSwitch: versionSwitchResultSchema,
+  versionMerge: versionMergeResultSchema,
+  versionResolve: versionResolveResultSchema,
   keptCopies: keptCopiesResultSchema,
   // The engine's answer: Collection updates wait for an unfinished pull.
   collectionsWaiting: z.discriminatedUnion("ok", [

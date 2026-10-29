@@ -196,6 +196,47 @@ A shared view keeps no versions of its own, so it does not offer this tool.
 
 Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
+### `dohc_create_version`
+
+Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `name`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name } } | { ok: false, reason }`.
+
+### `dohc_switch_version`
+
+Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, changedFileCount } | { ok: false, reason }`.
+
+### `dohc_merge_version`
+
+Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_resolve_version_conflict`
+
+Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `conflictId`: `string`. Required.
+- `resolution`: `{ keep: "current" | "incoming" } | { keep: "combined", text: string }`. Required.
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
 ### `dohc_list_changes`
 
 List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.
@@ -1781,9 +1822,9 @@ With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, re
 
 ### `dohc version`
 
-Read the workspace's versions, how one differs from Main, and open conflicts.
+Read and change the workspace's versions and their open conflicts.
 
-Versions belong to the owning workspace.
+Versions belong to the owning workspace. A change first saves the edits open in dohc, or refuses when dohc can't.
 
 #### `dohc version list`
 
@@ -1820,6 +1861,55 @@ List open conflicts from merges and from sync.
 With --json, print each conflict's sides.
 
 - `--after <conflict>`: Continue after this conflict ID from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+
+#### `dohc version create`
+
+```sh
+dohc version create <name> [options]
+```
+
+Create a version from the active one and switch to it.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name } }`.
+
+#### `dohc version switch`
+
+```sh
+dohc version switch <version> [options]
+```
+
+Switch the workspace folder to a version.
+
+Name a version by its name or ID, as version list prints them.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, changedFileCount }`.
+
+#### `dohc version merge`
+
+```sh
+dohc version merge <version> [options]
+```
+
+Merge a version into Main.
+
+Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+
+#### `dohc version resolve`
+
+```sh
+dohc version resolve <conflict> [-] [options]
+```
+
+Resolve an open conflict.
+
+Use - to read the combined text from stdin. Give exactly one of --keep, --text or -. In a merge, current is Main and incoming is the version. In sync, current is this computer.
+
+- `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
+- `--text <text>`: Replace both sides with this combined text.
 
 With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
 
