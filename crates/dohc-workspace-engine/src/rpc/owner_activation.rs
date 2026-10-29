@@ -628,6 +628,178 @@ mod tests {
         }
     }
 
+    /// A Stop's preparation answers only the configured host's own
+    /// connection, and the same each time. Its release is idempotent, and the
+    /// retirement's intent ends it. A restarted engine holds none, and no
+    /// edit method reaches the departing activation there.
+    #[tokio::test]
+    async fn a_retirement_preparation_lasts_only_for_its_connection_and_engine() {
+        use dohc_engine_protocol::transport::{
+            ConnectionHandle, ConnectionOwner, EngineService as _,
+        };
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = json!({
+            "version": 1, "relayNamespace": "prepare-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4,
+                "relay":{"baseUrl":"https://relay.invalid","bearerToken":"owner"}}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        });
+        let lineage = dohc_engine_storage::hex_sha256(b"lineage");
+        let source = ImportedOwnerSource {
+            version: 1,
+            reader_source: false,
+            relay_database_namespace: "prepare-test".into(),
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: lineage.clone(),
+            current_path: "document.md".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            committed_cursor: 0,
+            base_origin_id: "origin".into(),
+            base_origin_seq: 0,
+            base_relay_seq: 0,
+            source_moment_id: "moment".into(),
+            source_digest: lineage.clone(),
+            source_byte_length: 0,
+            native_head_sequence: 0,
+            full_state_digest: lineage.clone(),
+            full_state_byte_length: 0,
+            predecessor_activation_id: None,
+        };
+        let key = json!({"objectId":"document","lineageClaimId":lineage,"activationId":"retiring",
+            "restoreFenceGeneration":0});
+        for restarted in [false, true] {
+            let (service, owner, _ingress) = EngineService::configured_live_host(
+                serde_json::from_value(configuration.clone()).unwrap(),
+            )
+            .await
+            .unwrap();
+            let workspace = lock(&service.handles).keys().next().unwrap().clone();
+            let open = service.open(Some(&workspace)).unwrap();
+            if !restarted {
+                open.actor
+                    .ensure_main_version(
+                        "workspace".into(),
+                        0,
+                        Arc::new(dohc_engine_storage::NoFaults),
+                        dohc_engine_runtime::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
+                conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                conn.execute(
+                    "INSERT INTO ydoc_owner_activation_sources VALUES ('retiring','prepare-test','workspace','main','document',?1,'moment',?1,?1,?2)",
+                    rusqlite::params![lineage, serde_json::to_string(&source).unwrap()],
+                )
+                .unwrap();
+            }
+            let call = |connection: ConnectionHandle, method: &str, params: serde_json::Value| {
+                let mut ctx = RequestContext::unbounded();
+                ctx.connection = Some(connection);
+                service.call(
+                    ctx,
+                    Request {
+                        id: 9,
+                        method: method.into(),
+                        workspace: Some(workspace.clone()),
+                        deadline_ms: None,
+                        idempotency_key: None,
+                        progress: false,
+                        params,
+                    },
+                )
+            };
+            let answer = |method: &'static str| {
+                let request = call(owner.handle(), method, key.clone());
+                async move { request.await.map(|answer| answer.response.result) }
+            };
+            let prepared = json!({"status":"prepared"});
+            if !restarted {
+                assert_eq!(
+                    answer("liveApplication.prepareRetirement").await.unwrap(),
+                    prepared
+                );
+                assert_eq!(
+                    answer("liveApplication.prepareRetirement").await.unwrap(),
+                    prepared
+                );
+                let stranger = ConnectionOwner::authenticated();
+                for method in [
+                    "liveApplication.prepareRetirement",
+                    "liveApplication.releaseRetirementPreparation",
+                ] {
+                    let refused = call(stranger.handle(), method, key.clone())
+                        .await
+                        .unwrap_err();
+                    assert_eq!(refused.code, ErrorCode::SessionExpired, "{method}");
+                }
+                let released = |value: bool| json!({ "released": value });
+                assert_eq!(
+                    answer("liveApplication.releaseRetirementPreparation")
+                        .await
+                        .unwrap(),
+                    released(true),
+                    "another connection neither prepared nor released it"
+                );
+                assert_eq!(
+                    answer("liveApplication.releaseRetirementPreparation")
+                        .await
+                        .unwrap(),
+                    released(false)
+                );
+                assert_eq!(
+                    answer("liveApplication.prepareRetirement").await.unwrap(),
+                    prepared
+                );
+                let mut reconcile = key.clone();
+                reconcile["acceptedThrough"] = json!(5);
+                reconcile["afterReceipt"] = json!(null);
+                reconcile["maxApplications"] = json!(4);
+                let reconciled = call(
+                    owner.handle(),
+                    "liveApplication.reconcileActivation",
+                    reconcile,
+                )
+                .await
+                .unwrap();
+                assert_eq!(reconciled.response.result["status"], "reconciled");
+                assert_eq!(
+                    answer("liveApplication.releaseRetirementPreparation")
+                        .await
+                        .unwrap(),
+                    released(false),
+                    "the intent ended it"
+                );
+            } else {
+                assert_eq!(
+                    answer("liveApplication.releaseRetirementPreparation")
+                        .await
+                        .unwrap(),
+                    json!({"released": false}),
+                    "a restarted engine holds no preparation"
+                );
+                let edit = call(owner.handle(), "ydoc.recordUpdate", json!({}))
+                    .await
+                    .unwrap_err();
+                assert_eq!(edit.code, ErrorCode::Forbidden);
+            }
+            assert_eq!(
+                answer("liveApplication.prepareRetirement")
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Conflict,
+                "a retiring activation prepares no more, restarted={restarted}"
+            );
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
+    }
+
     /// A release names the activation it ends. One naming another activation
     /// than the session serves closes nothing and removes no source. A
     /// capture of another lineage never retags a reused session.

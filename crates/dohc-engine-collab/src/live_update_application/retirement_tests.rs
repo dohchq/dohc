@@ -2357,3 +2357,188 @@ fn observe(f: &mut Fixture) -> Result<(), owner_outbox::OwnerOutboxError> {
         TxnOutcome::Crashed { .. } => panic!("observed binding crash"),
     }
 }
+
+fn preparation_key(f: &Fixture) -> PreparationKey {
+    PreparationKey {
+        object_id: "object".into(),
+        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+        activation_id: f.cut.adoption_id.clone(),
+        restore_fence_generation: 0,
+    }
+}
+
+fn prepare(
+    f: &Fixture,
+    preparations: &RetirementPreparations,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<PreparationPending>, ApplicationError> {
+    prepare_retirement(&f.store, &retirement_scope(), &preparation_key(f), preparations, owner)
+}
+
+fn owner() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+}
+
+/// A native edit appended on the writer `preparations` belongs to, as
+/// [`native_tail_edit`] appends one.
+fn prepared_append(
+    f: &mut Fixture,
+    update: &[u8],
+    now: i64,
+    preparations: &RetirementPreparations,
+) -> Result<owner_outbox::OwnerOutboxEntry, crate::CollabError> {
+    let key = f.key.clone();
+    let path = f.binding.current_path.clone();
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+        run: None,
+    };
+    crate::record_local_update(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.key,
+        update,
+        crate::LocalAppend {
+            actor_origin_id: Some("native-agent"),
+            attribution: Some(&attribution),
+            ..Default::default()
+        },
+        &NoFaults,
+        now,
+        |tx, outcome, _| {
+            owner_outbox::append_adopted_local_update_in_tx(tx, &key, &path, outcome.seq, update, preparations, now)
+        },
+    )?;
+    let delivery = native_entries(f).last().unwrap().0.clone();
+    let outbox = outbox_of(f, &delivery);
+    Ok(owner_outbox::read_pending(&f.store, "workspace", &outbox).unwrap().entries.last().unwrap().clone())
+}
+
+/// What a refused append could have changed: the document, its update log,
+/// and its native entries.
+fn appended(f: &Fixture) -> (Vec<u8>, i64, Vec<EntryState>) {
+    (full_state(f), f.store.table_row_count("ydoc_updates").unwrap(), native_entries(f))
+}
+
+/// Codex's P2 on round 5: Stop checked that nothing of the activation waited
+/// for delivery, then fenced it at the relay. A local edit appended between
+/// the two reached neither the relay nor any receipt, and retirement refused
+/// the activation forever. A preparation and an append run on one writer, so
+/// one commits first: an append first leaves the preparation pending, and a
+/// preparation first refuses the append until the retirement's intent, which
+/// refuses it from there.
+#[test]
+fn a_local_append_and_a_stop_preparation_never_interleave() {
+    // The gap without a block: the check passed, the edit landed, and the
+    // journal never accepted it.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    let late = native_tail_edit(&mut f, "# Late\n", 11);
+    let absent = JournalEvidence { receipts: vec![], absent: vec![late.delivery_id] };
+    assert!(matches!(reconcile(&mut f, 10, None, Some(&absent)), Err(ApplicationError::Conflict)));
+
+    // The append first: the preparation waits for its delivery and blocks nothing.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let first = native_tail_edit(&mut f, "# First\n", 11);
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::NativePending));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Second\n").unwrap();
+    let second = prepared_append(&mut f, &update, 12, &preparations).unwrap();
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::NativePending));
+    acknowledge_entry(&mut f, &receipt_of(&first.delivery_id, &first.update_digest, 3));
+    acknowledge_entry(&mut f, &receipt_of(&second.delivery_id, &second.update_digest, 4));
+
+    // The preparation first: it refuses the next append, and preparing again answers the same.
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    let before = appended(&f);
+    let third = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Third\n").unwrap();
+    assert!(matches!(prepared_append(&mut f, &third, 13, &preparations), Err(crate::CollabError::OwnerOutboxFrozen)));
+    assert_eq!(appended(&f), before);
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+
+    // The fence's retirement meets no edit it cannot answer for.
+    begin(&mut f, 10).unwrap();
+    preparations.end(&f.cut.adoption_id);
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    assert!(matches!(
+        prepared_append(&mut f, &third, 13, &preparations),
+        Err(crate::CollabError::OwnerOutboxFrozen)
+    ), "the intent refuses it from here");
+    assert_eq!(appended(&f), before);
+    assert!(matches!(prepare(&f, &preparations, &owner), Err(ApplicationError::Conflict)));
+    assert!(matches!(reconcile(&mut f, 10, None, None).unwrap(), Reconciliation::Reconciled { .. }));
+}
+
+/// A refused append fails as one on a frozen queue does: its whole
+/// transaction rolls back and the caller keeps its bytes. Released, the
+/// same bytes append whole.
+#[test]
+fn a_refused_append_loses_nothing() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    let before = appended(&f);
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Kept\n").unwrap();
+    assert!(matches!(prepared_append(&mut f, &update, 11, &preparations), Err(crate::CollabError::OwnerOutboxFrozen)));
+    assert_eq!(appended(&f), before);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    assert!(!preparations.release(&preparation_key(&f), &owner), "a release is idempotent");
+    let entry = prepared_append(&mut f, &update, 11, &preparations).unwrap();
+    assert_eq!(entry.update, update);
+    assert_eq!(entry_update(&f, &entry.delivery_id), update);
+    let after = appended(&f);
+    assert_eq!((after.1, after.2.len()), (before.1 + 1, before.2.len() + 1));
+    assert_ne!(after.0, before.0);
+}
+
+/// A preparation lasts only while the owner that made it does. Another
+/// owner neither releases it nor inherits it, and the owner's end reopens
+/// appends.
+#[test]
+fn a_preparation_lasts_only_while_its_owner_does() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, first, other) = (RetirementPreparations::default(), owner(), owner());
+    assert_eq!(prepare(&f, &preparations, &first).unwrap(), None);
+    assert!(!preparations.release(&preparation_key(&f), &other));
+    let mut later = preparation_key(&f);
+    later.restore_fence_generation = 1;
+    assert!(!preparations.release(&later, &first), "a release names its exact generation");
+    assert!(!preparations.blocks(&f.cut.adoption_id, 1));
+    assert!(preparations.blocks(&f.cut.adoption_id, 0));
+    first.store(false, std::sync::atomic::Ordering::Release);
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Reopened\n").unwrap();
+    prepared_append(&mut f, &update, 11, &preparations).unwrap();
+    assert!(!preparations.release(&preparation_key(&f), &first), "an ended owner's preparation was not in force");
+    assert_eq!(prepare(&f, &preparations, &other).unwrap(), Some(PreparationPending::NativePending));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+}
+
+/// A refused queue with no Try again retires with its kept bytes, so it
+/// prepares. An outstanding Try again may still deliver, so it waits.
+#[test]
+fn an_outstanding_try_again_holds_a_preparation() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    let entry = native_tail_edit(&mut f, "# Refused\n", 11);
+    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    owner_outbox::retry(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxRetryInput { outbox_id: outbox, binding: f.binding.clone() },
+    )
+    .unwrap();
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::RetryOutstanding));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+}

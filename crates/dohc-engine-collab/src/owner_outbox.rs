@@ -924,13 +924,16 @@ fn retain_fenced_in_tx(
 }
 
 /// Called only by the ordinary local append transaction. Remote applications
-/// use their own receipt ledger and never enter this path.
+/// use their own receipt ledger and never enter this path. An activation
+/// whose Stop prepared, or whose retirement began, refuses the append as a
+/// frozen queue does, and the whole transaction rolls back.
 pub fn append_adopted_local_update_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &crate::DocKey,
     path: &str,
     sequence: i64,
     update: &[u8],
+    preparations: &crate::live_update_application::RetirementPreparations,
     now_ms: i64,
 ) -> Result<(), crate::CollabError> {
     use crate::CollabError;
@@ -948,17 +951,18 @@ pub fn append_adopted_local_update_in_tx(
         }
         return Ok(());
     };
-    let saved: Option<(String, i64, i64, String)> = tx
+    let saved: Option<(String, i64, i64, String, String)> = tx
         .query_row(
-            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id FROM {CURRENT_ACTIVATIONS}
+            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id,relay_database_namespace FROM {CURRENT_ACTIVATIONS}
          WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
             params![key.workspace_id, key.version_id, key.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()
         .map_err(read_sql)
         .map_err(map)?;
-    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
+    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id, namespace)) = saved
+    else {
         if has_adopted_owner_in(tx, key)? {
             return Err(CollabError::OwnerOutboxFrozen);
         }
@@ -976,6 +980,19 @@ pub fn append_adopted_local_update_in_tx(
         || marker.path.as_deref() != Some(path)
     {
         return Err(map(OwnerOutboxError::ParentMismatch));
+    }
+    // After the relay's fence, an edit could reach neither the relay nor
+    // the retirement that answers for this activation.
+    let retiring: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_retirements WHERE relay_database_namespace=?1 AND activation_id=?2)",
+            params![namespace, adoption_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)
+        .map_err(map)?;
+    if retiring || preparations.blocks(&adoption_id, binding.restore_fence_generation) {
+        return Err(CollabError::OwnerOutboxFrozen);
     }
     // Adoption authenticated these immutable bytes. Each keystroke needs only
     // their retained metadata; loading and hashing the full base scales with

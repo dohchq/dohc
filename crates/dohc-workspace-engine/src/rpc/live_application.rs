@@ -1363,6 +1363,76 @@ impl EngineService {
         })
     }
 
+    /// `liveApplication.prepareRetirement`: before the relay fences an
+    /// activation, check that none of its native edits waits for delivery,
+    /// then refuse its local appends until its release, its retirement's
+    /// intent, or the end of this connection. A pending answer blocks nothing.
+    pub(super) async fn live_application_prepare_retirement(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{PreparationKey, PreparationPending};
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let scope = self.configured_retirement_scope(ctx, 1)?;
+        let pending = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .prepare_retirement(scope, key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match pending {
+            None => json!({"status":"prepared"}),
+            Some(reason) => json!({"status":"pending","reason":match reason {
+                PreparationPending::NativePending => "native-pending",
+                PreparationPending::RetryOutstanding => "retry-outstanding",
+            }}),
+        })
+    }
+
+    /// `liveApplication.releaseRetirementPreparation`: reopen the local
+    /// appends this connection's preparation refused. Idempotent.
+    pub(super) async fn live_application_release_retirement_preparation(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::PreparationKey;
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let released = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .release_retirement_preparation(key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({"released":released}))
+    }
+
+    /// The workspace's host, when this connection owns it. Its owner's
+    /// lifetime bounds every preparation it makes.
+    fn preparing_host(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+    ) -> Result<Arc<Host>, WireError> {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .filter(|host| host.current(connection))
+            .cloned()
+            .ok_or_else(workspace_unavailable)
+    }
+
     /// The retirement form of `liveApplication.settle`: settle the activation
     /// a retirement names through its durable binding. It needs no live
     /// registration and opens no session.

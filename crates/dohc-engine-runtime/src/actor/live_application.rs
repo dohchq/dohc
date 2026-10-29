@@ -9,12 +9,12 @@ use dohc_engine_collab::live_update_application::{
     LiveUpdateHostApplicationAck, LiveUpdateReceipt, NativeRestoreApplication,
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
-    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, Reconciliation, Release,
-    RetiredActivations, RetirementKey, RetirementScope, RetirementTarget, UnloadPending,
-    adopt_owner_committed, apply_committed, begin_retirement, bootstrap_committed,
-    read_application_ack, reconcile_activation, release_activation, unload_pending,
-    validate_application_binding, validate_registration_activation, with_retirement_settlement,
-    with_settlement,
+    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, PreparationKey,
+    PreparationPending, Reconciliation, Release, RetiredActivations, RetirementKey,
+    RetirementScope, RetirementTarget, UnloadPending, adopt_owner_committed, apply_committed,
+    begin_retirement, bootstrap_committed, prepare_retirement, read_application_ack,
+    reconcile_activation, release_activation, unload_pending, validate_application_binding,
+    validate_registration_activation, with_retirement_settlement, with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -584,6 +584,51 @@ impl ActorLiveApplicationOwner {
                     coordinate,
                     key,
                     release,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// See [`prepare_retirement`]. The block lasts while this owner does.
+    pub async fn prepare_retirement(
+        &self,
+        scope: OwnedRetirementScope,
+        key: PreparationKey,
+    ) -> Result<Option<PreparationPending>, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::PrepareRetirement {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    scope,
+                    key,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// End this owner's preparation of `key`; see
+    /// [`dohc_engine_collab::live_update_application::RetirementPreparations::release`].
+    pub async fn release_retirement_preparation(
+        &self,
+        key: PreparationKey,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::ReleasePreparation {
+                    token: self.token.clone(),
+                    key,
                     reply,
                 },
             )))
@@ -1162,6 +1207,18 @@ pub(super) enum Request {
         release: bool,
         reply: Reply<RetirementTarget>,
     },
+    PrepareRetirement {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        key: PreparationKey,
+        reply: Reply<Option<PreparationPending>>,
+    },
+    ReleasePreparation {
+        token: Token,
+        key: PreparationKey,
+        reply: Reply<bool>,
+    },
     Reconcile {
         workspace_id: String,
         token: Token,
@@ -1646,6 +1703,7 @@ impl Request {
                         release,
                         &dohc_engine_storage::NoFaults,
                     )?;
+                    cache.retirement_preparations().end(&key.activation_id);
                     if !target.released {
                         owner.retire_activation(
                             cache,
@@ -1658,6 +1716,29 @@ impl Request {
                     Ok(target)
                 });
                 let _ = reply.send(result);
+            }
+            Self::PrepareRetirement {
+                workspace_id,
+                token,
+                scope,
+                key,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    prepare_retirement(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        &cache.retirement_preparations(),
+                        &token,
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            // An owner that ended blocks nothing, so its release needs no current owner.
+            Self::ReleasePreparation { token, key, reply } => {
+                let _ = reply.send(Ok(cache.retirement_preparations().release(&key, &token)));
             }
             Self::Reconcile {
                 workspace_id,

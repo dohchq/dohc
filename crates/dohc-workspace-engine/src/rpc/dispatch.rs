@@ -147,6 +147,8 @@ impl EngineService {
                     | "liveApplication.openRecoveryStore"
                     | "liveApplication.closeRecoveryStore"
                     | "liveApplication.unloadDocument"
+                    | "liveApplication.prepareRetirement"
+                    | "liveApplication.releaseRetirementPreparation"
                     | "liveApplication.reconcileActivation"
                     | "liveApplication.releaseActivation"
                     | "liveApplication.register"
@@ -379,6 +381,22 @@ impl EngineService {
             "liveApplication.unloadDocument" => {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
                     .await?
+            }
+            "liveApplication.prepareRetirement" => {
+                Box::pin(self.live_application_prepare_retirement(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
+            "liveApplication.releaseRetirementPreparation" => {
+                Box::pin(self.live_application_release_retirement_preparation(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "liveApplication.reconcileActivation" => {
                 Box::pin(self.live_application_reconcile(&ctx, request.workspace, request.params))

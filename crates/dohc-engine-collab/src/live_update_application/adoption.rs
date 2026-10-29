@@ -644,6 +644,7 @@ mod tests {
                         "owner.md",
                         outcome.seq,
                         &bytes,
+                        &Default::default(),
                         11,
                     )
                 },
@@ -1032,6 +1033,7 @@ mod tests {
                         "owner.md",
                         outcome.seq,
                         &update,
+                        &Default::default(),
                         5,
                     )
                 },

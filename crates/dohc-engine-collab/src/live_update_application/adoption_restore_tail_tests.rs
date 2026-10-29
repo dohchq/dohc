@@ -254,6 +254,7 @@ fn native_tail_record_at_depth(
                 &path,
                 outcome.seq,
                 &update,
+                &Default::default(),
                 now,
             )
         },
@@ -1071,6 +1072,7 @@ fn native_restore_append_identity_survives_retries_restart_and_acknowledgement()
                         "owner.md",
                         1,
                         &entry.update,
+                        &Default::default(),
                         now,
                     )
                 })
@@ -1192,6 +1194,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                 "owner.md",
                 native_sequence,
                 &entry.update,
+                &Default::default(),
                 99,
             )
         })
@@ -1263,6 +1266,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                     "owner.md",
                     outcome.seq,
                     &update,
+                    &Default::default(),
                     11,
                 )
             },
@@ -2398,6 +2402,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
                 "owner.md",
                 outcome.seq,
                 &original,
+                &Default::default(),
                 11,
             )?;
             Ok::<_, crate::CollabError>(outcome)

@@ -15,6 +15,8 @@ use crate::owner_outbox::{
     ACTIVATION_RELEASED, MAX_TERMINAL_REASON_BYTES,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The activation Stop retires, as the relay fenced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,135 @@ pub fn begin_retirement(
         TxnOutcome::Committed(target) => Ok(target),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
+}
+
+/// The activation a Stop prepares to fence. No fence exists yet, so it names no F.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparationKey {
+    pub object_id: String,
+    pub lineage_claim_id: String,
+    pub activation_id: String,
+    pub restore_fence_generation: i64,
+}
+
+/// Why a Stop cannot fence its activation yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationPending {
+    /// A native edit of the activation waits for delivery.
+    NativePending,
+    /// A Try again of one of its queues is outstanding.
+    RetryOutstanding,
+}
+
+/// The activations a Stop prepared to fence, on one store's writer. Each
+/// refuses local appends while the owner that prepared it lasts, until its
+/// release or its retirement's intent. Memory only: a restarted engine
+/// holds none.
+#[derive(Clone, Default)]
+pub struct RetirementPreparations(Arc<Mutex<HashMap<String, Prepared>>>);
+
+/// A preparation's generation, and the owner whose lifetime bounds it.
+type Prepared = (i64, Arc<AtomicBool>);
+
+impl RetirementPreparations {
+    fn held(&self) -> MutexGuard<'_, HashMap<String, Prepared>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a preparation refuses appends to the activation at `generation`.
+    pub fn blocks(&self, activation_id: &str, generation: i64) -> bool {
+        self.held()
+            .get(activation_id)
+            .is_some_and(|(prepared, owner)| {
+                *prepared == generation && owner.load(Ordering::Acquire)
+            })
+    }
+
+    /// End `owner`'s preparation of the key. True when it was in force.
+    pub fn release(&self, key: &PreparationKey, owner: &Arc<AtomicBool>) -> bool {
+        let mut held = self.held();
+        let Some((generation, prepared)) = held.get(&key.activation_id) else {
+            return false;
+        };
+        if *generation != key.restore_fence_generation || !Arc::ptr_eq(prepared, owner) {
+            return false;
+        }
+        let live = prepared.load(Ordering::Acquire);
+        held.remove(&key.activation_id);
+        live
+    }
+
+    /// A retirement's durable intent refuses the activation's appends from here.
+    pub fn end(&self, activation_id: &str) {
+        self.held().remove(activation_id);
+    }
+}
+
+/// Check that nothing of the activation waits for delivery, then refuse its
+/// local appends while `owner` lasts. The check and the block run on the
+/// store's writer, so no append lands between them. A pending answer blocks
+/// nothing. A released or retiring activation is not prepared again.
+pub fn prepare_retirement(
+    store: &EngineStore,
+    scope: &RetirementScope<'_>,
+    key: &PreparationKey,
+    preparations: &RetirementPreparations,
+    owner: &Arc<AtomicBool>,
+) -> Result<Option<PreparationPending>, ApplicationError> {
+    let pending = store.read_with(|conn| {
+        let retiring = validate_retirement(
+            conn,
+            scope,
+            &RetirementKey {
+                object_id: key.object_id.clone(),
+                lineage_claim_id: key.lineage_claim_id.clone(),
+                activation_id: key.activation_id.clone(),
+                restore_fence_generation: key.restore_fence_generation,
+                accepted_through: 0,
+            },
+        )?;
+        if retiring.released_through.is_some() {
+            return Err(ApplicationError::Conflict);
+        }
+        require_not_retiring(conn, scope.namespace, &key.activation_id)?;
+        let doc = &retiring.doc;
+        let (retrying, pending): (bool, bool) = conn
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id
+                     WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
+                       AND o.state='quarantined' AND o.retry_delivery_id IS NOT NULL
+                       AND e.pending=1 AND json_extract(e.native_source_json,'$.adoptionId')=?5),
+                   EXISTS(SELECT 1 FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id
+                     WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
+                       AND o.state!='quarantined' AND e.pending=1
+                       AND json_extract(e.native_source_json,'$.adoptionId')=?5)",
+                params![
+                    doc.workspace_id,
+                    doc.version_id,
+                    doc.object_id,
+                    key.lineage_claim_id,
+                    key.activation_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(read_sql)?;
+        Ok::<_, ApplicationError>(if retrying {
+            Some(PreparationPending::RetryOutstanding)
+        } else if pending {
+            Some(PreparationPending::NativePending)
+        } else {
+            None
+        })
+    })?;
+    if pending.is_none() {
+        preparations.held().insert(
+            key.activation_id.clone(),
+            (key.restore_fence_generation, Arc::clone(owner)),
+        );
+    }
+    Ok(pending)
 }
 
 /// Record that the retirement of this exact activation and generation began.

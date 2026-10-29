@@ -73,8 +73,9 @@ pub(crate) mod restore_fence;
 mod restore_resume;
 mod retirement;
 pub use retirement::{
-    begin_retirement, reconcile_activation, release_activation, CarriedDelivery, JournalEvidence,
-    Reconciliation, Release, ReleasePending, RetainedPrefix, RetainedPrefixBody, RetirementKey,
+    begin_retirement, prepare_retirement, reconcile_activation, release_activation,
+    CarriedDelivery, JournalEvidence, PreparationKey, PreparationPending, Reconciliation, Release,
+    ReleasePending, RetainedPrefix, RetainedPrefixBody, RetirementKey, RetirementPreparations,
     RetirementScope, RetirementTarget,
 };
 mod settled_base;

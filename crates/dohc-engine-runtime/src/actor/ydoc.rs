@@ -218,6 +218,7 @@ impl ActorHandle {
                 let Some((version,object))=found.into_iter().next() else {return Ok(Err(OwnerOutboxError::NotFound));};
                 DocKey::new(&workspace,&version,&object)?
             };
+            let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
                 "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
@@ -227,7 +228,7 @@ impl ActorHandle {
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
                     release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
-                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
+                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
                     }).map(|row|vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
@@ -2283,6 +2284,7 @@ pub(super) fn ydoc_record_update_on_store(
     let mut sharing_declined: Option<SharingDeclined> = None;
     let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
     let reader_resolver = doc_cache.reader_resolver.clone();
+    let preparations = doc_cache.retirement_preparations();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -2332,6 +2334,7 @@ pub(super) fn ydoc_record_update_on_store(
                 attribution.as_ref(),
                 seed_source.as_ref(),
                 reader_resolver.as_deref(),
+                &preparations,
                 &mut sharing_declined,
                 outcome,
                 now_ms,
@@ -4702,6 +4705,7 @@ fn journal_local_append_in_tx(
     attribution: Option<&ChangeAttribution>,
     seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     sharing_declined: &mut Option<SharingDeclined>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
@@ -4713,6 +4717,7 @@ fn journal_local_append_in_tx(
         path,
         outcome.seq,
         update,
+        preparations,
         now_ms,
     )?;
     if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
@@ -4819,6 +4824,7 @@ pub(super) fn journal_recovery_append_in_tx(
     update: &[u8],
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     outcome: &mut AppendOutcome,
     now_ms: i64,
 ) -> Result<bool, CollabError> {
@@ -4835,6 +4841,7 @@ pub(super) fn journal_recovery_append_in_tx(
         attribution,
         None,
         None,
+        preparations,
         &mut None,
         outcome,
         now_ms,
