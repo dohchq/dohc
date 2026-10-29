@@ -114,6 +114,9 @@ export interface ShellError {
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
+  // The stored notice was read, so its row is read too. Closing a toast alone
+  // leaves the row unread.
+  read?: boolean;
 }
 
 // The error hook a notice owner hands to a shared part that reports its own
@@ -459,7 +462,7 @@ export function useShellError(workspaceId: string) {
           title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
-          atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
+          atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null, read: notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),

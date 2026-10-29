@@ -60,7 +60,7 @@ export type Notice = {
 
 // A workspace error the shell reported. `details` is the report Copy puts
 // on the clipboard; `seen` means its toast was closed and only the row in
-// Notices remains.
+// Notices remains. `read` means its stored notice was read, so the row is too.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
   // Omitted for a failure. A warning needs the person, though nothing failed.
@@ -81,6 +81,7 @@ export interface WorkspaceErrorNotice {
   actionLabel?: string;
   additionalActionLabels?: string[];
   seen: boolean;
+  read?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -1200,7 +1201,7 @@ export function NoticeCenter(props: {
         ...(!error.seen && props.onHideWorkspaceError
           ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
           : {}),
-        read: error.seen,
+        read: error.read === true,
         timeMs: error.atMs,
         // A success has nothing to report, so it has nothing to copy.
         copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,

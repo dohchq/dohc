@@ -1887,9 +1887,13 @@ describe("notices sent to you", () => {
     const held = { id: "held-save", tone: "warning" as const, title: "Held a change to note.md",
       message: "Saving it would also change parts dohc can't show.", details: "note.md", atMs: 1,
       canRetry: false, actionLabel: "Open note", seen: false };
-    const props = (seen: boolean) => ({ workspaceErrors: [{ ...held, seen }], onWorkspaceErrorAction: vi.fn() });
+    const props = (seen: boolean, read = seen) => ({ workspaceErrors: [{ ...held, seen, read }], onWorkspaceErrorAction: vi.fn() });
     const first = renderNotices(props(false));
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-held-save-unread")).toBeTruthy();
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+    // Closing the toast keeps the row unread.
+    first.rerender(noticeElement(props(true, false)));
     expect(screen.getByTestId("notice-held-save-unread")).toBeTruthy();
     expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
     first.rerender(noticeElement(props(true)));

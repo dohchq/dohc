@@ -5274,6 +5274,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
+        ...(error.read ? { read: true } : {}),
       })),
     [shellErrors, reportFacts],
   );

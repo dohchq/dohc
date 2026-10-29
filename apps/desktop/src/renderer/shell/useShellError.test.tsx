@@ -249,9 +249,9 @@ describe("useShellError", () => {
       readAtMs: null, postedHere: true };
     const retry = vi.fn();
     act(() => result.current.showSyncRefusals([notice], retry));
-    expect(result.current.shellErrors[0]?.seen).toBe(false);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: false, read: false });
     act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
-    expect(result.current.shellErrors[0]?.seen).toBe(true);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
     act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
     expect(result.current.shellErrors[0]?.seen).toBe(true);
     act(() => result.current.showSyncRefusals([], retry));
