@@ -2372,6 +2372,26 @@ it("retires a stopped document only once the engine released it after its replic
   expect(releases()).toBe(tries);
 });
 
+// Proves: a retirement the relay defers for a restore it carries stays open
+// after the engine released the document. The host keeps the document, and a
+// later pass replays the release and retires it once the relay completes it.
+it("keeps a released document hosted while its retirement waits for a restore", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement").mockReturnValue({status: "pending", reason: "restore"});
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(complete.mock.calls.length).toBeGreaterThan(1));
+  expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish."));
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.drained("workspace")).toBe(false);
+  expect(retiredRow(o).retired).toBe(false);
+  complete.mockRestore();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(retiredRow(o).retired).toBe(true);
+});
+
 type Enrolled = Awaited<ReturnType<typeof enrolledServiceHost>>;
 // Each engine request for `method` after the first `count` is never answered, as when its daemon stops first.
 const unansweredAfter = (o: Enrolled, method: string, count: number) => {
@@ -2482,18 +2502,21 @@ it("records a successor's adoption at its predecessor's boundary whose reply was
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   o.engine.boundary = undefined;
   const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  // A pass after the lost reply may recover the adoption through the open retirement, so the count is taken when the reply is lost.
+  let ownersWhenLost: unknown;
   adopt.mockImplementationOnce(async (...args: unknown[]) => {
     await adopted(...args);
     expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
       enabled: false, retire: true, nowMs: 50, guard() {}})).toMatchObject({retired: true});
+    ownersWhenLost = o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get();
     throw new Error("Adoption reply lost.");
   });
   const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
   const acks = vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeOwnerAdoption");
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(adopt).toHaveBeenCalledTimes(1));
-  expect(o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get()).toEqual({owners: 0});
+  await vi.waitFor(() => expect(adopt.mock.settledResults).toEqual([{type: "rejected", value: new Error("Adoption reply lost.")}]));
+  expect(ownersWhenLost).toEqual({owners: 0});
   await o.depart();
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(cuts).toHaveBeenCalledWith(expect.objectContaining({adoptionId: SUCCESSOR, throughCursor: terminal}));
