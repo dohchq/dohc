@@ -257,7 +257,9 @@ describe("FileInspector when an open note changed outside dohc", () => {
     await openNote();
     setEngine(engineState(markdownToYDoc("# Plan typed\n"), "unsaved"));
     const notice = await screen.findByTestId("changed-outside-notice");
+    expect(CHANGED_OUTSIDE_NOTICE).toBe("This file changed outside dohc.");
     expect(notice.textContent).toContain(CHANGED_OUTSIDE_NOTICE);
+    expect(notice.textContent).not.toContain("History");
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CHANGED_OUTSIDE_NOTICE);
     expect(retryKeys).toEqual([0]);
     const reload = screen.getByRole("button", { name: "Reload" });

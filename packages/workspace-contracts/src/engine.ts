@@ -460,6 +460,8 @@ export interface VersionedTextMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: VersionedFileContentKind;
   byteLength?: number;
+  // Present on listMoments rows; history.page does not send it.
+  sha256?: string;
   metadata: MomentMetadata;
   // Present only when the moment recorded who made it.
   authors?: MomentAuthor[];

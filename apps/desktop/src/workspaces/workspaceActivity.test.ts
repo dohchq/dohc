@@ -58,6 +58,29 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("omits copy status until each newly opened capture first reports", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const activity = createWorkspaceActivity(vi.fn(), {
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    for (let opening = 0; opening < 2; opening++) {
+      const initial = await activity.open(workspace());
+      expect(initial).not.toHaveProperty("outsideWriteCopies");
+      expect(initial).not.toHaveProperty("outsideWriteCopyReadError");
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopies");
+      expect(activity.getStatus("activity-test")).not.toHaveProperty("outsideWriteCopyReadError");
+      hooks.onOutsideWriteCopies?.(null, "local state not opened");
+      const failedRead = activity.getStatus("activity-test");
+      expect(failedRead.outsideWriteCopyReadError).toBe("local state not opened");
+      expect(failedRead).not.toHaveProperty("outsideWriteCopies");
+      hooks.onOutsideWriteCopies?.([], null);
+      expect(activity.getStatus("activity-test")).toMatchObject({ outsideWriteCopies: [], outsideWriteCopyReadError: null });
+      await activity.stopAll();
+    }
+  });
   it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
     let hooks!: WorkspaceCaptureHooks;
     const notify = vi.fn();
@@ -103,9 +126,18 @@ describe("workspaceActivity capture hooks", () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "activity-test" });
     hooks.onRetainedCopies({ count: 3, bytes: 300 });
     expect(notify).toHaveBeenCalledOnce();
+    hooks.onKeptFiles([["native.md", ".dohc-write-displaced/native.md"]]);
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
+    expect(activity.getStatus("activity-test").keptFiles).toEqual([["native.md", ".dohc-write-displaced/native.md"]]);
+    expect(activity.getStatus("activity-test").outsideWriteCopies).toEqual([["n.md", "n (kept copy).md", "copy-n-1"]]);
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], "broken receipt");
+    expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBe("broken receipt");
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
+    expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBeNull();
     await activity.stopAll();
     hooks.onRetainedCopies({ count: 4, bytes: 400 });
-    expect(notify).toHaveBeenCalledOnce();
+    hooks.onOutsideWriteCopies?.([], "retired capture");
+    expect(notify).toHaveBeenCalledTimes(5);
   });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;

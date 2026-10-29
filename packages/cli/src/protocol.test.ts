@@ -9,6 +9,11 @@ import {
   parseCliResult,
 } from "./protocol";
 
+it("keeps outside-write copies separate from native retained copies for agents", () => {
+  const result = { ok: true, keptCopies: [], more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
+  expect(parseCliResult("keptCopies", result)).toEqual(result);
+});
+
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
@@ -452,6 +457,8 @@ describe("document request schemas", () => {
   it("parses document results and structured failures", () => {
     expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" }))
       .toEqual({ ok: true, path: "a.md", markdown: "# A" });
+    const pending = { ok: true, path: "a.md", changed: true, warning: "Saved locally. The shared file update is pending. Do not repeat this edit." };
+    expect(parseCliResult("documentEdit", pending)).toEqual(pending);
     expect(parseCliResult("documentEdit", { ok: true, path: "a.md", changed: false }))
       .toEqual({ ok: true, path: "a.md", changed: false });
     expect(parseCliResult("documentEdit", { ok: false, reason: "refused" }))
