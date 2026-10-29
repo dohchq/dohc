@@ -164,9 +164,9 @@ export class LiveRestorePreparation {
       const continuation = store.continueStopRestore(input, Date.now());
       if (continuation !== "continue") throw new Error((await this.#end({...options, connection}, continuation)).reason);
       const retained = store.readStopRestoreLifecycle(input);
-      let current = retained ?? (requireReview
+      let current = retained ?? await (requireReview
         ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, config.validation, Date.now(), signal)
-        : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now()));
+        : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now(), signal));
       const verify = () => {
         check();
         if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {

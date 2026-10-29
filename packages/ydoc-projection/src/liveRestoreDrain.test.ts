@@ -1418,7 +1418,7 @@ it("serves the exact retained restore admission and checkpoint before native app
   const f = contentProposalFixture("owner", "device", true);
   try {
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const lifecycle = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const lifecycle = (await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201));
     expect(lifecycle.application).toBeNull();
     const raw = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1").get()!;
     const decoded = decodeJournalRow(f.context.db, raw);
@@ -1438,13 +1438,13 @@ it("serves the exact retained restore admission and checkpoint before native app
   } finally {f.close();}
 });
 
-it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",(kind,mode)=>{
+it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",async (kind,mode)=>{
   const f=contentProposalFixture(kind,mode,kind==="owner");
   try {
     const proposed=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=f.journalRows();
     // Coverage window statements are cached per database, so the row bound lives in the cost test.
     const prepare=vi.spyOn(f.context.db,"prepare");
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201);
+    const admitted=(await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201));
     const provenanceReads=prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.includes("sync_relay_live_update_struct_provenance") && /^\s*SELECT/i.test(sql));
     expect(provenanceReads.length).toBeGreaterThan(0);
     expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql) ||
@@ -1459,7 +1459,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     expect(admitted.admitted.authorSnapshot).toEqual([]);
     expect(admitted.admitted.checkpointCoverage?.filter(entry => entry.author.kind === "unattributed"))
       .toHaveLength(1);
-    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205)).toEqual(admitted);
+    expect((await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205))).toEqual(admitted);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
       hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
@@ -1477,7 +1477,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     const after=f.journalRows();
     expect(f.store.acknowledgeStopRestoreResume(f.input,resume)).toEqual(resumed);
     expect(f.store.acknowledgeStopRestoreReplacement(f.input,application)).toEqual(resumed);
-    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,210)).toEqual(resumed);
+    expect((await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,210))).toEqual(resumed);
     expect(f.journalRows()).toEqual(after);
     const read=f.storage.readLiveUpdateJournalCut({document:f.document});expect(read.kind).toBe("cut");
     if (kind==="owner") {
@@ -1538,7 +1538,7 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
     }
     expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: 2});
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const admitted = (await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201));
     expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
     const application = {fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest, nativeSourceManifestDigest: admitted.nativeSourceManifestDigest,
       admitted: admitted.admitted, localHeadSequence: admitted.preparation.fence.localHeadSequence + 1,
@@ -1603,7 +1603,7 @@ it("keeps a retirement's pre-restore key when its restore is declined", () => {
 // moves the owner's applied tip to the restore's row. The retried push then
 // lands as retirement output and moves no projection.
 it("publishes a restore's settlement moment for a retirement once the restore resumes", async () => {
-  const f = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
   try {
     const receipt = f.admitted.admitted.accepted.receipt, feed = createServiceHostFeed(f.storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
     const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
@@ -1648,16 +1648,16 @@ async function pushRestoreSettlement(storage: HostedStorage, {payload, record}: 
     settlementAdmission: {status: "accepted"}});
 }
 // The retirement key a restore's relay admission carried, and the boundary its owner delivery releases at.
-function carriedRetirement(f: Pick<ReturnType<typeof admittedRestoreFixture>, "admitted" | "document" | "raw">) {
+function carriedRetirement(f: Pick<Awaited<ReturnType<typeof admittedRestoreFixture>>, "admitted" | "document" | "raw">) {
   const receipt = f.admitted.admitted.accepted.receipt;
   const endpoint = f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(receipt.journalCursor)!;
   return {key: {objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId, activationId: hostedActivationId,
     restoreFenceGeneration: 2, acceptedThrough: receipt.journalCursor},
   boundary: {terminalReceipt: receipt, eventCount: Number(endpoint.accepted_event_count), historyEvidenceDigest: String(endpoint.accepted_evidence_digest)}};
 }
-type Admitted = ReturnType<typeof admittedRestoreFixture>["admitted"];
+type Admitted = Awaited<ReturnType<typeof admittedRestoreFixture>>["admitted"];
 // Proves and appends a resumed restore's settlement moment, as its host's push would.
-async function publishRestore(f: Pick<ReturnType<typeof admittedRestoreFixture>, "document" | "raw" | "storage" | "context">, admitted: Admitted,
+async function publishRestore(f: Pick<Awaited<ReturnType<typeof admittedRestoreFixture>>, "document" | "raw" | "storage" | "context">, admitted: Admitted,
   id: string, previous = 0, before?: string, originSeq = 0) {
   const cursor = admitted.admitted.accepted.receipt.journalCursor;
   const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cursor)!.validation_checkpoint_bytes as Uint8Array;
@@ -1699,7 +1699,7 @@ function declineAfterFence(f: Pick<ReturnType<typeof fixture>, "context" | "stor
   expect(f.store.acknowledgeStopRestoreCancellation(lookup, answers[answer], at + 3).phase).toBe("declined");
 }
 // Fences, prepares and completes the begun restore `lookup` names.
-function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence>, "store" | "raw" | "context" | "document" | "close">>(f: F,
+async function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence>, "store" | "raw" | "context" | "document" | "close">>(f: F,
   lookup: ReturnType<typeof fixture>["lookup"], at: number) {
   advanceStopRestoreFence(f.context, lookup, at);
   const capture = f.store.openStopRestoreCut(lookup);
@@ -1707,7 +1707,7 @@ function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence>, "st
   f.store.completeStopRestoreCut(capture.capture);
   const operation = f.store.pendingStopRestoreFence(lookup).operation;
   const fence: NativeRestoreFenceReceipt = {operation, localHeadSequence: operation.appliedSequence, recordedAtMs: at + 1};
-  const next = admitRestore(buildContentProposal({...f, ...proposalSources(f, "owner", lookup, fence), receipt: fence}));
+  const next = (await admitRestore(buildContentProposal({...f, ...proposalSources(f, "owner", lookup, fence), receipt: fence})));
   expect(next.complete().phase).toBe("resumed");
   return next;
 }
@@ -1718,7 +1718,7 @@ function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence>, "st
 // the document. That holds across a restart. Once the push lands it retires,
 // across a restart and a lost response to either the push or the completion.
 it("retires an activation that carries a restore only once its settlement moment is in the log", async () => {
-  const f = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
   const opened: ReturnType<typeof openSyncRelayStorage>[] = [];
   let closed = false;
   try {
@@ -1761,7 +1761,7 @@ it("retires an activation that carries a restore only once its settlement moment
 // it to generation 3 and B's Decline keeps it there. A's settlement at its own
 // generation is the publication the retirement waits for, across a restart.
 it("retires after a declined restore that follows a published one", async () => {
-  const f = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other"));
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other")));
   const opened: ReturnType<typeof openSyncRelayStorage>[] = [];
   let closed = false;
   try {
@@ -1808,7 +1808,7 @@ const publicationPending = "The last restore of this file has not reached the se
 // declined after its fence, and restore C completes on the generation B left
 // and publishes its own settlement, which moves the file and its history.
 it("waits for a resumed restore's settlement before the next restore begins", async () => {
-  const first = admittedRestoreFixture("owner", false);
+  const first = (await admittedRestoreFixture("owner", false));
   let f = first;
   try {
     expect(first.complete().phase).toBe("resumed");
@@ -1826,7 +1826,7 @@ it("waits for a resumed restore's settlement before the next restore begins", as
     declineAfterFence(f, {...f.lookup, operationId: "restore-b"}, 301, "fenceCancelled");
     reshare(f, 8);
     expect(beginStopRestore(f.context, {...f.intent, operationId: "restore-c", expectedFence: 3, expectedGrantGeneration: 8}, 310).previousOperationId).toBe("restore-b");
-    const c = completeRestore(f, {...f.lookup, operationId: "restore-c"}, 311);
+    const c = await completeRestore(f, {...f.lookup, operationId: "restore-c"}, 311);
     const published = await publishRestore(f, c.admitted, "restore-c-publication", first.admitted.admitted.accepted.receipt.journalCursor, a.markdownDigest, 1);
     expect(projectedMoment(f, "restore-c-publication")).toEqual({moment: {path: "docs/a.md", blob_sha256: published.markdownDigest},
       file: {blob_sha256: published.markdownDigest}});
@@ -1837,7 +1837,7 @@ it("waits for a resumed restore's settlement before the next restore begins", as
 // was there does not fence once it is missing. Nothing changes until it is
 // back, and then the fence goes on.
 it("holds a restore's fence while its resumed predecessor's settlement is missing", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     await publishRestore(f, f.admitted, "restore-a-publication");
@@ -1860,7 +1860,7 @@ it("holds a restore's fence while its resumed predecessor's settlement is missin
 const restoredState = (f: Pick<ReturnType<typeof fixture>, "raw">, admitted: Admitted) => f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?")
   .get(admitted.admitted.accepted.receipt.journalCursor)!.validation_checkpoint_bytes as Uint8Array;
 // Accepts the owner's edit to `doc` after the restore resumed.
-function editAfterRestore(f: Pick<ReturnType<typeof admittedRestoreFixture>, "journalCapture" | "storage">, doc: Y.Doc, deliveryId: string) {
+function editAfterRestore(f: Pick<Awaited<ReturnType<typeof admittedRestoreFixture>>, "journalCapture" | "storage">, doc: Y.Doc, deliveryId: string) {
   const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), deliveryId);
   const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount: {accountId: "owner", name: "Owner"},
     metadata: {...captured.metadata, authorContext: {kind: "account", accountId: "owner"}}});
@@ -1875,7 +1875,7 @@ const publicationRepair = "The server could not confirm the latest changes to th
 // retry publishes it through the feed and the next restore begins. Once that
 // one is declined, the retirement that carries the restore's row completes.
 it("retries a restore's publication its push ran out of proof budget for", async () => {
-  const first = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other"));
+  const first = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other")));
   let f = first;
   try {
     expect(first.complete().phase).toBe("resumed");
@@ -1905,7 +1905,7 @@ it("retries a restore's publication its push ran out of proof budget for", async
 // host never retries, so the refusal is stored and the next restore of the
 // file says it needs repair instead of asking to try again.
 it("reports a refused restore publication as needing repair", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -1924,7 +1924,7 @@ it("reports a refused restore publication as needing repair", async () => {
 // asked to retry, and the device's next op lands behind it. The next restore
 // says it needs repair until a later settlement publishes the restore.
 it("refuses a restore's publication whose state is over the normalization limits", async () => {
-  const f = admittedRestoreFixture("owner", false), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
+  const f = (await admittedRestoreFixture("owner", false)), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -1945,7 +1945,7 @@ it("refuses a restore's publication whose state is over the normalization limits
 // interval spans the restore's row and runs out of proof budget is refused,
 // not asked to retry, and the device's next op lands behind it.
 it("refuses an exhausted settlement across a restore whose publication was refused", async () => {
-  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  const f = (await admittedRestoreFixture("owner", false)), doc = new Y.Doc({gc: false});
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -1972,7 +1972,7 @@ it("refuses an exhausted settlement across a restore whose publication was refus
 // is refused, and the device's next op lands behind it.
 it.each([["selector", "selector_paths_json", '["docs/a.md"]'], ["rename", "current_path", "docs/old.md"]] as const)(
   "refuses an exhausted restore publication that starts before a %s change", async (_change, column, value) => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -1998,7 +1998,7 @@ it.each([["selector", "selector_paths_json", '["docs/a.md"]'], ["rename", "curre
 // can no longer publish. The hold, its lifecycle's charge and workspace usage
 // then match the stored rows.
 it("releases a refused restore publication's hold with the settlement that covers it", async () => {
-  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  const f = (await admittedRestoreFixture("owner", false)), doc = new Y.Doc({gc: false});
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -2032,7 +2032,7 @@ it("releases a refused restore publication's hold with the settlement that cover
 // relay refuses and one past the push's proof budget both count.
 it.each([["begin", "refused"], ["fence", "refused"], ["begin", "over budget"]] as const)("reports an edit's unsettleable interval after a resumed restore as needing repair: %s, %s",
   async (step, cause) => {
-    const first = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+    const first = (await admittedRestoreFixture("owner", false)), doc = new Y.Doc({gc: false});
     let f = first;
     try {
       first.complete();
@@ -2062,7 +2062,7 @@ it.each([["begin", "refused"], ["fence", "refused"], ["begin", "over budget"]] a
 // edit after it then asks to try again, across a restart, and once the
 // edit's settlement lands the next restore begins.
 it("asks to try again for an edit after a refused publication is covered", async () => {
-  const first = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  const first = (await admittedRestoreFixture("owner", false)), doc = new Y.Doc({gc: false});
   let f = first;
   try {
     first.complete();
@@ -2092,7 +2092,7 @@ it("asks to try again for an edit after a refused publication is covered", async
 // settlement lands, B fences and is declined after its fence, and the edits
 // are the file another device reads.
 it("waits for edits after a resumed restore before the next restore fences", async () => {
-  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  const f = (await admittedRestoreFixture("owner", false)), doc = new Y.Doc({gc: false});
   try {
     f.complete();
     const a = await publishRestore(f, f.admitted, "restore-a-publication"), restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -2131,7 +2131,7 @@ it("waits for edits after a resumed restore before the next restore fences", asy
 // answer they load to the caller's budget. The traversal finds nothing for a
 // cutover or binding that does not match.
 it("steps across consecutive restores declined after their fences", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     const a = await publishRestore(f, f.admitted, "restore-a-publication"), restored = f.admitted.admitted.accepted.receipt.journalCursor;
@@ -2142,7 +2142,7 @@ it("steps across consecutive restores declined after their fences", async () => 
     }
     reshare(f, 10);
     beginStopRestore(f.context, {...f.intent, operationId: "restore-d", expectedFence: 4, expectedGrantGeneration: 10}, 320);
-    const d = completeRestore(f, {...f.lookup, operationId: "restore-d"}, 321), terminal = d.admitted.admitted.accepted.receipt.journalCursor;
+    const d = await completeRestore(f, {...f.lookup, operationId: "restore-d"}, 321), terminal = d.admitted.admitted.accepted.receipt.journalCursor;
     const answers = f.raw.prepare("SELECT length(CAST(acknowledgment_json AS BLOB)) AS bytes FROM sync_relay_live_restore_cancellations WHERE outcome='fence-cancelled'")
       .all().map(row => Number(row.bytes));
     expect(answers).toHaveLength(2);
@@ -2166,7 +2166,7 @@ it("steps across consecutive restores declined after their fences", async () => 
 // Proves: the traversal steps across as many declined generations as native's
 // `require_cancelled` does, and finds nothing past them.
 it("stops stepping across declined restores past native's generation limit", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     await publishRestore(f, f.admitted, "restore-a-publication");
@@ -2206,7 +2206,7 @@ it("stops stepping across declined restores past native's generation limit", asy
 // releases nothing, and usage is the stored charges plus what is held. The
 // held amount is the moment's log row and the binding, each at its limit.
 it("funds a restore's publication at admission and releases it once with its binding", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     const binding = f.admitted.admitted.accepted.binding, cursor = f.admitted.admitted.accepted.receipt.journalCursor;
     const reservation = restorePublicationReservation("restore-test", binding);
@@ -2258,7 +2258,7 @@ it("funds a restore's publication at admission and releases it once with its bin
 // its binding and log row charge, as a reservation computed from a smaller
 // binding would be, it is refused before anything is released.
 it("refuses a restore publication that would charge more than admission held", async () => {
-  const f = admittedRestoreFixture("owner", false);
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     const reservation = restorePublicationReservation("restore-test", f.admitted.admitted.accepted.binding);
@@ -2277,8 +2277,8 @@ it("refuses a restore publication that would charge more than admission held", a
 
 // Proves: deleting the owner's account removes a restore's held publication
 // with its rows and workspace, and leaves another workspace's usage alone.
-it("removes a restore's held publication with its owner's account", () => {
-  const f = admittedRestoreFixture("owner", false);
+it("removes a restore's held publication with its owner's account", async () => {
+  const f = (await admittedRestoreFixture("owner", false));
   try {
     f.complete();
     expect(Number(f.raw.prepare("SELECT publication_reservation_bytes FROM sync_relay_live_restore_lifecycles").get()!.publication_reservation_bytes)).toBeGreaterThan(0);
@@ -2543,7 +2543,7 @@ it.each([["fenceCancelled", false], ["fenceCancelled", true], ["cancelled", fals
     try {
       expect(f.plan().intent).toMatchObject({expectedFence: generation, deliveryKind: "owner"});
       expect(beginStopRestore(f.context, f.next, 180).previousOperationId).toBe(answer === "cancelled" ? null : "restore");
-      const next = completeRestore(f, f.nextLookup, 190);
+      const next = await completeRestore(f, f.nextLookup, 190);
       expect(next.admitted.preparation.fence.operation.newFence).toBe(generation + 1);
       expect(documentState(f)).toEqual({restore_fence_generation: generation + 1, admission_state: "open"});
       passSourceMoment(f);
@@ -2562,7 +2562,7 @@ it.each([["fenceCancelled", false], ["fenceCancelled", true], ["cancelled", fals
 it.each([["resumed", false], ["resumed", true], ["declined", false], ["declined", true]] as const)(
   "completes a restore after a cancelled one that followed a %s restore, restart=%s", async (predecessor, restart) => {
     const resumed = predecessor === "resumed";
-    let f: ReturnType<typeof declinedAtFence> | ReturnType<typeof admittedRestoreFixture> = resumed ? admittedRestoreFixture("owner", false) : declinedAtFence(false);
+    let f: ReturnType<typeof declinedAtFence> | Awaited<ReturnType<typeof admittedRestoreFixture>> = resumed ? (await admittedRestoreFixture("owner", false)) : declinedAtFence(false);
     try {
       let previous = 0, before: string | undefined;
       if ("complete" in f) {
@@ -2578,7 +2578,7 @@ it.each([["resumed", false], ["resumed", true], ["declined", false], ["declined"
       if (restart) f = restartRelay(f);
       reshare(f, 8);
       expect(beginStopRestore(f.context, {...f.intent, operationId: "restore-y", expectedFence: 2, expectedGrantGeneration: 8}, 310).previousOperationId).toBe("restore");
-      const next = completeRestore(f, {...f.lookup, operationId: "restore-y"}, 311);
+      const next = await completeRestore(f, {...f.lookup, operationId: "restore-y"}, 311);
       expect(documentState(f)).toEqual({restore_fence_generation: 3, admission_state: "open"});
       if (!resumed) passSourceMoment(f);
       const published = await publishRestore(f, next.admitted, "restore-y-publication", previous, before, resumed ? 1 : 0);
@@ -2726,7 +2726,7 @@ it.each(["preparing", "saved"] as const)("ends a restore whose file is renamed a
       const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
       departFrozenPath(f);
       const before = proposalRows(f);
-      expect(() => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201)).toThrow();
+      await expect(f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201)).rejects.toThrow();
       expect(proposalRows(f)).toEqual(before);
     }
     await expect(new LiveRestorePreparation(preparationConfig()).prepare(options)).rejects.toThrow("The reply was lost.");
@@ -2823,7 +2823,7 @@ it("declines a restore whose file is renamed before its fence", () => {
 // delivery's boundary at the restore's accepted row. A successor needs fresh
 // authority for the renamed path.
 it("finishes an admitted restore at its frozen path after its file is renamed", async () => {
-  const f = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
   try {
     const frozen = f.admitted.admitted.accepted.binding, receipt = f.admitted.admitted.accepted.receipt;
@@ -2876,7 +2876,7 @@ const admittedRows = (f: Pick<ReturnType<typeof contentProposalFixture>, "raw" |
 // restore. No acknowledgment advances its lifecycle, completion sends the host
 // nothing, and admission stays closed.
 it.each(["bootstrap", "owner"] as const)("stops an admitted %s restore after a workspace identity rotation", async kind => {
-  const f = admittedRestoreFixture(kind, false, "service");
+  const f = (await admittedRestoreFixture(kind, false, "service"));
   try {
     rotateIdentity(f);
     const before = admittedRows(f);
@@ -2895,7 +2895,7 @@ it.each(["bootstrap", "owner"] as const)("stops an admitted %s restore after a w
 // reply. The lifecycle stays where it was, and the resume reply cannot
 // reopen admission.
 it.each(["apply", "settle", "resume"] as const)("refuses a native %s reply that arrives after a workspace identity rotation", async stage => {
-  const f = admittedRestoreFixture("owner", false, "service");
+  const f = (await admittedRestoreFixture("owner", false, "service"));
   try {
     if (stage !== "apply") f.store.acknowledgeStopRestoreReplacement(f.input, f.application);
     if (stage === "resume") f.store.acknowledgeStopRestoreSettlement(f.input, f.settlement);
@@ -2991,13 +2991,13 @@ it("keeps a declined restore's evidence funded with near-limit identifiers", () 
 // Proves: Decline and relay admission each take the restore under the same
 // writer, so exactly one wins. Once Decline is recorded, a late native fence,
 // preparation step, admission or application cannot revive the restore.
-it.each(["decline", "admission"] as const)("lets exactly one of Decline and admission take a fenced restore: %s first", first => {
+it.each(["decline", "admission"] as const)("lets exactly one of Decline and admission take a fenced restore: %s first", async first => {
   const f = contentProposalFixture("bootstrap", "service");
   try {
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
     const admit = () => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
     if (first === "admission") {
-      expect(admit().phase).toBe("relay-admitted");
+      expect((await admit()).phase).toBe("relay-admitted");
       const after = f.rows();
       expect(() => declineStopRestore(f.context, f.lookup, 202)).toThrow("The restore is already being applied, so it can no longer be declined.");
       expect(f.rows()).toEqual(after);
@@ -3006,7 +3006,7 @@ it.each(["decline", "admission"] as const)("lets exactly one of Decline and admi
     }
     expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
     const after = f.journalRows();
-    expect(admit).toThrow();
+    await expect(admit()).rejects.toThrow();
     expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 203)).toThrow();
     expect(() => f.store.captureStopRestorePoint(f.input)).toThrow();
     expect(() => f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt.fence)).toThrow();
@@ -3017,48 +3017,84 @@ it.each(["decline", "admission"] as const)("lets exactly one of Decline and admi
 });
 
 // Proves: admission checks the restored checkpoint within the limits its
-// publication normalizes under, here lowered to the struct visits that
-// checkpoint needs. At that limit the restore is admitted; one below it,
+// publication normalizes under. A worker capacity refusal or heap exhaustion
+// refuses admission; a successful worker result admits it. On refusal,
 // admission stores nothing and the restore can still be declined.
-it.each(["at", "over"] as const)("admits a restore only if its checkpoint normalizes within the publication limits: %s", limit => {
+it.each(["at", "over", "out-of-memory"] as const)("admits a restore only if its checkpoint normalizes within the publication limits: %s", async limit => {
   const f = contentProposalFixture("owner", "device");
-  const normalizes = (input: Parameters<typeof liveValidation.settlementFits>[0], maxStructVisits: number) =>
-    createLiveMarkdownRegistrationValidator({...policy, maxStructVisits})(input);
-  // The fewest struct visits the checkpoint normalizes within.
-  const needed = (input: Parameters<typeof liveValidation.settlementFits>[0]) => {
-    let low = 1, high = policy.maxStructVisits;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (normalizes(input, middle).kind === "accepted") high = middle; else low = middle + 1;
-    }
-    return low;
-  };
-  const fits = vi.spyOn(liveValidation, "settlementFits").mockImplementation(input => {
-    const result = normalizes(input, needed(input) - (limit === "over" ? 1 : 0));
-    return result.kind === "accepted" || result.reason !== "capacity-refused";
+  const validate = liveValidation.validateRestore.bind(liveValidation);
+  const fits = vi.spyOn(liveValidation, "validateRestore").mockImplementation(async (...args) => {
+    if (limit === "out-of-memory") throw Object.assign(new Error("Worker heap exhausted"), {code: "ERR_WORKER_OUT_OF_MEMORY"});
+    const result = await validate(...args);
+    return limit === "over" && result.kind === "accepted" ? {kind: "capacity-refused"} : result;
   });
   try {
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200), before = lifecycleRows(f);
     const admit = () => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
     if (limit === "at") {
-      expect(admit().phase).toBe("relay-admitted");
-      const checkpoint = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id IS NOT NULL").get()!;
-      expect(fits.mock.calls.map(([input]) => Buffer.from(input.checkpoint))).toEqual([Buffer.from(checkpoint.validation_checkpoint_bytes as Uint8Array)]);
+      expect((await admit()).phase).toBe("relay-admitted");
+      expect(fits).toHaveBeenCalledTimes(1);
       return;
     }
-    let refusal: unknown;
-    try {admit();} catch (error) {refusal = error;}
-    expect(refusal).toMatchObject({code: "payload_too_large",
+    await expect(admit()).rejects.toMatchObject({code: "payload_too_large",
       message: "The server can't confirm this restore: the restored file is too large for it to check. Decline this restore."});
     expect(lifecycleRows(f)).toEqual(before);
     expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
   } finally {fits.mockRestore(); f.close();}
 });
 
+it.each(["unrelated", "authority", "lineage", "grant", "host", "fence", "proposal", "history", "history-bytes", "decline"] as const)(
+  "rechecks the captured %s dependency after the capped restore worker starts", async change => {
+    const f = contentProposalFixture("owner", "device", true);
+    const validate = liveValidation.validateRestore.bind(liveValidation);
+    let started!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => {started = resolve;});
+    const resume = new Promise<void>(resolve => {release = resolve;});
+    const worker = vi.spyOn(liveValidation, "validateRestore").mockImplementation(async (...args) => {
+      const pending = validate(...args);
+      started(); await resume;
+      return pending;
+    });
+    let pending: ReturnType<typeof f.store.admitStopRestoreProposal> | undefined;
+    let restoreMainThread = () => {};
+    try {
+      const proposal = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      const mainThread = vi.spyOn(restoreProof, "validateLiveRestoreProposal");
+      restoreMainThread = () => mainThread.mockRestore();
+      pending = f.store.admitStopRestoreProposal(f.input, proposal.proposalDigest, policy, 201);
+      await entered;
+      expect(mainThread).not.toHaveBeenCalled(); mainThread.mockRestore();
+      if (change === "unrelated") f.raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES('unrelated','another-owner',1)");
+      if (change === "authority") f.raw.exec("UPDATE sync_relay_live_documents SET registered_at_ms=registered_at_ms+1");
+      if (change === "lineage") f.raw.exec("UPDATE sync_relay_live_documents SET lineage_state='retired',retired_at_ms=201");
+      if (change === "grant") f.raw.exec("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id='grant'");
+      if (change === "host") f.raw.exec("UPDATE sync_relay_session_host_control SET updated_at_ms=updated_at_ms+1");
+      if (change === "fence") f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
+      if (change === "decline") expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
+      if (change === "proposal") {
+        const bytes = f.encoded.slice(); bytes[bytes.length - 1] ^= 1;
+        f.raw.prepare("UPDATE sync_relay_live_restore_proposals SET proposal_bytes=?").run(bytes);
+      }
+      if (change === "history") f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1");
+      if (change === "history-bytes") {
+        const row = f.raw.prepare("SELECT update_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=1").get()!;
+        const bytes = new Uint8Array(row.update_bytes as Uint8Array); bytes[bytes.length - 1] ^= 1;
+        f.raw.prepare("UPDATE sync_relay_live_update_journal SET update_bytes=? WHERE journal_cursor=1").run(bytes);
+      }
+      const before = lifecycleRows(f);
+      release();
+      if (change === "unrelated") await expect(pending).resolves.toMatchObject({phase: "relay-admitted"});
+      else {
+        await expect(pending).rejects.toThrow("changed during validation");
+        expect(lifecycleRows(f)).toEqual(before);
+      }
+    } finally {release(); await pending?.catch(() => {}); restoreMainThread(); worker.mockRestore(); f.close();}
+  });
+
 // Proves: admission refuses a restore whose publication one push could not
 // prove, here with that proof's event limit lowered to none. It stores
 // nothing, and the restore can still be declined.
-it("refuses a restore whose publication proof would pass a push's budget", () => {
+it("refuses a restore whose publication proof would pass a push's budget", async () => {
   const f = contentProposalFixture("owner", "device"), charge = RestoreHistoryBudget.prototype.chargeEvents;
   let measured = false;
   // Only the publication proof admission measures starts at a push's event limit.
@@ -3069,7 +3105,7 @@ it("refuses a restore whose publication proof would pass a push's budget", () =>
   try {
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200), before = lifecycleRows(f);
     let refusal: unknown;
-    try {f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);} catch (error) {refusal = error;}
+    try {(await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201));} catch (error) {refusal = error;}
     expect(refusal).toMatchObject({code: "payload_too_large",
       message: "The server can't confirm this restore: too many changes to this file haven't been confirmed yet. Decline this restore."});
     expect(measured).toBe(true);
@@ -3081,8 +3117,8 @@ it("refuses a restore whose publication proof would pass a push's budget", () =>
 // Proves: a store from before the declined phase opens with every restore
 // row, lifecycle, proposal, source range and journal reference as it was,
 // though foreign keys stay on while its tables move.
-it("migrates a store from before the declined phase without changing its restore rows", () => {
-  const f = admittedRestoreFixture("owner", true);
+it("migrates a store from before the declined phase without changing its restore rows", async () => {
+  const f = (await admittedRestoreFixture("owner", true));
   try {
     f.complete();
     // One connection throughout, as the relay has: another one may read a table through its old layout.
@@ -3112,8 +3148,8 @@ it("migrates a store from before the declined phase without changing its restore
 // Proves: a store from before publication funding opens with every lifecycle
 // and source range as it was, holding no publication and no refusal, and its
 // restores still read.
-it("migrates a store from before publication funding without changing its restore rows", () => {
-  const f = admittedRestoreFixture("owner", true);
+it("migrates a store from before publication funding without changing its restore rows", async () => {
+  const f = (await admittedRestoreFixture("owner", true));
   try {
     f.complete();
     const db = f.context.db;
@@ -3149,7 +3185,7 @@ function layOutEarlierRestoreStore(db: StorageContext["db"], tables: [table: str
 // Proves: deleting the account of the collaborator a restore stopped, after the
 // restore begins, purges the revoked grant without stranding the restore. It
 // still fences and resumes.
-it("finishes a restore after the stopped collaborator's account is deleted", () => {
+it("finishes a restore after the stopped collaborator's account is deleted", async () => {
   const f = contentProposalFixture("bootstrap", "service", false, false, false, 0, hosted => {
     beginStopRestore(hosted.context, hosted.intent, 40);
     initializeAccountDeletion(hosted.context, "fence-key");
@@ -3159,7 +3195,7 @@ it("finishes a restore after the stopped collaborator's account is deleted", () 
   });
   try {
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const admitted = (await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201));
     const application = {fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest, nativeSourceManifestDigest: admitted.nativeSourceManifestDigest,
       admitted: admitted.admitted, localHeadSequence: admitted.preparation.fence.localHeadSequence + 1,
       hostCoordinate: {hostId: f.input.host.hostId, hostEpoch: f.input.host.hostEpoch, instanceId: f.input.host.instanceId, connectionId: f.input.host.connectionId}, recordedAtMs: 202};
@@ -3175,14 +3211,14 @@ it("finishes a restore after the stopped collaborator's account is deleted", () 
   } finally {f.close();}
 });
 
-it("starts a fresh restore author window at the 960-identity checkpoint band", () => {
+it("starts a fresh restore author window at the 960-identity checkpoint band", async () => {
   const f = contentProposalFixture("owner", "device", false, false, false, 960);
   try {
     const accepted = f.store.captureStopRestoreAcceptedCut(f.input);
     expect(accepted.checkpoint.cursor).toBe(960);
     expect(accepted.events).toEqual([]);
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const admitted = (await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201));
     expect(admitted.admitted.authorSnapshot).toEqual([]);
     expect(admitted.admitted.checkpointCoverage?.map(entry => entry.author)).toEqual([{kind: "unattributed"}]);
   } finally {f.close();}
@@ -3192,9 +3228,9 @@ function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolea
   return admitRestore(contentProposalFixture(kind,mode,pending,false,false,0,beforeFence));
 }
 // Records and admits a built restore proposal, with the native receipts that complete it.
-function admitRestore<F extends Pick<ReturnType<typeof contentProposalFixture>,"store"|"input"|"encoded">>(f: F) {
+async function admitRestore<F extends Pick<ReturnType<typeof contentProposalFixture>,"store"|"input"|"encoded">>(f: F) {
   const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
-  const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+  const admitted=(await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201));
   const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
     admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
     hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
@@ -3212,7 +3248,7 @@ const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"jou
   edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
 
 async function repeatedReviewFixture(rounds = 1) {
-  const f = admittedRestoreFixture("owner", "deleted");
+  const f = (await admittedRestoreFixture("owner", "deleted"));
   try {
     f.complete();
     // Each restore begins once the one before it is published.
@@ -3238,7 +3274,7 @@ async function repeatedReviewFixture(rounds = 1) {
       const second = buildContentProposal({...f, input, lookup, receipt, proposal});
       const saved = f.store.recordStopRestoreProposal(input, second.encoded, policy, at + 3);
       if (round === rounds) return {...second, first: f, saved, reviewInput: {...input, maxOutputBytes: 1_000_000}};
-      const admitted = f.store.admitStopRestoreProposal(input, saved.proposalDigest, policy, at + 4);
+      const admitted = (await f.store.admitStopRestoreProposal(input, saved.proposalDigest, policy, at + 4));
       const application = {...f.application, fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest,
         nativeSourceManifestDigest: admitted.nativeSourceManifestDigest, admitted: admitted.admitted,
         localHeadSequence: receipt.localHeadSequence + 1, recordedAtMs: at + 5};
@@ -3337,7 +3373,7 @@ it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "bud
       let reads = 0;
       vi.spyOn(f.store, "readStopRestoreLifecycle").mockImplementation((...args) => {
         const lifecycle = read(...args);
-        // The driver first checks recovery; admission checks again after preparing the review.
+        // The driver checks recovery, then admission checks again before capturing its evidence.
         if (++reads === 2) {
           if (state === "changed-after-review") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
           else abort.abort(Error("confirmation cancelled"));
@@ -3350,7 +3386,7 @@ it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "bud
     if (state === "complete") {
       const validation = vi.spyOn(restoreProof, "validateLiveRestoreProposal");
       await expect(driver.confirm(options, expected)).rejects.toThrow("simulated transport loss after admission");
-      expect(validation).toHaveBeenCalledTimes(1);
+      expect(validation).not.toHaveBeenCalled();
       validation.mockRestore();
       expect(f.store.readStopRestoreLifecycle(f.input)?.phase).toBe("relay-admitted");
       expect(sendLiveRestore).toHaveBeenCalledTimes(1);
@@ -3476,8 +3512,8 @@ it.each(["metadata", "provenance"])("preflights actual historical %s before mate
   } finally {f.close();}
 });
 
-it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",damage=>{
-  const f=admittedRestoreFixture(),doc=new Y.Doc({gc:false});
+it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",async damage=>{
+  const f=(await admittedRestoreFixture()),doc=new Y.Doc({gc:false});
   try{
     f.complete();
     const checkpoint=f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!;
@@ -3498,15 +3534,15 @@ it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending 
     }
   }finally{doc.destroy();f.close();}
 });
-it("allows ordinary admission from a restored checkpoint with no pending source rows",()=>{
-  const f=admittedRestoreFixture("bootstrap",false),doc=new Y.Doc({gc:false});
+it("allows ordinary admission from a restored checkpoint with no pending source rows",async ()=>{
+  const f=(await admittedRestoreFixture("bootstrap",false)),doc=new Y.Doc({gc:false});
   try{
     f.complete();Y.applyUpdate(doc,f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!.validation_checkpoint_bytes as Uint8Array);
     doc.getMap("frontmatter").set("after","restored");expect(f.storage.commitLiveUpdateJournal(f.journalCapture(Y.encodeStateAsUpdate(doc),"ordinary")).result.kind).toBe("accepted");
   }finally{doc.destroy();f.close();}
 });
-it.each(["application","settlement","resume"])("refuses changed %s evidence without advancing the restore or quota",stage=>{
-  const f=admittedRestoreFixture();
+it.each(["application","settlement","resume"])("refuses changed %s evidence without advancing the restore or quota",async stage=>{
+  const f=(await admittedRestoreFixture());
   try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
@@ -3517,29 +3553,29 @@ it.each(["application","settlement","resume"])("refuses changed %s evidence with
     expect(call).toThrow();expect(lifecycleRows(f)).toEqual(before);
   }finally{f.close();}
 });
-it("funds all restore receipts before admission and keeps the journal unchanged on quota refusal",()=>{
+it("funds all restore receipts before admission and keeps the journal unchanged on quota refusal",async ()=>{
   const f=contentProposalFixture();
   try{
     const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f),original=f.context.options.workspaceQuotaBytes;
     f.context.options.workspaceQuotaBytes=Number(before.usage)+1;
-    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow(/quota/);expect(lifecycleRows(f)).toEqual(before);
+    await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).rejects.toThrow(/quota/);expect(lifecycleRows(f)).toEqual(before);
     f.context.options.workspaceQuotaBytes=original;
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    const admitted=(await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201));
     expect(admitted.phase).toBe("relay-admitted");
     expect(Number(f.raw.prepare("SELECT receipt_reservation_bytes FROM sync_relay_live_restore_lifecycles").get()!.receipt_reservation_bytes)).toBeGreaterThan(0);
   }finally{f.close();}
 });
-it.each(["admission","source","usage"])("rolls back the replacement journal and all metadata after ignored %s write",boundary=>{
+it.each(["admission","source","usage"])("rolls back the replacement journal and all metadata after ignored %s write",async boundary=>{
   const f=contentProposalFixture("owner","device",true);
   try{
     const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),table=boundary==="admission"?"sync_relay_live_restore_lifecycles":boundary==="source"?"sync_relay_live_restore_source_ranges":"sync_relay_workspace_usage";
     f.raw.exec(`CREATE TRIGGER ignore_restore BEFORE ${boundary==="usage"?"UPDATE":"INSERT"} ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
     const before=lifecycleRows(f);
-    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow();expect(lifecycleRows(f)).toEqual(before);
+    await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).rejects.toThrow();expect(lifecycleRows(f)).toEqual(before);
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("recovers the exact restore after relay restart before %s acknowledgement",stage=>{
-  const f=admittedRestoreFixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined,closed=false;
+it.each(["application","settlement","resume"])("recovers the exact restore after relay restart before %s acknowledgement",async stage=>{
+  const f=(await admittedRestoreFixture());let reopened:ReturnType<typeof openSyncRelayStorage>|undefined,closed=false;
   try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
@@ -3549,20 +3585,20 @@ it.each(["application","settlement","resume"])("recovers the exact restore after
   }finally{if(!closed)f.close();reopened?.close();}
 });
 it("retains original owner binding and operation history across a second stop",async()=>{
-  const f=admittedRestoreFixture();
+  const f=(await admittedRestoreFixture());
   try{
     f.complete();await publishRestore(f,f.admitted,"restore-publication");f.raw.exec("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'");
     const second={...f.intent,operationId:"second-restore",expectedFence:2,expectedGrantGeneration:6};
     const begun=beginStopRestore(f.context,second,300);expect(begun.previousOperationId).toBe(f.input.operationId);
     const lookup={...f.lookup,operationId:second.operationId};advanceStopRestoreFence(f.context,lookup,301);
     const before=lifecycleRows(f);
-    expect(f.store.admitStopRestoreProposal(f.input,f.proposal.proposalDigest,policy,302).resume).toEqual(f.resume);
+    expect((await f.store.admitStopRestoreProposal(f.input,f.proposal.proposalDigest,policy,302)).resume).toEqual(f.resume);
     expect(f.store.acknowledgeStopRestoreResume(f.input,f.resume).resume).toEqual(f.resume);expect(lifecycleRows(f)).toEqual(before);
     expect(f.raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toMatchObject({admission_state:"closed",restore_fence_generation:3});
   }finally{f.close();}
 });
-it("workspace deletion cascades through admitted restore history",()=>{
-  const f=admittedRestoreFixture();
+it("workspace deletion cascades through admitted restore history",async ()=>{
+  const f=(await admittedRestoreFixture());
   try{
     f.complete();f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'");
     for(const table of ["sync_relay_live_restore_lifecycles","sync_relay_live_restore_source_ranges","sync_relay_live_restore_operations","sync_relay_live_update_journal"])
@@ -3570,7 +3606,7 @@ it("workspace deletion cascades through admitted restore history",()=>{
   }finally{f.close();}
 });
 
-it("hashes copied restore state before entering the SQLite writer",()=>{
+it("hashes copied restore state before entering the SQLite writer",async ()=>{
   const f=contentProposalFixture("owner","device",true),prototype=Object.getPrototypeOf(createHash("sha256"));
   const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;
   const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){
@@ -3580,7 +3616,7 @@ it("hashes copied restore state before entering the SQLite writer",()=>{
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   try{
     const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
-    expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201).phase).toBe("relay-admitted");
+    expect((await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).phase).toBe("relay-admitted");
   }finally{hashSpy.mockRestore();txSpy.mockRestore();f.close();}
 });
 it("finds existing owner delivery only after authorization and refuses damaged origin",()=>{
@@ -3596,8 +3632,8 @@ it("finds existing owner delivery only after authorization and refuses damaged o
   }finally{f.close();}
 });
 
-it("precharges retained restore evidence before materializing an oversized admission",()=>{
-  const f=admittedRestoreFixture();
+it("precharges retained restore evidence before materializing an oversized admission",async ()=>{
+  const f=(await admittedRestoreFixture());
   try{
     f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_json=?").run(JSON.stringify({payload:"x".repeat(f.input.maxBytes)}));
     const before=lifecycleRows(f),spy=vi.spyOn(f.context.db,"prepare");
@@ -3618,7 +3654,7 @@ function retainedLifecyclePayloadBytes(db:StorageContext["db"],operationId:strin
     (journal.update_bytes as Uint8Array).byteLength+(journal.validation_checkpoint_bytes as Uint8Array).byteLength+
     Number(journal.accepted_metadata_bytes)+Number(lifecycle.receipt_reservation_bytes);
 }
-it("rolls back admission one byte below its funded read budget and can retry to completion",()=>{
+it("rolls back admission one byte below its funded read budget and can retry to completion",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);
   try {
     const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f);
@@ -3626,15 +3662,15 @@ it("rolls back admission one byte below its funded read budget and can retry to 
     const dryRun=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{
       run();required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);throw Error("measured rollback");
     }));
-    try{expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow("measured rollback");}finally{dryRun.mockRestore();}
+    try{await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).rejects.toThrow("measured rollback");}finally{dryRun.mockRestore();}
     expect(lifecycleRows(f)).toEqual(before);expect(required).toBeGreaterThan(f.encoded.length);
     let reachedAdmission=false;
     const observe=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{try{return run();}catch(error){
       reachedAdmission=f.context.db.prepare("SELECT 1 FROM sync_relay_live_restore_lifecycles WHERE operation_id=?").get(f.input.operationId)!==undefined;throw error;
     }}));
-    try{expect(()=>f.store.admitStopRestoreProposal({...f.input,maxBytes:required-1},proposal.proposalDigest,policy,201)).toThrow();}finally{observe.mockRestore();}
+    try{await expect(f.store.admitStopRestoreProposal({...f.input,maxBytes:required-1},proposal.proposalDigest,policy,201)).rejects.toThrow();}finally{observe.mockRestore();}
     expect(reachedAdmission).toBe(true);expect(lifecycleRows(f)).toEqual(before);
-    const admitted=f.store.admitStopRestoreProposal({...f.input,maxBytes:required},proposal.proposalDigest,policy,201);
+    const admitted=(await f.store.admitStopRestoreProposal({...f.input,maxBytes:required},proposal.proposalDigest,policy,201));
     expect(admitted.phase).toBe("relay-admitted");
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
@@ -3649,15 +3685,15 @@ it("rolls back admission one byte below its funded read budget and can retry to 
     expect(f.store.acknowledgeStopRestoreResume(budget,resume).phase).toBe("resumed");
   }finally{f.close();}
 });
-it("charges operation payloads once when reading a resumed lifecycle at its exact byte budget",()=>{
-  const f=admittedRestoreFixture();try{
+it("charges operation payloads once when reading a resumed lifecycle at its exact byte budget",async ()=>{
+  const f=(await admittedRestoreFixture());try{
     f.complete();const required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);
     expect(f.store.readStopRestoreLifecycle({...f.input,maxBytes:required})!.phase).toBe("resumed");
     expect(()=>f.store.readStopRestoreLifecycle({...f.input,maxBytes:required-1})).toThrow();
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("keeps %s recoverable when configured evidence capacity is reduced",stage=>{
-  const f=admittedRestoreFixture();try{
+it.each(["application","settlement","resume"])("keeps %s recoverable when configured evidence capacity is reduced",async stage=>{
+  const f=(await admittedRestoreFixture());try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
     const before=lifecycleRows(f),input={...f.input,maxBytes:retainedLifecyclePayloadBytes(f.context.db,f.input.operationId)-1};
@@ -3667,8 +3703,8 @@ it.each(["application","settlement","resume"])("keeps %s recoverable when config
     expect(f.complete().phase).toBe("resumed");
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("rolls back %s if its retained budget becomes unreadable before commit",stage=>{
-  const f=admittedRestoreFixture();try{
+it.each(["application","settlement","resume"])("rolls back %s if its retained budget becomes unreadable before commit",async stage=>{
+  const f=(await admittedRestoreFixture());try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
     const column=stage==="application"?"application_json":stage==="settlement"?"settlement_json":"resume_json";
@@ -3679,7 +3715,7 @@ it.each(["application","settlement","resume"])("rolls back %s if its retained bu
     expect(lifecycleRows(f)).toEqual(before);f.raw.exec("DROP TRIGGER shrink_restore_budget");expect(f.complete().phase).toBe("resumed");
   }finally{f.close();}
 });
-it.each(["proposal","admission"])("rejects a same-length source rewrite by another connection before %s writer entry",stage=>{
+it.each(["proposal","admission"])("rejects a same-length source rewrite by another connection before %s writer entry",async stage=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);let changed:ReturnType<typeof lifecycleRows>|undefined;
   try {
     const proposal=stage==="admission"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):null;
@@ -3689,17 +3725,20 @@ it.each(["proposal","admission"])("rejects a same-length source rewrite by anoth
       f.raw.prepare("UPDATE sync_relay_live_update_journal SET update_bytes=? WHERE journal_cursor=?").run(bytes,row.journal_cursor);changed=lifecycleRows(f);
       return tx(run);
     });
-    try{expect(()=>stage==="proposal"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):f.store.admitStopRestoreProposal(f.input,proposal!.proposalDigest,policy,201)).toThrow(/changed during validation/);}finally{spy.mockRestore();}
+    try{
+      if (stage === "proposal") expect(() => f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200)).toThrow(/changed during validation/);
+      else await expect(f.store.admitStopRestoreProposal(f.input,proposal!.proposalDigest,policy,201)).rejects.toThrow(/changed during validation/);
+    }finally{spy.mockRestore();}
     expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
   }finally{f.close();}
 });
-it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes in the writer",()=>{
+it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes in the writer",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
   const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false;
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
-    if(writing && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
-    if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
+    if(writing && /^SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
+    if(writing && /^SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
     return prepare(sql);
   });
   const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing)throw Error("byte comparison in writer");return compare(a,b);});
@@ -3707,7 +3746,7 @@ it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comp
   try {
     const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
     expect(f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200).replayed).toBe(true);
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    const admitted=(await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201));
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
       localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
     const settlement={settlementId:"\\".repeat(512),previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,localYDocSequence:application.localHeadSequence,
@@ -3720,7 +3759,7 @@ it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comp
 });
 
 
-function restorePublication(f: Pick<ReturnType<typeof admittedRestoreFixture>, "document" | "raw" | "admitted" | "storage">, bytes: Uint8Array,
+function restorePublication(f: Pick<Awaited<ReturnType<typeof admittedRestoreFixture>>, "document" | "raw" | "admitted" | "storage">, bytes: Uint8Array,
   terminal: number, id: string, previous = 0, before = String(f.raw.prepare("SELECT baseline_projected_sha256 FROM sync_relay_live_documents").get()!.baseline_projected_sha256), originSeq = 0) {
   const document = f.document, row = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!;
   const binding = {...f.admitted.admitted.accepted.binding};
@@ -3748,7 +3787,7 @@ function restorePublication(f: Pick<ReturnType<typeof admittedRestoreFixture>, "
 }
 
 it("publishes hosted settlement at a verified closed restore fence and chains the next ordinary settlement", async () => {
-  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  const f = (await admittedRestoreFixture()), doc = new Y.Doc({gc: false});
   try {
     const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
@@ -3775,7 +3814,7 @@ it("publishes hosted settlement at a verified closed restore fence and chains th
 });
 
 it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid hosted restore proof: %s", async damage => {
-  const f = admittedRestoreFixture();
+  const f = (await admittedRestoreFixture());
   try {
     const terminal = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!.validation_checkpoint_bytes as Uint8Array;
@@ -3794,7 +3833,7 @@ it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid ho
 afterAll(async () => {await liveValidation.close();});
 
 it.each(["accepted-base", "forged-before", "skipped-cut", "changed-base-admission", "damaged-base-cut"])("restarts hosted chain from authenticated recovered binding base: %s", async variant => {
-  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  const f = (await admittedRestoreFixture()), doc = new Y.Doc({gc: false});
   try {
     const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;

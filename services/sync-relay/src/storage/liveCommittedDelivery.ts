@@ -1,6 +1,7 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {restorePublicationFits,restorePublicationReservation} from "./hostedSettlement";
-import {liveValidation} from "../liveValidation";
+import {liveValidation, type RestoreValidationInput, type RestoreValidationResult} from "../liveValidation";
+import {RestoreAdmissionReads} from "./restoreAdmissionReads";
 import {relayError} from "../errors";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
@@ -1189,6 +1190,13 @@ export class LiveCommittedDeliveryStore {
     return prepared ? {...prepared.saved, receipt: prepared.capture.receipt} : null;
   }
   #prepareStopRestoreProposal(input: RestoreProposalInput, policy: OrderedLiveUpdateCutPolicy) {
+    const prepared = this.#captureStopRestoreProposalInput(input);
+    if (!prepared) return null;
+    const validated = validateLiveRestoreProposal(prepared.capture, prepared.decoded.bytes, policy, prepared.budget);
+    integrity(validated.content.candidateDigest === prepared.saved.candidateDigest);
+    return {...prepared, validated};
+  }
+  #captureStopRestoreProposalInput(input: RestoreProposalInput, useRevision = true) {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1208,10 +1216,8 @@ export class LiveCommittedDeliveryStore {
     if (!saved) return null;
     integrity(createHash("sha256").update(saved.bytes).digest("hex") === saved.proposalDigest);
     const decoded = decodeNativeRestoreProposal(saved.bytes, budget);
-    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson, decoded.bytes.nativeSourceBytes);
-    const validated = validateLiveRestoreProposal(capture, decoded.bytes, policy, budget);
-    integrity(validated.content.candidateDigest === saved.candidateDigest);
-    return {saved, capture, validated, assertCurrentInTransaction};
+    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson, decoded.bytes.nativeSourceBytes, useRevision);
+    return {saved, capture, decoded, budget, assertCurrentInTransaction};
   }
   captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
     return this.#captureStopRestoreProposal(input, receiptJson).capture;
@@ -1248,8 +1254,8 @@ export class LiveCommittedDeliveryStore {
     capture.assertCurrent(); assertDatabaseCurrent();
     return {review, prepared};
   }
-  #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[]) {
-    const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);
+  #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[], useRevision = true) {
+    const assertDatabaseCurrent=useRevision ? captureSqliteReadRevision(this.#storage.db) : () => {};
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1409,37 +1415,74 @@ export class LiveCommittedDeliveryStore {
       .get(document.workspaceId,document.mainVersionId,document.objectId);
     integrity(active?.operation_id===operation.intent.operationId);
   }
-  admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy, now:number):RestoreLifecycle {
-    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now);
+  async admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy, now:number,
+    signal?: AbortSignal):Promise<RestoreLifecycle> {
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now, undefined, signal);
   }
-  admitReviewedStopRestoreProposal(input: RestoreProposalInput & {maxOutputBytes: number}, expectedProposalDigest: string,
-    policy: OrderedLiveUpdateCutPolicy, now: number, signal?: AbortSignal): RestoreLifecycle {
+  async admitReviewedStopRestoreProposal(input: RestoreProposalInput & {maxOutputBytes: number}, expectedProposalDigest: string,
+    policy: OrderedLiveUpdateCutPolicy, now: number, signal?: AbortSignal): Promise<RestoreLifecycle> {
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now, authorityInteger(input.maxOutputBytes, 1), signal);
+  }
+  async #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy,
+    now:number, maxOutputBytes?: number, signal?: AbortSignal):Promise<RestoreLifecycle> {
     signal?.throwIfAborted();
-    const assertReviewCurrent = captureSqliteReadRevision(this.#storage.db);
-    const prepared = this.#prepareStopRestoreReview(input, policy);
-    integrity(prepared && prepared.review.proposalDigest === expectedProposalDigest);
-    return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now, () => {
-      signal?.throwIfAborted();
-      assertReviewCurrent();
-    }, () => prepared.prepared);
-  }
-  #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy,
-    now:number, assertReviewCurrent?: () => void, prepare = () => this.#prepareStopRestoreProposal(input, policy)):RestoreLifecycle {
-    const assertProposalCurrent=captureSqliteReadRevision(this.#storage.db);
     input=lifecycleInput(input);
+    policy=Object.freeze({...policy});
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
     const historical=this.readStopRestoreLifecycle(input);
     if (historical) {integrity(historical.proposalDigest===expectedProposalDigest);return historical;}
-    const prepared=prepare();integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
-    const {saved:proposal,capture,validated,assertCurrentInTransaction}=prepared;
+    const reads = new RestoreAdmissionReads(this.#storage.db);
+    const prepared=reads.capture(() => this.#captureStopRestoreProposalInput(input, false));
+    integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
+    const {saved:proposal,capture,decoded}=prepared;
+    const reviewHistory = maxOutputBytes === undefined ? undefined : reads.capture(() => {
+      const budget = new RestoreHistoryBudget(input.maxBytes, input.maxEvents);
+      budget.chargeBytes(proposal.bytes.byteLength);
+      budget.chargeEvents(capture.receipt.selectedHistory.suffix.length + capture.receipt.acceptedHistory.suffix.length);
+      return {budget, history: readRestoreReviewHistory(this.#storage, {document: capture.selected.binding,
+        namespace: this.#history.namespace, proposalDigest: proposal.proposalDigest, receipt: capture.receipt}, budget)};
+    });
+    const snapshot = (history: typeof capture.selected | typeof capture.accepted) => ({target: history.target,
+      binding: history.binding, checkpoint: history.checkpoint, events: history.events, point: history.point});
+    const work: RestoreValidationInput = {capture: {receipt: capture.receipt,
+      selected: {...snapshot(capture.selected), target: "selected"}, accepted: {...snapshot(capture.accepted), target: "accepted"}},
+      bytes: decoded.bytes, budget: {maxBytes: input.maxBytes, maxEvents: input.maxEvents}, artifacts: [], maxOutputBytes};
+    let result: RestoreValidationResult;
+    for (;;) {
+      signal?.throwIfAborted();
+      const checked = await liveValidation.validateRestore(work, policy, signal).catch(error => {
+        if (error instanceof Error && "code" in error && error.code === "ERR_WORKER_OUT_OF_MEMORY") return {kind: "capacity-refused"} as const;
+        throw error;
+      });
+      if (checked.kind === "retry") {await checked.waitForCapacity(signal); continue;}
+      if (checked.kind !== "artifact-required") {result = checked; break;}
+      // Only artifacts requested by the bounded decoder are loaded, under the capture's shared byte budget.
+      const bytes = reads.capture(() => capture.selected.artifact(checked.digest));
+      work.artifacts.push([checked.digest, bytes]);
+    }
+    signal?.throwIfAborted();
+    const tooLarge = () => relayError("payload_too_large","The server can't confirm this restore: the restored file is too large for it to check. Decline this restore.");
+    if (result.kind === "capacity-refused") throw tooLarge();
+    if (result.kind === "invalid") throw new Error(result.message);
+    integrity(result.kind === "accepted");
+    const {validated} = result;
+    integrity(validated.content.candidateDigest === proposal.candidateDigest);
+    if (reviewHistory) {
+      integrity(result.reviewContent);
+      const review = {operationId: input.operationId, workspaceId: input.workspaceId, binding: capture.selected.binding,
+        proposalDigest: proposal.proposalDigest, candidateDigest: proposal.candidateDigest, recordedAtMs: proposal.recordedAtMs,
+        point: capture.receipt.point, frozenTerminal: capture.receipt.acceptedHistory.terminal,
+        selectedEventCount: capture.receipt.selectedHistory.eventCount, acceptedEventCount: capture.receipt.acceptedHistory.eventCount,
+        selectedHistoryDigest: capture.receipt.selectedHistory.evidenceDigest, acceptedHistoryDigest: capture.receipt.acceptedHistory.evidenceDigest,
+        nativeSourceManifestDigest: capture.receipt.nativeSourceManifestDigest, content: result.reviewContent, ...reviewHistory.history};
+      const bytes = Buffer.byteLength(JSON.stringify(review));
+      if (bytes > maxOutputBytes!) throw new Error("Restore review exceeds its output budget.");
+      reviewHistory.budget.chargeBytes(bytes);
+    }
     const updateBytes=validated.candidateBytes,checkpointBytes=validated.content.stateUpdate;
     const checkpointDigest=createHash("sha256").update(checkpointBytes).digest("hex"),at=authorityInteger(now);
     const {fence,point,nativeSourceManifestDigest}=capture.receipt,document=journalDocument({workspaceId:fence.operation.oldBinding.workspaceId,mainVersionId:fence.operation.oldBinding.mainVersionId,objectId:fence.operation.oldBinding.objectId,lineageClaimId:fence.operation.oldBinding.lineageClaimId});
     const binding=parseLiveObjectBinding({...fence.operation.oldBinding,restoreFenceGeneration:fence.operation.newFence});
-    // The restore's publication normalizes its checkpoint within a settlement's limits, which can be lower than admission's.
-    if (!liveValidation.settlementFits({document,currentPath:binding.currentPath,checkpoint:checkpointBytes})) {
-      throw relayError("payload_too_large","The server can't confirm this restore: the restored file is too large for it to check. Decline this restore.");
-    }
     const sourceRanges:RestoreSourceRange[]=[];
     const known=[...validated.content.acceptedCheckpointRanges,...capture.accepted.events.flatMap(event=>event.metadata.firstSeen)]
       .sort((a,b)=>a.clientId-b.clientId || a.startClock-b.startClock);
@@ -1459,9 +1502,10 @@ export class LiveCommittedDeliveryStore {
       authorSnapshot: [], firstSeen: validated.content.replacementRanges, firstSeenDeletes: validated.content.firstSeenDeletes});
     integrity(!authorWindow.refused);
     this.#storage.tx(()=>{
-      assertReviewCurrent?.();
-      assertProposalCurrent();
-      assertCurrentInTransaction();
+      signal?.throwIfAborted();
+      this.#storage.captureStanding();
+      this.#standing(host);
+      reads.assertCurrent();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
       // The same writer records a Decline, so exactly one of them takes the fenced restore.
       integrity(operation.phase==="native-fenced" && !stopRestoreDeclineRecorded(this.#storage,operation) && stopRestoreHoldsFrozenPath(this.#storage,operation));

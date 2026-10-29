@@ -1,9 +1,11 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import { createLiveMarkdownRegistrationValidator, type OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import type {validateLiveRestoreProposal} from "@dohc/ydoc-projection/restore-proof";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import {WORKER_LIVE_VALIDATION_POLICY} from "./liveValidationPolicy.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;
@@ -32,7 +34,27 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
+  | { kind: "restore"; input: RestoreValidationInput; settlementPolicy: OrderedLiveUpdateCutPolicy }
 );
+type ProposalCapture = Parameters<typeof validateLiveRestoreProposal>[0];
+type ProposalValidation = ReturnType<typeof validateLiveRestoreProposal>;
+export type RestoreValidationInput = {
+  capture: {
+    receipt: ProposalCapture["receipt"];
+    selected: Omit<ProposalCapture["selected"], "assertCurrent" | "artifact">;
+    accepted: Omit<ProposalCapture["accepted"], "assertCurrent" | "artifact">;
+  };
+  bytes: Parameters<typeof validateLiveRestoreProposal>[1];
+  budget: Parameters<typeof validateLiveRestoreProposal>[3];
+  artifacts: [string, Uint8Array | undefined][];
+  maxOutputBytes?: number;
+};
+export type RestoreValidationResult =
+  | {kind: "accepted"; validated: Pick<ProposalValidation, "content" | "candidateBytes" | "nativeSourceRanges">;
+      reviewContent?: ReturnType<ProposalValidation["projectReview"]>}
+  | {kind: "artifact-required"; digest: string}
+  | {kind: "capacity-refused"}
+  | {kind: "invalid"; message: string};
 type CapacityRetry = {
   kind: "retry";
   reason: "admission-unavailable";
@@ -176,27 +198,16 @@ export function createLiveValidationExecutor() {
       signal?: AbortSignal,
     ) {
       return submit<SettlementNormalizationResult>(
-        { kind: "settlement", policy: SETTLEMENT_NORMALIZATION_POLICY, input },
+        { kind: "settlement", policy: WORKER_LIVE_VALIDATION_POLICY, input },
         signal,
       );
     },
-    /** Whether `input` normalizes within a settlement's work limits, checked in this thread. A contradiction is its settlement's to refuse. */
-    settlementFits(input: SettlementNormalizationInput): boolean {
-      const result = createLiveMarkdownRegistrationValidator(SETTLEMENT_NORMALIZATION_POLICY)(input);
-      return result.kind === "accepted" || result.reason !== "capacity-refused";
+    async validateRestore(input: RestoreValidationInput, policy: OrderedLiveUpdateCutPolicy, signal?: AbortSignal) {
+      return submit<RestoreValidationResult>(
+        {kind: "restore", policy, input, settlementPolicy: WORKER_LIVE_VALIDATION_POLICY}, signal,
+      );
     },
     close,
   };
 }
-/** The work limits a settlement's state normalizes within. */
-const SETTLEMENT_NORMALIZATION_POLICY: OrderedLiveUpdateCutPolicy = Object.freeze({
-  maxStructVisits: 1_000_000,
-  maxValueNodeVisits: 5_000_000,
-  maxDecodedPayloadByteVisits: 100_000_000,
-  maxStructClientGroupVisits: 1_000_000,
-  maxDeleteClientGroupVisits: 1_000_000,
-  maxDeleteIntervalVisits: 1_000_000,
-  maxIndexOperations: 10_000_000,
-});
-
 export const liveValidation = createLiveValidationExecutor();

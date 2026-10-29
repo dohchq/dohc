@@ -1,3 +1,5 @@
+import {WORKER_LIVE_VALIDATION_POLICY} from "./liveValidationPolicy";
+
 /** Shared live-edit transport bounds. */
 export function selfHostLiveProfile() {
   const MiB = 1024 * 1024;
@@ -5,8 +7,10 @@ export function selfHostLiveProfile() {
     receive: {maxFrameBytes: 64 * 1024, maxStateVectorBytes: 128 * 1024, maxUpdateBytes: 2 * MiB, maxSyncBytes: 4 * MiB},
     maxQueuedBytes: 4 * MiB, maxQueuedFrames: 128, maxControlBytes: 128 * 1024, maxControlFrames: 16, maxAssemblyBytes: 4 * MiB,
   };
-  const validation = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
+  // Activation and restore preparation/review still validate in the relay thread.
+  const synchronousValidation = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
     maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
+  const validation = {...WORKER_LIVE_VALIDATION_POLICY};
   const requests = {maxPendingRequests: 32, maxRequestBytes: 16 * 1024, maxResponseBytes: 64 * 1024, timeoutMs: 30_000};
   const connections = {maxConnections: 128, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 16, maxConnectionsPerSession: 6, maxConnectionsPerPrincipal: 12, maxConnectionsPerGrant: 80,
     maxBufferedBytes: 128 * MiB, maxPendingBytes: 256 * 1024, maxFragments: 16, maxBufferedChunks: 128, upgradeTimeoutMs: 30_000, idleTimeoutMs: 60_000, drainTimeoutMs: 1_000};
@@ -33,10 +37,10 @@ export function selfHostLiveProfile() {
       sync: nativeIngress.sync,
       // One restore at a time. Its native reservation, about 206 MiB, shares
       // the 512 MiB ingress budget with live applications and owner delivery.
-      restore: {maxBytes: 2 * MiB, maxEvents: 64, aggregateBytes: 40 * MiB, workingReserveBytes: 8 * MiB, maxOperations: 1, validation},
+      restore: {maxBytes: 2 * MiB, maxEvents: 64, aggregateBytes: 40 * MiB, workingReserveBytes: 8 * MiB, maxOperations: 1, validation: synchronousValidation},
       // A hosted document with no live connection for idleUnloadMs settles and
       // leaves memory until it is opened again.
-      activation: {validation, maxCaptureBytes: 4 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
+      activation: {validation: synchronousValidation, maxCaptureBytes: 4 * MiB, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000}},
   };
 }

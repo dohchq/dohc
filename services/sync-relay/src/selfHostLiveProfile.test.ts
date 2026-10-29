@@ -32,3 +32,13 @@ it("returns independent capacity profiles so one caller cannot change another", 
   expect(second.frames.receive.maxFrameBytes).toBe(64 * 1024);
   expect(second.nativeIngress.ingress.aggregateBytes).toBe(512 * 1024 * 1024);
 });
+
+it("keeps synchronous activation and restore checks within their existing work limits", () => {
+  const profile = selfHostLiveProfile();
+  expect(profile.namedLive.validation.maxIndexOperations).toBeGreaterThan(profile.service.activation.validation.maxIndexOperations);
+  expect(profile.service.activation.validation.maxIndexOperations).toBe(10_000_000);
+  expect(profile.service.restore.validation.maxIndexOperations).toBe(10_000_000);
+  profile.validation.maxIndexOperations = 1;
+  expect(profile.service.activation.validation.maxIndexOperations).toBe(10_000_000);
+  expect(selfHostLiveProfile().validation.maxIndexOperations).toBe(100_000_000);
+});
