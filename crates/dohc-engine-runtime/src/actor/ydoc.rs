@@ -3327,16 +3327,19 @@ fn ydoc_settle_attempt_on_store(
         let audited_restore =
             live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
         let adoption = kind == SettlementKind::CollectionAdoption
+            && dohc_engine_domain::collections::markdown_frontmatter_json_with_body(override_text)
+                .is_some_and(|(fields, _)| fields == doc.frontmatter_json())
             && head_probe.as_ref().is_some_and(|head| {
-                let split = |text: &str| {
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(text)
-                        .map_or(
-                            (serde_json::json!({}), text.to_owned()),
-                            |(fields, body)| (fields, body.to_owned()),
+                doc.frontmatter_json()
+                    .get(dohc_engine_domain::collections::RECORD_ID_FRONTMATTER_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| {
+                        dohc_engine_domain::collections::collection_record_markdown_with_id(
+                            &head.text, id,
                         )
-                };
-                let (fields, body) = split(override_text);
-                fields == doc.frontmatter_json() && body == split(&head.text).1
+                    })
+                    .as_deref()
+                    == Some(override_text)
             });
         if !(source_preserving || audited_restore || adoption) {
             return Err(CollabError::FrontmatterEditRefused.into());

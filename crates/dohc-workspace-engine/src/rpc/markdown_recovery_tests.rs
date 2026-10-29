@@ -1473,10 +1473,7 @@ async fn markdown_recovery_notifies_when_reopened_local_consent_clears_the_old_s
     }
 }
 
-pub(in crate::rpc) fn witness_reader(
-    scratch: &ScratchDir,
-    mode: &str,
-) -> dohc_engine_reader::Config {
+pub(crate) fn witness_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
     let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
     assert!(output.status.success());

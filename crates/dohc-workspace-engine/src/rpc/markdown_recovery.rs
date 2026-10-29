@@ -400,4 +400,4 @@ fn notify_sessions(
 
 #[cfg(test)]
 #[path = "markdown_recovery_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;
