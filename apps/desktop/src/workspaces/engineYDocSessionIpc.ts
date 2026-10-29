@@ -10,6 +10,7 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import {
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
+  YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
 } from "@dohc/workspace-engine-client";
@@ -1484,11 +1485,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 }
 
-// Journals one main-side edit on a live document session and settles it, so
-// the edit is in the engine and the file when the caller hears back. The
-// update is computed off this thread against the session's state and reaches
-// the editor as a remote update, which merges with anything the person typed
-// meanwhile.
+export const DOCUMENT_EDIT_PENDING_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+
+// Admit the edit before reporting a pending owner draft as saved. The editor
+// receives the admitted update, merged with what the person typed meanwhile.
 async function applyDocumentEdit(
   provider: EngineYDocSessionProvider,
   path: string,
@@ -1519,22 +1519,27 @@ async function applyDocumentEdit(
     accepted = await append();
   }
   if (!accepted) throw new Error(`The engine did not accept the edit to ${path}.`);
+  let pending = false;
   session.show(update);
   try {
     await settleNow.call(provider, input.allowLossySourceSha256
       ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
   } catch (error) {
-    // The session's journal holds the edit and a later settle saves it.
-    // Sending the edit again could apply it twice.
-    const cause = error instanceof Error ? error.message : String(error);
-    // Over a change made outside dohc, the disk version stands when the
-    // document reloads or closes, and the edit stays in History.
-    throw new LiveDocumentEditAppliedError(
-      isConflictStaleTargetCause(error)
-        ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
-        : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
-      { cause: error },
-    );
+    if (error instanceof YdocOwnerDraftPendingError) {
+      pending = true;
+    } else {
+      // The session's journal holds the edit and a later settle saves it.
+      // Sending the edit again could apply it twice.
+      const cause = error instanceof Error ? error.message : String(error);
+      // Over a change made outside dohc, the disk version stands when the
+      // document reloads or closes, and the edit stays in History.
+      throw new LiveDocumentEditAppliedError(
+        isConflictStaleTargetCause(error)
+          ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+          : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+        { cause: error },
+      );
+    }
   }
   // Someone who removed or reshaped a block while the edit went into it takes
   // the edit's text with the block. That merge is correct for the document,
@@ -1548,6 +1553,8 @@ async function applyDocumentEdit(
   // before the edit can still be on its way from their editor, and waiting
   // for it would only move the moment: they can change the block again right
   // after. So the answer says so instead of promising the text stays.
+  if (pending) return { changed: true, warning: session.keepBlocks
+    ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}` : DOCUMENT_EDIT_PENDING_WARNING };
   return session.keepBlocks ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING } : { changed: true };
 }
 

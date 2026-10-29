@@ -58,7 +58,10 @@
     "show",
     "stopAgain",
     "stopSync",
-    "threads"
+    "threads",
+    "versionCompare",
+    "versionConflicts",
+    "versionList"
   ],
   "internalVerbs": [
     "chat",
@@ -121,7 +124,10 @@
     "show",
     "stopAgain",
     "stopSync",
-    "threads"
+    "threads",
+    "versionCompare",
+    "versionConflicts",
+    "versionList"
   ],
   "publicGroups": [
     "links",
@@ -134,6 +140,7 @@
     "app",
     "file",
     "history",
+    "version",
     "automation",
     "account"
   ],
@@ -218,6 +225,9 @@
     "history undo",
     "history list",
     "history show",
+    "version list",
+    "version compare",
+    "version conflicts",
     "automation list",
     "automation switch",
     "automation buttons",
@@ -273,6 +283,10 @@
           "block": "  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"
         },
         {
+          "group": "version",
+          "block": "  version      Read the workspace's versions, how one differs from Main, and\n               open conflicts.\n               list, compare, conflicts\n"
+        },
+        {
           "group": "automation",
           "block": "  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"
         },
@@ -291,7 +305,7 @@
     "share copy": "Usage: dohc share copy <shareId> <grantId> [options]\n\nRead a grant's share code and named-account invite link.\n\nRun dohc inside a workspace folder while the dohc app is open.\nRequires the original workspace and its signed-in owner account.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "document": "Usage: dohc document <verb> [arguments] [options]\n\nRead, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.\n\nVerbs:\n  read                 Read the current Markdown, including edits in an open\n                       editor.\n  edit                 Replace matching text or append Markdown through the live\n                       document.\n  create               Create a Markdown document without overwriting an\n                       existing file.\n  chats                List chats linked to a workspace file.\n  comment              Start a chat linked to a file with its first message.\n  kept-edits           List live documents whose edits the server refused, and\n                       where dohc keeps those edits.\n  save-recovery-copy   Save a document's kept edits next to it.\n  retry-kept-edits     Send a document's kept edits to the server once more.\n  stop-again           Stop live editing again for a document whose Stop kept\n                       its edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc document <verb> --help to see its arguments and options.\n",
     "document read": "Usage: dohc document read <path> [options]\n\nRead the current Markdown, including edits in an open editor.\n\nRead before editing. Without --json, prints the Markdown byte for byte.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
-    "document edit": "Usage: dohc document edit <path> [-] [options]\n\nReplace matching text or append Markdown through the live document.\n\nUse - as the body to read it from stdin.\nUse --text instead to supply the body as an argument. Each side allows at most\n256 KiB of UTF-8.\nEdits change the body, not frontmatter. Concurrent editing can prevent removing\nblocks or changing their kind.\nRead again after a warning or an unexplained failure. Retry keys have the same\nlimits as dohc_edit_document.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --text <markdown>    Use this Markdown as the body. An empty string is\n                       allowed.\n  --agent <name>       Record this agent name with the change.\n  --find <markdown>    Replace this exact, unique match. Omit to append.\n  --request-id <key>   Reuse this key when retrying the same edit, as with\n                       dohc_edit_document.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n",
+    "document edit": "Usage: dohc document edit <path> [-] [options]\n\nReplace matching text or append Markdown through the live document.\n\nUse - as the body to read it from stdin.\nUse --text instead to supply the body as an argument. Each side allows at most\n256 KiB of UTF-8.\nEdits change the body, not frontmatter. Concurrent editing can prevent removing\nblocks or changing their kind.\nA pending warning means the edit is saved locally and the shared file update is\npending. Do not repeat it. Read again after other warnings or an unexplained\nfailure. Retry keys have the same limits as dohc_edit_document.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --text <markdown>    Use this Markdown as the body. An empty string is\n                       allowed.\n  --agent <name>       Record this agent name with the change.\n  --find <markdown>    Replace this exact, unique match. Omit to append.\n  --request-id <key>   Reuse this key when retrying the same edit, as with\n                       dohc_edit_document.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n",
     "document create": "Usage: dohc document create <path> [-] [options]\n\nCreate a Markdown document without overwriting an existing file.\n\nUse - as the body to read it from stdin.\nUse --text instead to supply Markdown. With neither, create an empty document.\nThe path must end in .md or .markdown. Frontmatter is refused.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --text <markdown>   Use this Markdown as the body. An empty string is allowed.\n  --agent <name>      Record this agent name with the change.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
     "document chats": "Usage: dohc document chats <path> [options]\n\nList chats linked to a workspace file.\n\nChats follow the file across renames.\nUse chat show --peek with a thread ID to read it without marking it read.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "document comment": "Usage: dohc document comment <path> [-] [options]\n\nStart a chat linked to a file with its first message.\n\nUse - as the body to read it from stdin.\nThe first message allows at most 64 KiB of UTF-8.\n\nRun dohc inside a workspace folder while the dohc app is open.\nPaths resolve from your current folder. Changes are recorded as an agent's, as\nwith MCP.\nA refusal exits with status 1 and prints its reason to stderr, including with\n--json.\n\nOptions:\n  --title <title>      Set the chat title. Use 1 to 200 characters that are not\n                       all whitespace.\n  --text <markdown>    Set the first message as Markdown. The message must\n                       contain text that is not all whitespace.\n  --agent <name>       Record this agent name with the change.\n  --request-id <key>   Set a key for safe retries. Use 1 to 64 printable ASCII\n                       characters. A retry with the same key and the same\n                       payload returns the existing result. A retry with the\n                       same key and a changed payload is refused.\n  --run-id <id>        Set the run ID. The value must not be empty. This flag\n                       overrides DOHC_RUN_ID.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n",
@@ -383,6 +397,10 @@
     "chat file-mentions": "Usage: dohc chat file-mentions [options]\n\nRead one bounded page of file mentions.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --subject <subject>   A file path or objectId as JSON.\n  --cursor <cursor>     Continue the previous page.\n  --as-agent            Post and read chat as an agent.\n  --json                Print the result as JSON.\n  --help                Show help. -h does the same.\n",
     "file": "Usage: dohc file <verb> [arguments] [options]\n\nChange workspace files.\n\nVerbs:\n  duplicate   Duplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc file <verb> --help to see its arguments and options.\n",
     "file duplicate": "Usage: dohc file duplicate <path> [options]\n\nDuplicate one file beside its source.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUndo removes the copy while it is unchanged.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
-    "chat links": "Usage: dohc chat links <group> [options]\n\nRead one page of files mentioned in a chat.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n"
+    "chat links": "Usage: dohc chat links <group> [options]\n\nRead one page of files mentioned in a chat.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Group by its name or ID, and a thread or message by its ID. A unique ID\nprefix also works.\nDOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.\n\nOptions:\n  --cursor <cursor>   Continue the previous page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
+    "version": "Usage: dohc version <verb> [arguments] [options]\n\nRead the workspace's versions, how one differs from Main, and open conflicts.\n\nVerbs:\n  list        List the versions and which one is active.\n  compare     List the files that differ between Main and a version.\n  conflicts   List open conflicts from merges and from sync.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc version <verb> --help to see its arguments and options.\n",
+    "version list": "Usage: dohc version list [options]\n\nList the versions and which one is active.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
+    "version compare": "Usage: dohc version compare <version> [options]\n\nList the files that differ between Main and a version.\n\nName a version by its name or ID, as version list prints them. With --json,\nprint both sides' text.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --after <path>   Continue after this path from the previous page.\n  --as-agent       Post and read chat as an agent.\n  --json           Print the result as JSON.\n  --help           Show help. -h does the same.\n",
+    "version conflicts": "Usage: dohc version conflicts [options]\n\nList open conflicts from merges and from sync.\n\nWith --json, print each conflict's sides.\n\nRun dohc inside a workspace folder while the dohc app is open.\nVersions belong to the owning workspace.\n\nOptions:\n  --after <conflict>   Continue after this conflict ID from the previous page.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n"
   }
 }

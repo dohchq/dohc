@@ -241,11 +241,22 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<Extract<CliResultByVerb[Verb], { ok: true }>, "ok">;
+
+// The versions menu's reads, for the owning workspace. Compare and conflict
+// pages leave out secret-backed files and paths the workspace's rules don't
+// track, as History does.
+export interface CliVersionsPort {
+  list(): Promise<CliVersionPage<"versionList">>;
+  compare(versionId: string, afterPath?: string): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
+  conflicts(afterConflictId?: string): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
+}
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
@@ -301,12 +312,12 @@ export interface CliButtonsPort {
 export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
 export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
 
-function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
+function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "History is hidden") {
   return {
     ok: false as const,
     status: "policy-unreadable" as const,
     unreadable: refusal.unreadable,
-    reason: `History is hidden because dohc can't read ${refusal.unreadable.join(" and ")}`,
+    reason: `${hidden} because dohc can't read ${refusal.unreadable.join(" and ")}`,
   };
 }
 
@@ -352,7 +363,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
-  // Absent in a shared view, which keeps no copies of its own.
+  // Absent in a shared view, which keeps no copies or versions of its own.
+  versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
@@ -2630,7 +2642,7 @@ async function dispatchWorkspace(
           return {
             ok: true as const,
             stream: {
-              group: { id: channel.id, name: channel.kind === "agent" ? "my-agent" : channel.name, kind: cliGroupKind(channel.kind) },
+              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
               ...page,
               items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
             },
@@ -3101,6 +3113,32 @@ async function dispatchWorkspace(
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "versionList":
+    case "versionCompare":
+    case "versionConflicts": {
+      const versions = context.versions;
+      if (!versions || (await callerPaths(context, request.args.cwd)).shared) {
+        return { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." };
+      }
+      try {
+        if (request.verb === "versionList") return { ok: true as const, ...(await versions.list()) };
+        if (request.verb === "versionConflicts") {
+          const page = await versions.conflicts(request.args.afterConflictId);
+          return "status" in page ? historyPolicyUnreadable(page, "Conflicts are hidden") : { ok: true as const, ...page };
+        }
+        const named = request.args.version;
+        const { versions: all } = await versions.list();
+        const version = all.find(candidate => candidate.name === named) ?? all.find(candidate => candidate.id === named);
+        if (!version) return { ok: false as const, reason: `No version is called ${named}. Run dohc version list to see them.` };
+        if (version.kind === "main") return { ok: false as const, reason: "Versions compare with Main. Name another version." };
+        const page = await versions.compare(version.id, request.args.afterPath);
+        if ("status" in page) return historyPolicyUnreadable(page, "Version files are hidden");
+        return { ok: true as const, version: { id: version.id, name: version.name }, ...page };
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not read the workspace's versions.");
       }
     }
 

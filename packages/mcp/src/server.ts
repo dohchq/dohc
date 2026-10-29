@@ -26,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -199,6 +199,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
+  register("dohc_list_versions", {
+    description: "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.",
+    inputSchema: {},
+  }, async () => text(await listVersions(ctx)));
+  register("dohc_compare_version", {
+    description: "Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200), afterPath: z.string().min(1).max(4096).optional() },
+  }, async args => text(await compareVersion(ctx, args)));
+  register("dohc_list_version_conflicts", {
+    description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
+    inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
+  }, async args => text(await listVersionConflicts(ctx, args)));
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per
@@ -223,7 +235,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_kept_copies",
     {
       description:
-        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.",
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.",
       inputSchema: {},
     },
     async () => text(await listKeptCopies(ctx)),
@@ -373,7 +385,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_edit_document",
     {
       description:
-        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
         allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
         path: z.string().min(1).max(4096),

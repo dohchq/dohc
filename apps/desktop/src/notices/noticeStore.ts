@@ -766,7 +766,7 @@ export function createNoticeStore(deps: {
             ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
-            : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
+            : tooLarge ? "Make the file smaller, then try sync again." : "Review the file, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
             title: attributionRefused ? unattributedTitle(document?.path)

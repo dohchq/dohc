@@ -6030,11 +6030,21 @@ fn replay_share_write<T: RelayTransport>(
             },
         ));
     }
-    if content_kind != "binary" && std::str::from_utf8(&bytes).is_err() {
-        return Err(RelayError::ShareOpInvalid {
-            reason: "share write claims text content the shared bytes cannot be",
-        });
-    }
+    let content: Result<String, Vec<u8>> = if content_kind == "binary" {
+        Err(bytes)
+    } else {
+        // These bytes already matched the sha the op named, so they are
+        // the content the granter shared. The op calling them text is the
+        // defect, and no repair at the relay changes that.
+        Ok(String::from_utf8(bytes).map_err(|_| {
+            remember(
+                blob_refusals,
+                RelayError::ShareOpInvalid {
+                    reason: "share write claims text content the shared bytes cannot be",
+                },
+            )
+        })?)
+    };
     if let Some(before) = rename_from {
         let input = dohc_engine_domain::RenameTextFile {
             workspace_id: workspace_id.to_owned(),
@@ -6112,8 +6122,8 @@ fn replay_share_write<T: RelayTransport>(
             now_ms: envelope.recorded_at_ms,
         }
     });
-    let deduped = {
-        if content_kind == "binary" {
+    let deduped = match content {
+        Err(bytes) => {
             let input = WriteBinary {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
@@ -6162,18 +6172,8 @@ fn replay_share_write<T: RelayTransport>(
             )
             .map_err(domain)?
             .deduped
-        } else {
-            // These bytes already matched the sha the op named, so they are
-            // the content the granter shared. The op calling them text is the
-            // defect, and no repair at the relay changes that.
-            let text = String::from_utf8(bytes).map_err(|_| {
-                remember(
-                    blob_refusals,
-                    RelayError::ShareOpInvalid {
-                        reason: "share write claims text content the shared bytes cannot be",
-                    },
-                )
-            })?;
+        }
+        Ok(text) => {
             let input = WriteText {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),

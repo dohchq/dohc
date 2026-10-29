@@ -35,12 +35,16 @@ it("stops treating a zero as decision evidence when a day was Off or incomplete"
   expect(result).toMatchObject({ total: null, usedDays: null, coveredDays: 29 });
 });
 
-it("cannot answer the comparison placement decision without a deliberate comparison action", () => {
+it("counts comparisons only where someone deliberately asks for one", () => {
   const snapshot = usageDecisionFixture();
   expect(snapshot.counts.some(row => row.capabilityId === "version.compare")).toBe(false);
   const rows = queryUsage(snapshot, { from: "2026-09-08", through: "2026-10-07",
     pairs: USAGE_DOORS.map(door => ({ capabilityId: "version.compare", door })) });
-  for (const row of rows) expect(row).toMatchObject({ total: null, usedDays: null, coveredDays: 0 });
+  for (const row of rows) {
+    expect(row).toMatchObject(row.door === "cli" || row.door === "mcp"
+      ? { total: 0, usedDays: 0, coveredDays: 30 }
+      : { total: null, usedDays: null, coveredDays: 0 });
+  }
 });
 
 it("uses the build's real coverage and never presents an uncovered candidate as zero", () => {

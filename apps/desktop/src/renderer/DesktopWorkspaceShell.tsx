@@ -896,6 +896,7 @@ export function DesktopWorkspaceShell(props: {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showOutsideCopies,
     showCaptureRecoveries,
     showCaptureHolds,
     showDirectWriteNotice,
@@ -5456,6 +5457,24 @@ export function DesktopWorkspaceShell(props: {
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
+  useEffect(() => {
+    if (syncStatus?.outsideWriteCopies === undefined) return;
+    showOutsideCopies(syncStatus.outsideWriteCopies, openFile);
+  }, [syncStatus?.outsideWriteCopies, showOutsideCopies, openFile]);
+  const shownCopyReadError = useRef<string | null>(null);
+  useEffect(() => {
+    if (syncStatus?.outsideWriteCopyReadError === undefined) return;
+    const error = syncStatus.outsideWriteCopyReadError;
+    if (error === shownCopyReadError.current) return;
+    shownCopyReadError.current = error;
+    const identity = "outside-copy-records";
+    if (error === null) { clearIdentity(identity); return; }
+    reportShellFailure({
+      identity, kind: "outside-copy-read", title: "dohc could not list every kept copy",
+      message: "To find a copy that isn't listed, look beside its file for (kept copy) in the name.",
+      details: [["Cause", error]], retry: () => void refreshKeptCopies(),
+    });
+  }, [syncStatus?.outsideWriteCopyReadError, reportShellFailure, clearIdentity, refreshKeptCopies]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),

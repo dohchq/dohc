@@ -2252,7 +2252,7 @@ describe("CLI socket server", () => {
     let kept = [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }];
     context.keptCopies = {
       async list() {
-        return { keptCopies: kept, more: false };
+        return { keptCopies: kept, more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
       },
       async save(id) {
         const found = kept.some((copy) => copy.id === id);
@@ -2266,6 +2266,7 @@ describe("CLI socket server", () => {
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
       ok: true,
       keptCopies: [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }],
+      outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]],
       more: false,
     });
     await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
@@ -2275,7 +2276,7 @@ describe("CLI socket server", () => {
       .resolves.toEqual({ ok: true, status: "gone" });
     expect(calls.writes).toBe(1);
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
-      .resolves.toEqual({ ok: true, keptCopies: [], more: false });
+      .resolves.toEqual({ ok: true, keptCopies: [], more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] });
 
     delete context.keptCopies;
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
@@ -2965,6 +2966,18 @@ describe("CLI socket server", () => {
     expect(await invoke("fileChatStart", corrected)).toEqual(started);
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
       .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
+  });
+
+  it("returns a pending document edit as success and replays it without another edit", async () => {
+    const warning = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+    const edit = vi.fn(async (input: { path: string }) => ({ path: input.path, changed: true, warning }));
+    context.documents = { read: async () => { throw new Error("unused"); }, edit,
+      create: async () => { throw new Error("unused"); } };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "After.", requestId: "kept-edit" };
+    const expected = { ok: true, path: "notes/plan.md", changed: true, warning };
+    await expect(invoke("documentEdit", args)).resolves.toEqual(expected);
+    await expect(invoke("documentEdit", args)).resolves.toEqual(expected);
+    expect(edit).toHaveBeenCalledOnce();
   });
 
   it("answers a resent document edit with its first result", async () => {
@@ -3857,6 +3870,20 @@ describe("CLI socket server", () => {
     expect(thread.messages[0]?.agentRequests).toEqual([{ agentId: "default", state: "waiting" }]);
     await expect(invokeAny("show", { cwd: workspaceRoot, actor: "human", target: cliThreadId(chat.thread.id), peek: true, limit: 1 }))
       .rejects.toThrow("--before and --limit page a group's stream");
+  });
+
+  it("names each agent's chat stream by its own group in the CLI and MCP", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    for (const slug of ["my-agent", "my-agent-codex"]) {
+      const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: slug, peek: true });
+      if (!("stream" in shown)) throw new Error("expected a stream");
+      const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: slug });
+      if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+      expect(shown.stream.group.name).toBe(slug);
+      expect(read.stream.group.name).toBe(slug);
+    }
   });
 
   it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {

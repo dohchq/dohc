@@ -20,6 +20,24 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "deleteRetainedCopies"
 >;
 
+// A version as the versions menu and the CLI show it.
+export function workspaceVersionForIpc(version: {
+  id: string;
+  name: string;
+  kind: "main" | "named";
+  createdAtMs: number;
+  forkPoint?: { versionId: string };
+}): WorkspaceVersionRecord {
+  return {
+    id: version.id,
+    name: version.name,
+    kind: version.kind,
+    createdAtMs: version.createdAtMs,
+    canMergeIntoMain:
+      version.kind === "named" && version.forkPoint?.versionId === "main",
+  };
+}
+
 export function workspaceVersionHandlers(dependencies: {
   onRefusalsChanged?(): void;
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
@@ -34,23 +52,6 @@ export function workspaceVersionHandlers(dependencies: {
       "Versions",
     );
     return capture;
-  }
-
-  function workspaceVersionForIpc(version: {
-    id: string;
-    name: string;
-    kind: "main" | "named";
-    createdAtMs: number;
-    forkPoint?: { versionId: string };
-  }): WorkspaceVersionRecord {
-    return {
-      id: version.id,
-      name: version.name,
-      kind: version.kind,
-      createdAtMs: version.createdAtMs,
-      canMergeIntoMain:
-        version.kind === "named" && version.forkPoint?.versionId === "main",
-    };
   }
 
   return {
