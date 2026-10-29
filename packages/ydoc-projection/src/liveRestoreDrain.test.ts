@@ -2578,8 +2578,10 @@ it.each([false, true])("ends a declined restore at the fenced generation with it
     expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: f.cutover, requestedAtMs: 40});
     expect(f.raw.prepare("SELECT outcome,journal_cursor FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "fence-cancelled", journal_cursor: control}]);
     expect(sequence()).toBe(control);
+    const baseline = Number(f.raw.prepare("SELECT baseline_moment_relay_seq FROM sync_relay_live_documents WHERE lineage_state='current'").get()!.baseline_moment_relay_seq);
+    const authority = {lineageClaimId: f.fenceCancelled.receipt.binding.lineageClaimId, baselineSequence: baseline, restoreFenceGeneration: 2};
     expect(await readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: f.cutover, limit: 10}))
-      .toEqual({rows: [{relayDatabaseNamespace: "restore-test", journalCursor: control, cancellation: f.fenceCancelled.receipt}], nextCursor: control, hasMore: false});
+      .toEqual({rows: [{relayDatabaseNamespace: "restore-test", journalCursor: control, cancellation: f.fenceCancelled.receipt, authority}], nextCursor: control, hasMore: false});
     const operations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), after = operations();
     f.close(); closed = true;
     reopened = openSyncRelayStorage(f.path);

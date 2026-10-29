@@ -293,6 +293,8 @@ export interface ReplicaLiveJournalCancellation {
   readonly relayDatabaseNamespace: string;
   readonly journalCursor: number;
   readonly cancellation: NativeRestoreCancellationReceipt;
+  // The document's current authority, as rows carry it, so a replica can skip a lineage it never saw that has since retired.
+  readonly authority: ReplicaLiveJournalAuthority | null;
 }
 
 export interface ReplicaLiveJournalPage {
@@ -423,6 +425,15 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     const authorities = new Map<string, ReplicaLiveJournalAuthority | null>();
     const currentAuthority = storage.db.prepare(`SELECT lineage_claim_id,baseline_moment_relay_seq,restore_fence_generation
       FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_state='current'`);
+    const authorityOf = (mainVersionId: unknown, objectId: unknown) => {
+      const key = JSON.stringify([mainVersionId, objectId]);
+      let authority = authorities.get(key);
+      if (authority === undefined) {
+        authority = replicaJournalAuthority(currentAuthority.get(workspaceId, mainVersionId, objectId));
+        authorities.set(key, authority);
+      }
+      return authority;
+    };
     // Lengths avoid walking either blob; price stored metadata while capturing full rows.
     const headers = storage.db.prepare(`SELECT journal_cursor,workspace_id,main_version_id,object_id,lineage_claim_id,
       length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
@@ -431,13 +442,7 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     let rowBytes = 0, captureBytes = 0, nextCursor = after, hasMore = false;
     for (const header of headers) {
       if (projectedRows.length === limit) {hasMore = true; break;}
-      const key = JSON.stringify([header.main_version_id, header.object_id]);
-      let authority = authorities.get(key);
-      if (authority === undefined) {
-        authority = replicaJournalAuthority(currentAuthority.get(workspaceId, header.main_version_id, header.object_id));
-        authorities.set(key, authority);
-      }
-      const projected = replicaJournalProjection(header, authority);
+      const projected = replicaJournalProjection(header, authorityOf(header.main_version_id, header.object_id));
       journalIntegrity(projected.document.workspaceId === workspaceId && projected.journalCursor > nextCursor);
       const updateLength = authorityInteger(header.update_length, 1);
       journalIntegrity(updateLength <= 20_971_520);
@@ -460,9 +465,10 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     const controls = storage.db.prepare(`SELECT relay_database_namespace,journal_cursor,acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS}
       WHERE workspace_id=? AND journal_cursor IS NOT NULL AND journal_cursor>? ORDER BY journal_cursor LIMIT ?`).all(workspaceId, after, limit + 1).map(row => {
       const answer = parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
-      journalIntegrity(answer.status === "fenceCancelled");
+      journalIntegrity(answer.status === "fenceCancelled" && answer.receipt.binding.workspaceId === workspaceId);
+      const {mainVersionId, objectId} = answer.receipt.binding;
       return {relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relay_database_namespace), journalCursor: authorityInteger(row.journal_cursor, 1),
-        cancellation: answer.receipt} satisfies ReplicaLiveJournalCancellation;
+        cancellation: answer.receipt, authority: authorityOf(mainVersionId, objectId)} satisfies ReplicaLiveJournalCancellation;
     });
     return {captured, controls, hasMore: hasMore || captured.length < projectedRows.length};
   });
