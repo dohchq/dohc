@@ -666,12 +666,18 @@ export async function startServiceLiveHost(options: {
       if (!row) return null;
       // A retirement must settle, which no settlement can do past a queue frozen at its owner's adoption seed.
       // Such a document departs as an ordinary unload instead, with its accepted work kept for its owner's recovery copy.
-      const open = storage.serviceActivationRetirement({workspaceId: row.target.workspaceId, objectId: row.objectId});
+      const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
+      const open = storage.serviceActivationRetirement(document);
       if (!open) return null;
+      // An unfinished restore continues through the document's target, so the document neither retires nor departs until it ends.
+      // Its end can move the document's restore generation, which decides whose seed stays frozen, so the seeds are read after it.
+      if (storage.serviceRestoreInProgress(document)) {
+        if (!grantsEnded.has(key)) {await endKeptRetries(row, joined, false); grantsEnded.add(key);}
+        seededOf.delete(key);
+        return "Waiting for its restore to finish.";
+      }
       let seeded = seededOf.get(key);
       if (!seeded) {seeded = await endKeptRetries(row, joined, false); seededOf.set(key, seeded); grantsEnded.add(key);}
-      // An unfinished restore continues through the document's target, so the document neither retires nor departs until it ends.
-      if (storage.serviceRestoreInProgress({workspaceId: row.target.workspaceId, objectId: row.objectId})) return "Waiting for its restore to finish.";
       if (seeded.has(open.lineageClaimId)) return null;
       const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
       const step = await activation!.retire(row.target, row.objectId, joined, {
@@ -681,7 +687,6 @@ export async function startServiceLiveHost(options: {
       if (step.kind === "pending") return step.reason;
       // A retired document whose refusals this host kept stays, with its workspace attached, until no Try again
       // of them stays granted and its owner saved a recovery copy of each. Its rows go then.
-      const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
       if (storage.serviceKeptEditsOf(document).keptEdits.length > 0) retained.set(documentKey(document), {target: row.target, objectId: row.objectId});
       unhost(key);
       return undefined;

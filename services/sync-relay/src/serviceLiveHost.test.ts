@@ -19,6 +19,7 @@ import {readServiceActivationRetirement} from "./storage/serviceActivationRetire
 import {ServiceActivationStore} from "./storage/serviceActivation.js";
 import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
+import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
@@ -618,7 +619,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // restore moved it past its queues'.
   const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; reconciledThrough?: number; unproven: string[]; journals: unknown[];
     unpushed: number; releasePending?: string; capture: NativeOwnerActivation; adoption: {activationId: string; throughCursor: number | null};
-    generation?: number} =
+    generation?: number; fenceCommitted?: boolean} =
     {capture, unproven: [], journals: [], unpushed: 0, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
   const ownerBoundary = () => {
     const tip = JSON.parse(String(raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json));
@@ -775,10 +776,21 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
-        // No native fence commits here, so a Decline ends the restore at its old generation, under the binding it began with.
+        // Unless `fenceCommitted` says the native fence committed, a Decline ends the restore at its old generation,
+        // under the binding it began with. After a committed fence, it keeps the fenced generation.
         case "liveApplication.cancelRestoreFence": {
           const basis = JSON.parse(String(raw.prepare("SELECT basis_json FROM sync_relay_live_restore_operations WHERE operation_id=?").get(request.params.operationId as string)!.basis_json));
-          return reply({status: "cancelled", hostId: request.params.hostId, generation: (request.params.newFence as number) - 1, binding: basis.ownerBinding});
+          const newFence = request.params.newFence as number;
+          if (!engine.fenceCommitted) return reply({status: "cancelled", hostId: request.params.hostId, generation: newFence - 1, binding: basis.ownerBinding});
+          const saved = f.storage.readStopRestore(stopLookup)!, fence = nativeRestoreFence(saved.applied!, newFence, saved.intent);
+          const binding = {...fence.oldBinding, restoreFenceGeneration: newFence}, endpoint = fence.terminal === null
+            ? {terminalReceipt: null, eventCount: 0, historyEvidenceDigest: initialAcceptedHistoryDigest(f.history.namespace, document)}
+            : (row => ({terminalReceipt: fence.terminal, eventCount: row.accepted_event_count, historyEvidenceDigest: row.accepted_evidence_digest}))(
+              raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE object_id='object' AND journal_cursor=?")
+                .get(fence.terminal.journalCursor)!);
+          engine.generation = newFence;
+          return reply({status: "fenceCancelled", hostId: request.params.hostId, generation: newFence, binding,
+            receipt: {fence: {operation: fence, localHeadSequence: fence.appliedSequence, recordedAtMs: 55}, binding, endpoint, recordedAtMs: 55}});
         }
         case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
         case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
@@ -2409,11 +2421,16 @@ it("keeps a released document hosted while its retirement waits for a restore", 
 // restore fences and is declined through the host. The engine then releases
 // the activation at the generation the Decline restored, and it retires. A
 // document whose queue is frozen at its owner's adoption seed, which departs as
-// an ordinary unload instead, waits for the restore the same way.
+// an ordinary unload instead, waits for the restore the same way. A Decline
+// after the native fence committed keeps the fenced generation, which that
+// seed no longer freezes, so the document then retires.
 it.each([
-  {restart: false, seeded: false}, {restart: true, seeded: false}, {restart: false, seeded: true}, {restart: true, seeded: true},
-])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: $restart, frozen seed: $seeded", async ({restart, seeded}) => {
+  {restart: false, seeded: false, fenceCommitted: false}, {restart: true, seeded: false, fenceCommitted: false},
+  {restart: false, seeded: true, fenceCommitted: false}, {restart: true, seeded: true, fenceCommitted: false},
+  {restart: false, seeded: true, fenceCommitted: true}, {restart: true, seeded: true, fenceCommitted: true},
+])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: $restart, frozen seed: $seeded, fence committed: $fenceCommitted", async ({restart, seeded, fenceCommitted}) => {
   const o = await enrolledServiceHost();
+  o.engine.fenceCommitted = fenceCommitted;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   // The current daemon's engine requests that reconcile, release or unload a leaving document.
   const retiring = () => o.calls(0).filter(method => method === "liveApplication.reconcileActivation" || method === "liveApplication.releaseActivation" ||
@@ -2438,9 +2455,15 @@ it.each([
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   expect(retiring()).toEqual([]);
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
-  if (seeded) {
+  if (seeded && !fenceCommitted) {
     // Its ordinary departure goes ahead once the restore ended.
     await vi.waitFor(() => expect(retiring()).toContain("liveApplication.unloadDocument"), {timeout: 10_000});
+    return;
+  }
+  if (seeded) {
+    await vi.waitFor(() => expect(retiring()).toContain("liveApplication.releaseActivation"), {timeout: 10_000});
+    expect(retiredRow(o).retired).toBe(true);
+    expect(retiring()).not.toContain("liveApplication.unloadDocument");
     return;
   }
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
