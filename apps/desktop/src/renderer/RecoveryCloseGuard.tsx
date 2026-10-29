@@ -527,9 +527,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       roundRequest = { request: exitRequest, kind: message.exit };
       const round = { id: message.roundId, kind: message.exit };
       activeRound = round;
-      // A newer round replaces the restart this window was waiting to see
-      // through, so no button keeps showing it under way.
-      if (proceededRound?.kind === "update") for (const listener of restartStoppedListeners) listener();
+      // A quit replaces the restart this window was waiting to see through,
+      // so no button keeps showing it under way. A newer restart carries
+      // on, and ends through its own round.
+      if (proceededRound?.kind === "update" && round.kind === "quit") for (const listener of restartStoppedListeners) listener();
       proceededRound = null;
       heldRound = null;
       // Claim the intent up front: a queued reopen can still capture a
@@ -647,9 +648,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // the exit, so going back takes it back from every window
                   // of that round.
                   const round = closeWarning.round ?? heldRound ?? undefined;
-                  if (closeWarning.kind === "update") for (const listener of restartStoppedListeners) listener();
+                  const exit = round === undefined ? null : forgetRoundIntent(round);
+                  if (closeWarning.kind === "update" || exit === "update") for (const listener of restartStoppedListeners) listener();
                   setCloseWarning(null);
-                  if (round !== undefined && forgetRoundIntent(round) !== null) {
+                  if (round !== undefined && exit !== null) {
                     rearmGuard();
                     answerRound(round, "cancel");
                   }

@@ -667,8 +667,13 @@ describe("RecoveryCloseGuard", () => {
     });
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Close anyway");
 
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
     await user.click(screen.getByTestId("recovery-close-goback"));
     expect(main.answers(), "the held restart stays under way in the window that asked for it").toContainEqual({ roundId: 1, decision: "cancel" });
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped, "this window's own button would stay on Restarting…").toHaveBeenCalledOnce();
   });
 
   it("ends this window's restart when a newer round replaces it", async () => {
@@ -689,6 +694,26 @@ describe("RecoveryCloseGuard", () => {
     main.cancelled(2);
     unsubscribe();
     expect(stopped, "the update button would stay on Restarting… after the quit was gone back on").toHaveBeenCalledOnce();
+  });
+
+  it("keeps a newer restart under way, and ends it through its own round", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    main.request(2, "update");
+    expect(stopped, "a button that just asked for the newer restart would offer it again while it runs").not.toHaveBeenCalled();
+    main.cancelled(2);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
   });
 
   // Dismissing the last at-risk draft from a round's warning removes the
