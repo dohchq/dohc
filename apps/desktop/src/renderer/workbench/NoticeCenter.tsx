@@ -1229,7 +1229,6 @@ export function NoticeCenter(props: {
   );
   const firstOpenToastView = firstOpenToast ? firstOpenView(firstOpenToast) : null;
 
-
   useEffect(() => {
     if (!open) return;
 

@@ -82,7 +82,7 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
-    openEngineYDocSession: vi.fn(async () => ({
+    openEngineYDocSession: vi.fn<DohcDesktopBridge["openEngineYDocSession"]>(async () => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)),
       lineageGeneration: 1,
@@ -98,6 +98,28 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
   vi.stubGlobal("dohcDesktop", bridgeMock);
   return bridgeMock;
 }
+
+it("shows the nesting refusal without first offering lossy-note consent", async () => {
+  const text = `${"*a ".repeat(17)}b${" a*".repeat(17)}\n`;
+  const bridge = bridgeFor([{ text, contentHash: sha(text) }]);
+  bridge.openEngineYDocSession.mockResolvedValue({ available: false });
+  const shown: string[] = [];
+  const observer = new MutationObserver(() => {
+    if (screen.queryByTestId("lossy-note-notice")) shown.push("consent");
+    if (screen.queryByTestId("rich-text-refused")) shown.push("refusal");
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  try {
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("rich-text-refused");
+    expect(shown).toContain("refusal");
+    expect(shown).not.toContain("consent");
+    expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  } finally {
+    observer.disconnect();
+  }
+});
 
 describe("a lossy note", () => {
   it("opens read-only from the file's text, with no engine session", async () => {

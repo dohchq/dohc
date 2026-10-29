@@ -816,6 +816,7 @@ describe("private first-open candidate check", () => {
 
   it("asks the engine to stop a check after its last input frame and holds its upload slot until the engine answers", async () => {
     const { peer, transport, checks } = await connected();
+    const cancellation = new AbortController();
     const source = Buffer.alloc(100_000, 0x61), large = { ...input, source, sourceSha256: digest(source) };
     const reached = Promise.withResolvers<void>();
     let finished = false;
@@ -829,10 +830,10 @@ describe("private first-open candidate check", () => {
       if (envelope.type === "cancel") peer.send({ type: "error", id: envelope.id, error: { code: "CANCELLED", message: "first-open check cancelled", retry: "no" } });
     };
     try {
-      const pending = transport.checkFirstOpenCandidate(call, large);
+      const pending = transport.checkFirstOpenCandidate(call, large, undefined, cancellation.signal);
       const cancelled = expect(pending).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
       await reached.promise;
-      await transport.cancelRequest(call.id);
+      cancellation.abort();
       expect(peer.received.some(envelope => envelope.type === "cancel")).toBe(false);
       await expect(transport.checkFirstOpenCandidate({ ...call, id: 906 }, input)).rejects.toThrow("upload capacity is full");
       peer.drain(); await cancelled;

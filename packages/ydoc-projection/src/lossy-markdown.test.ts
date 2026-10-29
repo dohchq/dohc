@@ -55,6 +55,13 @@ it('flags a note the editor cannot import', () => {
   expect(isLossyMarkdown('- a\n - b\n  - c\n   - d\n    - e\n')).toBe(true)
 })
 
+it.each([
+  `${'>'.repeat(121)} a\n`,
+  `${'*a '.repeat(17)}b${' a*'.repeat(17)}\n`,
+])('leaves a nesting refusal to the rich editor instead of asking for lossy-note consent: %s', markdown => {
+  expect(isLossyMarkdown(markdown)).toBe(false)
+})
+
 it('remembers a verdict by the digest it was given', () => {
   expect(isLossyMarkdownCached('digest-a', '<details>\n\nHidden.\n</details>\n')).toBe(true)
   // The same digest answers from memory, whatever text comes with it.

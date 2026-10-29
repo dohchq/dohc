@@ -738,7 +738,9 @@ impl Ydoc {
                 continue;
             }
             let projects_alike = || {
-                staged.project_richdoc().is_ok_and(|projection| projection == canonical_projection)
+                staged
+                    .project_richdoc()
+                    .is_ok_and(|projection| projection == canonical_projection)
             };
             if (projects_alike()
                 || (!reads_alike

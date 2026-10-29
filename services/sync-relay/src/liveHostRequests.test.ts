@@ -14,19 +14,19 @@ const position = {eventCount: 0, journalCursor: 0, evidenceDigest: "a".repeat(64
 function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
   const lifetime = new AbortController(), seen: number[] = [];
   const invoke = vi.fn(async (input: {id: number}, _signal?: AbortSignal): Promise<unknown> => {seen.push(input.id); return {result: {}};});
+  const checkFirstOpenCandidate = vi.fn((input: {id: number}, _candidate: unknown, signal?: AbortSignal, _cancelSignal?: AbortSignal) => invoke(input, signal));
   const native = {
     sendRequest: invoke,
     sendLiveOwnerAdoption: (input: {id: number}, _cut: unknown, _bounds: unknown, signal?: AbortSignal) => invoke(input, signal),
     readNextLiveApplied: (input: {id: number}, _position: unknown, _limit: number, signal?: AbortSignal) => invoke(input, signal),
     readLiveApplicationAck(input: {id: number}, _identity: unknown, signal?: AbortSignal) {return this.sendRequest(input, signal);},
-    checkFirstOpenCandidate: (input: {id: number}, _candidate: unknown, signal?: AbortSignal) => invoke(input, signal),
-    cancelRequest: vi.fn(async (_id: number) => undefined),
+    checkFirstOpenCandidate,
   };
   const retire = vi.fn(() => lifetime.abort(new Error("retired")));
   const client = queueLiveHostRequests(native as unknown as EngineClient, {maxPendingReads: maxPending, maxPendingWrites: maxPending,
     maxRetainedInputBytes,
     deadlineMs: 1000, signal: lifetime.signal, retire});
-  return {client, invoke, seen, lifetime, retire, cancelRequest: native.cancelRequest};
+  return {client, invoke, seen, lifetime, retire, checkFirstOpenCandidate};
 }
 afterEach(() => vi.useRealTimers());
 
@@ -58,7 +58,7 @@ it("holds active capacity after caller cancellation until native actually comple
   const refused = expect(active).rejects.toThrow("reader closed");
   caller.abort(new Error("reader closed"));
   expect(f.invoke.mock.calls[0]![1]).toBe(f.lifetime.signal);
-  expect(f.lifetime.signal.aborted).toBe(false); expect(f.cancelRequest).not.toHaveBeenCalled();
+  expect(f.lifetime.signal.aborted).toBe(false);
   const next = f.client.sendRequest(request(2)); expect(f.invoke).toHaveBeenCalledTimes(1);
   release.resolve(null); await refused; await next;
   expect(f.invoke).toHaveBeenCalledTimes(2); f.lifetime.abort();
@@ -136,15 +136,20 @@ it("asks native to stop a cancelled first-open check and holds its slot and inpu
   const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();
   f.invoke.mockImplementationOnce(() => release.promise);
   const active = f.client.checkFirstOpenCandidate(request(1), firstOpen(10_000), caller.signal);
+  const forwarded = f.checkFirstOpenCandidate.mock.calls[0]![3]!;
+  const aborted = vi.fn();
+  forwarded.addEventListener("abort", aborted);
+  expect(forwarded.aborted).toBe(false);
   const cancelled = expect(active).rejects.toThrow("cancelled"); caller.abort(new Error("cancelled"));
-  expect(f.cancelRequest).toHaveBeenCalledWith(1);
+  expect(forwarded.aborted).toBe(true);
+  expect(forwarded.reason).toBe(caller.signal.reason);
   expect(f.invoke.mock.calls[0]![1]).toBe(f.lifetime.signal);
   await expect(f.client.checkFirstOpenCandidate(request(2), firstOpen(10_000))).rejects.toThrow("retained input capacity");
   const next = f.client.sendRequest(request(4)); expect(f.invoke).toHaveBeenCalledTimes(1);
   // The check finished before it saw the cancellation; its answer is still withheld.
   release.resolve({result: {status: "checked"}}); await cancelled; await next;
   await f.client.checkFirstOpenCandidate(request(3), firstOpen(10_000)); expect(f.invoke).toHaveBeenCalledTimes(3);
-  expect(f.cancelRequest).toHaveBeenCalledOnce(); expect(f.retire).not.toHaveBeenCalled(); f.lifetime.abort();
+  expect(aborted).toHaveBeenCalledOnce(); expect(f.retire).not.toHaveBeenCalled(); f.lifetime.abort();
 });
 
 const wireLimits = {maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};

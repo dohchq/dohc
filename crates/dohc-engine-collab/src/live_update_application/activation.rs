@@ -344,6 +344,35 @@ pub fn resume_imported_owner_activation(
     })
 }
 
+// E checkpoints can re-encode mark attribute maps in a different order. Compare
+// their complete typed wire structure, including identities, instead of a new encoding.
+pub(super) fn matches_imported_state(
+    conn: &Connection,
+    local: &Ydoc,
+    source: &ImportedOwnerSource,
+    max_bytes: usize,
+) -> Result<bool, ApplicationError> {
+    if local.has_reader_source() != source.reader_source {
+        return Ok(false);
+    }
+    if source.reader_source {
+        let bytes =
+            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
+        let retained = Ydoc::wire();
+        retained.apply(&bytes)?;
+        return Ok(crate::replay_parity::structurally_equal_v2(
+            local, &retained,
+        )?);
+    }
+    let full = local
+        .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+        .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
+    Ok(
+        full.len() == source.full_state_byte_length
+            && hex_sha256(&full) == source.full_state_digest,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,33 +438,4 @@ mod tests {
             fixture.reserve
         );
     }
-}
-
-// E checkpoints can re-encode mark attribute maps in a different order. Compare
-// their complete typed wire structure, including identities, instead of a new encoding.
-pub(super) fn matches_imported_state(
-    conn: &Connection,
-    local: &Ydoc,
-    source: &ImportedOwnerSource,
-    max_bytes: usize,
-) -> Result<bool, ApplicationError> {
-    if local.has_reader_source() != source.reader_source {
-        return Ok(false);
-    }
-    if source.reader_source {
-        let bytes =
-            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
-        let retained = Ydoc::wire();
-        retained.apply(&bytes)?;
-        return Ok(crate::replay_parity::structurally_equal_v2(
-            local, &retained,
-        )?);
-    }
-    let full = local
-        .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-        .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-    Ok(
-        full.len() == source.full_state_byte_length
-            && hex_sha256(&full) == source.full_state_digest,
-    )
 }

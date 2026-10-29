@@ -2,6 +2,7 @@ import { digest } from 'lib0/hash/sha256'
 import { Marked } from 'marked'
 import * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
+import { MarkdownNestingRefusal } from './markdown-nesting-refusal.js'
 
 const reader = new Marked()
 
@@ -25,7 +26,8 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  *
  * A note dohc wrote is its own canonical Markdown, apart from the final
  * newline a save drops, so it skips the render. A note the editor cannot
- * import at all is lossy too.
+ * import at all is lossy too, except nesting refusals the rich editor reports
+ * directly.
  */
 export function isLossyMarkdown(markdown: string): boolean {
   let canonical: string
@@ -36,7 +38,9 @@ export function isLossyMarkdown(markdown: string): boolean {
     } finally {
       doc.destroy()
     }
-  } catch {
+  } catch (error) {
+    // The rich editor shows its nesting refusal before offering an edit.
+    if (error instanceof MarkdownNestingRefusal) return false
     return true
   }
   if (canonical === markdown.replace(/\r?\n$/u, '')) return false

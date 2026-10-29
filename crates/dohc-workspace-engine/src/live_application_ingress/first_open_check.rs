@@ -649,7 +649,7 @@ mod tests {
         assert!(!guard.cancel_signal().is_cancelled());
         assert!(!guard.retirement_signal().is_cancelled());
         let mut written = false;
-        assert!(guard.with_current(&mut || written = true));
+        assert!(guard.with_current(true, &mut || written = true));
         assert!(written);
         // The host was not retired: the next check runs.
         let (params, bundle) = upload(2, &bytes, MARKDOWN.as_bytes(), MAX_YDOC_UPDATE_BYTES);
@@ -659,7 +659,8 @@ mod tests {
         );
         f.owner.retire();
         assert!(guard.retirement_signal().is_cancelled());
-        assert!(!guard.with_current(&mut || ()));
+        assert!(!guard.with_current(true, &mut || ()));
+        assert!(!guard.with_current(false, &mut || ()));
         f.close().await;
     }
 

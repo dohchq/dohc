@@ -123,15 +123,15 @@ impl OutputGuard for AnswerGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.host.current(&self.host.connection)
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, _cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let _fence = lock(&self.host.output_fence);
-        if !self.is_current() {
+        if !self.is_current_ignoring_cancel() {
             return false;
         }
         action();
@@ -469,7 +469,8 @@ pub(crate) mod tests {
             deadline: Some(Instant::now()),
         };
         assert!(!guard.is_current());
-        assert!(!guard.with_current(&mut || ()));
+        assert!(!guard.with_current(true, &mut || ()));
+        assert!(!guard.with_current(false, &mut || ()));
         drop(guard);
         f.close().await;
     }

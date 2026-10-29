@@ -1,12 +1,11 @@
 import {createHash} from "node:crypto";
 import type {StorageContext} from "./context";
-import type {SyncRelayLogRow} from "./types";
+import type {SqliteDb, SyncRelayLogRow} from "./types";
 import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
 import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
 import {hostedDocumentRows} from "./hostedDocumentIndex";
-import type {SqliteDb} from "./types";
 
 const CONFLICT_EFFECT_INDEX = "idx_sync_relay_log_conflict_effects";
 const CONFLICT_EFFECT_WHERE = "op_kind='moment.append' AND json_type(payload_json, '$.conflictId')='text'";
