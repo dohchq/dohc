@@ -160,7 +160,7 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
 }
 
 export const CHANGED_OUTSIDE_NOTICE =
-  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
+  "This file changed outside dohc.";
 
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
@@ -769,7 +769,7 @@ export function MarkdownView(props: {
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The file changed outside dohc. Reopening closes this session first, and
-  // main lets the disk version stand, keeping any unsaved text in History.
+  // main lets the disk version stand. Reload can wait for capture to record it.
   // A document with nothing unsaved reopens by itself, never over edits main
   // has not confirmed; otherwise the notice asks the person.
   const { onReloadChangedOutside, onButtonError } = props;

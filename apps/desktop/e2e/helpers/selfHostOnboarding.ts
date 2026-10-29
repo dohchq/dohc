@@ -60,6 +60,9 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      pause: () => proxy.pause(),
+      resume: () => proxy.resume(),
+      outageState: () => proxy.outageState(),
       // The relay's recent console output, such as a failed service host pass,
       // for a failure report. Bearer values are removed.
       relayOutput: () => relay!.output().replace(/(bearer\s+)\S+/giu, "$1[redacted]"),
@@ -130,10 +133,14 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   let relayUrl: string | undefined;
   let nextHostedLog: PendingHostedLogResponse | undefined;
   let holdingHostedLog: PendingHostedLogResponse | undefined;
+  let paused = false;
+  let refusedRequests = 0;
+  let refusedUpgrades = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
   const forward: RequestListener = (incoming, outgoing) => {
+    if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
     if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
     const hostedWorkspace = incoming.method === "GET"
@@ -191,17 +198,21 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   };
   const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, forward) : createHttpServer(forward);
   server.on("upgrade", (incoming, socket, head) => {
+    if (paused) { refusedUpgrades++; socket.destroy(); return; }
     const target = route(incoming.url ?? "/");
     if (!target) { socket.destroy(); return; }
     upgraded.add(socket);
     socket.once("close", () => upgraded.delete(socket));
     const upstream = requestHttp(new URL(incoming.url ?? "/", target), { method: incoming.method, headers: incoming.headers });
+    upstreams.add(upstream);
+    upstream.once("close", () => upstreams.delete(upstream));
     const answer = (response: IncomingMessage) => {
       const lines = [`HTTP/1.1 ${response.statusCode} ${response.statusMessage}`];
       for (let index = 0; index < response.rawHeaders.length; index += 2) lines.push(`${response.rawHeaders[index]}: ${response.rawHeaders[index + 1]}`);
       return `${lines.join("\r\n")}\r\n\r\n`;
     };
     upstream.once("upgrade", (response, relaySocket, relayHead) => {
+      if (paused) { relaySocket.destroy(); socket.destroy(); return; }
       upgraded.add(relaySocket);
       relaySocket.once("close", () => { upgraded.delete(relaySocket); socket.destroy(); });
       socket.once("close", () => relaySocket.destroy());
@@ -222,6 +233,16 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   assert.ok(address && typeof address !== "string");
   return {
     origin: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
+    pause() {
+      paused = true;
+      nextHostedLog?.destroy();
+      holdingHostedLog?.destroy();
+      for (const request of upstreams) request.destroy();
+      for (const socket of upgraded) socket.destroy();
+      server.closeAllConnections();
+    },
+    resume() { paused = false; },
+    outageState() { return { paused, refusedRequests, refusedUpgrades, upstreams: upstreams.size, upgraded: upgraded.size }; },
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
     /** Buffers the next real hosted-log response for this workspace until released. */

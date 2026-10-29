@@ -283,7 +283,7 @@ const DOCUMENT_VERBS = {
     ],
     notes: [stdinNote, "Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8.",
       "Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind.",
-      "Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
+      "A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
     parse: (input) => documentWrite(input, "documentEdit"),
   },
   create: {

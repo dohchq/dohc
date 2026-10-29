@@ -454,3 +454,22 @@ export function replicationOpKindCount(rootPath: string, opKind: string): number
     }) ?? 0
   );
 }
+
+/** The committed ordinary pull position and native kept-copy records. Read-only. */
+export function outsideWriteRecoveryState(rootPath: string, workspaceId: string) {
+  return withEngineDb(rootPath, db => ({
+    pull: db.prepare("SELECT * FROM sync_relay_cursors WHERE workspace_id = ?").all(workspaceId),
+    displacements: db.prepare("SELECT * FROM materialization_displacements WHERE workspace_id = ?").all(workspaceId),
+    retained: db.prepare("SELECT * FROM materialization_retained WHERE workspace_id = ?").all(workspaceId),
+  }));
+}
+
+export function outsideCopyPushed(rootPath: string, workspaceId: string, path: string): boolean {
+  return withEngineDb(rootPath, db => {
+    const row = db.prepare(`SELECT EXISTS(SELECT 1 FROM replication_log l
+      JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+      WHERE l.workspace_id=? AND l.imported=0 AND l.op_kind='moment.append'
+      AND json_extract(l.payload_json,'$.path')=? AND p.pushed_seq >= l.origin_seq) AS pushed`).get(workspaceId, path);
+    return Number(row?.pushed) === 1;
+  }) ?? false;
+}
