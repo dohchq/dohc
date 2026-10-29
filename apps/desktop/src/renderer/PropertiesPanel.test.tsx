@@ -74,11 +74,11 @@ function ForwardsOnCommit(props: { from: Y.Doc; to: Y.Doc }) {
   return null;
 }
 
-function ControlledPropertiesPanel(props: { initialBody: string }) {
+function ControlledPropertiesPanel(props: { initialBody: string; onShowSource?: () => void }) {
   const [body, setBody] = useState(props.initialBody);
   return (
     <>
-      <PropertiesPanel body={body} onChange={setBody} />
+      <PropertiesPanel body={body} onChange={setBody} onShowSource={props.onShowSource} />
       <output data-testid="current-body">{body}</output>
     </>
   );
@@ -1295,7 +1295,7 @@ describe("PropertiesPanel", () => {
     expect(words?.getAttribute("role")).toBe("tooltip");
     expect(words?.hidden).toBe(true);
     expect(words?.textContent).toBe(
-      "['Kyoto, Japan', Osaka]dohc can't edit this list because an item has a comma. Change it in another app, or ask an agent.",
+      "['Kyoto, Japan', Osaka]dohc can't edit this list here because an item has a comma.",
     );
 
     await user.tab();
@@ -1310,10 +1310,23 @@ describe("PropertiesPanel", () => {
     const where = screen.getByLabelText("Property where value") as HTMLInputElement;
     await user.hover(where);
     expect(document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
-      "{lat: 35.5}dohc can't edit a value with named fields. Change it in another app, or ask an agent.",
+      "{lat: 35.5}dohc can't edit a value with named fields here.",
     );
     // Leaving a name saves the rows, which leaves the file as it was.
     for (const [written] of onChange.mock.calls) expect(written).toBe(body);
+  });
+
+  it("points a value the pills can't edit to Source to view, unless the page is read-only", () => {
+    const body = "---\nwhere: {lat: 35.5}\n---\n\nBody\n";
+    const reason = () => {
+      const where = screen.getByLabelText("Property where value");
+      return document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent;
+    };
+    const { rerender } = render(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here. View it in Source.");
+
+    rerender(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} readOnly />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here.");
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {
@@ -1449,5 +1462,202 @@ describe("PropertiesPanel", () => {
       expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ lead: "Sam", status: "draft!?" });
       expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
     } finally { doc.destroy(); peer.destroy(); }
+  });
+});
+
+describe("PropertiesPanel's Source button", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it.each([
+    ["names and values", "---\nstatus: Draft\nowner: Sam\n---\n"],
+    ["quoted values", "---\nstatus: \"Draft\"\nstart: '12:30'\n---\n"],
+    ["a title and an icon", "---\ntitle: Plan\nicon: 🎒\nowner: Sam\n---\n"],
+    ["an empty value", "---\nowner:\n---\n"],
+    ["a list as its items", "---\ntags:\n  - kyoto\n  - 'food'\n---\n"],
+    ["a list on one line", "---\ntags: [kyoto, food]\n---\n"],
+    ["a list on one line in quotes", "---\ntags: [\"kyoto\", \"food\"]\n---\n"],
+    ["a list on one line with no spaces", "---\ntags: [kyoto,food]\n---\n"],
+    ["a name in quotes", "---\n\"owner\": Sam\n---\n"],
+    ["a name with a colon", "---\nhttp:host: Sam\n---\n"],
+    ["a space after an empty value", "---\nowner: \n---\n"],
+  ])("offers no Source button when the pills show every line: %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["a comment", "---\n# Times are local\nstatus: Draft\n---\n"],
+    ["a comment after a value", "---\nstatus: Draft # until Friday\n---\n"],
+    ["an ID", "---\nid: 01JD8K2V7QX4\nstatus: Draft\n---\n"],
+    ["named fields", "---\ntrip:\n  city: Kyoto\n---\n"],
+    ["a value over several lines", "---\nnote: |\n  one\n  two\n---\n"],
+    ["a comment between list items", "---\ntags:\n  - kyoto\n  # later\n  - food\n---\n"],
+    ["a list it can't edit", "---\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"],
+    ["a line break in a value", "---\nnote: \"one\\ntwo\"\n---\n"],
+    ["a line break in a list item", "---\ntags: [\"one\\ntwo\"]\n---\n"],
+    ["an anchor", "---\nowner: &who Sam\n---\n"],
+    ["a tag", "---\nowner: !!str Sam\n---\n"],
+    ["a block that doesn't read", "---\nowner: [Sam\n---\n"],
+  ])("opens Source from the properties when the block holds %s", async (_, body) => {
+    const user = userEvent.setup();
+    const onShowSource = vi.fn();
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={onShowSource} />);
+
+    const button = screen.getByTestId("properties-source");
+    expect(button.getAttribute("aria-label")).toBe("Show all properties in Source");
+    expect(button.getAttribute("title")).toBe("Show all properties in Source (Ctrl+/)");
+    await user.click(button);
+    expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no Source button for a record whose own ID is its only hidden line", () => {
+    render(<PropertiesPanel body={"---\nid: rec-12\nstatus: Draft\n---\n\nBody\n"} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["an ID the engine didn't give it", "---\nid: rec-13\nstatus: Draft\n---\n"],
+    ["its own ID and a comment", "---\nid: rec-12\n# Paid in cash\nstatus: Draft\n---\n"],
+  ])("opens Source from a record's properties when the block holds %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source when a duplicate name's flag hides a saved value", () => {
+    render(<PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n\nBody\n"} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source while a held name's flag hides its saved value", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("opens Source while a reserved name's flag hides a saved value, but not on a new pill", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-reserved")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("opens Source when a live document gains a value no pill shows beside its kept text", () => {
+    const doc = markdownToYDoc('---\nstatus: "Draft"\n---\n\nBody\n');
+    render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    act(() => setFrontmatterValue(doc, "place", { city: "Lisbon" }));
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("offers no Source button when a held name is on a new pill, since nothing saved is hidden", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 2 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByLabelText("Property owner value")).toHaveProperty("value", "Sam");
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("shows a note you can only view as pills with no +, no × and no edits", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <PropertiesPanel
+        body={"---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n---\n\nBody\n"}
+        onChange={onChange}
+        readOnly
+        onShowSource={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryByTestId("property-remove")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+    await user.type(screen.getByLabelText("Property status value"), "x");
+    await user.type(screen.getByLabelText("Property 1 name"), "x");
+    await user.tab();
+    expect(propertyValue("status")).toBe("Draft");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing for a note you can only view with no properties", () => {
+    render(<PropertiesPanel body={"Body\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
+  });
+
+  it("offers Source, not an edit, for a block you can only view that doesn't read", () => {
+    render(<PropertiesPanel body={"---\nowner: [Sam\n---\n\nBody\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-locked")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("follows a live document's kept text", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+      expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+      // The engine read the file again, and the comment is gone.
+      act(() => doc.getMap("meta").delete("dohcFrontmatterSource"));
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("reads a live document's kept text that changes before the panel listens", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    // A layout effect runs after the panel renders and before it subscribes.
+    function Reread() {
+      useLayoutEffect(() => {
+        doc.getMap("meta").delete("dohcFrontmatterSource");
+      }, []);
+      return null;
+    }
+    try {
+      render(
+        <>
+          <PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />
+          <Reread />
+        </>,
+      );
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
   });
 });

@@ -1,16 +1,19 @@
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterEditsRefused,
+  leadingFrontmatter,
   loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
   nullPrototypeRecord,
   sameFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
-import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import { frontmatterAsWritten, frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { Lock, Plus, X } from "lucide-react";
+import { EVENT_ALIAS, EVENT_DOCUMENT, EVENT_POP, EVENT_SCALAR, parseEvents } from "js-yaml";
+import { Code, Lock, Plus, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
+import { shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
   applyFrontmatter,
@@ -24,6 +27,9 @@ import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatt
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
+// A leading block's text, found cheaply so the block parses again only when
+// it changes. The projection still decides whether it is frontmatter.
+const LEADING_BLOCK = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/;
 
 // Each property is one pill: its name, then its value. The inputs size to
 // their text, so a pill is as wide as what it says.
@@ -51,6 +57,15 @@ export type PropertiesPanelProps = (
   // A document still opening shows its properties where they will be and
   // refuses edits until it opens: no write, no ×, and the + holds its box.
   opening?: boolean;
+  // A note the person can only view shows its pills with no +, no × and no
+  // edits.
+  readOnly?: boolean;
+  // Opens Source at the top. The panel offers it while the block has lines
+  // no pill shows.
+  onShowSource?: () => void;
+  // The engine's ID for the record this note is. An `id` line with exactly
+  // that value hides nothing, so it counts as shown.
+  recordId?: string;
 };
 
 function isReserved(key: string): boolean {
@@ -234,6 +249,42 @@ function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
     .map(({ entry }) => entry);
 }
 
+/**
+ * Whether the pills and the page's title and icon show all of a block: each
+ * property's name and value as the pills read them. A comment, an anchor, a
+ * tag, a value with named fields, a list the pills can't edit, a line break in
+ * a value, an `id` other than the record's own, or a block that doesn't read
+ * shows only in Source.
+ */
+function everyLineShown(block: string, recordId: string | undefined): boolean {
+  const read = loadMarkdownFrontmatter(`${block}\n`);
+  if (!read) return false;
+  // The text between the delimiters without its names and values. A `#` left
+  // in it starts a comment.
+  const text = block.slice(block.indexOf("\n") + 1, block.lastIndexOf("\n") + 1);
+  let rest = "";
+  let at = 0;
+  try {
+    for (const event of parseEvents(text, {})) {
+      if (event.type === EVENT_ALIAS) return false;
+      if (event.type === EVENT_DOCUMENT || event.type === EVENT_POP) continue;
+      if (event.anchorStart >= 0 || event.tagStart >= 0) return false;
+      if (event.type !== EVENT_SCALAR || event.valueStart < at) continue;
+      rest += text.slice(at, event.valueStart);
+      at = event.valueEnd;
+    }
+  } catch {
+    return false;
+  }
+  if (`${rest}${text.slice(at)}`.includes("#")) return false;
+  return frontmatterEntriesFromPairs(read.keys.map((key) => [key, read.meta[key]])).every((entry) => {
+    // PageIdentity shows `title` and `icon`, named just so.
+    const own = entry.key === "title" || entry.key === "icon" || (entry.key === "id" && entry.rawValue === recordId);
+    // A field shows one line, so a line break hides what follows it.
+    return (own || !isReserved(entry.key)) && !entry.readOnly && !/[\r\n]/.test(`${entry.key}${entry.value}`);
+  });
+}
+
 // A value the pill shows but can't change, such as a list with a comma in an
 // item. The lock is always there; the pointer or keyboard focus shows why,
 // with the whole value.
@@ -280,6 +331,28 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     return () => map.unobserve(update);
   }, [ydoc]);
 
+  // Whether the block has lines no pill shows. A live document's block is the
+  // one a save writes now, from its values and the text its engine keeps, as
+  // Source shows it.
+  const [keptRevision, setKeptRevision] = useState(0);
+  useEffect(() => {
+    if (!ydoc) return;
+    const meta = ydoc.getMap("meta");
+    const update = (event: Y.YMapEvent<unknown>) => {
+      if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY)) setKeptRevision((revision) => revision + 1);
+    };
+    meta.observe(update);
+    // The text can change after render and before this subscribes.
+    setKeptRevision((revision) => revision + 1);
+    return () => meta.unobserve(update);
+  }, [ydoc]);
+  const leading = ydoc ? "" : (LEADING_BLOCK.exec(body)?.[0] ?? "");
+  const unshown = useMemo(() => {
+    const text = ydoc ? frontmatterAsWritten(ydoc, true) : leading ? (leadingFrontmatter(leading)?.text ?? "") : "";
+    const block = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+    return block !== "" && !everyLineShown(block, props.recordId);
+  }, [leading, ydoc, ydocRevision, keptRevision, props.recordId]);
+
   useEffect(() => {
     // This can apply after the person's next keystroke has changed the
     // document, so a live document's rows read the document as it is now.
@@ -293,7 +366,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // rewriting the others, so the panel refuses edits before any write.
   const locked = ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body);
   const opening = props.opening ?? false;
-  const refused = locked || opening;
+  const readOnly = props.readOnly ?? false;
+  const refused = locked || opening || readOnly;
 
   function commit(next: FrontmatterEntry[]) {
     if (refused) return;
@@ -408,11 +482,18 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   const isEmpty = entries.length === 0;
   const duplicates = duplicateKeySet(entries);
+  // A duplicate, held or reserved name on a saved property shows its flag in
+  // place of the saved line, so only Source still shows that line.
+  const flagHidesSaved = entries.some((entry, index) =>
+    entry.sourceKey !== undefined
+    && (index === heldRow || isReserved(entry.key) || duplicates.has(entry.key.trim().toLowerCase())));
+  const showSource = props.onShowSource && (unshown || flagHidesSaved) ? props.onShowSource : null;
+  if (readOnly && isEmpty && !showSource) return null;
 
   return (
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
       <div ref={line} className={PROPERTIES_LINE}>
-        {locked || editRefused ? (
+        {(locked || editRefused) && !readOnly ? (
           <span data-testid="properties-locked" className={TOPMATTER_FLAG} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>
             Edit in Source
           </span>
@@ -453,7 +534,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   duplicate name
                 </span>
               ) : entry.readOnly !== undefined ? (
-                <ReadOnlyValue label={`Property ${entry.key || index + 1} value`} value={entry.value} reason={entry.readOnly} />
+                <ReadOnlyValue
+                  label={`Property ${entry.key || index + 1} value`}
+                  value={entry.value}
+                  reason={showSource && !refused ? `${entry.readOnly} View it in Source.` : entry.readOnly}
+                />
               ) : (
                 <input
                   data-testid="property-value"
@@ -496,7 +581,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         {/* Alone on a page with no properties, it shows while the pointer is
             over the title and properties, like "Add icon". A locked block
             cannot gain a property, so it offers no +. */}
-        {locked ? null : opening ? (
+        {locked || readOnly ? null : opening ? (
           <button type="button" disabled tabIndex={-1} aria-hidden className={`${ADD} invisible`}>
             <Plus size={12} aria-hidden />
           </button>
@@ -514,6 +599,19 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
             <Plus size={12} aria-hidden />
           </button>
         )}
+        {showSource ? (
+          <button
+            type="button"
+            data-testid="properties-source"
+            aria-label="Show all properties in Source"
+            title={`Show all properties in Source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`}
+            disabled={opening}
+            onClick={showSource}
+            className="grid size-6 shrink-0 place-items-center rounded-full text-subtle transition-colors duration-100 hover:bg-hover hover:text-ink disabled:pointer-events-none"
+          >
+            <Code size={14} aria-hidden />
+          </button>
+        ) : null}
       </div>
     </section>
   );
