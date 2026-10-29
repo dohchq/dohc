@@ -112,6 +112,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   relayShareJsonWithCredentials: RelayShareRequest;
   // A request names its document; a release its binding.
   ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
+  // Sends everything sync recorded for an open workspace. Rejects when a pass fails.
+  pushRecorded(workspaceId: string): Promise<void>;
   // The document at a path now, or where an object's document is now. Null when there is none.
   liveDocument(workspace: Workspace, target: {path: string} | {objectId: string}): Promise<OwnerLiveStop["document"] | null>;
   // Holds off editors of the path while the change runs: refused while one holds it.
@@ -125,6 +127,24 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   retryOwnerLiveRelease(workspace: Workspace, objectId: string): Promise<OwnerLiveStop | "requested" | undefined>;
   // This computer's Stops, as the engine holds them.
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
+}
+
+/**
+ * Sends what sync recorded before an action that starts hosting notes for
+ * editing. A note opened here has live-editing history that sync may not have
+ * sent yet, and without it the server can't start the note. Waits at most
+ * 10 s: a push that fails or takes longer lets the action go ahead without it.
+ */
+async function pushRecordedFirst(push: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(push).catch((error: unknown) => console.warn("[desktop] sync before live hosting failed:", error)),
+      new Promise<void>(resolve => {timer = setTimeout(resolve, 10_000);}),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
@@ -211,7 +231,7 @@ export function createOwnerLiveDocumentActions<
       if (local?.document.objectId!==document.objectId) throw changed();
       // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
       // and edits an earlier release could not write are not this Stop's to claim.
-      const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write");
+      const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write" && !row.saveOnly);
       const quarantined=kept?.storedOn==="this-computer", onServer=kept?.storedOn==="server";
       if (!local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
       let result: unknown;
@@ -249,6 +269,8 @@ export function createOwnerLiveDocumentActions<
    */
   const resume = async (input: {workspaceId: string; path: string}, operation: Operation): Promise<void> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
+    await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
+    operation.assertCurrent();
     await withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
       let result: unknown;
       try {result=await liveHost(operation,"POST",{path:input.path});}
@@ -354,12 +376,15 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted" && row.reason !== "conflict-parent-withheld"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
-        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId);
+        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
         if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
           ...(quarantine.earlier ? {earlier: true} : {})});
       }
-      return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
+      const retained = quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId,
+        status: "paused",
+        canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true}));
+      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...retained], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
   };
 
@@ -378,6 +403,7 @@ export function createRelaySharesIpcHandlers<
 
   const retryOwnerLiveShare: Handlers["retryOwnerLiveShare"] = async (input, { operation }) => {
     return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
+      await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
       const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
         `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
           method: "POST", body: JSON.stringify({shareId: input.shareId, retry: true}),
@@ -436,6 +462,10 @@ export function createRelaySharesIpcHandlers<
 
   // ---- Relay shares ----
 
+  // Edit access hosts the shared notes for live editing.
+  const beforeEditHosting = (operation: Operation, access: string) =>
+    access === "edit" ? pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId)) : Promise.resolve();
+
   // Grant side: create a share on the SYNC RELAY for a synced workspace.
   // Selector validation (secret refusal, traversal, caps) is server-side —
   // the relay is the security boundary; this handler only adds product copy.
@@ -454,6 +484,7 @@ export function createRelaySharesIpcHandlers<
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
+        await beforeEditHosting(operation, input.access);
         const workspace = operation.workspace;
         const created = await session.run(changingGrants(workspace.workspaceId, () =>
           relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
@@ -571,8 +602,12 @@ export function createRelaySharesIpcHandlers<
 
   // Restores what a removal ended, from the receipt the removal returned.
   // The same account transport as the removal, so the Undo on a notice works
-  // after the dialog that removed it has closed and names no workspace.
-  const undoRelayShare: Handlers["undoRelayShare"] = async (input) => {
+  // after the dialog that removed it has closed. Undo can restore Edit access,
+  // so it first sends what sync recorded for this window's workspace.
+  const undoRelayShare: Handlers["undoRelayShare"] = async (input, { operation }) => {
+    assertOriginalWorkspace(operation.workspace);
+    await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
+    operation.assertCurrent();
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
       {
@@ -592,6 +627,7 @@ export function createRelaySharesIpcHandlers<
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
+        await beforeEditHosting(operation, input.access);
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
@@ -620,6 +656,7 @@ export function createRelaySharesIpcHandlers<
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
+        await beforeEditHosting(operation, input.access);
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
@@ -670,6 +707,7 @@ export function createRelaySharesIpcHandlers<
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
+        await beforeEditHosting(operation, input.access);
         // A new level applies to the link's dependents too.
         const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(

@@ -33,6 +33,8 @@ import {
   type ChatReaction,
   type ChatReactionAuthor,
   type ChatRun,
+  type ChatStreamPage,
+  type ChatStreamPosition,
   type ChatsMethod,
   type ChatsMethodParamsMap,
   type ChatsMethodResultMap,
@@ -195,6 +197,28 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async getThread(input: {
+    workspaceId: string;
+    threadId: string;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.threadGet]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.threadGet, { threadId: input.threadId });
+  }
+
+  async listGroupStream(input: {
+    workspaceId: string;
+    channelId: string;
+    before?: ChatStreamPosition;
+    limit?: number;
+  }): Promise<ChatStreamPage> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.streamList, {
+      channelId: input.channelId,
+      ...(input.before !== undefined ? { before: { ...input.before } } : {}),
+      ...(input.limit !== undefined ? { pageLimit: input.limit } : {}),
+    });
+  }
+
   async getThreadRevision(input: {
     workspaceId: string;
     threadId: string;
@@ -218,6 +242,7 @@ export class ChatsLiveAdapter {
     namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
+    ownThread?: boolean;
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -239,6 +264,7 @@ export class ChatsLiveAdapter {
         messageId,
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.lane !== undefined ? { lane: input.lane } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
         ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
@@ -424,6 +450,21 @@ export class ChatsLiveAdapter {
       afterMessageOrder = page.nextAfterMessageOrder ?? undefined;
     } while (afterMessageOrder !== undefined);
     return rows;
+  }
+
+  /** One page of a thread's messages, after the message at `afterMessageOrder`. */
+  async listMessagesPage(input: {
+    workspaceId: string;
+    threadId: string;
+    afterMessageOrder?: number;
+    limit: number;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.messagesList]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.messagesList, {
+      threadId: input.threadId,
+      limit: input.limit,
+      ...(input.afterMessageOrder !== undefined ? { afterMessageOrder: input.afterMessageOrder } : {}),
+    });
   }
 
   /** One message, whole. A Group automation reads a body its claim carried truncated. */

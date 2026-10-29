@@ -26,6 +26,7 @@ import {
   type ChatReaction,
   type ChatRun,
   type ChatsJsonObject,
+  type ChatStreamPosition,
   type ChatThread,
   type ChatThreadPause,
   type ChatThreadReadState,
@@ -355,6 +356,131 @@ function threadMessages(state: WorkspaceState, threadId: string): ChatMessage[] 
     .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id));
 }
 
+// The engine's rule: a message names each agent request that has not
+// finished, one per agent it asked. A request absorbed into a live run shows
+// as running. A completed run whose failure desktop handled (a nonzero exit,
+// or no reply) failed.
+function withAgentRequests(state: WorkspaceState, message: ChatMessage): ChatMessage {
+  const agentRequests = [...state.dispatches.values()]
+    .filter((dispatch) => dispatch.triggerMessageId === message.id)
+    .sort((left, right) => compareText(left.agentId, right.agentId))
+    .flatMap((dispatch) => agentRequest(state, dispatch) ?? []);
+  return agentRequests.length > 0 ? { ...message, agentRequests } : message;
+}
+
+function agentRequest(
+  state: WorkspaceState,
+  dispatch: ChatDispatch,
+): NonNullable<ChatMessage["agentRequests"]>[number] | null {
+  if (dispatch.state === "pending") return { agentId: dispatch.agentId, state: "waiting" as const };
+  const found = dispatch.runId ? state.runs.get(dispatch.runId) : undefined;
+  const run = found?.agentId === dispatch.agentId ? found : undefined;
+  const requestState = dispatch.state === "running" || (dispatch.state === "done" && run && run.endedAtMs === undefined)
+    ? "running"
+    : dispatch.state === "failed" || (dispatch.state === "done" && run?.failureHandled)
+      ? "failed"
+      : null;
+  if (!requestState) return null;
+  const failureReason = dispatch.failureReason ?? run?.failureReason ??
+    (dispatch.state === "done" && run?.exitCode === 0 ? "no-reply" : undefined);
+  return {
+    agentId: dispatch.agentId,
+    state: requestState,
+    ...(dispatch.runId ? { runId: dispatch.runId } : {}),
+    ...(run ? { startedAtMs: run.startedAtMs } : {}),
+    ...(requestState === "failed"
+      ? {
+          ...(failureReason ? { failureReason } : {}),
+          ...(run?.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
+          ...(run?.logPath ? { logPath: run.logPath } : {}),
+        }
+      : {}),
+  };
+}
+
+function compareStreamPosition(left: ChatStreamPosition, right: ChatStreamPosition): number {
+  return left.createdAtMs - right.createdAtMs ||
+    (left.lane === right.lane ? 0 : left.lane === "posts" ? -1 : 1) ||
+    compareText(left.id, right.id);
+}
+
+// Every item in a group's stream, oldest first: each post's first message and
+// each conversation's top-level messages.
+function streamItems(state: WorkspaceState, channelId: string) {
+  const items: Array<{
+    position: ChatStreamPosition;
+    order: number;
+    message: ChatMessage;
+    reactions: ChatReaction[];
+  }> = [];
+  for (const thread of state.threads.values()) {
+    if (thread.channelId !== channelId) continue;
+    const messages = threadMessages(state, thread.id);
+    if (thread.lane === "chat") {
+      messages.forEach((message, order) => {
+        if (message.parentMessageId) return;
+        items.push({
+          position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id },
+          order,
+          message,
+          reactions: activeMessageReactions(state, message.id),
+        });
+      });
+    } else if (messages[0]) {
+      items.push({
+        position: { createdAtMs: thread.createdAtMs, lane: "posts", id: thread.id },
+        order: 0,
+        message: messages[0],
+        reactions: activeMessageReactions(state, messages[0].id),
+      });
+    }
+  }
+  return items.sort((left, right) => compareStreamPosition(left.position, right.position));
+}
+
+function streamPost(state: WorkspaceState, threadId: string) {
+  const replies = threadMessages(state, threadId).slice(1);
+  const repliers = new Map<string, { author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>();
+  for (const reply of replies) {
+    const key = JSON.stringify([reply.author.kind, reply.author.displayName, reply.authorUserId ?? null, reply.authorAgentId ?? null]);
+    repliers.set(key, {
+      author: reply.author,
+      ...(reply.authorUserId ? { authorUserId: reply.authorUserId } : {}),
+      ...(reply.authorAgentId ? { authorAgentId: reply.authorAgentId } : {}),
+      lastReplyAtMs: Math.max(repliers.get(key)?.lastReplyAtMs ?? 0, reply.createdAtMs),
+    });
+  }
+  const latestAgent = replies.filter((reply) => reply.author.kind === "agent").at(-1);
+  const lastReply = replies.at(-1);
+  return {
+    replyCount: replies.length,
+    repliers: [...repliers.values()]
+      .sort((left, right) => right.lastReplyAtMs - left.lastReplyAtMs ||
+        compareText(left.author.displayName, right.author.displayName))
+      .slice(0, 3),
+    ...(lastReply ? { lastReplyAtMs: lastReply.createdAtMs } : {}),
+    ...(latestAgent
+      ? {
+          latestAgentReply: {
+            id: latestAgent.id,
+            author: latestAgent.author,
+            ...(latestAgent.authorOwnerDisplayName
+              ? { authorOwnerDisplayName: latestAgent.authorOwnerDisplayName }
+              : {}),
+            ...(latestAgent.authorUserId ? { authorUserId: latestAgent.authorUserId } : {}),
+            ...(latestAgent.authorAgentId ? { authorAgentId: latestAgent.authorAgentId } : {}),
+            createdAtMs: latestAgent.createdAtMs,
+            bodyExcerpt: [...latestAgent.body].slice(0, 280).join(""),
+          },
+        }
+      : {}),
+    openDecisionCount: [...state.decisions.values()].filter(
+      (decision) => decision.threadId === threadId && decision.state === "open" &&
+        state.messages.has(decision.messageId),
+    ).length,
+  };
+}
+
 function activeMessageReactions(state: WorkspaceState, messageId: string): ChatReaction[] {
   return [...state.reactions.values()]
     .filter((reaction) => reaction.messageId === messageId && reaction.state === "added")
@@ -579,13 +705,15 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
-        "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
+        "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
         "authorAgentId", "namedAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
     case CHATS_METHOD.threadsListForChannel: return ["channelId", "lane", "pageLimit", "cursor"];
+    case CHATS_METHOD.streamList: return ["channelId", "before", "pageLimit"];
+    case CHATS_METHOD.threadGet:
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
@@ -601,6 +729,8 @@ function allowedKeys(method: string): readonly string[] {
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
+    case CHATS_METHOD.messageGet:
+      return ["messageId"];
     case CHATS_METHOD.readStateGet:
       return ["threadId"];
     case CHATS_METHOD.readStateMarkThreadRead:
@@ -804,6 +934,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.threadsListForChannel(state, workspace, params);
       case CHATS_METHOD.threadFindChannelId:
         return this.threadFindChannelId(state, params);
+      case CHATS_METHOD.threadGet: {
+        const thread = this.requireThread(state, requiredString(params, "threadId"));
+        const stored = thread.channelId ? state.channels.get(thread.channelId) : undefined;
+        if (thread.channelId && !stored) throw new Error("channel-not-found");
+        const { wireId: _wireId, ...channel } = stored ?? { wireId: null };
+        return jsonResult({
+          thread,
+          channel: stored ? channel : null,
+          messageCount: threadMessages(state, thread.id).length,
+        });
+      }
+      case CHATS_METHOD.streamList:
+        return this.streamList(state, params);
       case CHATS_METHOD.threadRevision:
         return jsonResult({
           revision: state.contentRevisions.get(requiredString(params, "threadId")) ?? 0,
@@ -815,6 +958,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
           this.messageSend(state, workspace, params));
       case CHATS_METHOD.messagesList:
         return this.messagesList(state, params);
+      case CHATS_METHOD.messageGet: {
+        const message = state.messages.get(requiredString(params, "messageId"));
+        if (!message) throw new Error("message-not-found");
+        return jsonResult({ message: withAgentRequests(state, message) });
+      }
       case CHATS_METHOD.readStateGet:
         return this.readStateGet(state, workspace, params);
       case CHATS_METHOD.readStateMarkThreadRead:
@@ -1334,9 +1482,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (state.threads.has(threadId)) throw new Error("target-exists");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
-    const title = optionalString(params, "title")?.trim() || body.split("\n")[0]?.slice(0, 80) || "New chat";
-    const lane = optionalString(params, "lane") ?? "posts";
-    if (lane !== "posts" && lane !== "chat") throw new Error("invalid-thread-lane");
+    const requestedTitle = optionalString(params, "title")?.trim();
+    const title = requestedTitle || body.split("\n")[0]?.slice(0, 80) || "New chat";
+    const requestedLane = optionalString(params, "lane") ?? "posts";
+    if (requestedLane !== "posts" && requestedLane !== "chat") throw new Error("invalid-thread-lane");
+    // An agent DM is one conversation, as in the engine.
+    const agentDm = state.channels.get(channelId)?.kind === "agent" && optionalBoolean(params, "ownThread") !== true;
+    if (agentDm && requestedTitle) throw new Error("invalid-thread-title");
+    const lane = agentDm ? "chat" : requestedLane;
     // One chat lane per channel: a second start appends to the oldest,
     // the way the engine does, and the caller's thread id is not used.
     const existingLane = lane === "chat"
@@ -1447,12 +1600,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const messages = threadMessages(state, threadId);
-    const after = optionalSafeInteger(params, "afterMessageOrder") ?? 0;
+    // Message orders count from zero, so a page starts after the named one.
+    const start = (optionalSafeInteger(params, "afterMessageOrder") ?? -1) + 1;
     const limit = Math.min(optionalSafeInteger(params, "limit", 1) ?? 100, 500);
-    const rows = messages.slice(after, after + limit);
+    const rows = messages.slice(start, start + limit);
     const next =
-      after + rows.length < messages.length ? after + rows.length : null;
-    return jsonResult({ messages: rows, nextAfterMessageOrder: next });
+      start + rows.length < messages.length ? start + rows.length - 1 : null;
+    return jsonResult({
+      messages: rows.map((message) => withAgentRequests(state, message)),
+      nextAfterMessageOrder: next,
+    });
   }
 
   private readStateGet(
@@ -1758,6 +1915,43 @@ export class ChatsLoopbackEngine implements EngineTransport {
       });
     const result = page(rows, params, `${workspace}\0threadsForChannel\0${channelId}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
+  }
+
+  private streamList(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const channelId = requiredString(params, "channelId");
+    if (!state.channels.has(channelId)) throw new Error("channel-not-found");
+    const limit = optionalSafeInteger(params, "pageLimit", 1) ?? 50;
+    if (limit > 100) throw new Error("invalid-cursor");
+    let before: ChatStreamPosition | undefined;
+    if (params.before !== undefined) {
+      strictObject(params.before, "before", ["createdAtMs", "lane", "id"]);
+      const object = asObject(params.before, "before");
+      const lane = requiredString(object, "lane");
+      if (lane !== "posts" && lane !== "chat") throw new Error("invalid-parameters");
+      before = {
+        createdAtMs: requiredSafeInteger(object, "createdAtMs", "invalid-cursor"),
+        lane,
+        id: requiredString(object, "id"),
+      };
+    }
+    const all = streamItems(state, channelId);
+    const end = before
+      ? all.filter((item) => compareStreamPosition(item.position, before) < 0).length
+      : all.length;
+    const start = Math.max(0, end - limit);
+    const items = all.slice(start, end).map(({ order: _order, ...item }) =>
+      item.position.lane === "posts"
+        ? { ...item, message: withAgentRequests(state, item.message), post: streamPost(state, item.position.id) }
+        : { ...item, message: withAgentRequests(state, item.message) });
+    const read = all.filter((item) => {
+      const cursor = state.humanReads.get(item.message.threadId) ?? 0;
+      return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;
+    }).at(-1);
+    return jsonResult({
+      items,
+      nextBefore: start > 0 ? items[0]?.position ?? null : null,
+      readPosition: read?.position ?? null,
+    });
   }
 
   private threadFindChannelId(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
@@ -2846,9 +3040,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = requiredString(params, "threadId");
     const sinceMs = params.sinceMs;
     if (typeof sinceMs !== "number" || !Number.isFinite(sinceMs)) throw new Error("invalid-input");
+    // A run a person's own message started in their agent DM's conversation doesn't count.
+    const personInAgentDm = (run: ChatRun): boolean => {
+      const trigger = state.messages.get(run.triggerMessageId);
+      const thread = trigger && state.threads.get(trigger.threadId);
+      return trigger?.author.kind === "human" && thread?.lane === "chat" &&
+        !!thread.channelId && state.channels.get(thread.channelId)?.kind === "agent";
+    };
     return jsonResult(
       [...state.runs.values()].filter(
-        (run) => run.threadId === threadId && run.startedAtMs >= sinceMs,
+        (run) => run.threadId === threadId && run.startedAtMs >= sinceMs && !personInAgentDm(run),
       ).length,
     );
   }

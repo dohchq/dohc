@@ -17,6 +17,32 @@ fn open_store() -> (ScratchDir, EngineStore) {
     (scratch, store)
 }
 
+fn start_input(thread: &str, message: &str, kind: ChatActorKind, at: i64) -> StartChannelThread {
+    StartChannelThread {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        channel_id: "channel".to_owned(),
+        thread_id: thread.to_owned(),
+        message_id: message.to_owned(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        own_thread: false,
+        author_kind: kind,
+        author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("ada".to_owned()),
+        origin: None,
+        body: message.to_owned(),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
+        now_ms: at,
+        request_id: None,
+    }
+}
+
 fn start(
     chats: &mut LinkedChatStore<'_>,
     thread: &str,
@@ -25,31 +51,7 @@ fn start(
     at: i64,
 ) {
     chats
-        .start_channel_thread(
-            &StartChannelThread {
-                automation: None,
-                workspace_id: WS.to_owned(),
-                channel_id: "channel".to_owned(),
-                thread_id: thread.to_owned(),
-                message_id: message.to_owned(),
-                title: None,
-                lane: ChatThreadLane::Posts,
-                author_kind: kind,
-                author_display_name: "Ada".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: Some("ada".to_owned()),
-                origin: None,
-                body: message.to_owned(),
-                needs_decision: false,
-                options: Vec::new(),
-                attachments: Vec::new(),
-                author_agent_id: None,
-                named_agent_ids: Vec::new(),
-                now_ms: at,
-                request_id: None,
-            },
-            &NO_FAULTS,
-        )
+        .start_channel_thread(&start_input(thread, message, kind, at), &NO_FAULTS)
         .expect("start");
 }
 
@@ -654,6 +656,83 @@ fn recent_dispatch_count_includes_since_boundary() {
 }
 
 #[test]
+fn recent_dispatch_count_skips_runs_a_person_started_in_their_agent_dm_conversation() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let conversation = {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_agent_channel(WS, "agent", "default", "My agent", 3, &NO_FAULTS)
+            .expect("agent DM");
+        let opening = StartChannelThread {
+            channel_id: "agent".to_owned(),
+            lane: ChatThreadLane::Chat,
+            ..start_input("dm", "person-1", ChatActorKind::Human, 10)
+        };
+        let conversation = chats
+            .start_channel_thread(&opening, &NO_FAULTS)
+            .expect("person's message")
+            .0
+            .thread_id;
+        send(
+            &mut chats,
+            &conversation,
+            "agent-1",
+            ChatActorKind::Agent,
+            11,
+        );
+        start(&mut chats, "post", "group-1", ChatActorKind::Human, 12);
+        // A wake keeps its own post in the DM, and a person's reply there counts.
+        let wake = StartChannelThread {
+            channel_id: "agent".to_owned(),
+            own_thread: true,
+            ..start_input("wake", "wake-1", ChatActorKind::Agent, 13)
+        };
+        chats.start_channel_thread(&wake, &NO_FAULTS).expect("wake");
+        send(&mut chats, "wake", "wake-reply", ChatActorKind::Human, 14);
+        conversation
+    };
+    for (index, (trigger, thread)) in [
+        ("person-1", conversation.as_str()),
+        ("agent-1", conversation.as_str()),
+        ("group-1", "post"),
+        ("wake-reply", "wake"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let run = format!("run-{index}");
+        let at = 20 + 10 * index as i64;
+        claimed_run(&mut store, trigger, thread, &run, at);
+        LinkedChatStore::new(&mut store)
+            .complete_dispatch(WS, &run, 0, at + 1, &NO_FAULTS)
+            .expect("complete");
+    }
+    let chats = LinkedChatStore::new(&mut store);
+    assert_eq!(
+        chats
+            .recent_dispatch_count(WS, &conversation, 0.0)
+            .expect("DM count"),
+        1,
+        "only the agent's run counts in the DM"
+    );
+    assert_eq!(
+        chats
+            .recent_dispatch_count(WS, "post", 0.0)
+            .expect("group count"),
+        1,
+        "a person's run in a group still counts"
+    );
+    assert_eq!(
+        chats
+            .recent_dispatch_count(WS, "wake", 0.0)
+            .expect("post count"),
+        1,
+        "a person's run in a post in the DM still counts"
+    );
+}
+
+#[test]
 fn recent_dispatch_count_accepts_finite_negative_since() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);
@@ -998,7 +1077,8 @@ fn latest_run_for_an_agent_skips_other_agents_runs_in_the_thread() {
 fn try_again_runs_a_request_from_before_agent_ids_once() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
+    dohc_engine_storage::recovery::create_store_before_migration_for_test(&db, "v2-agent-ids")
+        .expect("earlier store");
     let conn = rusqlite::Connection::open(&db).expect("open earlier store");
     conn.execute_batch(
         "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \

@@ -44,7 +44,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 4. **Built for humans and agents.** Design every feature and surface for two users from the start: a human and an agent. Parity is not an MCP server added after the fact; the feature itself must work for both. For example, a share link sent to an agent should work just like one sent to a friend: with the link alone, the agent can read, edit, comment, and chat, with no computer use, no separate integration, and no impersonating a person.
 
-5. **Agent agnostic.** dohc does not provide or supervise the user's agents. Any agent that can work with ordinary files should remain useful. dohc adds reliable tools and optional identity, provenance, and policy controls. It must not impose a universal agent approval workflow.
+5. **Agent agnostic.** dohc does not provide or supervise the user's agents. Any agent that can work with ordinary files should remain useful. dohc adds reliable tools and optional identity, provenance, and policy controls. It must not impose a universal agent approval workflow. A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
 
 6. **Chat is part of the workspace.** Chat connects humans, agents, files, data, and apps. It supports requests, discussion, handoffs, and proactive agent messages. Users and agents can turn useful outcomes into durable work instead of losing them in a transcript.
 

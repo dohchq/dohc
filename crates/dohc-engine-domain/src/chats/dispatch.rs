@@ -674,11 +674,24 @@ impl<'a> LinkedChatStore<'a> {
                 "Dispatch window start must be finite.",
             ));
         }
+        // Only the DM's person posts a person's message in an agent DM, so the
+        // runs their own messages start in its conversation don't count. Runs
+        // an agent or automation started do, as do runs in posts and groups.
         self.store.read_with(|conn| {
             let count: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM agent_run_records \
-                     WHERE workspace_id = ?1 AND thread_id = ?2 AND started_at_ms >= ?3",
+                    "SELECT COUNT(*) FROM agent_run_records r \
+                     WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.started_at_ms >= ?3 \
+                       AND NOT EXISTS ( \
+                         SELECT 1 FROM chat_messages m \
+                         JOIN chat_threads t ON t.workspace_id = m.workspace_id \
+                           AND t.thread_id = m.thread_id \
+                         JOIN chat_channels c ON c.workspace_id = t.workspace_id \
+                           AND c.channel_id = t.channel_id \
+                         WHERE m.workspace_id = r.workspace_id \
+                           AND m.message_id = r.trigger_message_id \
+                           AND m.author_kind = 'human' AND t.lane = 'chat' \
+                           AND c.kind = 'agent')",
                     params![workspace_id, thread_id, since_ms],
                     |row| row.get(0),
                 )

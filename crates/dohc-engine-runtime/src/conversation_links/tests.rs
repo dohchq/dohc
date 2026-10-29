@@ -352,6 +352,7 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
                 message_id: "local-message".into(),
                 title: Some("Local".into()),
                 lane: ChatThreadLane::Posts,
+                own_thread: false,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".into(),
                 author_owner_display_name: None,

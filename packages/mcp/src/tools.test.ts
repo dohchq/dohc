@@ -516,7 +516,9 @@ describe("mcp tools operate on allowed paths", () => {
   it("workspace_status reports whether Collection updates wait and which documents have kept edits, as the desktop answers", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
-      const keptEdits = [{ path: "plan.md", reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused" }];
+      const keptEdits = [{ path: "plan.md", reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused" },
+        ...["old-1:delivery:0", "old-2:delivery:0"].map(incident => ({path: "plan.md", reason: "restore-fenced",
+          storedOn: "this-computer", incident, recovery: "paused", saveOnly: true}))];
       // The desktop answers from the engine's pull token: set while a pull is
       // unfinished, cleared by its terminal commit or by abandoning it.
       for (const [pull, waiting] of [["unfinished", true], ["finished", false], ["abandoned", false]] as const) {

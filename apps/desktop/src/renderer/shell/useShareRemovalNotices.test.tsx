@@ -76,7 +76,7 @@ describe("useShareRemovalNotices", () => {
     // The removal counts as a change to the shares, and so does its Undo.
     expect(sharesChanged).toHaveBeenCalledTimes(1);
     await act(async () => result.current.shell.runShellErrorAction(notice!.id));
-    expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" });
+    expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({ workspaceId: "ws-a", shareId: "share-1", undoId: "undo-1" });
     expect(restored).toHaveBeenCalledTimes(1);
     expect(sharesChanged).toHaveBeenCalledTimes(2);
     expect(result.current.shell.shellErrors.map((error) => [error.tone, error.message])).toEqual([

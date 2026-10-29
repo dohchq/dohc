@@ -380,7 +380,7 @@ test("an agent creates a document and comments on it where the person reads comm
     await expect
       .poll(async () => {
         const chat = await agentCli(temp, "chat", { threadId });
-        return chat.ok ? chat.messages.map((message) => [message.authorKind, message.body]) : [];
+        return chat.ok && "messages" in chat ? chat.messages.map((message) => [message.authorKind, message.body]) : [];
       }, { timeout: 30_000 })
       .toEqual([
         ["agent", "Dawn is 5:40. Should we leave the hotel at 5?"],

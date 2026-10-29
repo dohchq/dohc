@@ -177,7 +177,14 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, target: command.target, peek: command.peek },
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          target: command.target,
+          peek: command.peek,
+          ...(command.before ? { before: command.before } : {}),
+          ...(command.limit ? { limit: command.limit } : {}),
+        },
       };
     case "post":
       return {

@@ -133,6 +133,9 @@ export interface CloudSyncEngine {
   // does not count as an attempt (a retry on reconnecting or waking) updates
   // a failure's detail without adding to its attempts.
   retryNow(options: { countsAsAttempt: boolean }): Promise<void>;
+  // Runs passes until a push leaves nothing behind, so what the workspace
+  // recorded before the call is on the relay. Rejects when a pass fails.
+  pushRecorded(): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -457,7 +460,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // Resolves true when the workspace pull or the shared-channel pass applied
   // ops. The shared-channel pass tells the renderer itself, and the renderer
   // then reads `syncing`, so a quiet pass must announce that it ended.
-  async function doPass(retryClaim: boolean): Promise<boolean> {
+  async function doPass(retryClaim: boolean, pushed?: { hasMore: boolean }): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const recovered = syncFailure !== null;
     const bootstrapPass = bootstrapPullPending;
@@ -475,6 +478,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
+      if (pushed) pushed.hasMore = result.hasMore;
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
@@ -597,11 +601,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // quiet pass announces nothing at its start, and at its end only when it
   // applied ops, changed what the snapshot shows, or something announced
   // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
-  // `retry` marks a pass someone asked for with retryNow.
+  // `retry` marks a pass someone asked for with retryNow. `pushed` learns
+  // whether the pass's push left more behind.
   function runPass(
     rethrow: boolean,
     quiet = false,
     retry?: { countsAsAttempt: boolean },
+    pushed?: { hasMore: boolean },
   ): Promise<void> {
     passesPending += 1;
     // This pass pulls, so it serves a pull waiting on its own deadline.
@@ -643,7 +649,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
-          applied = await doPass(retryClaim);
+          applied = await doPass(retryClaim, pushed);
         } catch (error) {
           failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
@@ -697,6 +703,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     retryNow(options) {
       if (authExpired || stopped) return Promise.resolve();
       return runPass(false, false, options);
+    },
+
+    async pushRecorded() {
+      // A pass that does not push, as when sync stopped, ends the loop.
+      for (;;) {
+        if (authExpired || stopped) return;
+        const pushed = { hasMore: false };
+        await runPass(true, false, undefined, pushed);
+        if (!pushed.hasMore) return;
+      }
     },
 
     snapshot() {

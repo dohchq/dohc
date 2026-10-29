@@ -97,7 +97,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       <VersionMergeDialog workspaceId="ws-1"
         source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
         activeTabDirty={false} beginLineageOperation={mergeBegin}
-        onWorkspaceStateChanged={mergeChanged} onClose={() => {}} />
+        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onFailed={() => {}} onClose={() => {}} />
     ));
     if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
@@ -399,6 +399,8 @@ describe("VersionMergeDialog conflict paging", () => {
         activeTabDirty={false}
         beginLineageOperation={async () => () => {}}
         onWorkspaceStateChanged={() => {}}
+        onMerged={() => {}}
+        onFailed={() => {}}
         onClose={() => {}}
       />,
     );
@@ -693,14 +695,14 @@ it("returns focus after a press on blank space closes the Versions menu", async 
     useFocusSurface(root, () => root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'));
     return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
       <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
-        onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} />
+        onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}} />
     </div>;
   }
   render(<Shell />);
   await settle();
   const trigger = screen.getByTestId("version-menu-button");
   await user.click(trigger);
-  expect(document.activeElement).toBe(screen.getAllByTestId("version-item")[0]);
+  expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Feature" }));
   await user.pointer({ target: document.body, keys: "[MouseLeft>]" });
   expect(screen.queryByTestId("version-menu")).toBeNull();
   // A browser's press on blank space takes focus to the page after the close.

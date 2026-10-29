@@ -5,7 +5,6 @@ import type {
 import { versionConflictForIpc } from "./engineHistoryIpc";
 import type { OperationHandlers } from "./operationTable";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
-import type { createTryInVersionSessions } from "../agents/tryInVersion";
 
 type VersionOperations = Pick<WorkspaceEngineCapture,
   | "listVersions"
@@ -44,12 +43,8 @@ export function workspaceVersionHandlers(dependencies: {
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
   notifyRenderer(target: { workspaceId: string }): void;
   activity: { queueCloudSync(workspaceId: string): void };
-  tryInVersionSessions: Pick<ReturnType<typeof createTryInVersionSessions>, "start" | "snapshot" | "dismiss">;
-  desktopMarks: { mark(name: string): void; measureSince(name: string, start: string): unknown };
 }): OperationHandlers<typeof workspaceVersionOperations> {
-  const {
-    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
-  } = dependencies;
+  const { requireEngineCapture, notifyRenderer, activity } = dependencies;
 
   async function requireVersionOperations(workspaceId: string) {
     const { capture } = await requireEngineCapture(
@@ -162,27 +157,6 @@ export function workspaceVersionHandlers(dependencies: {
         conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: outcome.remaining.nextAfterConflictId,
       };
-    },
-
-    // "Try it in a version". The gesture handler double-gates on the engine
-    // capture (requireVersionOperations here, and the manager's own
-    // operationsFor) so a workspace without one rejects before anything runs.
-    async tryInWorkspaceVersion(input) {
-      await requireVersionOperations(input.workspaceId);
-      desktopMarks.mark("try-in-version-start");
-      const result = await tryInVersionSessions.start(input.workspaceId, input.task);
-      // Gesture latency evidence (create+switch+run-start, excluding any agent
-      // process startup on the bare-run path), read via the test-gated marks.
-      desktopMarks.measureSince("try-in-version-gesture", "try-in-version-start");
-      return result;
-    },
-
-    getTryInVersionState(input) {
-      return { state: tryInVersionSessions.snapshot(input.workspaceId) };
-    },
-
-    dismissTryInVersionReview(input) {
-      tryInVersionSessions.dismiss(input.workspaceId);
     },
   };
 }
