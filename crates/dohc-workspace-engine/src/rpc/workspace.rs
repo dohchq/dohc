@@ -261,6 +261,10 @@ impl Drop for EngineService {
             workspace.observation.close_synchronously();
             // The open ends with the service, whatever task still holds the workspace.
             lock(&workspace.local_state).take();
+            // Dropping this cancels the Markdown recovery pass without waiting for
+            // the runtime that polls it. The pass keeps only a `Weak` between
+            // steps, and its writes hold the gates the cleanup takes below.
+            lock(&workspace.markdown_recovery).take();
         }
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
@@ -2172,6 +2176,51 @@ mod tests {
                 .into_iter()
                 .all(|task| task.is_none())
         );
+    }
+
+    /// A test blocked in its scratch cleanup cannot poll the Markdown recovery
+    /// pass. Dropping the service must still close the store, or the store's
+    /// files stay open until that runtime ends.
+    #[tokio::test]
+    async fn service_drop_closes_the_store_while_its_runtime_is_blocked() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "blocked-runtime-service-drop",
+                    "captureMode": "none",
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let retained = service.open(Some(&handle)).expect("retained access");
+        assert!(lock(&retained.markdown_recovery).is_some());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !lock(&retained.undo_recovery)
+                .as_ref()
+                .is_none_or(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("undo recovery ends on its own");
+        drop(service);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while retained.actor.lifecycle() != LifecycleState::Closed {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "service cleanup closes the store without polling this runtime"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
