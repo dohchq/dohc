@@ -1509,3 +1509,51 @@ pub(in crate::rpc) fn witness_reader(
         manifest: manifest_path,
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_announces_no_refusal_change_when_nothing_is_held() {
+    let scratch = ScratchDir::new().unwrap();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    EngineStore::open(&db, 1)
+        .unwrap()
+        .bind_root_token(token, &NoFaults)
+        .unwrap();
+    let service = EngineService::new();
+    let mut events = service.events.subscribe_with_wakes();
+    let opened = service
+        .workspace_open(
+            &RequestContext::unbounded(),
+            json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
+        )
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let open = service.open(Some(&handle)).unwrap();
+    open.shutdown_capture().await;
+    let cancel = CancellationToken::new();
+    let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(run(
+        Arc::downgrade(&open),
+        handle,
+        service.sessions.clone(),
+        service.leases.clone(),
+        service.self_writes.scoped(&open.root),
+        service.events.clone(),
+        cancel.clone(),
+        Some(send),
+    ));
+    open.actor.markdown_recovery_wake().notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // A pass announces before it reports, so whatever it announced is already waiting.
+    while let Ok(Some(event)) = tokio::time::timeout(std::time::Duration::ZERO, events.recv()).await
+    {
+        assert_ne!(event.name, crate::events::SYNC_REFUSALS_CHANGED_EVENT);
+    }
+    cancel.cancel();
+    task.await.unwrap();
+}

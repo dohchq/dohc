@@ -73,7 +73,8 @@ async fn run(
     let wake = initial.actor.markdown_recovery_wake();
     drop(initial);
     let mut attempted = HashMap::<i64, String>::new();
-    let mut reported_holds = None;
+    // A workspace that opens with nothing held has nothing to announce.
+    let mut reported_holds = Vec::new();
     loop {
         tokio::select! { biased; () = cancel.cancelled() => return, () = wake.notified() => {} }
         let Some(open) = open.upgrade() else {
@@ -103,8 +104,8 @@ async fn run(
                 })
             })
             .collect();
-        if reported_holds.as_ref() != Some(&holds) {
-            reported_holds = Some(holds);
+        if reported_holds != holds {
+            reported_holds = holds;
             events.emit_refusals_changed(&open.workspace_id);
         }
         let present: HashSet<_> = candidates.iter().map(|row| row.obligation.order).collect();
