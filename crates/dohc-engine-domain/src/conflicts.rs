@@ -868,6 +868,24 @@ impl VersionedTextStore<'_> {
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
+            if !conflict.current.is_present()
+                && (matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
+                    || matches!(input.resolution, ResolveConflictKind::ApplyIncoming)
+                        && conflict.incoming.snapshot.is_some())
+                && let Some(text) = conflict
+                    .incoming
+                    .snapshot
+                    .as_ref()
+                    .or(conflict.base.snapshot.as_ref())
+            {
+                crate::synced_deletion::refuse_synced_deletion_revival(
+                    tx,
+                    &conflict.workspace_id,
+                    &conflict.target_version_id,
+                    &text.object_id,
+                    Some(&conflict),
+                )?;
+            }
             let prepared = before(tx, &conflict, &live)?;
 
             let mut write = None;

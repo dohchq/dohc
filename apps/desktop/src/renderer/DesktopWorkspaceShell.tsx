@@ -56,6 +56,7 @@ import {
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -3110,6 +3111,7 @@ export function DesktopWorkspaceShell(props: {
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
+      if (readError(error).refusal === "synced-deletion") error = new SyncedDeletionRevivalError(path, { cause: error }, true);
       const { words } = readError(error);
       if (words && isRestorePolicyRefusal(error)) {
         reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
@@ -5579,6 +5581,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
             clearError={clearIdentity}
+            onConflictError={reportShellError}
             {...(shareView
               ? {}
               : {
@@ -6771,6 +6774,7 @@ export function DesktopWorkspaceShell(props: {
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
+          onError={reportShellError}
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}

@@ -1654,6 +1654,15 @@ fn write_normalized_text_in_tx(
                                 "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                                 params![ws, input.version_id, input.object_id], |row| row.get::<_, bool>(0),
                             ).map_err(DomainError::sql_corrupt)?;
+                        if dormant_history_object && history_source.is_some() {
+                            crate::synced_deletion::refuse_synced_deletion_revival(
+                                tx,
+                                ws,
+                                input.version_id,
+                                input.object_id,
+                                None,
+                            )?;
+                        }
                         if !bare_preallocation && !dormant_history_object {
                             return Err(DomainError::InvalidInput {
                                 reason: "object_id is already bound to another object",

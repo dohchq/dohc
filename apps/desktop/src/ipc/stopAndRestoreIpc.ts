@@ -1,3 +1,4 @@
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { rmdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { durableBatch } from "@dohc/automation-executor/durable-batch";
@@ -613,7 +614,7 @@ export function registerStopAndRestoreIpc<
               if (error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable") {
                 return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
               }
-              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError) return { kind: "refused", detail: refusalDetail(error) };
+              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError || error instanceof SyncedDeletionRevivalError) return { kind: "refused", detail: refusalDetail(error), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) };
               throw error;
             }
           },
@@ -696,11 +697,11 @@ export function registerStopAndRestoreIpc<
           });
           await receipts.add({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
         } catch (error) {
-          if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
+          if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError || error instanceof SyncedDeletionRevivalError ||
             error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
           await receipts.add(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
             ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
-            : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500) });
+            : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) });
         }
       }
       await receipts.flush();
@@ -714,7 +715,7 @@ export function registerStopAndRestoreIpc<
           if (file.kind === "restored") review.delete(path);
           else review.set(path, file.kind === "rules-unreadable"
             ? {path, reason: "rules-unreadable", unreadable: file.unreadable}
-            : {path, reason: "restore-refused", detail: file.detail});
+            : {path, reason: "restore-refused", detail: file.detail, refusal: file.refusal});
         }
         pending.session.result = {...before, review: [...review.values()].sort((a, b) => a.path.localeCompare(b.path))};
         pending.session.filesUndone = true;

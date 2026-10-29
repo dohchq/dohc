@@ -559,6 +559,9 @@ fn map_domain(error: &DomainError) -> WireError {
         DomainError::ForkBaseNotFound => (InvalidParams, "fork-base-not-found"),
         DomainError::ConflictNotFound => (InvalidParams, "conflict-not-found"),
         DomainError::ConflictStaleTarget => (InvalidParams, "conflict-stale-target"),
+        DomainError::SyncedDeletionRevivalRefused => {
+            (InvalidParams, "synced-deletion-revival-refused")
+        }
         DomainError::BinaryHeadNotText => (InvalidParams, "binary-head-not-text"),
         DomainError::InvalidPath { .. } => (InvalidParams, "invalid-path"),
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
@@ -1344,6 +1347,16 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn synced_deletion_refusal_preserves_its_domain_code() {
+        let error = map_runtime(RuntimeError::Domain(
+            DomainError::SyncedDeletionRevivalRefused,
+        ));
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "synced-deletion-revival-refused");
+        assert_eq!(error.retry, dohc_engine_protocol::Retryability::No);
     }
 
     #[test]
