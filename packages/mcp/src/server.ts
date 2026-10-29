@@ -18,7 +18,7 @@ import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema } from "@dohc/cli/protocol";
+import { MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -26,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -211,6 +211,22 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
     inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
   }, async args => text(await listVersionConflicts(ctx, args)));
+  register("dohc_create_version", {
+    description: "Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) },
+  }, async args => text(await createVersion(ctx, args)));
+  register("dohc_switch_version", {
+    description: "Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200) },
+  }, async args => text(await switchVersion(ctx, args)));
+  register("dohc_merge_version", {
+    description: "Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200) },
+  }, async args => text(await mergeVersion(ctx, args)));
+  register("dohc_resolve_version_conflict", {
+    description: "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
+    inputSchema: { conflictId: z.string().min(1).max(200), resolution: versionResolutionSchema },
+  }, async args => text(await resolveVersionConflict(ctx, args)));
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per

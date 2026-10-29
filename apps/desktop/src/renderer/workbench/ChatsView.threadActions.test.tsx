@@ -403,6 +403,9 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "agent working · 2 queued",
     );
+    const announcement = screen.getByTestId("chats-dispatch-announcement");
+    expect(announcement.getAttribute("role")).toBe("status");
+    expect(announcement.textContent).toBe("Agent working, 2 queued");
     await user.click(screen.getByTestId("chats-stop-agent-run"));
     expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -411,6 +414,9 @@ describe("ChatsView dispatch state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
     );
+    // The region stays mounted with no text, ready for the next run.
+    expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
+    expect(announcement.textContent).toBe("");
   });
 
   it("shows a paused status and resumes the open thread in place", async () => {
@@ -432,6 +438,7 @@ describe("ChatsView dispatch state", () => {
     const status = await screen.findByTestId("chats-dispatch-status");
     expect(status.textContent).toBe("Agent replies pausedResume");
     expect(status.hasAttribute("title")).toBe(false);
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe("Agent replies paused");
     await user.click(screen.getByTestId("chats-resume-dispatch"));
     expect(bridgeMock.resumeThreadDispatch).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -440,6 +447,7 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "3 queued",
     );
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe("3 queued");
   });
 
   it("says when this computer paused dispatch, before the thread's own pause, and resumes it", async () => {
@@ -461,6 +469,9 @@ describe("ChatsView dispatch state", () => {
       expect(screen.getByTestId("chats-dispatch-status").textContent).toBe(
         "Agent replies paused on this computerResume",
       ),
+    );
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe(
+      "Agent replies paused on this computer",
     );
     await user.click(screen.getByTestId("chats-resume-computer-dispatch"));
     expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: false });

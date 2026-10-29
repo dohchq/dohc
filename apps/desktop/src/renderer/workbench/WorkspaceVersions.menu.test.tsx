@@ -44,6 +44,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onWorkspaceStateChanged={onWorkspaceStateChanged}
         onError={onError}
         clearError={() => {}}
+        onConflictError={() => {}}
       />,
     );
     await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft"));
@@ -81,6 +82,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onWorkspaceStateChanged={() => {}}
         onError={onError}
         clearError={() => {}}
+        onConflictError={() => {}}
       />,
     );
 
@@ -104,6 +106,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}
           clearError={() => {}}
+          onConflictError={() => {}}
           refreshKey={refreshKey}
         />
       );
@@ -131,6 +134,7 @@ function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVers
       workspaceId="ws-1"
       activeTabDirty={false}
       beginLineageOperation={async () => () => {}}
+      onConflictError={() => {}}
       onOpenCompare={() => {}}
       {...props}
       {...extra}

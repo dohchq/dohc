@@ -15,7 +15,7 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import {
-  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement, bridgeWriteDeferred,
 } from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
@@ -128,6 +128,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // The engine announced that a workspace's drive has no rename that refuses
   // to replace a file.
   noteNoAtomicPlacement(workspaceId: string): void;
+  noteWriteDeferred(workspaceId: string, path: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
@@ -718,6 +719,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
       bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);
+      bridgeWriteDeferred(rustEngineDaemon, dependencies.noteWriteDeferred);
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim

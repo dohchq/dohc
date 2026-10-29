@@ -3428,6 +3428,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE parent_message_id IS NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 73,
+        id: "v2-replication-conflict-resolution-index",
+        sql: "CREATE INDEX replication_log_conflict_resolution ON replication_log(workspace_id) \
+              WHERE op_kind='conflict.resolve';",
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4595,6 +4602,10 @@ mod tests {
                 "v2-chat-stream-order",
                 "ed7263ecdfa09bd3eba5c1177a3f9df1be700e864d8903a3547af9f60e5853c6",
             ),
+            (
+                "v2-replication-conflict-resolution-index",
+                "a852c0240ab994a1d67c8bd86002832ad3cd76b85459b532a38f06855a6a7856",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5413,6 +5424,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(documents, 0, "documents leave with their replica");
+    }
+
+    #[test]
+    fn conflict_resolution_index_upgrades_existing_log_without_changing_rows() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-replication-conflict-resolution-index");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO replication_log VALUES ('ws','peer',1,'ydoc.update','{}',1,1,'applied'),
+             ('ws','peer',2,'moment.append','{}',2,1,'applied'),
+             ('ws','peer',3,'conflict.resolve','{}',3,1,'applied');",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT payload_json FROM replication_log
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve' AND apply_disposition='applied'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("replication_log_conflict_resolution"),
+            "{plan}"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replication_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 3);
+        let resolutions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM replication_log INDEXED BY replication_log_conflict_resolution
+                 WHERE workspace_id='ws' AND op_kind='conflict.resolve'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolutions, 1);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
     }
 
     #[test]

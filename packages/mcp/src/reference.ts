@@ -112,6 +112,7 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
 
 export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
   list: "versionList", compare: "versionCompare", conflicts: "versionConflicts",
+  create: "versionCreate", switch: "versionSwitch", merge: "versionMerge", resolve: "versionResolve",
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
@@ -196,6 +197,10 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_versions: { cli: "versionList" },
   dohc_compare_version: { cli: "versionCompare" },
   dohc_list_version_conflicts: { cli: "versionConflicts" },
+  dohc_create_version: { cli: "versionCreate" },
+  dohc_switch_version: { cli: "versionSwitch" },
+  dohc_merge_version: { cli: "versionMerge" },
+  dohc_resolve_version_conflict: { cli: "versionResolve" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },

@@ -24,3 +24,33 @@ it("marks binary files and conflicts, and exits 1 with a refusal's reason", asyn
   expect(await executeCli({ argv: ["version", "list"], request })).toEqual({ exitCode: 1, stdout: "",
     stderr: "dohc: Versions belong to the owning workspace. Open it to continue.\n" });
 });
+
+it("parses the version changes and refuses a bad name or resolution before transport", async () => {
+  expect(parseCliArguments(["version", "create", " Ideas "], {})).toMatchObject({ verb: "versionCreate", name: "Ideas" });
+  expect(parseCliArguments(["version", "switch", "Draft"], {})).toMatchObject({ verb: "versionSwitch", version: "Draft" });
+  expect(parseCliArguments(["version", "merge", "Draft"], {})).toMatchObject({ verb: "versionMerge", version: "Draft" });
+  const request = vi.fn(async (_sent: unknown) => ({ ok: true, conflicts: [], nextAfterConflictId: null }));
+  await executeCli({ argv: ["version", "resolve", "c1", "--keep", "incoming"], request });
+  await executeCli({ argv: ["version", "resolve", "c1", "--text", "both"], request });
+  await executeCli({ argv: ["version", "resolve", "c1", "-"], request, readStdin: async () => "from stdin" });
+  expect(request.mock.calls.map(([sent]) => (sent as { args: { resolution: unknown } }).args.resolution)).toEqual([
+    { keep: "incoming" }, { keep: "combined", text: "both" }, { keep: "combined", text: "from stdin" }]);
+  request.mockClear();
+  for (const argv of [["version", "create", "x".repeat(81)], ["version", "create", " "], ["version", "switch"],
+    ["version", "resolve", "c1"], ["version", "resolve", "c1", "--keep", "current", "--text", "both"], ["version", "resolve", "c1", "--keep", "combined"]]) {
+    expect((await executeCli({ argv, request })).exitCode, argv.join(" ")).toBe(1);
+  }
+  expect(request).not.toHaveBeenCalled();
+});
+
+it("says what a version change did", async () => {
+  const request = vi.fn(async (_sent: unknown) => ({ ok: true, version: { id: "draft", name: "Draft" }, changedFileCount: 1 }));
+  expect((await executeCli({ argv: ["version", "switch", "Draft"], request })).stdout).toBe("Switched to Draft · 1 file changed\n");
+  request.mockResolvedValueOnce({ ok: true, version: { id: "ideas", name: "Ideas" } } as never);
+  expect((await executeCli({ argv: ["version", "create", "Ideas"], request })).stdout).toBe("Created and switched to Ideas · ideas\n");
+  request.mockResolvedValueOnce({ ok: true, version: { id: "draft", name: "Draft" }, mergedFileCount: 2, unchangedFileCount: 0, conflictCount: 1,
+    nextAfterConflictId: null, conflicts: [{ conflictId: "c1", path: "notes.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
+      contentKind: "text", currentText: "a", incomingText: "b", baseText: null }] } as never);
+  expect((await executeCli({ argv: ["version", "merge", "Draft"], request })).stdout)
+    .toBe("Merged Draft into Main · 2 files merged · 1 conflict\nc1 · merge · notes.md\n");
+});

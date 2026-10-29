@@ -1,5 +1,6 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
+import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -313,6 +314,9 @@ function parse(error: unknown) {
 }
 
 export interface ReadError {
+  canRetry?: false;
+  refusal?: "synced-deletion";
+  details?: string;
   title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
@@ -327,6 +331,11 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
+    const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
+    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: text, canRetry: false,
+      ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}) };
+  }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
   }
@@ -360,6 +369,11 @@ export function readError(error: unknown): ReadError {
     return { words: null, mapped: false, cause: plain ? message : text };
   }
   return { words: message, mapped: false, cause: plain ? null : text };
+}
+
+export function isConflictStaleTarget(error: unknown): boolean {
+  const { name, message } = parse(error);
+  return (name === "DaemonRefusalError" || name === "VersionedTextStoreError") && message === "conflict-stale-target";
 }
 
 /** A caller's sentence, then the error's words when they add to it. */
