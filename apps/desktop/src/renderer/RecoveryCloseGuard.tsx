@@ -83,6 +83,10 @@ let activeRound: { id: number; kind: "quit" | "update" } | null = null;
 // The round whose exit this window is waiting to see through: the one that
 // proceeded last. A retraction for it drops the claimed intent.
 let proceededRound: { id: number; kind: "quit" | "update" } | null = null;
+// The proceeded round whose exit a veto here stopped. Going back on any
+// warning in this window takes that exit back, even after a later unload
+// attempt replaced the warning that named it.
+let heldRound: number | null = null;
 // The exit request the last round's arrival became. An install started
 // here at `request - 1` is still current when the only thing that happened
 // since is its own round asking, whether or not that round has proceeded.
@@ -111,6 +115,7 @@ function forgetRoundIntent(roundId: number): "quit" | "update" | null {
   if (!round) return null;
   if (activeRound === round) activeRound = null;
   if (proceededRound === round) proceededRound = null;
+  if (heldRound === roundId) heldRound = null;
   if (pendingUnload?.kind === "update" || pendingUnload?.kind === "quit") {
     pendingUnload = null;
   }
@@ -285,6 +290,7 @@ export function resetGuardedExits(): void {
   pendingWritesDrain = null;
   activeRound = null;
   proceededRound = null;
+  heldRound = null;
   roundRequest = null;
 }
 
@@ -467,10 +473,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // a "close". Confirming that would call window.close(), which does not
       // quit on macOS.
       void bridge().holdQuit();
+      const held = proceededRound && pending?.kind === proceededRound.kind ? proceededRound.id : null;
+      if (held !== null) heldRound = held;
       showCloseWarning({
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,
-        ...(proceededRound && pending?.kind === proceededRound.kind ? { round: proceededRound.id } : {}),
+        ...(held !== null ? { round: held } : {}),
       });
     };
     // Required contract, called directly. The bridge and the preload carry
@@ -519,7 +527,11 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       roundRequest = { request: exitRequest, kind: message.exit };
       const round = { id: message.roundId, kind: message.exit };
       activeRound = round;
+      // A newer round replaces the restart this window was waiting to see
+      // through, so no button keeps showing it under way.
+      if (proceededRound?.kind === "update") for (const listener of restartStoppedListeners) listener();
       proceededRound = null;
+      heldRound = null;
       // Claim the intent up front: a queued reopen can still capture a
       // draft between a clear answer and the exit's own beforeunload, and
       // the warning that blocks it there must resume the QUIT or RESTART.
@@ -631,10 +643,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // dialog keeps asking about an exit that is off. The
                   // approval an earlier local warning granted is off too:
                   // the person is staying, so the next close asks over the
-                  // full list. After the round proceeded, the veto that
-                  // opened this dialog holds the exit, so going back takes
-                  // it back from every window of that round.
-                  const round = closeWarning.round;
+                  // full list. After the round proceeded, a veto here holds
+                  // the exit, so going back takes it back from every window
+                  // of that round.
+                  const round = closeWarning.round ?? heldRound ?? undefined;
                   if (closeWarning.kind === "update") for (const listener of restartStoppedListeners) listener();
                   setCloseWarning(null);
                   if (round !== undefined && forgetRoundIntent(round) !== null) {

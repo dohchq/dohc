@@ -645,6 +645,52 @@ describe("RecoveryCloseGuard", () => {
     expect(screen.getByTestId("recovery-close-anyway").textContent, "a reload warning must not take the held restart's round").toBe("Reload anyway");
   });
 
+  // A second unload attempt, such as the window's close button, replaces
+  // the warning while the restart is held. Going back there still ends it.
+  it("goes back on the held restart from a warning a later unload attempt replaced", async () => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Close anyway");
+
+    await user.click(screen.getByTestId("recovery-close-goback"));
+    expect(main.answers(), "the held restart stays under way in the window that asked for it").toContainEqual({ roundId: 1, decision: "cancel" });
+  });
+
+  it("ends this window's restart when a newer round replaces it", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    // A quit asked while another window holds the restart, then gone back on.
+    main.request(2, "quit");
+    main.cancelled(2);
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting… after the quit was gone back on").toHaveBeenCalledOnce();
+  });
+
   // Dismissing the last at-risk draft from a round's warning removes the
   // dialog and its buttons. The round still owes main an answer.
   it("answers a held round clear when its warning empties by dismissal", async () => {
