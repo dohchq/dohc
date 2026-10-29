@@ -65,6 +65,7 @@ dohc-linux-files = { path = "../dohc-linux-files" }
 harness = ["dohc-engine-runtime/fault-injection"]
 
 [dev-dependencies]
+yrs = "=0.27.3"
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }

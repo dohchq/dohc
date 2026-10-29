@@ -26,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -199,6 +199,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
+  register("dohc_list_versions", {
+    description: "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.",
+    inputSchema: {},
+  }, async () => text(await listVersions(ctx)));
+  register("dohc_compare_version", {
+    description: "Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200), afterPath: z.string().min(1).max(4096).optional() },
+  }, async args => text(await compareVersion(ctx, args)));
+  register("dohc_list_version_conflicts", {
+    description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
+    inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
+  }, async args => text(await listVersionConflicts(ctx, args)));
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per

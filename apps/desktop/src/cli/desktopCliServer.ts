@@ -48,6 +48,8 @@ import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { versionConflictForIpc } from "../ipc/engineHistoryIpc";
+import { workspaceVersionForIpc } from "../ipc/workspaceVersionsIpc";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
@@ -99,7 +101,7 @@ interface DesktopCliServerDependencies<State> {
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
       | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
-      | "listVersions" | "writeAuthoredFile"
+      | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
       | "changePathsAs"
     > | null;
     queueCloudSync(workspaceId: string): void;
@@ -487,6 +489,44 @@ export function createDesktopCliServer<State>(
       ...(sharedViewOf(workspace.workspaceId)
         ? {}
         : {
+            versions: {
+              list: async () => {
+                const snapshot = await capture.listVersions();
+                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+              },
+              compare: async (versionId, afterPath) => {
+                // Unreadable rules hide every file, as the desktop's History does.
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const admitted = historyPathAdmission(policy);
+                // A page continues after its last path, which can be a hidden
+                // file. Continue after the last shown file instead, and read
+                // past pages that show none.
+                let after = afterPath;
+                for (;;) {
+                  const page = await capture.compareVersions(versionId, after === undefined ? {} : { afterPath: after });
+                  const files = page.files
+                    .filter(file => !file.protected && admitted(file.path))
+                    .map(({ protected: _protected, ...file }) => file);
+                  if (page.nextAfterPath === null) return { files, nextAfterPath: null };
+                  if (files.length > 0) return { files, nextAfterPath: files[files.length - 1]!.path };
+                  after = page.nextAfterPath;
+                }
+              },
+              conflicts: async (afterConflictId) => {
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const page = await capture.listOpenConflictsPage(afterConflictId);
+                const admitted = historyPathAdmission(policy);
+                // After a rename, a side can sit at another path than its conflict.
+                const shown = (conflict: (typeof page.conflicts)[number]) =>
+                  [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                return {
+                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  nextAfterConflictId: page.nextAfterConflictId,
+                };
+              },
+            },
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),

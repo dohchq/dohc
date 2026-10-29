@@ -173,10 +173,19 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
         )
         .into());
     }
+    let mut reader = reader_config(
+        replica,
+        std::env::var_os("DOHC_ENGINE_READER_CONFIG"),
+        |message| eprintln!("{message}"),
+    );
     let (service, live) = match std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG") {
         Some(path) => {
             let config = ConfiguredLiveHostConfig::read(std::path::Path::new(&path))?;
-            let (service, owner, ingress) = EngineService::configured_live_host(config).await?;
+            let service = EngineService::new();
+            if let Some(config) = reader.take() {
+                service.configure_reader(config);
+            }
+            let (service, owner, ingress) = service.configure_live_host(config).await?;
             (service, Some((owner, ingress)))
         }
         None => match std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG") {
@@ -198,11 +207,7 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
             }
         },
     };
-    if let Some(config) = reader_config(
-        replica,
-        std::env::var_os("DOHC_ENGINE_READER_CONFIG"),
-        |message| eprintln!("{message}"),
-    ) {
+    if let Some(config) = reader {
         service.configure_reader(config);
     }
     let supervisor = Arc::new(Supervisor::new(

@@ -3872,6 +3872,20 @@ describe("CLI socket server", () => {
       .rejects.toThrow("--before and --limit page a group's stream");
   });
 
+  it("names each agent's chat stream by its own group in the CLI and MCP", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    for (const slug of ["my-agent", "my-agent-codex"]) {
+      const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: slug, peek: true });
+      if (!("stream" in shown)) throw new Error("expected a stream");
+      const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: slug });
+      if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+      expect(shown.stream.group.name).toBe(slug);
+      expect(read.stream.group.name).toBe(slug);
+    }
+  });
+
   it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {
     await seedDispatchThread("thread-dispatch");
     const show = () => invoke("show", { cwd: workspaceRoot, actor: "agent", target: "th_dispatch", peek: true });
