@@ -4,8 +4,10 @@ import {
   CAPTURE_MOMENT_RECORDED_EVENT,
   COLLECTIONS_PROJECTED_EVENT,
   CAPTURE_NO_ATOMIC_PLACEMENT_EVENT,
+  CAPTURE_WRITE_DEFERRED_EVENT,
   bridgeCaptureEventsToRenderer,
   bridgeNoAtomicPlacement,
+  bridgeWriteDeferred,
   onWorkspaceCaptureSettled,
 } from "./captureActivityBridge";
 
@@ -43,6 +45,24 @@ function fakeDaemon(): {
     handlerCount: () => handlers.size,
   };
 }
+
+it("forwards deferred writes immediately, rejects malformed payloads and unsubscribes", () => {
+  const { daemon, emit, handlerCount } = fakeDaemon();
+  const note = vi.fn();
+  const unsubscribe = bridgeWriteDeferred(daemon, note);
+  for (const payload of [null, [], {}, { workspaceId: "w" }, { workspaceId: "", path: "note.md" },
+    { workspaceId: 1, path: "note.md" }, { workspaceId: "w", path: "" }, { workspaceId: "w", path: 1 }]) {
+    emit(captureEvent(CAPTURE_WRITE_DEFERRED_EVENT, payload));
+  }
+  emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, { workspaceId: "w", path: "note.md" }));
+  expect(note).not.toHaveBeenCalled();
+  emit(captureEvent(CAPTURE_WRITE_DEFERRED_EVENT, { workspaceId: "w", path: "note.md" }));
+  expect(note).toHaveBeenCalledExactlyOnceWith("w", "note.md");
+  unsubscribe();
+  expect(handlerCount()).toBe(0);
+  emit(captureEvent(CAPTURE_WRITE_DEFERRED_EVENT, { workspaceId: "w", path: "note.md" }));
+  expect(note).toHaveBeenCalledOnce();
+});
 
 describe("bridgeCaptureEventsToRenderer", () => {
   beforeEach(() => {
