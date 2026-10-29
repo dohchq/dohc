@@ -581,6 +581,22 @@ describe("CollectionPage", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("says a shared Collection's automations.yaml is not made yet", async () => {
+    const bridge = makeBridge([]);
+    // A shared Collection reports the file inside its definitions.
+    bridge.listCollectionAutomations.mockResolvedValue({ status: "shared", definitions: {
+      file: { status: "missing" }, contentHash: null, canSwitch: false, sync: "accepted",
+    } } as never);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost(() => undefined, () => undefined, { onOpenFile: vi.fn() }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
+    await waitFor(() => expect(within(dialog).getByText("Made with the first automation.")).toBeDefined());
+    expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
+  });
+
   it("counts the Collection's automations in the header and docks the ⚡ panel beside the view", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     const automations = { status: "read" as const, contentHash: hashFor(0), automations: [

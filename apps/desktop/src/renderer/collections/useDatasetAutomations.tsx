@@ -6,6 +6,7 @@ import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   automationCount,
+  automationsFileMade,
   AutomationsButton,
   AutomationsNote,
   AutomationsPanel,
@@ -143,5 +144,5 @@ export function useDatasetAutomations(props: {
       ) : found.status === "cannot-run" ? found.reason : undefined}
     </AutomationsNote>
   );
-  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automations.file?.status !== "missing" };
+  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automationsFileMade(automations.file) };
 }
