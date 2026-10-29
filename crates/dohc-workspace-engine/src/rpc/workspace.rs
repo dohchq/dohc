@@ -2492,7 +2492,7 @@ mod tests {
                 let Some(task) = task else { continue };
                 if let Err(error) = task.await {
                     assert!(
-                        index == 0 && error.is_cancelled(),
+                        index == 1 && error.is_cancelled(),
                         "background task joins after cancellation: {error}"
                     );
                 }
