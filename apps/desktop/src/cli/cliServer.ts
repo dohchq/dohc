@@ -2629,7 +2629,7 @@ async function dispatchWorkspace(
           return {
             ok: true as const,
             stream: {
-              group: { id: channel.id, name: channel.kind === "agent" ? "my-agent" : channel.name, kind: cliGroupKind(channel.kind) },
+              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
               ...page,
               items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
             },
