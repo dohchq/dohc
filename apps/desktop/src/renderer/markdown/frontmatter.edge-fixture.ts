@@ -36,14 +36,14 @@ export const EDGE_FRONTMATTER = [
 
 export const EDGE_MARKDOWN = `${EDGE_FRONTMATTER}Body\n`;
 
-/** Each property's text in the properties panel. */
+/** Each property's text in the properties panel, on one line. */
 export const EDGE_DISPLAY: Readonly<Record<string, string>> = {
   exact: "9007199254740993",
-  hostile: "__proto__: nested-value\nconstructor: own",
-  literal: "- constructor: hostile-constructor\n- $dohcBigInt: 9007199254740993",
-  mixed: "- constructor: hostile-constructor\n- 9007199254740993",
-  nested: "exact: 9007199254740993",
-  settings: "pinned: true",
+  hostile: "{__proto__: nested-value, constructor: own}",
+  literal: "[{constructor: hostile-constructor}, {$dohcBigInt: 9007199254740993}]",
+  mixed: "[{constructor: hostile-constructor}, 9007199254740993]",
+  nested: "{exact: 9007199254740993}",
+  settings: "{pinned: true}",
   status: "draft",
 };
 

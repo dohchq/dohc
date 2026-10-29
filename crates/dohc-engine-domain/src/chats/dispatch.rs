@@ -1,7 +1,7 @@
 use super::{
-    AgentRunRecord, DispatchClaim, DispatchRecord, DispatchRecovery, LinkedChatStore,
-    MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, chat_after, collect,
-    committed, dispatch_corrupt, is_js_trim_ws, non_empty, persisted_nonnegative_safe,
+    AgentRunRecord, ChatActorKind, DispatchClaim, DispatchRecord, DispatchRecovery,
+    LinkedChatStore, MAX_DISPATCH_ID_UTF16_UNITS, RunRecordLink, ThreadDispatchPause, chat_after,
+    collect, committed, dispatch_corrupt, is_agent_id, is_js_trim_ws, persisted_nonnegative_safe,
     persisted_safe_integer, validate_chat_page_limit,
 };
 use crate::error::DomainError;
@@ -73,160 +73,85 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
     }
 }
 
-fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
-    match value {
-        None => Ok(None),
-        Some(value)
-            if !value.is_empty()
-                && value.encode_utf16().count() <= MAX_DISPATCH_ID_UTF16_UNITS
-                && !value.contains('\0') =>
-        {
-            Ok(Some(value.to_owned()))
-        }
-        Some(_) => Err(DomainError::InvalidInput {
-            reason: "verified user id is invalid",
-        }),
+fn normalize_dispatch_agent_id(agent_id: &str) -> Result<String, DomainError> {
+    if is_agent_id(agent_id) {
+        Ok(agent_id.to_owned())
+    } else {
+        Err(DomainError::InvalidInput {
+            reason: "agent id is invalid",
+        })
     }
 }
 
-const LOCAL_DISPATCH_DISCOVERY_PAGE: i64 = 500;
-
-pub(super) fn queue_local_dispatch_discovery(
+/// Record a pending request for each agent a person's message wakes: the
+/// agent whose chat holds it, and each agent it names. The message's sender
+/// records them in the message's own write, so only that computer runs them.
+/// A message from the CLI wakes no agent.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_message_triggers(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    thread_id: &str,
     message_id: &str,
+    author_kind: ChatActorKind,
+    origin: Option<&str>,
+    named_agent_ids: &[String],
     created_at_ms: i64,
 ) -> Result<(), DomainError> {
-    tx.execute(
-        "INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) \
-         SELECT ?1, ?2 WHERE EXISTS ( \
-           SELECT 1 FROM chat_dispatch_scan_cursor \
-           WHERE workspace_id = ?1 AND max_created_at_ms > ?3)",
-        params![workspace_id, message_id, created_at_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if author_kind != ChatActorKind::Human || origin == Some("cli") {
+        return Ok(());
+    }
+    let chat_agent: Option<String> = tx
+        .query_row(
+            "SELECT c.agent_id FROM chat_threads t JOIN chat_channels c \
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+             WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .flatten();
+    for agent_id in chat_agent.iter().chain(named_agent_ids) {
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_dispatch_ledger \
+             (workspace_id, trigger_message_id, agent_id, thread_id, state, run_id, \
+              failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, 'pending', NULL, NULL, 0, ?5, ?5)",
+            params![workspace_id, message_id, agent_id, thread_id, created_at_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     Ok(())
 }
 
 impl<'a> LinkedChatStore<'a> {
     // ------------------------------------------------------------- dispatch
 
-    /// Scan new message timestamps and atomically seed all eligible, previously
-    /// unseen agent triggers plus the monotonic high-water cursor. Local writes
-    /// behind that cursor are discovered through a bounded queue page.
-    pub fn record_eligible_triggers(
-        &mut self,
-        workspace_id: &str,
-        verified_user_id: Option<&str>,
-        at_ms: i64,
-        faults: &dyn FaultInjector,
-    ) -> Result<i64, DomainError> {
-        non_empty(
-            workspace_id,
-            "invalid-channel-name",
-            "workspace_id must not be empty",
-        )?;
-        let verified_user_id = normalize_verified_user_id(verified_user_id)?;
-        let outcome = self.write_with_pending_chat_replay(workspace_id, faults, |tx| {
-            let prior: Option<i64> = tx
-                .query_row(
-                    "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor \
-                     WHERE workspace_id = ?1",
-                    params![workspace_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            let scan_after = prior.map_or(-1, |value| value.saturating_sub(1).max(-1));
-            let inserted = tx
-                .execute(
-                    "WITH local_page AS ( \
-                       SELECT message_id FROM chat_dispatch_local_discovery \
-                       WHERE workspace_id = ?1 ORDER BY message_id LIMIT ?5 \
-                     ), discovered AS ( \
-                       SELECT message_id FROM chat_messages \
-                       WHERE workspace_id = ?1 AND created_at_ms > ?2 \
-                       UNION ALL SELECT message_id FROM local_page \
-                     ) \
-                     INSERT OR IGNORE INTO chat_dispatch_ledger \
-                     (workspace_id, trigger_message_id, thread_id, state, run_id, \
-                      failure_reason, attempt_count, created_at_ms, updated_at_ms) \
-                     SELECT m.workspace_id, m.message_id, m.thread_id, 'pending', NULL, \
-                            NULL, 0, m.created_at_ms, ?3 \
-                     FROM discovered CROSS JOIN chat_messages m \
-                     JOIN chat_threads t ON t.workspace_id = m.workspace_id \
-                       AND t.thread_id = m.thread_id \
-                     LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id \
-                       AND c.channel_id = t.channel_id \
-                     LEFT JOIN chat_dispatch_ledger l ON l.workspace_id = m.workspace_id \
-                       AND l.trigger_message_id = m.message_id \
-                     WHERE m.workspace_id = ?1 AND m.message_id = discovered.message_id \
-                       AND l.trigger_message_id IS NULL \
-                       AND m.author_kind = 'human' \
-                       AND (m.origin IS NULL OR m.origin <> 'cli') \
-                       AND (m.author_user_id IS NULL \
-                         OR (?4 IS NOT NULL AND m.author_user_id = ?4)) \
-                       AND (c.kind = 'agent' OR EXISTS ( \
-                         SELECT 1 FROM chat_mentions x \
-                         WHERE x.workspace_id = m.workspace_id \
-                           AND x.message_id = m.message_id AND x.handle = 'agent'))",
-                    params![workspace_id, scan_after, at_ms, verified_user_id, LOCAL_DISPATCH_DISCOVERY_PAGE],
-                )
-                .map_err(DomainError::sql_persist)?;
-            let scanned_max: Option<i64> = tx
-                .query_row(
-                    "SELECT MAX(created_at_ms) FROM chat_messages \
-                     WHERE workspace_id = ?1 AND created_at_ms > ?2",
-                    params![workspace_id, scan_after],
-                    |row| row.get(0),
-                )
-                .map_err(DomainError::sql_corrupt)?;
-            if let Some(scanned_max) = scanned_max {
-                tx.execute(
-                    "INSERT INTO chat_dispatch_scan_cursor \
-                     (workspace_id, max_created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(workspace_id) DO UPDATE SET \
-                       max_created_at_ms = MAX(chat_dispatch_scan_cursor.max_created_at_ms, excluded.max_created_at_ms), \
-                       updated_at_ms = excluded.updated_at_ms",
-                    params![workspace_id, scanned_max, at_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-            }
-            // Consume ineligible rows too, preserving the timestamp scanner's posture.
-            tx.execute(
-                "DELETE FROM chat_dispatch_local_discovery \
-                 WHERE workspace_id = ?1 AND message_id IN ( \
-                   SELECT message_id FROM chat_dispatch_local_discovery \
-                   WHERE workspace_id = ?1 ORDER BY message_id LIMIT ?2)",
-                params![workspace_id, LOCAL_DISPATCH_DISCOVERY_PAGE],
-            ).map_err(DomainError::sql_persist)?;
-            i64::try_from(inserted).map_err(|_| dispatch_corrupt())
-        })?;
-        committed(outcome)
-    }
-
     /// Enqueue a durable dispatch trigger for a message (`recordDispatchTrigger`
-    /// posture): idempotent per `(workspace, trigger_message_id)`.
+    /// posture): idempotent per `(workspace, trigger_message_id, agent_id)`.
     pub fn enqueue_dispatch(
         &mut self,
         workspace_id: &str,
         trigger_message_id: &str,
+        agent_id: &str,
         thread_id: &str,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<bool, DomainError> {
         let ws = workspace_id.to_owned();
         let trigger = normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
+        let agent = normalize_dispatch_agent_id(agent_id)?;
         let tid = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let inserted = tx
                 .execute(
                     "INSERT INTO chat_dispatch_ledger \
-                 (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, \
-                  attempt_count, created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, 'pending', NULL, NULL, 0, ?4, ?4) \
-                 ON CONFLICT(workspace_id, trigger_message_id) DO NOTHING",
-                    params![ws, trigger, tid, now_ms],
+                 (workspace_id, trigger_message_id, agent_id, thread_id, state, run_id, \
+                  failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, 'pending', NULL, NULL, 0, ?5, ?5) \
+                 ON CONFLICT(workspace_id, trigger_message_id, agent_id) DO NOTHING",
+                    params![ws, trigger, agent, tid, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
             if inserted == 1 {
@@ -235,8 +160,8 @@ impl<'a> LinkedChatStore<'a> {
             let existing_thread: Option<String> = tx
                 .query_row(
                     "SELECT thread_id FROM chat_dispatch_ledger \
-                     WHERE workspace_id = ?1 AND trigger_message_id = ?2",
-                    params![ws, trigger],
+                     WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?3",
+                    params![ws, trigger, agent],
                     |row| row.get(0),
                 )
                 .optional()
@@ -253,11 +178,12 @@ impl<'a> LinkedChatStore<'a> {
     }
 
     /// Claim the oldest pending, non-paused dispatch trigger (`claimNextPending`):
-    /// flips it to `running`, marks every other pending trigger in the same
-    /// thread `done` under the same run, mints an `agent_run_records` row, and
-    /// returns the claim. Idempotent: retrying the same running `run_id`
-    /// returns its existing claim; a different open run returns `None`
-    /// (single-writer; no double-claim). `None` also when nothing is pending.
+    /// flips it to `running`, marks the same agent's other pending triggers in
+    /// the thread `done` under the same run, mints an `agent_run_records` row
+    /// for that agent, and returns the claim. Another agent's triggers wait for
+    /// their own run. Idempotent: retrying the same running `run_id` returns
+    /// its existing claim; a different open run returns `None` (one run at a
+    /// time per workspace; no double-claim). `None` also when nothing is pending.
     pub fn claim_next_pending(
         &mut self,
         workspace_id: &str,
@@ -310,29 +236,31 @@ impl<'a> LinkedChatStore<'a> {
             if open_running > 0 {
                 return Ok::<_, DomainError>(None);
             }
-            let pending: Option<(String, String, i64, i64)> = tx
+            let pending: Option<(String, String, String, i64, i64)> = tx
                 .query_row(
-                    "SELECT l.trigger_message_id, l.thread_id, l.attempt_count, l.created_at_ms \
+                    "SELECT l.trigger_message_id, l.agent_id, l.thread_id, l.attempt_count, \
+                            l.created_at_ms \
                      FROM chat_dispatch_ledger l WHERE l.workspace_id = ?1 AND l.state = 'pending' \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_pause p \
                          WHERE p.workspace_id = l.workspace_id AND p.thread_id = l.thread_id \
                            AND p.paused = 1) \
-                     ORDER BY l.created_at_ms, l.trigger_message_id LIMIT 1",
+                     ORDER BY l.created_at_ms, l.trigger_message_id, l.agent_id LIMIT 1",
                     params![ws],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
-            let Some((trigger, thread_id, attempt_count, created_at_ms)) = pending else {
+            let Some((trigger, agent_id, thread_id, attempt_count, created_at_ms)) = pending else {
                 return Ok(None);
             };
             let updated = tx
                 .execute(
                     "UPDATE chat_dispatch_ledger \
-                     SET state = 'running', run_id = ?3, attempt_count = attempt_count + 1, \
-                         updated_at_ms = ?4 \
-                     WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND state = 'pending'",
-                    params![ws, trigger, run, now_ms],
+                     SET state = 'running', run_id = ?4, attempt_count = attempt_count + 1, \
+                         updated_at_ms = ?5 \
+                     WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?3 \
+                       AND state = 'pending'",
+                    params![ws, trigger, agent_id, run, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
             if updated != 1 {
@@ -340,20 +268,21 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "dispatch claim raced its own pending row",
                 });
             }
-            // Cover every trigger pending in this thread at claim time under one run.
+            // Cover the agent's every trigger pending in this thread at claim
+            // time under one run.
             tx.execute(
                 "UPDATE chat_dispatch_ledger \
-                 SET state = 'done', run_id = ?3, attempt_count = attempt_count + 1, updated_at_ms = ?4 \
-                 WHERE workspace_id = ?1 AND thread_id = ?2 AND state = 'pending'",
-                params![ws, thread_id, run, now_ms],
+                 SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, updated_at_ms = ?5 \
+                 WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?3 AND state = 'pending'",
+                params![ws, thread_id, agent_id, run, now_ms],
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
                 "INSERT INTO agent_run_records \
                  (workspace_id, run_id, thread_id, trigger_message_id, command, started_at_ms, \
-                  ended_at_ms, exit_code, failure_reason, log_path, failure_handled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, ?7, 0)",
-                params![ws, run, thread_id, trigger, cmd, now_ms, log],
+                  ended_at_ms, exit_code, failure_reason, log_path, failure_handled, agent_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, ?7, 0, ?8)",
+                params![ws, run, thread_id, trigger, cmd, now_ms, log, agent_id],
             )
             .map_err(DomainError::sql_persist)?;
             let next_attempt_count = attempt_count.saturating_add(1);
@@ -362,6 +291,7 @@ impl<'a> LinkedChatStore<'a> {
                 dispatch: DispatchRecord {
                     workspace_id: ws.clone(),
                     trigger_message_id: trigger.clone(),
+                    agent_id: agent_id.clone(),
                     thread_id: thread_id.clone(),
                     state: "running".to_owned(),
                     run_id: Some(run.clone()),
@@ -373,6 +303,7 @@ impl<'a> LinkedChatStore<'a> {
                 run: AgentRunRecord {
                     workspace_id: ws.clone(),
                     run_id: run.clone(),
+                    agent_id,
                     thread_id,
                     trigger_message_id: trigger,
                     command: cmd.clone(),
@@ -389,26 +320,29 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Pending dispatches in trigger-message time order. Scanner-created rows
-    /// preserve the message timestamp in `created_at_ms` (F7).
+    /// Pending dispatches in trigger-message time order, then by agent. A
+    /// message's own requests keep its timestamp in `created_at_ms` (F7).
     pub fn list_pending_dispatches(
         &self,
         workspace_id: &str,
-        after: Option<(i64, String)>,
+        after: Option<(i64, String, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecord>, DomainError> {
         validate_chat_page_limit(limit)?;
+        let (after, after_agent) = match after {
+            Some((created_at_ms, trigger, agent)) => (Some((created_at_ms, trigger)), agent),
+            None => (None, String::new()),
+        };
         let (has_after, after_created_at_ms, after_trigger) = chat_after(after);
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, trigger_message_id, thread_id, state, run_id, \
-                            failure_reason, attempt_count, created_at_ms, updated_at_ms \
+                            failure_reason, attempt_count, created_at_ms, updated_at_ms, agent_id \
                      FROM chat_dispatch_ledger \
                      WHERE workspace_id = ?1 AND state = 'pending' \
-                       AND (?2 = 0 OR created_at_ms > ?3 \
-                         OR (created_at_ms = ?3 AND trigger_message_id > ?4)) \
-                     ORDER BY created_at_ms, trigger_message_id LIMIT ?5",
+                       AND (?2 = 0 OR (created_at_ms, trigger_message_id, agent_id) > (?3, ?4, ?6)) \
+                     ORDER BY created_at_ms, trigger_message_id, agent_id LIMIT ?5",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
@@ -418,7 +352,8 @@ impl<'a> LinkedChatStore<'a> {
                         has_after,
                         after_created_at_ms,
                         after_trigger,
-                        limit
+                        limit,
+                        after_agent
                     ],
                     |row| map_dispatch_row(row, 0),
                 )
@@ -454,7 +389,7 @@ impl<'a> LinkedChatStore<'a> {
                     "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
                      LEFT JOIN chat_dispatch_ledger l \
                        ON l.workspace_id = r.workspace_id \
-                      AND l.trigger_message_id = r.trigger_message_id \
+                      AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                      WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NULL \
                        AND (l.trigger_message_id IS NULL OR l.state <> 'running' \
                          OR l.run_id <> r.run_id))",
@@ -469,9 +404,10 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, \
                             l.run_id, l.failure_reason, l.attempt_count, l.created_at_ms, \
-                            l.updated_at_ms, r.workspace_id, r.run_id, r.thread_id, \
+                            l.updated_at_ms, l.agent_id, r.workspace_id, r.run_id, r.thread_id, \
                             r.trigger_message_id, r.command, r.started_at_ms, r.ended_at_ms, \
-                            r.exit_code, r.failure_reason, r.log_path, r.failure_handled \
+                            r.exit_code, r.failure_reason, r.log_path, r.failure_handled, \
+                            r.agent_id \
                      FROM chat_dispatch_ledger l JOIN agent_run_records r \
                        ON r.workspace_id = l.workspace_id AND r.run_id = l.run_id \
                      WHERE l.workspace_id = ?1 AND l.state = 'running' \
@@ -579,7 +515,7 @@ impl<'a> LinkedChatStore<'a> {
                  SELECT links.message_id, runs.workspace_id, runs.run_id, runs.thread_id, \
                         runs.trigger_message_id, runs.command, runs.started_at_ms, \
                         runs.ended_at_ms, runs.exit_code, runs.failure_reason, runs.log_path, \
-                        runs.failure_handled \
+                        runs.failure_handled, runs.agent_id \
                  FROM run_message_links links JOIN recent_runs runs \
                    ON runs.workspace_id = links.workspace_id AND runs.run_id = links.run_id \
                  WHERE runs.workspace_id = ?1 AND runs.thread_id = ?2 \
@@ -592,7 +528,7 @@ impl<'a> LinkedChatStore<'a> {
                 "SELECT links.message_id, runs.workspace_id, runs.run_id, runs.thread_id, \
                         runs.trigger_message_id, runs.command, runs.started_at_ms, \
                         runs.ended_at_ms, runs.exit_code, runs.failure_reason, runs.log_path, \
-                        runs.failure_handled \
+                        runs.failure_handled, runs.agent_id \
                  FROM run_message_links links JOIN agent_run_records runs \
                    ON runs.workspace_id = links.workspace_id AND runs.run_id = links.run_id \
                  WHERE runs.workspace_id = ?1 AND runs.thread_id = ?2 \
@@ -640,24 +576,31 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
+    /// The thread's latest run, or that agent's latest run in it when
+    /// `agent_id` is given.
     pub fn latest_run_for_thread(
         &self,
         workspace_id: &str,
         thread_id: &str,
+        agent_id: Option<&str>,
     ) -> Result<Option<AgentRunRecord>, DomainError> {
         let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        let agent_id = agent_id.map(normalize_dispatch_agent_id).transpose()?;
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
                             started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
-                            failure_handled FROM agent_run_records \
+                            failure_handled, agent_id FROM agent_run_records \
                      WHERE workspace_id = ?1 AND thread_id = ?2 \
+                       AND (?3 IS NULL OR agent_id = ?3) \
                      ORDER BY started_at_ms DESC, run_id DESC LIMIT 1",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, thread_id], |row| map_run_row(row, 0))
+                .query_map(params![workspace_id, thread_id, agent_id], |row| {
+                    map_run_row(row, 0)
+                })
                 .map_err(DomainError::sql_corrupt)?;
             Ok(collect(rows)?.pop())
         })
@@ -674,7 +617,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
                             started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
-                            failure_handled FROM agent_run_records \
+                            failure_handled, agent_id FROM agent_run_records \
                      WHERE run_id = ?1 LIMIT 2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -731,11 +674,24 @@ impl<'a> LinkedChatStore<'a> {
                 "Dispatch window start must be finite.",
             ));
         }
+        // Only the DM's person posts a person's message in an agent DM, so the
+        // runs their own messages start in its conversation don't count. Runs
+        // an agent or automation started do, as do runs in posts and groups.
         self.store.read_with(|conn| {
             let count: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM agent_run_records \
-                     WHERE workspace_id = ?1 AND thread_id = ?2 AND started_at_ms >= ?3",
+                    "SELECT COUNT(*) FROM agent_run_records r \
+                     WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.started_at_ms >= ?3 \
+                       AND NOT EXISTS ( \
+                         SELECT 1 FROM chat_messages m \
+                         JOIN chat_threads t ON t.workspace_id = m.workspace_id \
+                           AND t.thread_id = m.thread_id \
+                         JOIN chat_channels c ON c.workspace_id = t.workspace_id \
+                           AND c.channel_id = t.channel_id \
+                         WHERE m.workspace_id = r.workspace_id \
+                           AND m.message_id = r.trigger_message_id \
+                           AND m.author_kind = 'human' AND t.lane = 'chat' \
+                           AND c.kind = 'agent')",
                     params![workspace_id, thread_id, since_ms],
                     |row| row.get(0),
                 )
@@ -747,24 +703,29 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
+    /// Fail one agent's pending requests in a thread. Another agent's
+    /// requests there stay queued.
     pub fn fail_pending_for_thread(
         &mut self,
         workspace_id: &str,
         thread_id: &str,
+        agent_id: &str,
         reason: &str,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<i64, DomainError> {
         let workspace_id = workspace_id.to_owned();
         let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        let agent_id = normalize_dispatch_agent_id(agent_id)?;
         let reason = normalize_failure_reason(reason)?;
         let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let changed = tx
                 .execute(
                     "UPDATE chat_dispatch_ledger SET state = 'failed', failure_reason = ?3, \
                        updated_at_ms = ?4 \
-                     WHERE workspace_id = ?1 AND thread_id = ?2 AND state = 'pending'",
-                    params![workspace_id, thread_id, reason, now_ms],
+                     WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?5 \
+                       AND state = 'pending'",
+                    params![workspace_id, thread_id, reason, now_ms, agent_id],
                 )
                 .map_err(DomainError::sql_persist)?;
             i64::try_from(changed).map_err(|_| dispatch_corrupt())
@@ -938,27 +899,43 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// The workspace's runs a quit or restart stopped whose requests are still
+    /// failed, or only those in one thread when `thread_id` is given.
     pub fn list_app_quit_recoveries(
         &self,
         workspace_id: &str,
+        thread_id: Option<&str>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, DomainError> {
         validate_chat_page_limit(limit)?;
+        let thread_id = thread_id
+            .map(|thread_id| normalize_dispatch_id(thread_id, "Thread id is invalid."))
+            .transpose()?;
         let (has_after, after_started_at_ms, after_run_id) = chat_after(after);
+        // SQLite uses the thread index only for a plain equality, so a
+        // thread's read gets its own statement rather than `?2 IS NULL OR`.
+        let thread_filter = if thread_id.is_some() {
+            "r.thread_id = ?2"
+        } else {
+            "?2 IS NULL"
+        };
         self.store.read_with(|conn| {
             let duplicate: i64 = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
                      JOIN chat_dispatch_ledger l ON l.workspace_id = r.workspace_id \
-                       AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
-                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                       AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
+                       AND l.run_id = r.run_id \
+                     WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
                        AND l.state = 'failed' \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
-                         WHERE all_runs.run_id = r.run_id) <> 1)",
-                    params![workspace_id],
+                         WHERE all_runs.run_id = r.run_id) <> 1)"
+                    ),
+                    params![workspace_id, thread_id],
                     |row| row.get(0),
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -966,26 +943,29 @@ impl<'a> LinkedChatStore<'a> {
                 return Err(dispatch_corrupt());
             }
             let mut stmt = conn
-                .prepare_cached(
+                .prepare_cached(&format!(
                     "SELECT r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, \
                             r.command, r.started_at_ms, r.ended_at_ms, r.exit_code, \
-                            r.failure_reason, r.log_path, r.failure_handled, l.attempt_count \
+                            r.failure_reason, r.log_path, r.failure_handled, r.agent_id, \
+                            l.attempt_count \
                      FROM agent_run_records r JOIN chat_dispatch_ledger l \
                        ON l.workspace_id = r.workspace_id \
-                      AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
-                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                      AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
+                      AND l.run_id = r.run_id \
+                     WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
                        AND l.state = 'failed' \
-                       AND (?2 = 0 OR r.started_at_ms > ?3 \
-                         OR (r.started_at_ms = ?3 AND r.run_id > ?4)) \
-                     ORDER BY r.started_at_ms, r.run_id LIMIT ?5",
-                )
+                       AND (?3 = 0 OR r.started_at_ms > ?4 \
+                         OR (r.started_at_ms = ?4 AND r.run_id > ?5)) \
+                     ORDER BY r.started_at_ms, r.run_id LIMIT ?6"
+                ))
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
                     params![
                         workspace_id,
+                        thread_id,
                         has_after,
                         after_started_at_ms,
                         after_run_id,
@@ -993,7 +973,7 @@ impl<'a> LinkedChatStore<'a> {
                     ],
                     |row| {
                         let run = map_run_row(row, 0)?;
-                        let attempt_count: i64 = row.get(11)?;
+                        let attempt_count: i64 = row.get(12)?;
                         Ok(run.and_then(|run| {
                             if persisted_nonnegative_safe(attempt_count) {
                                 Ok(DispatchRecovery { run, attempt_count })
@@ -1136,7 +1116,9 @@ impl<'a> LinkedChatStore<'a> {
     /// single-writer claim guard forever. For each such row this marks the run
     /// record ended-with-failure, then requeues the trigger to `pending` (so a
     /// fresh worker can claim it) when `attempt_count < max_attempts`, else leaves
-    /// it terminally `failed`. Returns the trigger ids requeued to `pending`.
+    /// it terminally `failed`. Each trigger the run covered goes back to
+    /// `pending` when it has attempts left, whichever way its first trigger
+    /// went. Returns the first trigger ids requeued to `pending`.
     ///
     /// Because the engine is the single writer, this sweep is safe only when a
     /// freshly-created actor establishes the startup recovery boundary. An
@@ -1152,17 +1134,19 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Snapshot the running rows first (can't mutate while iterating).
-            let running: Vec<(String, i64, Option<String>)> = {
+            let running: Vec<(String, String, i64, Option<String>)> = {
                 let mut stmt = tx
                     .prepare(
-                        "SELECT trigger_message_id, attempt_count, run_id \
+                        "SELECT trigger_message_id, agent_id, attempt_count, run_id \
                          FROM chat_dispatch_ledger \
                          WHERE workspace_id = ?1 AND state = 'running' \
-                         ORDER BY updated_at_ms, trigger_message_id",
+                         ORDER BY updated_at_ms, trigger_message_id, agent_id",
                     )
                     .map_err(DomainError::sql_corrupt)?;
                 let rows = stmt
-                    .query_map(params![ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .query_map(params![ws], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })
                     .map_err(DomainError::sql_corrupt)?;
                 let mut out = Vec::new();
                 for row in rows {
@@ -1171,7 +1155,7 @@ impl<'a> LinkedChatStore<'a> {
                 out
             };
             let mut requeued = Vec::new();
-            for (trigger, attempt_count, run_id) in running {
+            for (trigger, agent_id, attempt_count, run_id) in running {
                 if let Some(run) = &run_id {
                     tx.execute(
                         "UPDATE agent_run_records SET ended_at_ms = ?2, exit_code = -1, \
@@ -1185,22 +1169,24 @@ impl<'a> LinkedChatStore<'a> {
                     tx.execute(
                         "UPDATE chat_dispatch_ledger SET state = 'pending', run_id = NULL, \
                            failure_reason = NULL, updated_at_ms = ?3 \
-                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND state = 'running'",
-                        params![ws, trigger, now_ms],
+                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?4 \
+                           AND state = 'running'",
+                        params![ws, trigger, now_ms, agent_id],
                     )
                     .map_err(DomainError::sql_persist)?;
-                    if let Some(run) = &run_id {
-                        requeue_covered_triggers(tx, &ws, run, max_attempts, now_ms)?;
-                    }
                     requeued.push(trigger);
                 } else {
                     tx.execute(
                         "UPDATE chat_dispatch_ledger SET state = 'failed', \
                            failure_reason = 'reclaim-exhausted', updated_at_ms = ?3 \
-                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND state = 'running'",
-                        params![ws, trigger, now_ms],
+                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?4 \
+                           AND state = 'running'",
+                        params![ws, trigger, now_ms, agent_id],
                     )
                     .map_err(DomainError::sql_persist)?;
+                }
+                if let Some(run) = &run_id {
+                    requeue_covered_triggers(tx, &ws, run, max_attempts, now_ms)?;
                 }
             }
             Ok::<_, DomainError>(requeued)
@@ -1225,11 +1211,10 @@ impl DispatchOutcomeKind {
     }
 }
 
-/// Give the triggers an interrupted run covered back to the queue with its
-/// first trigger. The run never answered them, and the next run must cover
-/// them again, so it keeps their chain depth whichever trigger it starts
-/// from. A trigger that has used its attempts stays done, as a first trigger
-/// would.
+/// Give the triggers an interrupted run covered back to the queue, whether or
+/// not its first trigger goes back. The run never answered them, and the next
+/// run must cover them again, so it keeps their chain depth whichever trigger
+/// it starts from. A trigger that has used its attempts stays done.
 fn requeue_covered_triggers(
     conn: &Connection,
     workspace_id: &str,
@@ -1284,7 +1269,7 @@ pub(crate) fn running_run_chain_depth(
         .query_row(
             "SELECT thread_id, run_id FROM chat_dispatch_ledger \
              WHERE workspace_id = ?1 AND state = 'running' AND run_id IS NOT NULL \
-             ORDER BY created_at_ms, trigger_message_id LIMIT 1",
+             ORDER BY created_at_ms, trigger_message_id, agent_id LIMIT 1",
             params![workspace_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1319,10 +1304,10 @@ fn running_dispatch_claim(
     let claim = conn
         .query_row(
             "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, l.run_id, \
-                l.failure_reason, l.attempt_count, l.created_at_ms, l.updated_at_ms, \
+                l.failure_reason, l.attempt_count, l.created_at_ms, l.updated_at_ms, l.agent_id, \
                 r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, r.command, \
                 r.started_at_ms, r.ended_at_ms, r.exit_code, r.failure_reason, r.log_path, \
-                r.failure_handled \
+                r.failure_handled, r.agent_id \
          FROM chat_dispatch_ledger l \
          JOIN agent_run_records r \
            ON r.workspace_id = l.workspace_id AND r.run_id = l.run_id \
@@ -1341,19 +1326,21 @@ fn running_dispatch_claim(
                         attempt_count: row.get(6)?,
                         created_at_ms: row.get(7)?,
                         updated_at_ms: row.get(8)?,
+                        agent_id: row.get(9)?,
                     },
                     AgentRunRecord {
-                        workspace_id: row.get(9)?,
-                        run_id: row.get(10)?,
-                        thread_id: row.get(11)?,
-                        trigger_message_id: row.get(12)?,
-                        command: row.get(13)?,
-                        started_at_ms: row.get(14)?,
-                        ended_at_ms: row.get(15)?,
-                        exit_code: row.get(16)?,
-                        failure_reason: row.get(17)?,
-                        log_path: row.get(18)?,
-                        failure_handled: row.get(19)?,
+                        workspace_id: row.get(10)?,
+                        run_id: row.get(11)?,
+                        thread_id: row.get(12)?,
+                        trigger_message_id: row.get(13)?,
+                        command: row.get(14)?,
+                        started_at_ms: row.get(15)?,
+                        ended_at_ms: row.get(16)?,
+                        exit_code: row.get(17)?,
+                        failure_reason: row.get(18)?,
+                        log_path: row.get(19)?,
+                        failure_handled: row.get(20)?,
+                        agent_id: row.get(21)?,
                     },
                 ))
             },
@@ -1373,7 +1360,7 @@ fn run_rows_by_global_id(
         .prepare_cached(
             "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
                     started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
-                    failure_handled FROM agent_run_records WHERE run_id = ?1 LIMIT 2",
+                    failure_handled, agent_id FROM agent_run_records WHERE run_id = ?1 LIMIT 2",
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = stmt
@@ -1390,7 +1377,7 @@ fn require_run_in_workspace(
     conn.query_row(
         "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
                 started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
-                failure_handled FROM agent_run_records \
+                failure_handled, agent_id FROM agent_run_records \
          WHERE workspace_id = ?1 AND run_id = ?2",
         params![workspace_id, run_id],
         |row| map_run_row(row, 0),
@@ -1416,6 +1403,7 @@ fn dispatch_run_context(
          FROM agent_run_records r \
          LEFT JOIN chat_dispatch_ledger l \
            ON l.workspace_id = r.workspace_id AND l.trigger_message_id = r.trigger_message_id \
+          AND l.agent_id = r.agent_id \
          WHERE r.workspace_id = ?1 AND r.run_id = ?2",
         params![workspace_id, run_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -1463,6 +1451,7 @@ fn map_dispatch_row(
         attempt_count,
         created_at_ms,
         updated_at_ms,
+        agent_id: row.get(offset + 9)?,
     }))
 }
 
@@ -1498,6 +1487,7 @@ fn map_run_row(
         failure_reason,
         log_path: row.get(offset + 9)?,
         failure_handled: failure_handled == 1,
+        agent_id: row.get(offset + 11)?,
     }))
 }
 
@@ -1505,12 +1495,13 @@ fn map_dispatch_claim_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<(DispatchRecord, AgentRunRecord), DomainError>> {
     let dispatch = map_dispatch_row(row, 0)?;
-    let run = map_run_row(row, 9)?;
+    let run = map_run_row(row, 10)?;
     Ok(match (dispatch, run) {
         (Ok(dispatch), Ok(run))
             if dispatch.workspace_id == run.workspace_id
                 && dispatch.thread_id == run.thread_id
                 && dispatch.trigger_message_id == run.trigger_message_id
+                && dispatch.agent_id == run.agent_id
                 && dispatch.run_id.as_deref() == Some(run.run_id.as_str())
                 && dispatch.state == "running"
                 && run.ended_at_ms.is_none() =>

@@ -31,7 +31,7 @@ function blob(stream: number, bytes: Uint8Array, fin = true) {
 }
 async function start(entry = bundle, preload?: string) {
   const cwd = await mkdtemp(join(tmpdir(), 'dohc-reader-empty-'))
-  const args = ['--permission', `--allow-fs-read=${bundle}`, '--max-old-space-size=256']
+  const args = ['--permission', `--allow-fs-read=${bundle}`, '--max-old-space-size=512']
   if (entry !== bundle) args.push('--allow-fs-read=' + dirname(entry))
   if (preload) args.push(`--allow-fs-read=${preload}`, '--require', preload)
   const child = spawn(process.execPath, [...args, entry],
@@ -245,6 +245,21 @@ it('handles zero-length source and checkpoint blobs', async () => {
     await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 })
+it('constructs and proves 5000 mixed paragraphs with the shared live validation policy', async () => {
+  const source = Array.from({length: 5000}, (_, i) =>
+    `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`).join('\n\n')
+  const host = await start(), base = markdownToYDoc(source), bytes = Buffer.from(source)
+  try {
+    await hello(host)
+    request(host.child, 2, 'construct', bytes, Y.encodeStateAsUpdate(base))
+    const constructed = await success(host, 2)
+    expect(constructed.result.kind).toBe('constructed')
+    Y.applyUpdate(base, constructed.delta)
+    request(host.child, 3, 'prove', bytes, Y.encodeStateAsUpdate(base))
+    expect((await success(host, 3)).result.kind).toBe('proved')
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 60000)
 it('ends the child on an allocation RangeError without sending a document verdict', async () => {
   const preload = join(directory, 'allocation-failure.cjs')
   await writeFile(preload, `const decode = TextDecoder.prototype.decode;

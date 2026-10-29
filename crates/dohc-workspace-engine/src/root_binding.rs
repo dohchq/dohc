@@ -320,6 +320,20 @@ pub fn prepare_local_state(root: &Path) -> Result<LocalState, RootBindingError> 
     }
 }
 
+/// Create the folder `name` in `base`, or take the one there, and make it
+/// private as the engine's folder is. A link, anything but a folder, or
+/// another user's folder is refused.
+pub(crate) fn ensure_private_folder(base: &Path, name: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    return dohc_windows_files::ensure_private_dir(base, Path::new(name)).map(drop);
+    #[cfg(target_os = "macos")]
+    return dohc_macos_files::ensure_private_dir(base, Path::new(name)).map(drop);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return create_folder(base, name, rustix::process::geteuid().as_raw())
+        .and_then(make_private)
+        .map(drop);
+}
+
 /// What an open that writes prepared in `.dohc/local`.
 pub struct LocalState {
     /// Whether this computer's state can go in the folder.

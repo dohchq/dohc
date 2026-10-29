@@ -108,7 +108,7 @@ function Table(props: { rows: readonly UsageRecordRow[]; today: string }) {
             {["Capability", ...DOORS.map(({ name }) => name), "Last used"].map((name, index) => {
               const door = DOORS[index - 1]?.door;
               return (
-                <th key={name} scope="col" className="border-b border-line px-3 py-2 text-left font-mono text-[10px] font-normal uppercase tracking-wide text-subtle">
+                <th key={name} scope="col" className="border-b border-line px-3 py-2 text-left text-[12px] font-medium text-subtle">
                   <span className="inline-flex items-center gap-1">
                     {name}
                     {door && neverCounted.has(door) ? <NotCounted /> : null}
@@ -167,7 +167,7 @@ export function UsageRecordCard(props: {
   );
   return (
     <section data-testid="usage-record" data-state={readable ? (readable.enabled ? "on" : "off") : view.status}
-      aria-labelledby={titleId} className="mt-4 overflow-hidden rounded-lg border border-line bg-panel">
+      aria-labelledby={titleId} className="mt-8 overflow-hidden rounded-lg border border-line bg-panel">
       <header className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px]">
         <Shield size={14} aria-hidden className="shrink-0 text-muted" />
         <h3 id={titleId} className="m-0 text-[13px] font-medium text-ink">What dohc records about use</h3>

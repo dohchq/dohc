@@ -49,6 +49,7 @@ mod bounded_encoder;
 mod frontmatter_yaml;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
+mod reference_links;
 mod restore_copy;
 mod wikilinks;
 
@@ -73,7 +74,7 @@ const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
-const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
+pub(crate) const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
 
 pub(crate) fn reader_source_meta_key(key: &str) -> bool {
     matches!(
@@ -696,10 +697,10 @@ impl Ydoc {
         )
     }
 
-    /// Whether `source` rebuilds a document that projects
-    /// `canonical_projection`, under the importer's reading or the fold's.
-    /// With `reads_alike`, each text block must also read as its projection
-    /// does; see [`markdown_reads_alike`].
+    /// Whether `source` rebuilds `canonical_projection` under the source or
+    /// projection reading. Without `reads_alike`, also try the successor
+    /// reading and full reference links as desktop link marks. With it, each
+    /// text block must read as its projection does; see [`markdown_reads_alike`].
     fn source_reproduces(
         &self,
         source: &str,
@@ -711,17 +712,27 @@ impl Ydoc {
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
             .any(|reading| {
                 let staged = Ydoc::wire();
-                staged
+                if staged
                     .rewrite_content_to_markdown_checked::<false>(
                         ContentKind::Richdoc,
                         source,
                         reading,
                         FileFold::No,
                     )
-                    .is_ok()
-                    && staged
+                    .is_err()
+                {
+                    return false;
+                }
+                let projects_alike = || {
+                    staged
                         .project_richdoc()
                         .is_ok_and(|projection| projection == canonical_projection)
+                };
+                (projects_alike()
+                    || (!reads_alike
+                        && reading == MarkdownReading::Source
+                        && staged.resolve_reference_links(source)
+                        && projects_alike()))
                     && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
             })
     }
@@ -1382,6 +1393,43 @@ impl Ydoc {
             MarkdownReading::Projection,
             FileFold::Strict,
         )
+    }
+
+    /// Check a reader fold on a clone. Reader witnesses cannot authorize this path.
+    pub fn native_fold_candidate(&self, update: &[u8]) -> Result<Ydoc, CollabError> {
+        crate::validate_replay_parity(self, update)?;
+        let candidate = Ydoc::wire();
+        candidate.apply(&self.encode_full_state())?;
+        candidate.apply(update)?;
+        let epoch = candidate.lineage_epoch_tag();
+        if candidate.has_pending_dependencies() || epoch != self.lineage_epoch_tag() {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        let meta = candidate.doc.get_or_insert_map(ROOT_META);
+        let txn = candidate.doc.transact();
+        if (epoch.is_none() && meta.contains_key(&txn, LINEAGE_EPOCH_META_KEY))
+            || [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ]
+            .iter()
+            .any(|key| meta.contains_key(&txn, key))
+        {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        drop(txn);
+        // Public schema validation excludes the engine's private lineage tag.
+        let public = Ydoc::wire();
+        public.apply(&candidate.encode_full_state())?;
+        public
+            .doc
+            .get_or_insert_map(ROOT_META)
+            .remove(&mut public.doc.transact_mut(), LINEAGE_EPOCH_META_KEY);
+        public.validate_public_baseline(&public.encode_full_state())?;
+        public.project(ContentKind::Richdoc)?;
+        Ok(candidate)
     }
 
     /// Replace an outside fold's frontmatter without rebuilding its body.
@@ -3144,53 +3192,56 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
     outside_markdown_allowlist(markdown).is_some()
 }
 
+// Inline text the desktop reader reads as the engine does: no autolinks, hard breaks or other
+// inline syntax.
+fn allowlisted_inline(text: &str) -> bool {
+    !text.contains("://")
+        && !text
+            .as_bytes()
+            .windows(4)
+            .any(|part| part.eq_ignore_ascii_case(b"www."))
+        && !text.split_inclusive('\n').any(|line| {
+            line.strip_suffix('\n')
+                .is_some_and(|content| content.ends_with("  "))
+        })
+        && text.chars().all(|character| {
+            character.is_alphanumeric()
+                || (character != '\r' && character.is_whitespace())
+                || matches!(
+                    character,
+                    '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '(' | ')' | '-' | '/'
+                )
+        })
+}
+
 // Some(true) denotes an agreed item-block body; flat successors keep their
 // existing permissive proof, except for the desktop's quote depth limit.
 fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
-    fn inline(text: &str) -> bool {
-        !text.contains("://")
-            && !text
-                .as_bytes()
-                .windows(4)
-                .any(|part| part.eq_ignore_ascii_case(b"www."))
-            && !text.split_inclusive('\n').any(|line| {
-                line.strip_suffix('\n')
-                    .is_some_and(|content| content.ends_with("  "))
-            })
-            && text.chars().all(|character| {
-                character.is_alphanumeric()
-                    || (character != '\r' && character.is_whitespace())
-                    || matches!(
-                        character,
-                        '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '(' | ')' | '-' | '/'
-                    )
-            })
-    }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
-            MdBlock::Paragraph(text) => inline(text),
-            MdBlock::Heading { text, .. } => !in_item && inline(text),
+            MdBlock::Paragraph(text) => allowlisted_inline(text),
+            MdBlock::Heading { text, .. } => !in_item && allowlisted_inline(text),
             MdBlock::CodeBlock { language, .. } => language
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "_+.#-".contains(character)),
             MdBlock::BulletList(items) => items.iter().all(|(text, blocks)| {
-                !text.trim().is_empty() && inline(text) && tree(blocks, true)
+                !text.trim().is_empty() && allowlisted_inline(text) && tree(blocks, true)
             }),
             MdBlock::OrderedList { items, .. } => items.iter().all(|item| {
                 !item.paragraph.trim().is_empty()
-                    && inline(&item.paragraph)
+                    && allowlisted_inline(&item.paragraph)
                     && tree(item.blocks(), true)
             }),
             MdBlock::TaskList(items) => items.iter().all(|(_, item)| {
                 !item.paragraph.trim().is_empty()
-                    && inline(&item.paragraph)
+                    && allowlisted_inline(&item.paragraph)
                     && tree(item.blocks(), true)
             }),
             MdBlock::Quote(children) => {
                 !in_item && !refused_fold_item_bodies(children) && tree(children, false)
             }
             MdBlock::Table { rows, .. } => {
-                !in_item && rows.iter().flatten().all(|cell| inline(cell))
+                !in_item && rows.iter().flatten().all(|cell| allowlisted_inline(cell))
             }
             _ => !in_item,
         })
@@ -4058,7 +4109,17 @@ fn ends_table(line: &str) -> bool {
         .or_else(|| rest.strip_prefix("1."))
         .or_else(|| rest.strip_prefix("1)"))
         .is_some_and(|after| after.starts_with([' ', '\t']));
-    let html = line.strip_prefix('<').is_some_and(|tag| {
+    rest.starts_with('>')
+        || rest.starts_with("```")
+        || rest.starts_with("~~~")
+        || heading
+        || thematic_break(rest)
+        || item
+        || paragraph_ending_html(line)
+}
+
+fn paragraph_ending_html(line: &str) -> bool {
+    line.strip_prefix('<').is_some_and(|tag| {
         ["script", "pre", "style", "textarea", "!--"]
             .iter()
             .any(|start| tag.starts_with(start))
@@ -4074,14 +4135,7 @@ fn ends_table(line: &str) -> bool {
                         || tag[end..].starts_with([' ', '>'])
                         || tag[end..].starts_with("/>"))
             }
-    });
-    rest.starts_with('>')
-        || rest.starts_with("```")
-        || rest.starts_with("~~~")
-        || heading
-        || thematic_break(rest)
-        || item
-        || html
+    })
 }
 
 fn parse_heading(line: &str) -> Option<(i64, String)> {
@@ -11643,6 +11697,200 @@ mod projection_tests {
         let forged = "---\nid: rec\n---\n\nHidden\n";
         witness_source(&doc, forged);
         assert_eq!(settled(&doc, &canonical, forged), None);
+    }
+
+    #[test]
+    fn a_local_settle_keeps_desktop_reference_links() {
+        use yrs::types::Attrs;
+
+        let source = "<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| {
+            insert_md_paragraph(txn, &body, 0, "<details>\n<summary>Extras</summary>");
+            insert_md_paragraph(txn, &body, 1, "Sunscreen and a spare charger.");
+            insert_md_paragraph(txn, &body, 2, "</details>");
+            // The desktop seeds one XmlText with a link mark, then a plain
+            // paragraph for the definition (MarkdownDefinition).
+            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+            let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
+            text.insert_with_attributes(
+                txn,
+                4,
+                "the airline's bag rules",
+                reference_links::link_attributes("https://example.com/bags"),
+            );
+            let at = text.len(&*txn);
+            text.insert_with_attributes(txn, at, ".", Attrs::new());
+            insert_md_paragraph(txn, &body, 4, "[bags]: https://example.com/bags");
+        });
+        let canonical = witness_source(&doc, source);
+        assert_eq!(
+            canonical,
+            "&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\n\
+             Sunscreen and a spare charger.\n\n&lt;/details&gt;\n\n\
+             See [the airline's bag rules](https://example.com/bags).\n\n\
+             &#91;bags&#93;&#58; https&#58;//example&#46;com/bags"
+        );
+        assert_eq!(doc.preserved_markdown_source(&canonical), None);
+        assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
+        assert_eq!(settled(&doc, &canonical, "A different file body"), None);
+
+        // A witnessed source must rebuild this destination and this label.
+        for forged in [
+            source.replace("example.com/bags", "other.example/bags"),
+            source.replace("the airline's bag rules", "different rules"),
+            source.replace("[bags].", "[missing]."),
+        ] {
+            witness_source(&doc, &forged);
+            assert_eq!(settled(&doc, &canonical, &forged), None, "{forged}");
+        }
+    }
+
+    #[test]
+    fn a_local_settle_keeps_undefined_reference_links_as_plain_text() {
+        let source = "See [the airline's bag rules][bags].\n";
+        // Base-path guard: this source needs no reference-link pass.
+        // marked emits plain text when no definition resolves the label.
+        let desktop = Ydoc::wire();
+        let body = desktop.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        desktop.with_delta(|txn| {
+            insert_md_paragraph(txn, &body, 0, source.trim_end());
+        });
+        let canonical = witness_source(&desktop, source);
+        let native = Ydoc::wire();
+        native
+            .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        assert_eq!(native.project_richdoc().unwrap(), canonical);
+        assert_eq!(canonical, source.trim_end());
+        assert_eq!(
+            settled(&desktop, &canonical, source).as_deref(),
+            Some(source)
+        );
+    }
+
+    fn assert_reference_link_pass_refused(source: &str) {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        let before = doc.encode_full_state();
+        assert!(!doc.resolve_reference_links(source), "{source:?}");
+        assert_eq!(
+            doc.encode_full_state(),
+            before,
+            "a refused pass must not edit"
+        );
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_formatted_html_split() {
+        let source = "Sunscreen and a **spare** charger.\n</details>\n\n[bags]: https://e.com";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| {
+            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+            let text = paragraph.push_back(txn, XmlTextPrelim::new("Sunscreen and a "));
+            text.insert_with_attributes(
+                txn,
+                16,
+                "spare",
+                yrs::types::Attrs::from([("bold".into(), json_to_any(&json!({})))]),
+            );
+            text.insert_with_attributes(txn, 21, " charger.\n</details>", yrs::types::Attrs::new());
+            insert_md_paragraph(txn, &body, 1, "[bags]: https://e.com");
+        });
+        assert!(doc
+            .body_paragraph_runs()
+            .iter()
+            .flatten()
+            .any(|(_, bold, _)| *bold));
+        let before = doc.encode_full_state();
+        assert!(!doc.resolve_reference_links(source));
+        assert_eq!(doc.encode_full_state(), before);
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_math_definitions() {
+        assert_reference_link_pass_refused(
+            "$$\n\n[bags]: https://evil.example\n\n$$\n\nSee [x][bags].",
+        );
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_unexplained_brackets() {
+        for unsupported in [
+            "# See [r][bags]",
+            "- See [r][bags]",
+            "| item |\n|---|\n| [r][bags] |",
+            "See [bags].",
+            "See [bags][].",
+            "See [[r]][bags].",
+            "See [][bags].",
+            "See [r\nr][bags].",
+            "See [a][b][bags].",
+            "See [r][bags] and [bags].",
+            "See *[r][bags]*.",
+            "See _[r][bags]_.",
+            "See ![r][bags].",
+            "See https://x.com/[r][bags].",
+            "See WWW.x.com/[r][bags].",
+            "See [==r==][bags].",
+            "See ==[r][bags]==.",
+            "See ++[r][bags]++.",
+            "See [++r++][bags].",
+            "Mail a@b.co about [r][bags].",
+        ] {
+            for source in [
+                format!("{unsupported}\n\nSee [r][bags].\n\n[bags]: https://e.com"),
+                format!("See [r][bags].\n\n{unsupported}\n\n[bags]: https://e.com"),
+            ] {
+                assert_reference_link_pass_refused(&source);
+            }
+        }
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_false_html_interrupts() {
+        for tag in ["<br>", "</span>", "<DIV>", "</DETAILS>"] {
+            assert!(!paragraph_ending_html(tag));
+            let source = format!("word\n{tag}\n\nSee [r][bags].\n\n[bags]: https://e.com");
+            // Forge the split the old pass accepted, with a real link mark.
+            let doc = Ydoc::wire();
+            let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            doc.with_delta(|txn| {
+                insert_md_paragraph(txn, &body, 0, "word");
+                insert_md_paragraph(txn, &body, 1, tag);
+                let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
+                let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
+                text.insert_with_attributes(
+                    txn,
+                    4,
+                    "r",
+                    reference_links::link_attributes("https://e.com"),
+                );
+                text.insert_with_attributes(txn, 5, ".", yrs::types::Attrs::new());
+                insert_md_paragraph(txn, &body, 3, "[bags]: https://e.com");
+            });
+            let canonical = witness_source(&doc, &source);
+            assert_eq!(settled(&doc, &canonical, &source), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn reference_link_pass_refuses_padded_labels() {
+        for (definition, reference) in [
+            ("bags ", "bags"),
+            (" bags", "bags"),
+            ("bags", "bags "),
+            ("bags", " bags"),
+            ("bags\t", "bags"),
+            ("bags", "\tbags"),
+        ] {
+            assert_reference_link_pass_refused(&format!(
+                "See [x][{reference}].\n\n[{definition}]: https://e.com"
+            ));
+        }
     }
 
     fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {

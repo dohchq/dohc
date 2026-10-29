@@ -67,11 +67,13 @@ fn live_ordinary_classification(
     payload: &YdocUpdatePayload,
     update: &[u8],
 ) -> Result<Option<bool>, SyncError> {
-    let bound: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
-         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-    ).map_err(SyncError::corrupt)?;
+    let bound: bool = conn
+        .query_row(
+            &format!("SELECT {}", crate::hosted::live_bound("?1", "?2", "?3")),
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
     if !bound {
         return Ok(None);
     }
@@ -108,6 +110,34 @@ fn live_ordinary_classification(
         |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     Ok(Some(applied))
+}
+
+/// Whether this replica keeps `payload`, an update that `key`'s bound
+/// session never admitted, queued, holding its document until the binding
+/// goes, instead of refusing it: a hosted replica does for an ordinary
+/// update of the document's current lineage, whose content here would
+/// otherwise miss it. A base of that lineage carries only what the lineage
+/// started from.
+fn keeps_unadmitted(
+    conn: &Connection,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+) -> Result<bool, SyncError> {
+    if payload.is_base_state || !crate::hosted::is_hosted(conn, &key.workspace_id)? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND lineage_claim_id=?4)",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            payload.lineage_claim_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 pub(crate) fn retain_refused_ydoc_blob(
@@ -780,7 +810,7 @@ pub(crate) fn drain_released_holds(
                AND h.scope_generation=d.scope_generation \
              JOIN ydoc_deferred_updates u ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND {} AND {} ORDER BY u.object_id,u.version_id",
-            crate::hosted::HELD_FOR_DRAIN,
+            crate::hosted::held_for_drain(),
             crate::hosted::OUTSTANDING_YDOC_UPDATE
         ))
         .and_then(|mut statement| {
@@ -1098,6 +1128,7 @@ fn complete_drain_cleanup(
     if cleanup.coordinates.is_empty()
         && cleanup.off_head_refusals.is_empty()
         && cleanup.live_refusals.is_empty()
+        && !cleanup.unadmitted
         && cleanup.projection_refusal.is_none()
         && recovery.is_none()
     {
@@ -1118,12 +1149,9 @@ fn complete_drain_cleanup(
         }
         for refusal in &cleanup.live_refusals {
             retain_refused_ydoc_blob(tx, &refusal.workspace_id, &refusal.origin_id, refusal.origin_seq)?;
-            crate::hosted::hold_unadmitted_in_tx(
-                tx,
-                &refusal.workspace_id,
-                &refusal.origin_id,
-                refusal.origin_seq,
-            )?;
+        }
+        if cleanup.unadmitted {
+            crate::hosted::hold_unadmitted_in_tx(tx, &cleanup.key.workspace_id, &cleanup.key.object_id)?;
         }
         let consumed = cleanup.consumed();
         let workspace_id = &cleanup.key.workspace_id;
@@ -1355,10 +1383,13 @@ pub struct YdocDrainCleanup {
     /// Refusals of rows of another lineage than the head's that its archive
     /// would not take. Each persists as its row leaves.
     off_head_refusals: Vec<crate::ReplicationRefusal>,
-    /// Refusals of rows a live session never admitted. Each persists, keeps
-    /// its blob and holds its document as its row leaves, so until then the
-    /// row keeps the facts an earlier attempt parked on it.
+    /// Refusals of rows a device's live session never admitted. Each
+    /// persists and keeps its blob as its row leaves, so until then the row
+    /// keeps the facts an earlier attempt parked on it.
     live_refusals: Vec<crate::ReplicationRefusal>,
+    /// The drain stopped at a row [`keeps_unadmitted`] keeps queued, which
+    /// holds its document.
+    unadmitted: bool,
     /// What the rows it removes owe a pass that reports durably, with the
     /// drain's own report; `None` for a caller that reports the drain itself.
     report: Option<crate::drain_report::DrainExtras>,
@@ -1534,6 +1565,7 @@ fn drain_deferred_ydoc(
                 applied_refusals: Vec::new(),
                 off_head_refusals: Vec::new(),
                 live_refusals: Vec::new(),
+                unadmitted: false,
                 report: None,
                 projected: None,
                 released_hold: false,
@@ -1661,6 +1693,7 @@ fn drain_deferred_ydoc(
     let mut applied_refusals = Vec::new();
     let mut off_head_refusals = Vec::new();
     let mut live_refusals = Vec::new();
+    let mut unadmitted = false;
     let mut projected_lineage = None;
     let mut projected_moment = None;
     // Rows held for released retained work while the head waits for
@@ -1729,6 +1762,15 @@ fn drain_deferred_ydoc(
             return Err(SyncError::BlobInvalid);
         }
         if let Some(echo) = live_classification {
+            let parked = parked_refusal(store, key, &origin_id, origin_seq)?;
+            // What follows it stays queued too.
+            if !echo
+                && parked.is_none()
+                && store.read_with(|conn| keeps_unadmitted(conn, key, &payload))?
+            {
+                unadmitted = true;
+                break;
+            }
             record_facts.extend(read_parked_record_facts(
                 store, key, &origin_id, origin_seq,
             )?);
@@ -1737,7 +1779,7 @@ fn drain_deferred_ydoc(
             // whose bytes an earlier drain applied keeps the refusal that
             // apply was owed: a session that later binds neither replaces
             // nor discharges it, and the head already holds those bytes.
-            match parked_refusal(store, key, &origin_id, origin_seq)? {
+            match parked {
                 Some(reason) => {
                     let refusal = deferred_ydoc_refusal(key, &origin_id, origin_seq, reason);
                     refusals.push(refusal.clone());
@@ -2196,6 +2238,7 @@ fn drain_deferred_ydoc(
             applied_refusals,
             off_head_refusals,
             live_refusals,
+            unadmitted,
             report: None,
             projected: projected_lineage,
             released_hold: !held_rows.is_empty() || archived_held,
@@ -2608,9 +2651,43 @@ pub(crate) struct CompleteYdocLineage {
 pub struct PreparedLocalYdocLineage {
     complete: CompleteYdocLineage,
     projection: Option<dohc_engine_collab::Projection>,
+    reader_delta: Option<Vec<u8>>,
 }
 
 impl PreparedLocalYdocLineage {
+    pub fn accept_outside_fold(
+        &mut self,
+        conn: &Connection,
+        fold: &dohc_engine_collab::reader_resolver::PreparedFold,
+        source: &str,
+    ) -> Result<(), SyncError> {
+        let Some((marker, doc)) = self.complete.state.as_ref() else {
+            return Ok(());
+        };
+        if !fold.matches(&self.complete.key, marker, doc, source) {
+            return Err(SyncError::RetryableState {
+                reason: "outside-fold-stale",
+            });
+        }
+        if let Ok(candidate) = doc.native_fold_candidate(&fold.delta) {
+            let projection = match project_ydoc_with_store(
+                conn,
+                &self.complete.key,
+                &candidate,
+                ContentKind::Richdoc,
+            ) {
+                Ok(projection) => projection,
+                Err(SyncError::InvalidInput { .. } | SyncError::ProjectionTooLarge { .. }) => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if projection.content == source {
+                self.reader_delta = Some(fold.delta.clone());
+            }
+        }
+        Ok(())
+    }
     pub fn projection(&self) -> Option<&dohc_engine_collab::Projection> {
         self.projection.as_ref()
     }
@@ -2630,6 +2707,7 @@ pub fn prepare_local_ydoc_lineage_in_tx(
     Ok(PreparedLocalYdocLineage {
         complete,
         projection,
+        reader_delta: None,
     })
 }
 
@@ -3590,6 +3668,7 @@ pub fn reconcile_local_head_in_tx(
         tx,
         &complete,
         None,
+        None,
         resulting,
         actor_origin_id,
         attribution,
@@ -3611,6 +3690,7 @@ pub fn reconcile_prepared_local_head_in_tx(
         tx,
         &prepared.complete,
         prepared.projection.as_ref(),
+        prepared.reader_delta.as_deref(),
         resulting,
         actor_origin_id,
         attribution,
@@ -3618,10 +3698,12 @@ pub fn reconcile_prepared_local_head_in_tx(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconcile_local_complete_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
     projection: Option<&dohc_engine_collab::Projection>,
+    reader_delta: Option<&[u8]>,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
@@ -3655,6 +3737,7 @@ fn reconcile_local_complete_resulting_head_in_tx(
                 now_ms,
                 LineageFoldCause::LocalMutation { unsettled_authors },
                 projection,
+                reader_delta,
             )?;
             match folded {
                 LineageFold::Folded {
@@ -4018,6 +4101,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         now_ms,
         cause,
         None,
+        None,
     )
 }
 
@@ -4031,6 +4115,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     now_ms: i64,
     cause: LineageFoldCause,
     projection: Option<&dohc_engine_collab::Projection>,
+    reader_delta: Option<&[u8]>,
 ) -> Result<LineageFold, SyncError> {
     let LineageFoldAuthor {
         actor_origin_id,
@@ -4103,30 +4188,32 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let (mut update, source_bound) =
-            match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
-                Err(CollabError::MarkdownNotRepresentable)
-                    if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
-                {
-                    retire_complete_ydoc_lineage_in_tx(tx, complete)?;
-                    return Ok(LineageFold::NoContent);
-                }
-                // Keep the body XML when the chosen file keeps its settled
-                // body. The final proof below checks the retained XML.
-                Err(CollabError::MarkdownNotRepresentable)
-                    if marker.content_kind == ContentKind::Richdoc
-                        && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
-                            markdown_body(&settled) == markdown_body(chosen_text)
-                        }) =>
-                {
-                    (
-                        doc.replace_frontmatter_for_fold(chosen_text)
-                            .map_err(map_fold_edit_error)?,
-                        true,
-                    )
-                }
-                result => (result.map_err(map_fold_edit_error)?, false),
-            };
+        let (mut update, source_bound) = match reader_delta.map_or_else(
+            || doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text),
+            |delta| doc.apply(delta).map(|()| delta.to_vec()),
+        ) {
+            Err(CollabError::MarkdownNotRepresentable)
+                if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
+            {
+                retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                return Ok(LineageFold::NoContent);
+            }
+            // Keep the body XML when the chosen file keeps its settled
+            // body. The final proof below checks the retained XML.
+            Err(CollabError::MarkdownNotRepresentable)
+                if marker.content_kind == ContentKind::Richdoc
+                    && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
+                        markdown_body(&settled) == markdown_body(chosen_text)
+                    }) =>
+            {
+                (
+                    doc.replace_frontmatter_for_fold(chosen_text)
+                        .map_err(map_fold_edit_error)?,
+                    true,
+                )
+            }
+            result => (result.map_err(map_fold_edit_error)?, false),
+        };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
@@ -6308,7 +6395,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             store,
             envelope,
             faults,
-            |tx, _| {
+            |tx, op| {
                 if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
                     return Err(SyncError::RetryableState {
                         reason: "native live binding changed",
@@ -6318,6 +6405,23 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
                         deferred: false,
                         reason: Some("native-live-content-echo"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                } else if keeps_unadmitted(tx, &key, &payload)? {
+                    defer_ydoc_update_in_tx(
+                        tx,
+                        &key,
+                        op,
+                        &payload.lineage_claim_id,
+                        relay_seq,
+                        relay_namespace,
+                    )?;
+                    crate::hosted::hold_unadmitted_in_tx(tx, &key.workspace_id, &key.object_id)?;
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: true,
+                        reason: Some("ydoc-live-edit-unadmitted"),
                         conflicts_opened: 0,
                         lineage_replacement: None,
                         record_facts: Vec::new(),

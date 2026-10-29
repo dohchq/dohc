@@ -9,7 +9,6 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
-import { AskAgentButton, type AskAgent } from "../askAgent";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { EmptyState, IconButton, PrimaryButton, RetryRow } from "../ui/controls";
@@ -124,7 +123,7 @@ function AppRow(props: {
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-medium text-ink">{app.title}</span>
-          <span className="block truncate font-mono text-[11px] leading-[1.4] text-subtle">
+          <span className="block truncate text-[11px] leading-[1.4] text-subtle">
             {app.root}
           </span>
         </span>
@@ -227,8 +226,6 @@ export function AppsView(props: {
   // A received share workspace rejects folder creation in main, including
   // for edit grants. Mounted shares inside a normal workspace do not set it.
   receivedShareWorkspace?: boolean;
-  // Hands making an app to the person's agent. Absent while chats are off.
-  askAgent?: AskAgent;
 }) {
   const { state, retry } = useApps(props.workspaceId, props.filesSettledRevision, props.notices);
   const apps = state.status === "ready" ? state.apps : [];
@@ -249,7 +246,7 @@ export function AppsView(props: {
       {props.head
         ? createPortal(
             <>
-              <output data-testid="sites-count" className="mr-1 font-mono text-[11px] text-subtle">
+              <output data-testid="sites-count" className="mr-1 text-[11px] text-subtle">
                 {state.status === "ready" ? `${apps.length} app${apps.length === 1 ? "" : "s"}` : null}
               </output>
               {state.status === "ready" && apps.length > 0 && !props.receivedShareWorkspace ? (
@@ -301,15 +298,6 @@ export function AppsView(props: {
           onSetPinned={props.onSetPinned}
         />
       )}
-      {props.askAgent && !props.receivedShareWorkspace && state.status === "ready" ? (
-        <div className="shrink-0 border-t border-line px-3 py-2">
-          <AskAgentButton
-            askAgent={props.askAgent}
-            request={{ kind: "app" }}
-            label="Ask my agent for an app"
-          />
-        </div>
-      ) : null}
     </div>
   );
 }

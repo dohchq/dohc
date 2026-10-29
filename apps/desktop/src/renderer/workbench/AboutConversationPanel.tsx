@@ -17,9 +17,9 @@ import {
   gatherDelay,
   useFocusAddedRow,
   type AboutNotices,
-  type AccessContext,
 } from "./About";
 import type { AboutConversation } from "./aboutConversation";
+import type { AccessContext } from "./accessReason";
 import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { useChatLinks } from "./useChatLinks";
 
@@ -280,7 +280,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{author.kind} </span>}
+                {author.kind === "human" ? null : <span className="sr-only">{author.kind === "link" ? "link holder" : author.kind} </span>}
                 <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
               </Fragment>
             ))}

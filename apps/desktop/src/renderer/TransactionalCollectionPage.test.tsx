@@ -34,6 +34,36 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 }
 afterEach(cleanup);
 
+it("offers a calendar before the Collection has a date field, and asks for one", async () => {
+  const onAddDateField = vi.fn();
+  const { props, rerender } = setup({ onAddDateField });
+  await screen.findByText("Alice");
+  const layout = screen.getByLabelText("Collection layout");
+  expect((within(layout).getByRole("option", { name: "Calendar" }) as HTMLOptionElement).disabled).toBe(false);
+  fireEvent.change(layout, { target: { value: "calendar" } });
+  expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
+  expect(screen.queryByLabelText("Calendar date")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+  expect(onAddDateField).toHaveBeenCalledOnce();
+
+  // Once the Collection has a date field, the calendar uses it.
+  const dated = dataset(), visit = id(7);
+  dated.revision = 2; dated.revisionSha256 = "b".repeat(64);
+  dated.tables[0]!.fields.push({ fieldId: visit, name: "Visit on", type: "date", required: false, unique: false });
+  dated.operations.find(operation => operation.operationId === read)!.fieldIds.push(visit);
+  rerender(<TransactionalCollectionPage {...props} dataset={dated} />);
+  expect((screen.getByLabelText("Calendar date") as HTMLSelectElement).value).toBe(visit);
+  expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
+});
+
+it("asks for a date field without a button for someone who cannot change fields", async () => {
+  setup();
+  await screen.findByText("Alice");
+  fireEvent.change(screen.getByLabelText("Collection layout"), { target: { value: "calendar" } });
+  expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
+});
+
 it.each(["Record ID", "Membership number"])("hides only the generated primary key column (%s)", async primaryName => {
   const definition = datasetDefinitionFromDrafts({ name: "People", schemaPath: "schema.sql", operationsPath: "operations.js",
     fields: [{ name: "Name", type: "text", required: true, unique: false }] });
@@ -153,7 +183,7 @@ describe("transactional Collection page", () => {
     expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
     expect(result.onError.mock.calls.at(-1)![2]).toBeNull();
     expect(screen.queryByText("Change not confirmed")).toBeNull();
-    expect(screen.getByRole("button", { name: "New record" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getAllByRole("button", { name: "New record" })[0]!.hasAttribute("disabled")).toBe(false);
     await act(async () => { retry?.(); pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } }); });
     expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
     expect(result.onNotice).not.toHaveBeenCalled();
@@ -213,7 +243,7 @@ describe("transactional Collection page", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await screen.findByRole("button", { name: "Try again" });
-    expect(screen.getByRole("button", { name: "New record" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByRole("button", { name: "New record" })[0]!.hasAttribute("disabled")).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await screen.findByRole("button", { name: "Try again" });
     const writes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
@@ -225,7 +255,7 @@ describe("transactional Collection page", () => {
     const onReviewSchema = vi.fn(); const onCustomize = vi.fn(); setup({onReviewSchema, onCustomize}); await screen.findByText("Alice");
     const manage = screen.getByLabelText("Manage Collection");
     const details = manage.closest("details")!;
-    expect(screen.getByRole("button",{name:"New record"}).closest("details")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "New record"})[0]!.closest("details")).toBeNull();
     fireEvent.click(manage); expect(details.open).toBe(true);
     const fields = screen.getByRole("button",{name:"Fields and names"});
     fireEvent.click(fields); expect(onReviewSchema).toHaveBeenCalledOnce();
@@ -288,7 +318,7 @@ describe("transactional Collection page", () => {
     const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
     const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
     const result = setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
-    fireEvent.click(screen.getByRole("button", { name: "New record" })); fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!); fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
     fireEvent.change(screen.getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt", { type: "text/plain" })] } });
     expect((screen.getByRole("button", { name: "Create record" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => pendingUpload.resolve({ fileId: "1234567890abcdef", name: "receipt.txt", byteLength: 3, contentType: "text/plain", sha256: "a".repeat(64) }));
@@ -300,7 +330,7 @@ describe("transactional Collection page", () => {
     const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
     const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
     const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
-    const result = setup({ dataset: description, uploadFile }); await screen.findByText("Alice"); fireEvent.click(screen.getByRole("button", { name: "New record" }));
+    const result = setup({ dataset: description, uploadFile }); await screen.findByText("Alice"); fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
     fireEvent.change(screen.getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt")] } });
     result.rerender(<TransactionalCollectionPage {...result.props} workspaceId="workspace-b" />);
     expect(uploadFile.mock.calls[0]![1].aborted).toBe(true); await act(async () => pendingUpload.reject(new Error("Old workspace"))); expect(result.onError).not.toHaveBeenCalled();
@@ -353,7 +383,7 @@ describe("transactional Collection page", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("button", { name: "Try again" });
     expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
-    expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
     expect(onError).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -364,13 +394,68 @@ describe("transactional Collection page", () => {
 
   it("creates typed values with declared defaults and rejects missing required input inline", async () => {
     const { invoke } = setup(); await screen.findByText("Alice");
-    fireEvent.click(screen.getByRole("button", { name: "New record" })); fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!); fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Enter Name.");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
     fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "12.5" } });
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
     expect(invoke.mock.calls.find(([request]) => request.operationId === create)![0].input).toEqual({ values: { [name]: "Bob", [amount]: 12.5, [status]: "New" } });
+  });
+
+  it("shows an empty Collection's columns and adds a record in the table's New record row", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? { rows: [], nextCursor: null } : { id: 1, version: 1 } }));
+    setup({ invoke });
+    const table = await screen.findByRole("table");
+    expect(within(table).getAllByRole("columnheader").map(header => header.textContent)).toEqual(expect.arrayContaining(["Name", "Amount", "Status"]));
+    expect(screen.queryByText(/on this page/)).toBeNull();
+
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    const row = within(table).getByRole("row", { name: "New record" });
+    expect(document.activeElement).toBe(within(row).getByLabelText("Name"));
+    expect(screen.queryByRole("form", { name: "New record" })).toBeNull();
+    fireEvent.keyDown(within(row).getByLabelText("Name"), { key: "Escape" });
+    expect(within(table).queryByLabelText("Name")).toBeNull();
+    expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" }));
+
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    await waitFor(() => expect(invoke.mock.calls.find(([request]) => request.operationId === create)?.[0].input).toEqual({ values: { [name]: "Bob", [amount]: null, [status]: "New" } }));
+    await waitFor(() => expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" })));
+  });
+
+  it("returns focus to the table's New record button once the read after a create lets it take focus", async () => {
+    const reread = deferred<{ result: AppBackendJson }>();
+    let reads = 0;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId !== read) return { result: { id: 1, version: 1 } };
+      return ++reads === 1 ? { result: { rows: [], nextCursor: null } } : reread.promise;
+    });
+    setup({ invoke });
+    const table = await screen.findByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    const button = await within(table).findByRole<HTMLButtonElement>("button", { name: "New record" });
+    await waitFor(() => expect(reads).toBe(2));
+    expect(button.disabled).toBe(true);
+    await act(async () => reread.resolve({ result: { rows: [{ id: 1, version: 1, values: { [name]: "Bob" } }], nextCursor: null } }));
+    expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" }));
+  });
+
+  it("keeps the New record row open when the browser rejects a value, such as a half-typed number", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? { rows: [], nextCursor: null } : { id: 1, version: 1 } }));
+    setup({ invoke });
+    const table = await screen.findByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    // jsdom cannot hold a half-typed number, so the input reports the browser's rejection directly.
+    vi.spyOn(screen.getByLabelText<HTMLInputElement>("Amount"), "reportValidity").mockReturnValue(false);
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    expect(invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(false);
+    expect(within(table).getByRole("row", { name: "New record" })).toBeTruthy();
   });
 
   it("keeps a refused edit draft editable and never treats it as an uncertain commit", async () => {
@@ -404,7 +489,7 @@ describe("transactional Collection page", () => {
       expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
       expect(onError).toHaveBeenCalledWith("dohc could not load People.", waiting, expect.any(Function), identity);
       // Records that could not load take no changes.
-      expect(screen.getByRole<HTMLButtonElement>("button", { name: "New record" }).disabled).toBe(true);
+      expect(screen.getAllByRole<HTMLButtonElement>("button", { name: "New record" })[0]!.disabled).toBe(true);
       retryFromToast = onError.mock.calls[0]![2]!;
       await act(() => vi.advanceTimersByTimeAsync(4999));
       expect(within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
@@ -418,7 +503,7 @@ describe("transactional Collection page", () => {
       expect(within(region).getByText("Alice")).toBeTruthy();
       expect(within(region).queryByRole("button", { name: "Try again" })).toBeNull();
       expect(onSettled).toHaveBeenCalledWith(identity);
-      expect(screen.getByRole<HTMLButtonElement>("button", { name: "New record" }).disabled).toBe(false);
+      expect(screen.getAllByRole<HTMLButtonElement>("button", { name: "New record" })[0]!.disabled).toBe(false);
     } finally { vi.useRealTimers(); }
     // The toast's Try again is the same load.
     expect(invoke).toHaveBeenCalledTimes(2);
@@ -535,7 +620,7 @@ it("shows records an automation changed in place, with no loading line, nothing 
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect(screen.getByRole("region", { name: "People", hidden: true }).getAttribute("aria-busy")).toBe("false");
-  expect((screen.getByRole("button", { name: "New record", hidden: true }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getAllByRole("button", { name: "New record", hidden: true })[0]! as HTMLButtonElement).disabled).toBe(false);
   // A record the read left out keeps its dialog open, which says so instead of showing old values.
   await act(async () => reread.resolve({ result: { rows: [], nextCursor: null } }));
   expect(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it.");
@@ -558,7 +643,7 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   await screen.findByText("Alice Paid");
   expect(invoke).toHaveBeenCalledTimes(3);
   expect(screen.queryByText("Loading records…")).toBeNull();
-  expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(false);
   expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
 });
 

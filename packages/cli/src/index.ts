@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
-import { sendCliRequest, type CliClientOptions } from "./client";
+import { sendCliRequest, VERSION_CHANGE_VERBS, type CliClientOptions } from "./client";
 import { cliErrorLine, DohcCliError } from "./errors";
 import { renderCliHelp } from "./help";
 import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
   documentEditTextSchema,
+  versionResolutionSchema,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
@@ -46,6 +47,12 @@ async function bodyForCommand(
   if (command.verb === "documentEdit" || command.verb === "documentCreate") {
     const text = command.stdin ? await readStdin() : command.text;
     if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
+    return text;
+  }
+  if (command.verb === "versionResolve") {
+    if (command.keep !== "combined") return undefined;
+    const text = command.stdin ? await readStdin() : command.text;
+    if (!versionResolutionSchema.safeParse({ keep: "combined", text }).success) throw new DohcCliError("combined text is at most 10 MiB as UTF-8");
     return text;
   }
   if (command.verb === "fileChatStart") {
@@ -90,6 +97,20 @@ function buildCliRequest(
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "versionList":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
+    case "versionCompare":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version, ...(command.afterPath ? { afterPath: command.afterPath } : {}) } };
+    case "versionConflicts":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ...(command.afterConflictId ? { afterConflictId: command.afterConflictId } : {}) } };
+    case "versionCreate":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, name: command.name } };
+    case "versionSwitch":
+    case "versionMerge":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version } };
+    case "versionResolve":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, conflictId: command.conflictId,
+        resolution: command.keep === "combined" ? { keep: "combined", text: stdinBody ?? command.text } : { keep: command.keep } } };
     case "fileDuplicate":
       return {protocolVersion: common.protocolVersion, verb: command.verb, args: {cwd: common.cwd, actor: common.actor, path: command.path, requestId: command.requestId ?? randomUUID(), agent: command.agent}};
     case "historyUndo":
@@ -113,6 +134,14 @@ function buildCliRequest(
     case "fileChats":
     case "documentRead":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+    case "saveRecoveryCopy":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
+        ...(command.incident === undefined ? {} : { incident: command.incident }) } };
+    case "liveKeptEdits":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+    case "retryKeptEdits":
+    case "stopAgain":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path, incident: command.incident } };
     case "documentEdit":
     case "documentCreate": {
       const args = {
@@ -163,7 +192,14 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, target: command.target, peek: command.peek },
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          target: command.target,
+          peek: command.peek,
+          ...(command.before ? { before: command.before } : {}),
+          ...(command.limit ? { limit: command.limit } : {}),
+        },
       };
     case "post":
       return {
@@ -265,6 +301,7 @@ function buildCliRequest(
         args: {
           cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation,
           ...(command.page === undefined ? {} : { page: command.page }),
+          ...(command.server ? { server: true } : {}),
         },
       };
     case "automationList":
@@ -283,6 +320,7 @@ function buildCliRequest(
           collectionPath: command.collectionPath,
           automation: command.automation,
           run: command.run,
+          ...(command.server ? { server: true } : {}),
         },
       };
     case "automationRetry":
@@ -329,7 +367,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -364,7 +402,10 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       result = await sendCliRequest<typeof command.verb>(request, {
         ...options.client,
         timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
-          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+          : command.verb === "saveRecoveryCopy" ? 420_000
+          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses"
+            || VERSION_CHANGE_VERBS.has(command.verb) ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
         env,
       });
     }

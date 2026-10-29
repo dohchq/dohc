@@ -34,6 +34,17 @@ export function normalizeHandle(handle: string): string {
   return handle.normalize("NFC").toLowerCase().normalize("NFC");
 }
 
+// The handle a name gets, so the scanner reads "@" and it back in full: the
+// name's handle characters, from its first letter or number, without the
+// punctuation a handle cannot end with. "" when the name has none.
+export function handleForName(name: string): string {
+  const handle = name
+    .replace(/[^\p{L}\p{N}\p{M}._-]/gu, "")
+    .replace(/^[\p{M}._-]+/u, "")
+    .replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
+  return nameByteLength(normalizeHandle(handle)) > 200 ? "" : handle;
+}
+
 // Character ranges [start, end) inside inline-code spans or fenced code
 // blocks. This deliberately pragmatic scanner covers backtick spans and both
 // ``` and ~~~ fences without taking a Markdown dependency.
@@ -63,8 +74,14 @@ export function codeRanges(body: string): Array<[number, number]> {
   }
   if (openFence) ranges.push([openFence.start, body.length]);
 
-  const inFence = (position: number) =>
-    ranges.some(([start, end]) => position >= start && position < end);
+  // Fences are in order and runs come in order, so one pointer finds each
+  // run's fence.
+  const fences = ranges.length;
+  let fence = 0;
+  const inFence = (position: number) => {
+    while (fence < fences && ranges[fence]![1] <= position) fence++;
+    return fence < fences && ranges[fence]![0] <= position;
+  };
   const runRe = /`+/g;
   let open: { len: number; start: number } | null = null;
   for (let match = runRe.exec(body); match !== null; match = runRe.exec(body)) {
@@ -80,15 +97,25 @@ export function codeRanges(body: string): Array<[number, number]> {
   return ranges;
 }
 
+// For positions asked in ascending order: whether each is inside code. Each
+// call moves forward through the ranges, so a whole scan reads them once.
+export function codeCover(body: string): (position: number) => boolean {
+  const ranges = codeRanges(body).sort((a, b) => a[0] - b[0]);
+  let next = 0;
+  let end = -1;
+  return (position) => {
+    while (next < ranges.length && ranges[next]![0] <= position) end = Math.max(end, ranges[next++]![1]);
+    return position < end;
+  };
+}
+
 // Candidate-agnostic source scanner used by the engine mention index and by
 // renderer candidate resolution. Tokens are returned in document order.
 export function scanMentionTokens(
   body: string,
   options: MentionScanOptions = {},
 ): MentionToken[] {
-  const ranges = options.ignoreCode ? codeRanges(body) : [];
-  const inCode = (position: number) =>
-    ranges.some(([start, end]) => position >= start && position < end);
+  const inCode = options.ignoreCode ? codeCover(body) : () => false;
   const found: MentionToken[] = [];
   MENTION_RE.lastIndex = 0;
   for (let match = MENTION_RE.exec(body); match !== null; match = MENTION_RE.exec(body)) {

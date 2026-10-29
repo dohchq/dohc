@@ -2,31 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
+import type { SettingsAgent } from "../workbench/agentChat";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
 type ChatEditor = {
   nav: ChatsNav | undefined;
   drafts: ChatsDrafts | undefined;
-  // A prefill waits in the new-post composer, which takes focus until the
-  // page first reports its drafts.
-  focusNewPost: boolean;
   revision: number;
   generation: number;
   restoreAttempted: boolean;
   onNavChange: (nav: ChatsNav) => void;
   onNavCommand: (nav: ChatsNav) => void;
   onDraftsChange: (drafts: ChatsDrafts) => void;
-};
-
-const EMPTY_DRAFTS: ChatsDrafts = {
-  composer: "",
-  newThreadBody: "",
-  dmRecipients: "",
-  dmDraft: "",
-  replyTarget: null,
-  resolveTargetMessageId: null,
-  poll: null,
-  newThreadPoll: null,
 };
 
 // Inactive editors unmount. Keep only their navigation and unsent input here;
@@ -38,7 +25,8 @@ export function useChatEditorTabs(input: {
   paths: readonly string[];
   activePaths?: readonly string[];
   enabled: boolean;
-  agentName?: string;
+  // The agents in Settings, whose names agent chat tabs take.
+  agents: readonly SettingsAgent[];
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
@@ -83,7 +71,6 @@ export function useChatEditorTabs(input: {
     const entry: ChatEditor = {
       nav: undefined,
       drafts: undefined,
-      focusNewPost: false,
       revision: 0,
       generation: session.current.generation,
       restoreAttempted: false,
@@ -100,43 +87,15 @@ export function useChatEditorTabs(input: {
       onDraftsChange(drafts) {
         if (store.current !== owner || owner.entries.get(path) !== entry) return;
         entry.drafts = drafts;
-        entry.focusNewPost = false;
       },
     };
     owner.entries.set(path, entry);
     return entry;
   }, []);
-  // A prefill lands in the conversation's new-post composer, after anything
-  // the person already typed there, and remounts the tab so it shows. It
-  // never leaves a reply the person has not sent: the tab keeps its thread
-  // and the answer is false.
-  const open = useCallback((nav: ChatsNav, prefill?: string): boolean => {
+  const open = useCallback((nav: ChatsNav): void => {
     callbacks.current.onNavigate();
     const path = chatEditorPath(nav);
     const entry = get(path);
-    if (prefill !== undefined) {
-      if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) {
-        if (entry.drafts?.composer.trim()) {
-          callbacks.current.onOpen(path);
-          return false;
-        }
-        // A thread in this tab belongs to this channel, whose new post the
-        // person may have started before opening the thread.
-        entry.drafts = entry.drafts && {
-          ...EMPTY_DRAFTS,
-          newThreadBody: entry.drafts.newThreadBody,
-          newThreadPoll: entry.drafts.newThreadPoll,
-        };
-      }
-      const typed = entry.drafts?.newThreadBody.trim() ? `${entry.drafts.newThreadBody}\n\n` : "";
-      entry.drafts = { ...(entry.drafts ?? EMPTY_DRAFTS), newThreadBody: `${typed}${prefill}` };
-      entry.focusNewPost = true;
-      entry.nav = nav;
-      entry.revision += 1;
-      render((value) => value + 1);
-      callbacks.current.onOpen(path);
-      return true;
-    }
     // A sidebar channel click focuses its tab, including its current thread.
     // A message link still commands a jump inside that tab.
     const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
@@ -154,7 +113,6 @@ export function useChatEditorTabs(input: {
       render((value) => value + 1);
     }
     callbacks.current.onOpen(path);
-    return true;
   }, [get]);
   // Mounted pages resolve their own destinations. Hydrate only hidden tabs.
   const pathsKey = JSON.stringify(input.paths.filter((path) => !input.activePaths?.includes(path)));
@@ -199,7 +157,7 @@ export function useChatEditorTabs(input: {
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   const titles = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
-      [path, chatEditorTitle(entry.nav!, input.agentName)] as const),
-  ), [revision, input.agentName, input.workspaceId]);
+      [path, chatEditorTitle(entry.nav!, input.agents)] as const),
+  ), [revision, input.agents, input.workspaceId]);
   return { get, open, titles };
 }

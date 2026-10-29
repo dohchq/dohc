@@ -5,7 +5,7 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Lock, Play, Share2 } from "lucide-react";
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -40,15 +40,15 @@ export function ViewActions(props: {
   const slot = useTabRowActionsSlot();
   const content = (
     <>
-      {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
+      {/* 28px: the widest mark (12px), its gap and an ellipsis. A grid of
           minmax(auto, max-content) columns, so its words set how wide it can
           grow and each item's own minimum how narrow: a label (min-w-0)
-          shrinks, and the row shrinks it to 25px before any tab name gives
+          shrinks, and the row shrinks it to 28px before any tab name gives
           way, while Try again keeps its natural width. */}
       {props.status ? (
         <div
           data-view-status=""
-          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[28px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
         >
           {props.status}
         </div>
@@ -103,7 +103,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
@@ -161,6 +161,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  // Actions left of Try again.
+  children?: ReactNode;
 }) {
   return (
     <div
@@ -180,55 +182,59 @@ export function EngineMayHoldDocumentNotice(props: {
         {props.message ?? "dohc could not open this document for editing."}
         {!props.message && props.contentShown ? " It is read-only for now." : ""}
       </span>
-      <button
-        type="button"
-        onClick={props.onRetry}
-        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
-      >
-        Try again
-      </button>
+      <span className="flex shrink-0 items-center gap-3">
+        {props.children}
+        <button
+          type="button"
+          onClick={props.onRetry}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Try again
+        </button>
+      </span>
     </div>
   );
 }
 
-// A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
-// app for the file, which edits it without dohc's editor.
-export function LossyNoteNotice(props: {
+// An Open externally control, then a lock and "Read-only copy" when the file
+// is from someone else. Main answers by the open's own rule. Until it answers
+// for this file, or when it can't, no words show, and the open decides alone.
+export function OpenExternallyControl(props: {
   workspaceId: string;
   path: string;
-  onError?: ReportButtonError;
-  // Binds the editor for this open, after the person confirms the warning.
-  onEditAnyway?: () => void;
+  className?: string;
+  children: (describedBy: string | undefined) => ReactNode;
 }) {
-  const [confirming, setConfirming] = useState(false);
-  // History keeps the original only of a file it shows. A path files.toml
-  // leaves out, or one not captured yet, has none to restore. History's own
-  // list for the file answers, as About's does, with its rules applied. Until
-  // it answers, the warning says nothing about History.
-  const offersEdit = props.onEditAnyway !== undefined;
-  const file = `${props.workspaceId}\u0000${props.path}`;
-  const [history, setHistory] = useState<{ file: string; keeps: boolean } | null>(null);
+  const id = useId();
+  const asked = `${props.workspaceId}\u0000${props.path}`;
+  const [answer, setAnswer] = useState<{ asked: string; readOnlyCopy: boolean } | null>(null);
   useEffect(() => {
-    if (!offersEdit) return;
     let live = true;
     void Promise.resolve()
-      .then(async () => {
-        const chats = await bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path });
-        if (!("fileObjectId" in chats)) return null;
-        if (chats.fileObjectId === null) return false;
-        const moments = await bridge().listEngineMoments({ workspaceId: props.workspaceId, objectId: chats.fileObjectId, limit: 1 });
-        return "moments" in moments ? moments.moments.length > 0 : null;
-      })
-      .then((keeps) => {
-        if (live && keeps !== null) setHistory({ file, keeps });
+      .then(() => bridge().readExternalOpen({ workspaceId: props.workspaceId, relativePath: props.path }))
+      .then(({ readOnlyCopy }) => {
+        if (live) setAnswer({ asked, readOnlyCopy });
       }, () => undefined);
     return () => {
       live = false;
     };
-  }, [offersEdit, file, props.workspaceId, props.path]);
-  const historyLine = history?.file !== file ? null
-    : history.keeps ? "History keeps the original."
-    : "History does not track this file, so dohc can't restore the original.";
+  }, [asked, props.workspaceId, props.path]);
+  const readOnlyCopy = answer?.asked === asked && answer.readOnlyCopy;
+  return (
+    <span className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}>
+      {props.children(readOnlyCopy ? id : undefined)}
+      {readOnlyCopy ? (
+        <span className="inline-flex items-center gap-1 text-subtle">
+          <Lock aria-hidden size={12} className="shrink-0" />
+          <span id={id}>Read-only copy</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// Opens a read-only note in the system's app for the file.
+export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -237,29 +243,80 @@ export function LossyNoteNotice(props: {
       );
   };
   return (
-    <div
-      data-testid="lossy-note-notice"
-      role="status"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      <span className="flex min-w-0 items-center gap-1.5">
-        <Lock aria-hidden size={12} className="shrink-0" />
-        dohc can't edit this document yet without changing parts it can't show.
-      </span>
-      <span className="flex shrink-0 items-center gap-3">
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+      {(describedBy) => (
         <button
           type="button"
           data-testid="lossy-note-open-externally"
+          aria-describedby={describedBy}
           onClick={openExternally}
           className="whitespace-nowrap text-subtle hover:text-ink"
         >
           Open externally
         </button>
+      )}
+    </OpenExternallyControl>
+  );
+}
+
+// A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
+// app for the file, which edits it without dohc's editor.
+export function LossyNoteNotice(props: {
+  workspaceId: string;
+  path: string;
+  // The hash of the bytes the note was read from, which saving would rewrite.
+  contentHash: string | null;
+  onError?: ReportButtonError;
+  // Binds the editor for this open, after the person confirms the warning.
+  onEditAnyway?: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // Each opening of the warning asks History again: capture can record an
+  // outside edit after the note opened.
+  const [opened, setOpened] = useState(0);
+  // History keeps the original only when its latest moment for the file
+  // recorded these exact bytes. A path files.toml leaves out has none to
+  // restore. Neither has a file capture has not recorded yet, or an outside
+  // edit capture holds. History's own list for the file answers, as About's
+  // does, with its rules applied. Until it answers, the warning says nothing
+  // about History.
+  const asked = `${props.workspaceId}\u0000${props.path}\u0000${props.contentHash}\u0000${opened}`;
+  const [history, setHistory] = useState<{ asked: string; keeps: HistoryKeeps } | null>(null);
+  useEffect(() => {
+    if (!confirming) return;
+    let live = true;
+    void historyKeeps(props.workspaceId, props.path, props.contentHash)
+      .then((keeps) => {
+        if (live && keeps !== null) setHistory({ asked, keeps });
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [confirming, asked, props.workspaceId, props.path, props.contentHash]);
+  const historyLine = history?.asked !== asked ? null
+    : history.keeps === "kept" ? "History keeps the original."
+    : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
+    : "dohc could not confirm that History can restore the original.";
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        dohc can't edit this document yet without changing parts it can't show.
+      </span>
+      <span className="flex shrink-0 items-center gap-3">
+        <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
         {props.onEditAnyway ? (
           <button
             type="button"
             data-testid="lossy-note-edit-anyway"
-            onClick={() => setConfirming(true)}
+            onClick={() => {
+              setOpened((count) => count + 1);
+              setConfirming(true);
+            }}
             className="whitespace-nowrap text-subtle hover:text-ink"
           >
             Edit anyway
@@ -290,9 +347,41 @@ export function LossyNoteNotice(props: {
   );
 }
 
+type HistoryKeeps = "kept" | "untracked" | "not-recorded";
+
+// Whether History's latest moment for the note holds the bytes `contentHash`
+// names; null when History can't say.
+async function historyKeeps(workspaceId: string, path: string, contentHash: string | null): Promise<HistoryKeeps | null> {
+  const chats = await bridge().listFileChats({ workspaceId, path });
+  if (!("fileObjectId" in chats)) return null;
+  if (chats.fileObjectId === null) return "untracked";
+  const moments = await bridge().listEngineMoments({ workspaceId, objectId: chats.fileObjectId, limit: 1 });
+  if (!("moments" in moments)) return null;
+  const latest = moments.moments[0];
+  if (latest === undefined || contentHash === null) return "not-recorded";
+  const read = await bridge().readEngineMoment({ workspaceId, momentId: latest.id });
+  if ("status" in read) return read.status === "untracked" ? "untracked" : null;
+  const text = read.moment?.afterText;
+  if (typeof text !== "string") return "not-recorded";
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex === contentHash ? "kept" : "not-recorded";
+}
+
+// Opens a file in the system's app for it. A failure goes to the shell's
+// toasts and Notices, with Try again.
+export function openExternally(props: { workspaceId: string; path: string; onError?: ReportButtonError }): void {
+  void bridge()
+    .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+    .catch((error: unknown) =>
+      props.onError?.("dohc could not open this file externally.", error, () => openExternally(props), `open-externally:${props.path}`),
+    );
+}
+
 export function EngineArtifactAssetsInvalidNotice(props: {
   workspaceId: string;
   path: string;
+  onError?: ReportButtonError;
 }) {
   return (
     <div
@@ -302,36 +391,33 @@ export function EngineArtifactAssetsInvalidNotice(props: {
       <span>
         dohc could not verify this drawing's images. The drawing is read-only.
       </span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
 
 // The next step in a file view that cannot show its file: the system's app
 // for it.
-export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
+export function OpenExternallyButton(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
-    <SecondaryButton
-      onClick={() =>
-        void bridge().openFileExternally({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-        })
-      }
-    >
-      Open externally
-    </SecondaryButton>
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path} className="text-xs">
+      {(describedBy) => (
+        <SecondaryButton aria-describedby={describedBy} onClick={() => openExternally(props)}>
+          Open externally
+        </SecondaryButton>
+      )}
+    </OpenExternallyControl>
   );
 }
 

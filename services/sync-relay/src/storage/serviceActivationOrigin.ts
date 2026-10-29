@@ -31,7 +31,7 @@ export function readServiceActivationOrigin(storage: StorageContext, namespace: 
     WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`)
     .get(document.workspaceId,document.mainVersionId,document.objectId,document.lineageClaimId);
   requireOrigin(baseline && baseline.baseline_digest === source.lineageClaimId && baseline.baseline_moment_relay_seq === source.baseRelaySeq);
-  return {source, baseline: {
+  return {source, binding, baseline: {
     relaySequence: integer(baseline.baseline_moment_relay_seq, 1),
     projectedDigest: parseLiveUpdateDigest(baseline.baseline_projected_sha256),
     projectedLength: integer(baseline.baseline_projected_byte_length, 0),

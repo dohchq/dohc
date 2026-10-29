@@ -337,12 +337,13 @@ export const restoreInProgress = (storage: StorageContext, workspaceId: string, 
 function retireHeldActivation(storage: StorageContext, enrollment: ServiceHostEnrollment,
   identity: {replicationEpoch: string; streamIdentity: string}, held: ServiceHostHeldActivation, nowMs: number): void {
   held.assertHeld();
-  const activation = storage.db.prepare(`SELECT a.activation_id,a.completion_json,json_extract(a.binding_json,'$.currentPath') AS path
+  // Any prepared activation: a held successor that never completed still retires.
+  const activation = storage.db.prepare(`SELECT a.activation_id,json_extract(a.binding_json,'$.currentPath') AS path
     FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
     WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND a.retired_at_ms IS NULL AND d.lineage_state='current'`)
     .get(enrollment.workspaceId, enrollment.objectId);
   if (identity.replicationEpoch !== held.replicationEpoch || identity.streamIdentity !== held.streamIdentity ||
-    activation?.activation_id !== held.activationId || activation.completion_json === null || activation.path !== enrollment.path) {
+    activation?.activation_id !== held.activationId || activation.path !== enrollment.path) {
     throw relayError("conflict", HELD_CHANGED);
   }
   if (restoreInProgress(storage, enrollment.workspaceId, enrollment.objectId)) throw relayError("restore-in-progress", "This document is being restored. Resume live editing once it finishes.");

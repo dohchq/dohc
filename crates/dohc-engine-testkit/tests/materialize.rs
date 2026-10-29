@@ -2088,6 +2088,59 @@ fn direct_replay_finds_a_rowless_copy_after_a_gap() {
     assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
 }
 
+#[test]
+fn selected_replay_recovers_listed_staged_files_with_or_without_rows() {
+    for has_row in [false, true] {
+        let sc = Scratch::new("selected-listed-copy");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_overwrite(&sc, &mut store);
+        put_staged(&sc, "6a31.63", OUTSIDE);
+        put_staged(&sc, "6f74686572.0", CREATED);
+        std::fs::write(sc.target("a.md"), OURS).unwrap();
+        if has_row {
+            store
+                .open_displacement(&DisplacementSpec {
+                    job_id: "j1".into(),
+                    workspace_id: "ws".into(),
+                    target_path: "a.md".into(),
+                    displaced_name: "6a31.63".into(),
+                    expected_sha256: hex_sha256(PREIMAGE),
+                    content_sha256: Some(hex_sha256(OURS)),
+                    now_ms: 5,
+                })
+                .unwrap();
+        }
+        let job = store.load_materialization_job("j1").unwrap().unwrap();
+        materialize_one(&store, sc.workspace(), &job, &sweep_options()).unwrap();
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+        assert_eq!(read(&sc, &staged("6f74686572.0")).as_deref(), Some(CREATED));
+        assert!(!sc.target(&staged("6a31.63")).exists());
+    }
+}
+
+#[test]
+fn selected_replay_settles_a_row_when_its_staging_folder_is_missing() {
+    let sc = Scratch::new("selected-missing-staging");
+    let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+    stage_overwrite(&sc, &mut store);
+    store
+        .open_displacement(&DisplacementSpec {
+            job_id: "j1".into(),
+            workspace_id: "ws".into(),
+            target_path: "a.md".into(),
+            displaced_name: "6a31.63".into(),
+            expected_sha256: hex_sha256(PREIMAGE),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 5,
+        })
+        .unwrap();
+    assert!(!sc.target(STAGING).exists());
+    let job = store.load_materialization_job("j1").unwrap().unwrap();
+    materialize_one(&store, sc.workspace(), &job, &sweep_options()).unwrap();
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+    assert_nothing_displaced(&sc, &store);
+}
+
 /// The staged file was read and not yet judged. Replay reads it again: known
 /// bytes are deleted and the job completes.
 #[test]

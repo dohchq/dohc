@@ -56,7 +56,7 @@ process.stdin.on('data', chunk => {
     if (type !== 1) continue;
     const r = JSON.parse(payload);
     if (r.method === 'hello') {
-      const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=256'];
+      const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=512'];
       const env = Object.keys(process.env);
       // Windows receives SystemRoot. On macOS, CoreFoundation sets this variable inside Node itself.
       const allowed = {win32: ['SystemRoot'], darwin: ['__CF_USER_TEXT_ENCODING']}[process.platform] ?? [];

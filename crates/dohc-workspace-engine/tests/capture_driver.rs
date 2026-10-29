@@ -16,8 +16,8 @@ use dohc_engine_sync::list_replication_ops;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_IMPORT_PROGRESS_EVENT, CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice, EngineEventReceiver,
-    EngineService, root_binding::write_root_binding,
+    CAPTURE_WRITE_DEFERRED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
+    EngineEventNotice, EngineEventReceiver, EngineService, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -309,98 +309,106 @@ fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
         .expect("moment metadata")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() {
-    // The D1/D2 acceptance pair.
-    let scratch = ScratchDir::new().expect("scratch");
+/// Open a new workspace over two existing files and wait for its first
+/// import to record both.
+async fn open_over_existing_files(
+    scratch: &ScratchDir,
+) -> (
+    InProcessTransport<EngineService>,
+    WorkspaceHandle,
+    tokio::sync::mpsc::Receiver<EngineEventNotice>,
+) {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    write_file(scratch.path(), "offline-a.md", b"edited while closed a");
-    write_file(scratch.path(), "offline-b.md", b"edited while closed b");
+    write_file(scratch.path(), "existing-a.md", b"already here a");
+    write_file(scratch.path(), "existing-b.md", b"already here b");
 
     let service = Arc::new(EngineService::new());
-    let mut events = service.events().subscribe();
+    let events = service.events().subscribe();
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let handle = open_workspace(&transport, &scratch, 1).await;
-    wait_for_text(
-        &transport,
-        &handle,
-        "offline-a.md",
-        Some("edited while closed a"),
-    )
-    .await;
-    wait_for_text(
-        &transport,
-        &handle,
-        "offline-b.md",
-        Some("edited while closed b"),
-    )
-    .await;
+    let handle = open_workspace(&transport, scratch, 1).await;
+    wait_for_text(&transport, &handle, "existing-a.md", Some("already here a")).await;
+    wait_for_text(&transport, &handle, "existing-b.md", Some("already here b")).await;
+    (transport, handle, events)
+}
 
-    // One batched event per settled reconcile pass covers both files.
-    let notice = wait_for_moment_event(&mut events, "offline-a.md").await;
-    let paths = notice.payload["paths"].as_array().expect("paths").clone();
-    if !paths.iter().any(|entry| entry == "offline-b.md") {
-        wait_for_moment_event(&mut events, "offline-b.md").await;
-    }
-
+async fn close_workspace(
+    transport: &InProcessTransport<EngineService>,
+    handle: WorkspaceHandle,
+    id: u64,
+) {
     transport
         .call(
             RequestContext::unbounded(),
-            request(9_100, "workspace.close", Some(handle), json!({})),
+            request(id, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_workspace_baseline_records_one_added_existing_files_pass() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let (transport, handle, mut events) = open_over_existing_files(&scratch).await;
+
+    // One batched event per settled pass covers both files.
+    let notice = wait_for_moment_event(&mut events, "existing-a.md").await;
+    let paths = notice.payload["paths"].as_array().expect("paths").clone();
+    if !paths.iter().any(|entry| entry == "existing-b.md") {
+        wait_for_moment_event(&mut events, "existing-b.md").await;
+    }
+    close_workspace(&transport, handle, 9_100).await;
 
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    let (summary_a, correlation_a) = moment_metadata(&db_path, "offline-a.md");
-    let (summary_b, correlation_b) = moment_metadata(&db_path, "offline-b.md");
-    assert_eq!(summary_a.as_deref(), Some("Reconciled offline edits"));
-    assert_eq!(summary_b.as_deref(), Some("Reconciled offline edits"));
+    let (summary_a, correlation_a) = moment_metadata(&db_path, "existing-a.md");
+    let (summary_b, correlation_b) = moment_metadata(&db_path, "existing-b.md");
+    assert_eq!(summary_a.as_deref(), Some("Added existing files"));
+    assert_eq!(summary_b.as_deref(), Some("Added existing files"));
     let correlation_a = correlation_a.expect("baseline moments carry a correlation id");
     assert_eq!(
         Some(correlation_a.as_str()),
         correlation_b.as_deref(),
-        "one reconcile pass = ONE correlation id across its per-file moments"
+        "one startup pass = ONE correlation id across its per-file moments"
     );
+}
 
-    // Second offline window: an edit and a DELETE reconcile in the same pass
-    // and must stay one contiguous history group — history groups only
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopened_workspace_baseline_records_changes_made_while_closed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let (transport, handle, _events) = open_over_existing_files(&scratch).await;
+    close_workspace(&transport, handle, 9_100).await;
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (_, first_correlation) = moment_metadata(&db_path, "existing-a.md");
+
+    // An edit and a DELETE made while closed reconcile in the same pass and
+    // must stay one contiguous history group — history groups only
     // consecutive same-correlation moments, so the delete carrying NULL
     // provenance would split it.
-    write_file(scratch.path(), "offline-a.md", b"edited offline again");
-    std::fs::remove_file(scratch.path().join("offline-b.md")).expect("offline delete");
+    write_file(scratch.path(), "existing-a.md", b"edited offline");
+    std::fs::remove_file(scratch.path().join("existing-b.md")).expect("offline delete");
     let handle = open_workspace(&transport, &scratch, 2_000).await;
-    wait_for_text(
-        &transport,
-        &handle,
-        "offline-a.md",
-        Some("edited offline again"),
-    )
-    .await;
-    wait_for_text(&transport, &handle, "offline-b.md", None).await;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(9_101, "workspace.close", Some(handle), json!({})),
-        )
-        .await
-        .expect("second close");
+    wait_for_text(&transport, &handle, "existing-a.md", Some("edited offline")).await;
+    wait_for_text(&transport, &handle, "existing-b.md", None).await;
+    close_workspace(&transport, handle, 9_101).await;
 
-    let (summary_a2, correlation_a2) = moment_metadata(&db_path, "offline-a.md");
-    let (summary_b2, correlation_b2) = moment_metadata(&db_path, "offline-b.md");
-    assert_eq!(summary_a2.as_deref(), Some("Reconciled offline edits"));
+    let (summary_a, correlation_a) = moment_metadata(&db_path, "existing-a.md");
+    let (summary_b, correlation_b) = moment_metadata(&db_path, "existing-b.md");
+    assert_eq!(summary_a.as_deref(), Some("Changed while dohc was closed"));
     assert_eq!(
-        summary_b2.as_deref(),
-        Some("Reconciled offline edits"),
+        summary_b.as_deref(),
+        Some("Changed while dohc was closed"),
         "the pass's DELETE moment carries the pass summary"
     );
-    let correlation_a2 = correlation_a2.expect("second pass carries a correlation id");
+    let correlation_a = correlation_a.expect("the reopened pass carries a correlation id");
     assert_eq!(
-        Some(correlation_a2.as_str()),
-        correlation_b2.as_deref(),
+        Some(correlation_a.as_str()),
+        correlation_b.as_deref(),
         "a delete recorded mid-pass shares the pass correlation id"
     );
-    assert_ne!(correlation_a2, correlation_a, "each pass mints its own id");
+    assert_ne!(
+        Some(correlation_a),
+        first_correlation,
+        "each pass mints its own id"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -653,6 +661,12 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
         )
         .await
         .expect("close");
+
+    // The re-ingest came from a rebuild while open, so it can't claim the
+    // edits were made while dohc was closed.
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2574,6 +2588,114 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_write_events_fire_only_when_a_held_path_gains_an_outside_write() {
+    async fn reconcile(
+        transport: &InProcessTransport<EngineService>,
+        handle: &WorkspaceHandle,
+    ) -> Value {
+        tokio::time::timeout(WAIT, async {
+            let mut result = call(transport, handle, 10, "capture.reconcile", json!({})).await;
+            loop {
+                assert_eq!(result["degraded"], json!(false), "{result}");
+                if result["settled"] == json!(true) {
+                    return result;
+                }
+                tokio::task::yield_now().await;
+                result = call(transport, handle, 11, "capture.flush", json!({})).await;
+            }
+        })
+        .await
+        .expect("capture settles")
+    }
+
+    fn deferred_events(events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>) -> Vec<Value> {
+        let mut payloads = Vec::new();
+        while let Ok(notice) = events.try_recv() {
+            if notice.name == CAPTURE_WRITE_DEFERRED_EVENT {
+                payloads.push(notice.payload);
+            }
+        }
+        payloads
+    }
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "note.md", b"Before.\n");
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 100).await;
+
+    write_file(scratch.path(), "unheld.md", b"No open session.\n");
+    assert_eq!(
+        reconcile(&transport, &handle).await["deferredWrites"],
+        json!([])
+    );
+    assert!(deferred_events(&mut events).is_empty());
+    assert_eq!(
+        read_text(&transport, &handle, 2, "unheld.md")
+            .await
+            .as_deref(),
+        Some("No open session.\n")
+    );
+
+    for (text, held) in [
+        ("First outside write.\n", "Still held.\n"),
+        // Not the first round's recorded text, which matches the head and holds nothing.
+        ("A new outside write.\n", "Held again.\n"),
+    ] {
+        let opened = call(
+            &transport,
+            &handle,
+            3,
+            "ydoc.open",
+            json!({ "versionId": "main", "path": "note.md", "contentKind": "plaintext" }),
+        )
+        .await;
+        write_file(scratch.path(), "note.md", text.as_bytes());
+        assert_eq!(
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!(["note.md"])
+        );
+        assert_eq!(
+            deferred_events(&mut events),
+            vec![json!({ "workspaceId": WORKSPACE_ID, "path": "note.md" })]
+        );
+
+        // A second write and full scan leave the path deferred without another wake.
+        write_file(scratch.path(), "note.md", held.as_bytes());
+        assert_eq!(
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!(["note.md"])
+        );
+        assert!(deferred_events(&mut events).is_empty());
+
+        call(
+            &transport,
+            &handle,
+            4,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+        assert_eq!(
+            reconcile(&transport, &handle).await["deferredWrites"],
+            json!([])
+        );
+        assert!(deferred_events(&mut events).is_empty());
+        assert_eq!(
+            read_text(&transport, &handle, 5, "note.md")
+                .await
+                .as_deref(),
+            Some(held)
+        );
+    }
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e_rpcs_on_a_closed_handle_fail_cleanly() {
     let scratch = ScratchDir::new().expect("scratch");

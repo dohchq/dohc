@@ -138,6 +138,25 @@ describe("chat presentation admission", () => {
     const r = request(); r.assertCurrent.mockImplementation(() => { throw new Error("retired"); });
     await expect(r.present(message(), "t")).rejects.toThrow("retired");
   });
+  it("tells link holders apart by their link principal, never by an account, and never as you", async () => {
+    const r = request();
+    const link = (principalId: string, displayName = "Guest"): ChatMessage =>
+      message({ author: { kind: "link", displayName, grantId: "grant-1", principalId }, authorUserId: undefined });
+    expect(chatActorForPresentation(link("p1"), issuer)).toMatchObject({
+      key: { kind: "link", grantId: "grant-1", principalId: "p1" }, assurance: "relay-verified",
+    });
+    const first = await r.present(link("p1"), "t");
+    expect(first).toMatchObject({ hue: null, self: false });
+    expect(first.group.startsWith("unknown:")).toBe(false);
+    // The same principal in another thread, under a new name, is the same link holder.
+    expect((await r.present(link("p1", "Renamed"), "other")).group).toBe(first.group);
+    expect((await r.present(link("p2"), "t")).group).not.toBe(first.group);
+    // A link holder named after you, on your account's server, is still not you.
+    expect(await r.present(link("p3", "alice"), "t")).toMatchObject({ self: false });
+    expect((await r.present(message(), "t")).group).not.toBe(first.group);
+    const entry = { authorKind: "link" as const, authorDisplayName: "Guest", linkGrantId: "grant-1", linkPrincipalId: "p1" };
+    expect((await r.present(chatLinkMessageForPresentation(entry), "t")).group).toBe(first.group);
+  });
 });
 
 describe("History presentation", () => {

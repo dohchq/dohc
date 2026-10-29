@@ -15,14 +15,15 @@ import { chromium } from "playwright";
 
 const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
 // Small icon sizes get a heavier mark and no paper grid, so they stay legible.
-const SMALL_ICON = ".mark{stroke-width:11}.dot{r:11}.grid{display:none}";
+const SMALL_ICON = ".mark{stroke-width:13}.dot{r:13}.grid{display:none}";
 // iconutil's iconset names and their pixel sizes.
 const ICONSET = [16, 32, 128, 256, 512].flatMap((size) => [
   [`icon_${size}x${size}.png`, size],
   [`icon_${size}x${size}@2x.png`, size * 2],
 ]);
-// The sizes electron-builder would put in an icon.ico generated from a PNG.
-const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
+// The sizes Windows asks for from 100% to 200% scale, so the taskbar's 30px
+// (125%) and 36px (150%) icons are drawn at size instead of shrunk.
+const ICO_SIZES = [16, 20, 24, 30, 32, 36, 40, 48, 64, 128, 256];
 
 /** Pack PNG images into an ICO file, which Windows reads from Vista on. */
 function ico(images) {
@@ -60,7 +61,7 @@ try {
     await render(variant, 512, join(buildDir, `${variant}.png`));
     console.log(`Wrote build/${variant}.png`);
   }
-  // A taskbar at 150% scale shrinks the 48px image, so it is small too.
+  // The taskbar draws 48px at 200% scale, so that size is small too.
   const icoImages = [];
   for (const size of ICO_SIZES) {
     icoImages.push({ size, png: await render("icon", size, undefined, size <= 48 ? SMALL_ICON : "") });

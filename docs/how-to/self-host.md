@@ -401,8 +401,15 @@ Each check reserves five times the document's stored state on the relay, plus th
 Each person runs one check at a time.
 A check that must wait for room gets a retry.
 The relay refuses an edit whose check needs more than 128 MiB, or whose document state and new edit total more than 16 MiB.
-Two validation workers run the checks, each with its own heap of up to 512 MiB.
-These budgets exclude the validation workers' heaps, the session host's document state, and OS socket buffers.
+Two validation processes run the checks, each with its own heap of up to 512 MiB.
+When a check runs out of that heap, the relay refuses the edit as too large and keeps running.
+An owner's refused edit is kept unapplied, and that document's later owner edits wait behind it.
+The owner can save a recovery copy of refused edits, even ones kept in an earlier copy of the workspace.
+If this build has not migrated that earlier copy, the session host copies it into `.recovery` in the session host's data folder and migrates the copy.
+That needs free space of twice the earlier copy's size. The session host removes the copy after the save, or after one idle minute.
+The session host checks a document in the same processes before it starts live editing on it, one document at a time, so edits always keep one process.
+When that check runs out of heap, the document shows Stopped by the server until its owner chooses Resume.
+These budgets exclude the validation processes' memory, the session host's document state, and OS socket buffers.
 
 These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
 They remain provisional until the launch server is measured.
@@ -551,3 +558,4 @@ node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 
 The upgrade preserves volumes and secrets and saves the previous configuration privately.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
+On a large relay log, the first start after an upgrade can take several minutes.

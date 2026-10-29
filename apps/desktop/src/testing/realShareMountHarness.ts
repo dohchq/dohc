@@ -103,7 +103,7 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
-    historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({ resolveFiles: async () => {throw new Error("Unexpected file resolution");}, readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
@@ -133,7 +133,15 @@ export function createRealShareMountHarness(input: {
     relayShareErrorCopy: unexpected,
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
     ownerLiveStop: unexpected,
+    pushRecorded: unexpected,
+    liveDocument: unexpected,
+    withoutEditors: unexpected,
     listOwnerLiveStops: unexpected,
+    ownerLiveQuarantines: unexpected,
+    unwrittenOwnerLiveReleases: unexpected,
+    retryOwnerLiveQuarantine: unexpected,
+    retryOwnerLiveRelease: unexpected,
+    saveOwnerLiveRecoveryCopy: unexpected,
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });

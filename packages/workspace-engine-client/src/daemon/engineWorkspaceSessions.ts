@@ -35,6 +35,7 @@ import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 export interface EngineWorkspace {
   workspaceId: string;
@@ -104,8 +105,17 @@ interface SessionEntry {
     // Settles when its daemon request starts, after the workspace is prepared.
     requested: Promise<void>;
   } | null;
+  // Runs opening the workspace, from their first attempt to their last,
+  // including the waits between attempts.
+  openingRuns: number;
+  // Woken when an attempt starts, the last opening run ends, or the
+  // workspace starts closing or rebuilding.
+  openWaiters: Set<() => void>;
   closing: Promise<void> | null;
   retiring: boolean;
+  // From a close that keeps the workspace until a run starts opening it
+  // again, as the sync client closes a binding to reopen it at once.
+  reopening: boolean;
   activeRuns: number;
   idleWaiters: Set<() => void>;
   captureWaitController: AbortController;
@@ -123,6 +133,12 @@ export interface EngineWorkspaceRunOptions {
    * for a read whose initial-capture refusal occurs before any side effect.
    */
   retryInitialCapture?: boolean;
+  /**
+   * Stop waiting for the operation at quit, so the session can close. Enable
+   * only for work the daemon may finish or drop after the app exits, such as
+   * a relay request.
+   */
+  abandonAtQuit?: boolean;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -238,13 +254,13 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
 }
 
 // Work that quit abandons: a bounded region asked to start after
-// `beginShutdown`, or a run that would wait on a workspace's first open.
-// Either is refused before it reaches the daemon or stops waiting, because the
-// app is quitting and the work is abandonable by construction.
+// `beginShutdown`, a run that would wait on a workspace's first open, or a run
+// marked `abandonAtQuit`. Each is refused before it reaches the daemon or
+// stops waiting, because the app is quitting and the work is abandonable.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
     super(
-      "Rust engine refused work that waits on an open: the app is quitting. " +
+      "Rust engine stopped waiting for abandonable work: the app is quitting. " +
         "Nothing new starts during teardown; retry after the next launch.",
     );
     this.name = "EngineWorkspaceShuttingDownError";
@@ -498,27 +514,39 @@ export class EngineWorkspaceSessions {
 
   /**
    * The open of this workspace already under way, or null when none is, or
-   * the session is closing or rebuilding. Settles when the open does, with its
-   * binding published. It also settles if the workspace's preparation outlasts
-   * the open deadline, or if the daemon request outlasts that deadline from
-   * when it started, so at most two deadlines in all. Never opens, and never
-   * counts as a run, so a caller inside a run can wait on it: a close waits
-   * for runs.
+   * the session is closing or rebuilding. An open is under way from a run's
+   * first attempt to its last, including a wait for a busy store and the
+   * pause before a retry. A close that keeps the workspace, such as the sync
+   * client's rebind, counts as an open under way until the next open starts.
+   * Settles when the open does, with its binding published, when its last
+   * attempt fails, or when the workspace starts closing for good or
+   * rebuilding. It also settles if an attempt's preparation outlasts the open
+   * deadline, if its daemon request outlasts that deadline from when it
+   * started, or after two deadlines in all. Null once the workspace is open.
+   * Never opens, and never counts as a run. A close waits for runs, so while
+   * one does, a caller inside a run (engineRunScope) is given nothing to wait
+   * on.
    */
-  openInProgress(workspace: EngineWorkspace): Promise<void> | null {
+  openInProgress(workspace: EngineWorkspace, until = this.now() + 2 * this.workspaceOpenDeadlineMs): Promise<void> | null {
     const key = this.sessionKey(workspace), entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry?.opening || entry.closing || entry.retiring ||
-      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath) return null;
-    const { settled, requested } = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
-    return new Promise<void>((resolve) => {
-      let done = false, timer: ReturnType<typeof setTimeout>;
-      const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
-      const wait = () => { timer = setTimeout(finish, deadlineMs); timer.unref?.(); };
+    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry ||
+      (!entry.opening && entry.openingRuns === 0 && !entry.reopening) ||
+      (entry.closing && entry.activeRuns > 0 && insideEngineRun()) ||
+      entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
+      (this.hasAvailableClient() && this.currentBinding(workspace)) || this.now() >= until) return null;
+    const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (lookAgain: boolean) => { clearTimeout(timer); entry.openWaiters.delete(again); resolve(lookAgain); };
+      const again = () => finish(true);
+      entry.openWaiters.add(again);
+      const wait = () => { clearTimeout(timer); timer = setTimeout(() => finish(false), Math.min(deadlineMs, until - this.now())); timer.unref?.(); };
       wait();
+      if (!attempt) return;
       // The daemon request's own deadline starts with it, after preparation.
-      void requested.then(() => { if (done) return; clearTimeout(timer); wait(); });
-      void settled.then(finish);
-    });
+      void attempt.requested.then(() => { if (entry.openWaiters.has(again)) wait(); });
+      void attempt.settled.then(again);
+    }).then((lookAgain) => (lookAgain ? this.openInProgress(workspace, until) ?? undefined : undefined));
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */
@@ -531,7 +559,7 @@ export class EngineWorkspaceSessions {
     if (!binding || !entry) return null;
     entry.activeRuns += 1;
     try {
-      return await operation(binding);
+      return await inEngineRun(() => operation(binding));
     } finally {
       this.release(entry);
     }
@@ -596,7 +624,8 @@ export class EngineWorkspaceSessions {
           });
         }
         try {
-          return await operation(binding);
+          const running = inEngineRun(() => operation(binding));
+          return await (options.abandonAtQuit ? this.untilQuit(running) : running);
         } catch (error) {
           const retryAfterReconnect = requiresReconnect(error);
           const retryAfterTransport =
@@ -1000,7 +1029,11 @@ export class EngineWorkspaceSessions {
   }
 
   beginRebuild(workspace: AttachedEngineWorkspace): void {
-    this.rebuildingWorkspaces.add(this.sessionKey(workspace));
+    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    this.rebuildingWorkspaces.add(key);
+    if (!entry) return;
+    entry.reopening = false;
+    this.wakeOpenWaiters(entry);
   }
 
   endRebuild(workspace: AttachedEngineWorkspace): void {
@@ -1040,13 +1073,24 @@ export class EngineWorkspaceSessions {
         return;
       }
       if (entry.closing) {
-        await entry.closing;
+        // A close for good ends a wait on a close that keeps the workspace
+        // now, not once that close settles.
+        if (retire && !entry.retiring) {
+          entry.retiring = true;
+          entry.reopening = false;
+          this.wakeOpenWaiters(entry);
+        }
+        // That close reports its own failure. This one still removes the
+        // entry, so no live entry stays marked as retiring.
+        await entry.closing.catch(() => undefined);
         continue;
       }
 
       entry.retiring = retire;
+      entry.reopening = !retire && !this.rebuildingWorkspaces.has(key);
       const closing = this.closeEntry(entry);
       entry.closing = closing;
+      this.wakeOpenWaiters(entry);
       try {
         await closing;
       } finally {
@@ -1103,8 +1147,11 @@ export class EngineWorkspaceSessions {
         binding: null,
         opened: false,
         opening: null,
+        openingRuns: 0,
+        openWaiters: new Set(),
         closing: null,
         retiring: false,
+        reopening: false,
         activeRuns: 0,
         idleWaiters: new Set(),
         captureWaitController: new AbortController(),
@@ -1169,6 +1216,26 @@ export class EngineWorkspaceSessions {
   }
 
   private async openForRun(
+    workspace: EngineWorkspace,
+    entry: SessionEntry,
+    options: EngineWorkspaceRunOptions,
+    rebindStarted: boolean,
+    storeBusy: StoreBusyRetryState,
+  ): Promise<EngineWorkspaceBinding> {
+    entry.openingRuns += 1;
+    if (!entry.closing) entry.reopening = false;
+    try {
+      return await this.openWithRetries(workspace, entry, options, rebindStarted, storeBusy);
+    } finally {
+      if (--entry.openingRuns === 0) this.wakeOpenWaiters(entry);
+    }
+  }
+
+  private wakeOpenWaiters(entry: SessionEntry): void {
+    for (const wake of [...entry.openWaiters]) wake();
+  }
+
+  private async openWithRetries(
     workspace: EngineWorkspace,
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
@@ -1248,6 +1315,7 @@ export class EngineWorkspaceSessions {
       const requested = new Promise<void>((resolve) => { request = resolve; });
       const promise = this.openWithClient(client, workspace, request);
       entry.opening = { client, promise, settled, requested };
+      this.wakeOpenWaiters(entry);
       let binding: EngineWorkspaceBinding;
       try {
         binding = await this.untilFirstOpenAbandoned(entry, promise);
@@ -1314,15 +1382,20 @@ export class EngineWorkspaceSessions {
     open: Promise<EngineWorkspaceBinding>,
   ): Promise<EngineWorkspaceBinding> {
     if (entry.opened) return await open;
+    return await this.untilQuit(open);
+  }
+
+  // Quit ends the wait, not the work.
+  private async untilQuit<T>(work: Promise<T>): Promise<T> {
     const quit = this.shutdownController.signal;
-    if (quit.aborted) throw new EngineWorkspaceShuttingDownError();
     let abandon!: () => void;
     const abandoned = new Promise<never>((_resolve, reject) => {
       abandon = () => reject(new EngineWorkspaceShuttingDownError());
     });
-    quit.addEventListener("abort", abandon, { once: true });
+    if (quit.aborted) abandon();
+    else quit.addEventListener("abort", abandon, { once: true });
     try {
-      return await Promise.race([open, abandoned]);
+      return await Promise.race([abandoned, work]);
     } finally {
       quit.removeEventListener("abort", abandon);
     }

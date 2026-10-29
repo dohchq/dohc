@@ -14,10 +14,12 @@ it("fits 1023 named authors and the window's marker in a settlement snapshot", (
   expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
   expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
 });
-it("derives the engine's own settlement ID", () => {
+// The engine's `update_native_audit_fixture` writes this settlement.
+it("derives the engine's own settlement ID and record digest", () => {
   const {payload} = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
-  const {record} = payload as unknown as {record: Record<string, unknown>};
+  const {record, recordDigest} = payload as unknown as {record: Record<string, unknown>; recordDigest: string};
   expect(nativeSettlementId(record)).toBe(record.settlementId);
+  expect(settlementRecordDigest(record)).toBe(recordDigest);
 });
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });

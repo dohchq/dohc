@@ -80,6 +80,8 @@ services:
   sync-relay:
     <<: *service
     command: [sync-relay]
+    # A validation process that runs out of heap aborts. No core file may keep its documents or secrets.
+    ulimits: {core: 0}
     environment:
       <<: *auth
       DOHC_RELAY_LINK_KEY: ${DOHC_RELAY_LINK_KEY:?Run the self-host bootstrap to generate secrets}
@@ -112,6 +114,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      # The first start after an upgrade can build an index over the whole relay log before the relay listens.
+      start_period: 300s
 
   relay-snapshot:
     <<: *service

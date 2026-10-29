@@ -3,7 +3,7 @@ import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
@@ -43,7 +43,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
-    await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
   } finally {
@@ -60,13 +60,11 @@ async function seedRunnerSettings(
   mode: "report" | "silent-fail" | "ask",
 ): Promise<string> {
   const command = runnerCommand(mode);
-  const settings = {
+  const settings: DesktopUserSettings = {
     ...DEFAULT_USER_SETTINGS,
-    profile: { agentName: "Nova", preferredName: "Sam" },
-    runner: {
-      command,
-      enabled: true,
-      timeoutMinutes: 1,
+    profile: { preferredName: "Sam" },
+    agents: {
+      default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
     },
   };
   await writeFile(
@@ -104,8 +102,8 @@ async function openMyAgent(page: Page): Promise<void> {
 
   await page.getByTestId(activityPin("chats")).click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
-  await page.getByTestId("chats-my-agent").click();
-  await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
+  await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+  await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
 }
 
 test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {
@@ -113,7 +111,7 @@ test("picking the agent in a group's post says it runs when you send, and the of
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest(temp, "agent-dispatch-offer-e2e");
-    await seedRunnerSettings(temp, "report");
+    const command = await seedRunnerSettings(temp, "report");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await trustOpenWorkspace(desktop);
@@ -122,7 +120,7 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
 
     const composer = page.getByTestId("chats-new-thread-composer");
-    await composer.pressSequentially("@ag");
+    await composer.pressSequentially("@Nova");
     await page.locator('[data-testid="chats-new-thread-mention-option"][data-candidate-id="agent:default"]').click();
     const offer = page.getByTestId("composer-agent-offer");
     await expect(offer).toHaveAttribute("data-state", "runs");
@@ -132,56 +130,55 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await composer.press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
     await expect(page.getByTestId("composer-agent-offer")).toHaveCount(0);
+
+    const runChip = page.getByTestId("chats-message").filter({ hasText: REPORT }).getByTestId("chats-run-chip");
+    await runChip.click();
+    await expect(page.getByTestId("chats-run-popover")).toBeVisible();
+    await expect(page.getByTestId("chats-run-command")).toHaveText(command);
+    await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
+    // The command and log path wrap inside the popover, Copy included.
+    expect(await page.getByTestId("chats-run-popover").evaluate((popover) => popover.scrollWidth <= popover.clientWidth)).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
-test("My agent dispatches a fresh successful run for each human message", async () => {
+test("the agent dispatches a fresh successful run for each human message", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-dispatch-report-e2e";
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    const command = await seedRunnerSettings(temp, "report");
+    await seedRunnerSettings(temp, "report");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await openMyAgent(page);
 
-    await page.getByTestId("chats-new-thread-composer").fill("audit the projections");
-    await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    // An agent DM opens on its conversation.
+    const composer = page.getByTestId("chats-lane-composer");
+    await composer.fill("audit the projections");
+    await composer.press("Enter");
 
     const agentReplies = page
-      .getByTestId("chats-message")
+      .getByTestId("chats-lane-message")
       .filter({ hasText: REPORT });
     await expect(agentReplies).toHaveCount(1);
     await expect(
-      agentReplies.first().getByTestId("chats-comment-agent-badge"),
+      agentReplies.first().getByTestId("chats-lane-agent-badge"),
     ).toHaveText("agent");
 
-    const firstRunChip = agentReplies.first().getByTestId("chats-run-chip");
-    await expect(firstRunChip).toBeVisible();
-    await firstRunChip.click();
-    await expect(page.getByTestId("chats-run-popover")).toBeVisible();
-    await expect(page.getByTestId("chats-run-command")).toHaveText(command);
-    await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
-
     // A second committed human message is a second ledger trigger. The same
-    // report text arriving again, attached to a distinct run chip, proves the
-    // first trigger was durably acked rather than accidentally replayed.
-    await page.getByTestId("chats-composer").fill("also audit the export totals");
-    await page.getByTestId("chats-composer").press("Enter");
+    // report arriving again, in the same conversation, proves the first
+    // trigger was durably acked rather than accidentally replayed.
+    await composer.fill("also audit the export totals");
+    await composer.press("Enter");
     await expect(agentReplies).toHaveCount(2);
-    const runChips = page.getByTestId("chats-run-chip");
-    await expect(runChips).toHaveCount(2);
-    const runLabels = await runChips.allTextContents();
-    expect(new Set(runLabels).size).toBe(2);
+    await expect(page.getByTestId("chats-lane-message")).toHaveCount(4);
     await expect(
-      agentReplies.nth(1).getByTestId("chats-comment-agent-badge"),
+      agentReplies.nth(1).getByTestId("chats-lane-agent-badge"),
     ).toHaveText("agent");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -202,32 +199,28 @@ test("an agent's question with choices is a poll; picking one answers it and the
     const page = desktop.page;
     await openMyAgent(page);
 
-    await page.getByTestId("chats-new-thread-composer").fill("plan the release");
-    await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await page.getByTestId("chats-lane-composer").fill("plan the release");
+    await page.getByTestId("chats-lane-composer").press("Enter");
 
     // The agent asks with choices. The question is a poll: its choices are
     // on screen and there is no bare Answer button.
-    const question = page.getByTestId("chats-message").filter({ hasText: "Which day do we ship?" });
+    const question = page.getByTestId("chats-lane-message").filter({ hasText: "Which day do we ship?" });
     await expect(question).toHaveCount(1);
-    await expect(question.getByTestId("chats-comment-agent-badge")).toHaveText("agent");
-    await expect(question.getByTestId("chats-comment-decision-open")).toHaveText("Poll open");
-    const options = question.getByTestId("chats-comment-poll-option");
+    await expect(question.getByTestId("chats-lane-agent-badge")).toHaveText("agent");
+    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Poll open");
+    const options = question.getByTestId("chats-lane-poll-option");
     await expect(options).toHaveText(["Friday", "Monday"]);
-    await expect(question.getByTestId("chats-comment-decision-resolve")).toHaveCount(0);
+    await expect(question.getByTestId("chats-lane-decision-resolve")).toHaveCount(0);
 
     // Picking a choice answers the poll with that choice.
     await options.nth(1).click();
-    await expect(page.getByTestId("chats-resolving-mode")).toContainText("Monday");
-    await page.getByTestId("chats-composer").press("Enter");
-    await expect(question.getByTestId("chats-comment-decision-resolved")).toHaveText("Answered");
+    await expect(question.getByTestId("chats-lane-decision-resolved")).toHaveText("Answered");
     await expect(options.nth(1)).toHaveAttribute("data-chosen", "true");
-    await expect(page.getByTestId("chats-message").filter({ hasText: "Monday" }).first()).toBeVisible();
 
     // The answer is a human message, so it triggers a run. That run reads
-    // the taken choice out of the thread and reports it back.
+    // the taken choice out of the conversation and reports it back.
     await expect(
-      page.getByTestId("chats-message").filter({ hasText: "going with Monday" }),
+      page.getByTestId("chats-lane-message").filter({ hasText: "going with Monday" }),
     ).toHaveCount(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -248,21 +241,22 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
     const page = desktop.page;
     await openMyAgent(page);
 
-    await page.getByTestId("chats-new-thread-composer").fill("audit the projections");
-    await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await page.getByTestId("chats-lane-composer").fill("audit the projections");
+    await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The failure is a row in Notices. The thread keeps only what people and
-    // the agent wrote, so once the notice is there it still holds one post.
+    // The failure is a row in Notices. The conversation keeps only what
+    // people and the agent wrote, so once the notice is there it still holds
+    // one message.
     await page.getByTestId("notice-center-toggle").click();
     // "failed", not "failed to start": the runner started, then exited silently.
     await expect(page.getByTestId("notice-center").getByText(
-      'Your agent\'s run in "audit the projections" failed',
+      // An agent DM's conversation has no title, so the title names no thread.
+      "Nova's run failed",
       { exact: true },
     )).toBeVisible();
-    const messages = page.getByTestId("chats-message");
+    const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
-    await expect(messages).toHaveAttribute("data-author-kind", "human");
+    await expect(messages.getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "human");
     await expect(messages).toContainText("audit the projections");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -283,27 +277,28 @@ function hitAtCenter(toast: Locator): Promise<string> {
 }
 
 // Toasts sit above every dialog and its scrim (NoticeCenter), so a failed
-// test says so inside Settings and its reason is reachable in the toast while
+// check says so inside Settings and its reason is reachable in the toast while
 // Settings stays open. Copy and Dismiss leave Settings in place. The row stays
 // in Notices after the toast is gone.
-test("failed runner tests stay readable above Settings and remain in Notices", async () => {
+test("failed agent checks stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest(temp, "agent-settings-failure-e2e");
     await seedRunnerSettings(temp, "silent-fail");
-    desktop = await launchDesktopApp({ workspace: temp });
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("agents")).click();
-    await page.getByTestId("runner-self-test-button").click();
-    await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");
-    await expect(page.getByTestId("runner-self-test-result")).toHaveText("Test failed.");
+    await page.getByTestId("agent-check").click();
+    await expect(page.getByTestId("agent-row")).toContainText("Didn't reply.");
+    // The toast names the agent; Copy details carries why.
+    const message = "Nova didn't reply to the check.";
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");
-    await expect(toast).toContainText(reason);
+    await expect(toast).toContainText(message);
     const settings = page.getByTestId(desktopPins.settingsDialog);
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -331,7 +326,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(settings).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
-    await expect(page.getByTestId("notice-center")).toContainText(reason);
+    await expect(page.getByTestId("notice-center")).toContainText(message);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

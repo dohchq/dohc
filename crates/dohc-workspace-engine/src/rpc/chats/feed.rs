@@ -211,6 +211,8 @@ mod tests {
                 body: "hello".to_owned(),
                 created_at_ms: 10,
                 automation: None,
+                link_author: None,
+                author_agent_id: None,
                 attachments: Vec::new(),
             },
             thread: ChatThread {
@@ -250,6 +252,7 @@ mod tests {
                 group: ChannelGroup::default(),
                 created_at_ms: 1,
                 updated_at_ms: 2,
+                agent_id: None,
             }),
             ..item()
         };

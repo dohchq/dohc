@@ -19,7 +19,8 @@ import {
   DismissShareSkipsPayload,
   ListOwnerLiveDocumentsPayload, OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload, OwnerLiveRefusalsResult,
-  OwnerLiveDocumentActionPayload,
+  OwnerLiveDocumentActionPayload, StopOwnerLiveDocumentPayload, StopOwnerLiveDocumentResult, RetryOwnerLiveQuarantinePayload,
+  SaveOwnerLiveRecoveryCopyPayload, SaveOwnerLiveRecoveryCopyResult,
   ListRelaySharesResult, GetRelayReceivedSharePayload, GetRelayReceivedShareResult,
   RevokeRelaySharePayload, RevokeRelayShareResult, UndoRelaySharePayload, UndoRelayShareResult,
   PollRelayShareDiscussionActivityPayload, PollRelayShareDiscussionActivityResult,
@@ -213,13 +214,27 @@ export const relayShareOperations = {
     capabilityId: "share.live.document.stop", channel: "desktop:stop-owner-live-document",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
-    payload: OwnerLiveDocumentActionPayload,
+    payload: StopOwnerLiveDocumentPayload, result: StopOwnerLiveDocumentResult,
   },
   resumeOwnerLiveDocument: {
     capabilityId: "share.live.document.resume", channel: "desktop:resume-owner-live-document",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
     payload: OwnerLiveDocumentActionPayload,
+  },
+  // The owner's Try again for one document whose edits the server refused.
+  retryOwnerLiveQuarantine: {
+    capabilityId: "share.live.document.retry", channel: "desktop:retry-owner-live-quarantine",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Live editing stopped because this window changed workspaces.",
+    payload: RetryOwnerLiveQuarantinePayload,
+  },
+  // Writes a document's kept edits next to its file. The edits stay queued.
+  saveOwnerLiveRecoveryCopy: {
+    capabilityId: "share.live.document.recovery.save", channel: "desktop:save-owner-live-recovery-copy",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Save recovery copy stopped because this window changed workspaces.",
+    payload: SaveOwnerLiveRecoveryCopyPayload, result: SaveOwnerLiveRecoveryCopyResult,
   },
   createRelayShare: {
     capabilityId: "share.create", channel: "desktop:create-relay-share",
@@ -244,7 +259,8 @@ export const relayShareOperations = {
   },
   undoRelayShare: {
     capabilityId: "share.revoke.undo", channel: "desktop:undo-relay-share",
-    scope: "device", guard: "trusted-sender",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: UndoRelaySharePayload, result: UndoRelayShareResult,
   },
   createRelayShareLink: {

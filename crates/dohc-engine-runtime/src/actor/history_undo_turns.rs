@@ -354,19 +354,25 @@ impl ActorHandle {
     pub(in crate::actor) async fn wait_undo_checkpoint(
         token: &crate::CancellationToken,
         since: &mut Option<std::time::Instant>,
-        wait: Arc<impl Fn() + Send + Sync + 'static>,
+        wait: Arc<impl Fn() -> dohc_engine_storage::CheckpointWait + Send + Sync + 'static>,
     ) -> Result<(), RuntimeError> {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if since.get_or_insert_with(std::time::Instant::now).elapsed()
-            >= std::time::Duration::from_secs(1)
-        {
-            return Err(StorageError::FileLocked.into());
-        }
-        tokio::task::spawn_blocking(move || wait())
+        let locked_since = *since.get_or_insert_with(std::time::Instant::now);
+        let checkpoint = tokio::task::spawn_blocking(move || wait())
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if checkpoint == dohc_engine_storage::CheckpointWait::Running {
+            // A PASSIVE checkpoint can still be copying or syncing pages.
+            // Only an idle or completed cycle can establish persistent contention.
+            *since = None;
+        } else if locked_since.elapsed() >= std::time::Duration::from_secs(1) {
+            return Err(StorageError::FileLocked.into());
+        }
         tokio::select! {
             () = token.cancelled() => return Err(RuntimeError::Cancelled),
             () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
@@ -937,7 +943,7 @@ impl ActorHandle {
                                 Err(error) => {
                                     tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
-                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
+                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..} | DomainError::SyncedDeletionRevivalRefused) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
                                     if refusal {
                                         tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),settle_error.cloned().unwrap_or_else(|| error.to_string())]).map_err(StorageError::persist_public)?;
                                     }

@@ -622,6 +622,8 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './lossy-markdown': './src/lossy-markdown.ts',
     './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
+    './list-markdown': './src/list-markdown.ts',
+    './table-row-heights': './src/table-row-heights.ts',
     './named-live-provider': './src/namedLiveProvider.ts',
     './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
   })
@@ -824,7 +826,9 @@ describe('private journal refusal attribution and cleanup', () => {
     for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
   })
 
-  it.each(['throw', 'transaction', 'destroy'] as const)('finalizes once on projection %s and never diagnoses mutation', action => {
+  // A projection that throws is a validator failure, never a refusal of the
+  // owner's candidate: the relay retries it.
+  it.each(['throw', 'transaction', 'destroy'] as const)('finalizes once on projection %s, rethrows, and never diagnoses', action => {
     const probe = observeJournalCuts()
     const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
     const original = projection.yDocToMarkdown
@@ -836,9 +840,9 @@ describe('private journal refusal attribution and cleanup', () => {
       }
       return original(doc)
     })
-    expect(journal(journalFixture())).toEqual({ kind: 'refused', reason: action === 'throw' ? 'invalid-schema' : 'projection-mutated', source: 'final' })
+    expect(() => journal(journalFixture())).toThrow('projection failed')
     expect(probe.spy).toHaveBeenCalledOnce()
-    expect(registration).toHaveBeenCalledTimes(action === 'throw' ? 1 : 0)
+    expect(registration).not.toHaveBeenCalled()
     expect(probe.scratches[0].finalizations).toBe(1)
     expect(probe.scratches[0].doc.isDestroyed).toBe(true)
   })
@@ -895,12 +899,12 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     expect(probe.scratches).toHaveLength(0)
   })
 
-  it('keeps a diagnostic projection mutation as an integration failure without further diagnosis', () => {
+  it('keeps a projection that mutates and throws an integration failure without diagnosis', () => {
     const call = journalFixture([editText('prefix '), doc => doc.getMap('meta').set('unknown', 1)])
     const probe = observeJournalCuts()
     const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
     vi.spyOn(projection, 'yDocToMarkdown').mockImplementation(doc => { doc.transact(() => {}); throw new Error('mutation') })
-    expect(journal(call)).toEqual({ kind: 'refused', reason: 'projection-mutated', source: 'admitted-cut' })
+    expect(() => journal(call)).toThrow('mutation')
     expect(probe.spy).toHaveBeenCalledTimes(2)
     expect(registration).not.toHaveBeenCalled()
     for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }

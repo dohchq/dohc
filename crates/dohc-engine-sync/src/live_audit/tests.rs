@@ -3372,7 +3372,13 @@ fn imported_activation_publication_admits_the_preserved_event_zero_source() {
     imported_activation_publication(false, true);
 }
 
-fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bool) {
+/// An imported activation's adoption and two settlements on the service
+/// host. Returns what that host published, or nothing when the settlement is
+/// refused.
+fn imported_activation_publication(
+    foreign_baseline: bool,
+    preserve_baseline: bool,
+) -> Vec<ReplicationEnvelope> {
     use dohc_engine_collab::live_update_application::{
         NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
         capture_imported_owner_activation,
@@ -3670,7 +3676,7 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
                 .iter()
                 .any(|op| op.payload["momentId"] == "service-first-settlement")
         );
-        return;
+        return Vec::new();
     }
     settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
     let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
@@ -3757,6 +3763,67 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         second.payload["payloadAfterBlobSha256"],
         hex_sha256(b"Next accepted edit.")
     );
+    crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap()
+}
+
+const NATIVE_AUDIT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json"
+);
+
+/// The operations an imported activation publishes, as the relay's fixture holds them.
+fn native_audit_fixture() -> serde_json::Value {
+    let ops = imported_activation_publication(false, false);
+    ops.iter()
+        .map(|op| {
+            serde_json::json!({
+                "originSeq": op.origin_seq,
+                "opKind": op.op_kind,
+                "recordedAtMs": op.recorded_at_ms,
+                "payload": op.payload,
+            })
+        })
+        .collect()
+}
+
+/// The relay's fixture of native output holds base and settlement audits
+/// this engine still imports byte for byte. Each run of the engine names its
+/// activation afresh, so the fixture is one run's output, not a reproduction.
+#[test]
+fn the_relay_fixture_holds_current_native_audit_payloads() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(NATIVE_AUDIT_FIXTURE).unwrap()).unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    let mut checked = Vec::new();
+    for op in fixture.as_array().unwrap() {
+        let (kind, payload) = (op["opKind"].as_str().unwrap(), &op["payload"]);
+        let imported = match kind {
+            BASE_OP => imported_base(&conn, payload, "ws").map(|_| ()),
+            settlement_record::SETTLEMENT_OP => {
+                settlement_record::check_imported_payload(payload, "ws")
+            }
+            _ => continue,
+        };
+        if let Err(error) = imported {
+            panic!("{kind}: {error:?}; regenerate with update_native_audit_fixture");
+        }
+        checked.push(kind);
+    }
+    assert!(
+        checked.contains(&BASE_OP) && checked.contains(&settlement_record::SETTLEMENT_OP),
+        "regenerate with update_native_audit_fixture"
+    );
+}
+
+// Like protocol/examples/update_fixtures.rs, Rust is the fixture's only writer.
+#[test]
+#[ignore = "regenerates the relay's native audit fixture"]
+fn update_native_audit_fixture() {
+    std::fs::write(
+        NATIVE_AUDIT_FIXTURE,
+        serde_json::to_string_pretty(&native_audit_fixture()).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 #[test]

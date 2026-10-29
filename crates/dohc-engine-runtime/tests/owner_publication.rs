@@ -2616,6 +2616,7 @@ async fn stop_action_at_cursor(
             },
             None,
             Some(accepted_cursor),
+            None,
             action.into(),
             40,
             Arc::new(NoFaults),
@@ -2883,6 +2884,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
                         Some(f.binding.clone()),
                         None,
                         Some(0),
+                        None,
                         "release".into(),
                         30,
                         Arc::new(CrashAt(point)),
@@ -3418,6 +3420,72 @@ async fn stop_requested_work_precedes_sixty_four_deferred_rows() {
     assert_eq!(rows.len(), 64);
     assert_eq!(rows[0].document.object_id, "object");
     assert!(rows[0].retirement_owed);
+    supervisor.close_all().unwrap();
+}
+
+// A Try again names the kept edits its record holds. It never starts a
+// release, and an older finished Stop restored under the same binding, which
+// took other edits, does not answer for the newer record.
+#[tokio::test]
+async fn stop_try_again_answers_only_for_its_own_kept_edits() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let (older, newer) = ("1".repeat(64), "2".repeat(64));
+    let kept = |accepted_cursor: Option<i64>, snapshot: &str| {
+        actor.owner_ydoc_stop(
+            "workspace".into(),
+            None,
+            Some(f.binding.clone()),
+            None,
+            accepted_cursor,
+            Some(snapshot.to_owned()),
+            "release".into(),
+            41,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+    };
+    let before = release_snapshot(&f);
+    assert!(matches!(
+        kept(None, &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    assert_eq!(release_snapshot(&f), before);
+    let released = kept(Some(0), &newer).await.unwrap().unwrap();
+    assert_eq!(released[0].kept_snapshot.as_deref(), Some(newer.as_str()));
+    assert_eq!(
+        kept(None, &newer).await.unwrap().unwrap()[0].state,
+        "released"
+    );
+    assert!(matches!(
+        kept(None, &older).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    // The engine store restored to the older Stop's state.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let saved: String = tx
+                .query_row("SELECT binding_json FROM owner_live_stops", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let mut row: serde_json::Value = serde_json::from_str(&saved).unwrap();
+            row["keptSnapshot"] = serde_json::json!(older);
+            tx.execute(
+                "UPDATE owner_live_stops SET binding_json=?1",
+                [row.to_string()],
+            )
+            .unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        kept(None, &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    assert!(matches!(
+        kept(Some(0), &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
     supervisor.close_all().unwrap();
 }
 
@@ -4103,6 +4171,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
                 Some(f.binding.clone()),
                 None,
                 Some(0),
+                None,
                 "release".into(),
                 40,
                 Arc::new(ObserveCommit(submitted.clone())),
@@ -6093,6 +6162,34 @@ fn window_store(root: &ScratchDir, origin: &str, base: &[u8], lineage: &str) -> 
 }
 
 async fn retained_window(retained: Retained) -> RetainedWindow {
+    retained_window_keeping(retained, None).await.0
+}
+
+/// An edit of the lineage from the owner's desktop, which never saw
+/// [`RETAINED`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kept {
+    /// A new paragraph, which destroys nothing.
+    Append,
+    /// A disk edit that capture folds, which deletes the retained text.
+    Fold,
+}
+
+/// [`retained_window`], where the host's hosted pass delivered `kept` while
+/// the root activation was bound and the document ready. Its session never
+/// admitted it, so it stays queued and holds the document through the
+/// release. The document then returns to the scope backfilling. Answers the
+/// feed that served it, and its row.
+async fn retained_window_keeping(
+    retained: Retained,
+    kept: Option<Kept>,
+) -> (
+    RetainedWindow,
+    Option<(
+        dohc_engine_sync::RelaySyncClient<HostedFeed>,
+        dohc_engine_sync::ReplicationEnvelope,
+    )>,
+) {
     let root = ScratchDir::new().unwrap();
     let base = owner_source_base();
     let lineage = hex_sha256(&base);
@@ -6180,6 +6277,39 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
     if retained != Retained::Own {
         accept_latest(&actor, &store, 2).await;
     }
+    let kept = match kept {
+        None => None,
+        Some(kept) => {
+            execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq,scope_token)
+                  VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'),'scope');
+                INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','ready',1)");
+            let desktop = desktop_of(&base, &lineage, &synced).await;
+            let (op, bytes) = match kept {
+                Kept::Append => desktop.append(&lineage, "A desktop paragraph").await,
+                Kept::Fold => {
+                    desktop
+                        .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
+                        .await
+                }
+            };
+            desktop.close().await;
+            let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
+            let op = feed.serve(op, bytes);
+            let client = dohc_engine_sync::RelaySyncClient::new(feed);
+            let pass = hosted_pass(
+                &mut store,
+                &client,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+            );
+            assert_eq!(
+                pass.held.get("object"),
+                Some(&dohc_engine_sync::HostedHold::LiveEditUnadmitted),
+                "{kept:?}: {pass:?}"
+            );
+            assert!(pass_commit(&mut store, &client, &pass).committed);
+            Some((client, op))
+        }
+    };
     // Stop: Phase A, settlement with nothing applied, the document parks,
     // and the release. Its document returns with no activation current.
     let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
@@ -6226,9 +6356,16 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         )
         .await
         .unwrap();
-    execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
-          VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
-        INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+    if kept.is_some() {
+        execute(
+            &mut store,
+            "UPDATE hosted_documents SET state='parked',held_reason=NULL,scope_generation=0,unmaterialized_seq=NULL",
+        );
+    } else {
+        execute(&mut store, "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+              VALUES ('workspace',1,0,1,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'));
+            INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation) VALUES ('workspace','object','notes/plan.md','parked',0)");
+    }
     let Release::Released { boundary, .. } = owner
         .release_activation(scope, coordinate.clone(), key, 40)
         .await
@@ -6236,12 +6373,19 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
     else {
         panic!("{retained:?}: released");
     };
-    execute(
-        &mut store,
-        "UPDATE hosted_documents SET scope_generation=1,state='ready';
-        UPDATE hosted_replicas SET scope_token='scope'",
-    );
-    RetainedWindow {
+    if kept.is_some() {
+        execute(
+            &mut store,
+            "UPDATE hosted_documents SET scope_generation=1,state='backfilling',backfill_cursor=0",
+        );
+    } else {
+        execute(
+            &mut store,
+            "UPDATE hosted_documents SET scope_generation=1,state='ready';
+            UPDATE hosted_replicas SET scope_token='scope'",
+        );
+    }
+    let window = RetainedWindow {
         owner,
         actor,
         supervisor,
@@ -6255,7 +6399,8 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         retained_delivery: delivery_id,
         synced,
         root,
-    }
+    };
+    (window, kept)
 }
 
 impl RetainedWindow {
@@ -7210,6 +7355,131 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
     w.close().await;
+}
+
+/// Opus's 7h third finding, through the real release: the owner's edit, kept
+/// queued while its session was bound, meets the unsettled released tail
+/// Stop leaves with [`RETAINED`]. Once the document returns, an append that
+/// destroys nothing applies once and the successor's captured state holds
+/// it with the retained text; a fold that would delete the retained text
+/// stays queued, held for that work, and changes nothing.
+#[tokio::test]
+async fn a_kept_edit_meets_the_released_tail_its_release_leaves() {
+    for kept in [Kept::Append, Kept::Fold] {
+        let (mut w, served) = retained_window_keeping(Retained::Carried, Some(kept)).await;
+        let (client, op) = served.unwrap();
+        let queued = vec![(
+            op.origin_id.clone(),
+            op.origin_seq,
+            "hosted".to_owned(),
+            Some("relay".to_owned()),
+        )];
+        assert_eq!(queued_updates(&w.store), queued, "{kept:?}");
+        let native = w.native();
+        assert!(w.text().contains(RETAINED), "{kept:?}: {}", w.text());
+        let status = |store: &EngineStore| {
+            dohc_engine_sync::read_hosted_replica(store, "workspace")
+                .unwrap()
+                .unwrap()
+                .documents["object"]
+                .status
+                .clone()
+        };
+        // Recording a released-lineage hold counts as a commit, so the pass
+        // whose drain records it commits nothing and the next pass commits.
+        let commits: Vec<bool> = (0..3)
+            .map(|_| {
+                let pass = hosted_pass(
+                    &mut w.store,
+                    &client,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                );
+                pass_commit(&mut w.store, &client, &pass).committed
+            })
+            .collect();
+        let expected = match kept {
+            Kept::Append => [true, true, true],
+            Kept::Fold => [false, true, true],
+        };
+        assert_eq!(commits, expected, "{kept:?}");
+        match kept {
+            Kept::Append => {
+                assert_eq!(
+                    status(&w.store),
+                    dohc_engine_sync::HostedDocumentStatus::Ready
+                );
+                assert_eq!(queued_updates(&w.store), []);
+                let text = w.text();
+                assert_eq!(
+                    (
+                        text.matches("A desktop paragraph").count(),
+                        text.matches(RETAINED).count()
+                    ),
+                    (1, 1),
+                    "{text}"
+                );
+                w.actor
+                    .materialize_replay_pending(w.root.path().to_owned(), "workspace".into(), 50)
+                    .await
+                    .unwrap();
+                let next = w
+                    .actor
+                    .capture_imported_owner_activation(
+                        "relay".into(),
+                        window_key(),
+                        WINDOW_PATH.into(),
+                        1_000_000,
+                        None,
+                        CancellationToken::new(),
+                        Arc::new(()),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    next.source.predecessor_activation_id.as_deref(),
+                    Some(w.first.activation_id.as_str())
+                );
+                assert_eq!(next.full_state, w.native());
+                let successor = Ydoc::wire();
+                successor.apply(&next.full_state).unwrap();
+                assert_eq!(
+                    successor.project(ContentKind::Richdoc).unwrap().content,
+                    text
+                );
+            }
+            Kept::Fold => {
+                let dohc_engine_sync::HostedDocumentStatus::Held(
+                    dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+                        binding,
+                        continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+                        binding_stale: false,
+                    },
+                ) = status(&w.store)
+                else {
+                    panic!("{:?}", status(&w.store));
+                };
+                assert_eq!(
+                    (
+                        binding.incoming.origin_id.as_str(),
+                        binding.incoming.origin_seq
+                    ),
+                    (op.origin_id.as_str(), op.origin_seq)
+                );
+                assert_eq!(queued_updates(&w.store), queued);
+                assert_eq!(w.native(), native);
+                let text = w.text();
+                assert_eq!(
+                    (
+                        text.matches("A desktop edit.").count(),
+                        text.matches(RETAINED).count()
+                    ),
+                    (0, 1),
+                    "{text}"
+                );
+            }
+        }
+        w.close().await;
+    }
 }
 
 /// Another device's `ydoc.update` of the document, before the relay places it.

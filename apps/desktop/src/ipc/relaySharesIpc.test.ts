@@ -1,8 +1,9 @@
 import { relayShareOperations } from "./shareOperations";
+import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
-import { createRelaySharesIpcHandlers } from "./relaySharesIpc";
+import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers } from "./relaySharesIpc";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -87,8 +88,24 @@ function harness() {
   const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   let enrolled=true;
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
-  const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}));
-  const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
+  const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
+  const unwrittenOwnerLiveReleases = vi.fn<Dependencies["unwrittenOwnerLiveReleases"]>(async () => []);
+  const retryOwnerLiveQuarantine = vi.fn<Dependencies["retryOwnerLiveQuarantine"]>(async () => undefined);
+  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"}));
+  const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
+  const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:action!=="release",document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null,
+    ...(action==="release" ? {materialized:true} : {})}));
+  // Each path holds the document "object", which the object ids name at "live.md".
+  const liveDocument = vi.fn<Dependencies["liveDocument"]>(async (_workspace, target) =>
+    ({mainVersionId: "main", objectId: "objectId" in target ? target.objectId : "object", currentPath: "path" in target ? target.path : "live.md"}));
+  const pushRecorded = vi.fn<Dependencies["pushRecorded"]>(async () => undefined);
+  const editors = new Set<string>(), reserved: string[] = [];
+  const withoutEditors: Dependencies["withoutEditors"] = async (_workspace, path, change) => {
+    if (editors.has(path)) throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`);
+    reserved.push(path);
+    return change();
+  };
+  const ownerHandlersDependencies: Dependencies = {
     remoteForWorkspace: remote,
     currentCredentialGeneration: () => generation,
     currentCredentials: () => credentials,
@@ -98,10 +115,19 @@ function harness() {
     relayShareErrorCopy: (status) => `sharing failed (${status})`,
     relayShareDiscussionActivityPolls: polls,
     ownerLiveStop,
+    pushRecorded,
+    liveDocument,
+    withoutEditors,
     listOwnerLiveStops: localStops,
+    ownerLiveQuarantines,
+    unwrittenOwnerLiveReleases,
+    retryOwnerLiveQuarantine,
+    retryOwnerLiveRelease,
+    saveOwnerLiveRecoveryCopy,
     sharesChanged,
     reconcileReceivedShares,
-  });
+  };
+  const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>(ownerHandlersDependencies);
   registerOperations<typeof relayShareOperations, Event, Operation>({
     handle: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
@@ -124,6 +150,16 @@ function harness() {
     unenrolled:() => {enrolled=false;},
     localStops,
     ownerLiveStop,
+    pushRecorded,
+    liveDocument,
+    editors,
+    reserved,
+    ownerLiveQuarantines,
+    unwrittenOwnerLiveReleases,
+    retryOwnerLiveQuarantine,
+    retryOwnerLiveRelease,
+    saveOwnerLiveRecoveryCopy,
+    ownerHandlersDependencies,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     rotateCredentials: () => { generation += 1; },
@@ -134,7 +170,7 @@ describe("named browser invitations", () => {
   it.each(["preparing","paused","unavailable","renamed","not-yet-enrolled"])("retires %s documents without claiming a restore generation",async () => {
     const h=harness();h.unenrolled();
     h.request.mockResolvedValue({ok:true,path:"live.md",objectId:"object",status: "retired", acceptedCursor: 0});
-    await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel,{workspaceId,path:"live.md"})).resolves.toBeUndefined();
+    await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel,{workspaceId,path:"live.md"})).resolves.toEqual({keptEdits:"none"});
     expect(JSON.parse(h.request.mock.calls[0]![2]!.body as string)).toEqual({path:"live.md",objectId:"object",retire:true});
   });
   it.each([undefined, "https://share.example.test/s/edit/exact-grant"])("preserves the grant and optional server URL %s", async browserInvitationUrl => {
@@ -155,12 +191,113 @@ describe("named browser invitations", () => {
   });
 });
 
+describe("sync before live hosting", () => {
+  const editShare = {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"};
+  const shareSent = (h: ReturnType<typeof harness>) => h.request.mock.calls.some(([, path, init]) => path === "/sync/workspace/shares" && init?.method === "POST");
+
+  it("sends an edit share only after sync sends what it recorded", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const created = h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    expect(shareSent(h)).toBe(false);
+    pushed.resolve();
+    await created;
+    expect(shareSent(h)).toBe(true);
+  });
+
+  it("sends the share at 10 s when sync takes longer", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      const h = harness();
+      h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+      h.pushRecorded.mockReturnValue(new Promise(() => {}));
+      const created = h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(shareSent(h)).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await created;
+      expect(shareSent(h)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends the share at once when sync fails", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness();
+      h.request.mockResolvedValue({shareId: "share", grantId: "grant"});
+      h.pushRecorded.mockRejectedValue(new Error("server unreachable"));
+      await h.invoke(relayShareOperations.createRelayShare.channel, editShare);
+      expect(shareSent(h)).toBe(true);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("syncs before edit links, Resume, and retry, but not before view access", async () => {
+    const h = harness();
+    h.request.mockResolvedValue(linkResult);
+    await h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput);
+    await h.invoke(relayShareOperations.createRelayShare.channel, {...editShare, access: "view"});
+    expect(h.pushRecorded).not.toHaveBeenCalled();
+    await h.invoke(relayShareOperations.createRelayShareLink.channel, {...linkInput, access: "edit"});
+    await h.invoke(relayShareOperations.addRelayShareLink.channel, {workspaceId, shareId: "share", access: "edit"});
+    h.request.mockResolvedValue({ok: true, documents: [{path: "live.md", objectId: "object", status: "ready"}]});
+    await h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"});
+    h.request.mockResolvedValue({ok: true, path: "live.md", objectId: "object", status: "ready"});
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {workspaceId, path: "live.md"});
+    expect(h.pushRecorded).toHaveBeenCalledTimes(4);
+    expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId);
+  });
+
+  it("syncs before retuning a link to Edit", async () => {
+    const h = harness();
+    const retune = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view"}});
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...retune, access: "view"})).resolves.toEqual({outcome: "narrowed"});
+    expect(h.pushRecorded).not.toHaveBeenCalled();
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "edit", url: "https://relay.example/new"}});
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...retune, access: "edit"})).resolves.toMatchObject({outcome: "widened"});
+    expect(h.pushRecorded).toHaveBeenCalledOnce();
+    expect(h.pushRecorded.mock.invocationCallOrder[0]).toBeLessThan(h.request.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it("syncs the window's workspace before Undo restores the share", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const undone = h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    expect(h.accountRequest).not.toHaveBeenCalled();
+    pushed.resolve();
+    await expect(undone).resolves.toEqual({shareId: "share"});
+    expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {method: "POST", body: JSON.stringify({undoId: "undo-1"})});
+  });
+
+  it("doesn't restore the share when the window changes workspaces while Undo syncs", async () => {
+    const h = harness(), pushed = deferred<void>();
+    h.pushRecorded.mockReturnValue(pushed.promise);
+    const undone = h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
+    await vi.waitFor(() => expect(h.pushRecorded).toHaveBeenCalledWith(workspaceId));
+    h.retireRenderer();
+    pushed.resolve();
+    await expect(undone).rejects.toThrow(relayShareOperations.undoRelayShare.inactiveMessage);
+    expect(h.accountRequest).not.toHaveBeenCalled();
+  });
+});
+
 describe("owner live document enrollment", () => {
   it("offers Resume after a half success and clears the deferred Stop on retry", async () => {
     const h=harness();
     const saved={state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"live.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}};
     h.localStops.mockResolvedValue([saved]);
-    h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",status:"ready"}]});
+    h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",objectId:"object",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",objectId:"object",status:"ready"}]});
     h.ownerLiveStop.mockRejectedValueOnce(new Error("local clear failed"));
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"})).rejects.toThrow("local clear failed");
     const listed=await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId});
@@ -170,8 +307,8 @@ describe("owner live document enrollment", () => {
     });
     await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"});
     expect(h.request.mock.calls.filter(([, ,init])=>init?.method==="POST")).toHaveLength(2);
-    expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md");
-    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).toEqual({documents:[{path:"live.md",status:"ready",canResume:false}],nextCursor:null});
+    expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md",{mainVersionId:"main",objectId:"object",currentPath:"live.md"});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).toEqual({documents:[{path:"live.md",objectId:"object",status:"ready",canResume:false}],nextCursor:null});
   });
   it("keeps the local Stop until Resume's POST succeeds", async () => {
     const h=harness(),posting=deferred<unknown>();
@@ -182,15 +319,42 @@ describe("owner live document enrollment", () => {
     posting.reject(new Error("offline"));
     await expect(resume).rejects.toThrow("offline");
     expect(h.ownerLiveStop).not.toHaveBeenCalled();
-    h.request.mockResolvedValueOnce({ok:true,path:"live.md",status:"ready"});
+    h.request.mockResolvedValueOnce({ok:true,path:"live.md",objectId:"object",status:"ready"});
     await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"});
-    expect(h.ownerLiveStop).toHaveBeenCalledWith(h.workspace,"clear","live.md");
+    expect(h.ownerLiveStop).toHaveBeenCalledWith(h.workspace,"clear","live.md",{mainVersionId:"main",objectId:"object",currentPath:"live.md"});
+  });
+  // Document A stopped at old.md and moved to new.md; B now has old.md. The
+  // server resumed A, so Resume clears A's Stop where A is now, never B's.
+  // When this computer no longer has the resumed document, it clears that
+  // document's Stop as the engine holds it, or nothing when it holds none.
+  it("clears the Stop of the document the server resumed, wherever it is now", async () => {
+    const h=harness();
+    h.liveDocument.mockImplementation(async (_workspace,target) => "path" in target ? (target.path==="old.md" ? {mainVersionId:"main",objectId:"b",currentPath:"old.md"} : null)
+      : target.objectId==="a" ? {mainVersionId:"main",objectId:"a",currentPath:"new.md"} : null);
+    h.request.mockResolvedValue({ok:true,path:"old.md",objectId:"a",status:"preparing"});
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"});
+    expect(h.ownerLiveStop.mock.calls).toEqual([[h.workspace,"clear","new.md",{mainVersionId:"main",objectId:"a",currentPath:"new.md"}]]);
+    h.request.mockResolvedValue({ok:true,path:"old.md",objectId:"gone",status:"preparing"});
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"});
+    expect(h.ownerLiveStop).toHaveBeenCalledOnce();
+    // A Stop of the gone document, which a later pass would send again: Resume clears it by its own document.
+    const gone={mainVersionId:"main",objectId:"gone",currentPath:"deleted.md"};
+    h.localStops.mockResolvedValue([{state:"requested",binding:null,document:{mainVersionId:"main",objectId:"other",currentPath:"old.md"},retirementOwed:true,relayDatabaseNamespace:"relay"},
+      {state:"requested",binding:null,document:gone,retirementOwed:true,relayDatabaseNamespace:"relay"}]);
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"});
+    expect(h.ownerLiveStop.mock.calls.at(-1)).toEqual([h.workspace,"clear","deleted.md",gone]);
+    expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
+    h.localStops.mockResolvedValue([]);
+    // An answer that names no document clears nothing.
+    h.request.mockResolvedValue({ok:true,path:"old.md",status:"preparing"});
+    await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"})).rejects.toThrow();
+    expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
   });
   it("adds only deferred counts and editability to a stopped row",async () => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"old.md",selectorPaths:["old.md"],restoreFenceGeneration:0},document:{mainVersionId:"main",objectId:"object",currentPath:"old.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:65,editable:false}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
-    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",objectId:"object",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
   });
   // Proves: a document stopped on a diverged server copy keeps the reason and
   // offers no Resume, whether its Stop finished or waits on this computer.
@@ -198,23 +362,40 @@ describe("owner live document enrollment", () => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"deferred.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:2,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
-      ? {ok:true,documents:[{path:"deferred.md",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
+      ? {ok:true,documents:[{path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
       : {ok:true,diverged:true,documents:[]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"deferred.md",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
-      {path:"stopped.md",status:"retired",reason:"session-host-diverged",canResume:false},
+      {path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
+      {path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged",canResume:false},
     ],nextCursor:null});
   });
-  // Proves: a deferred Stop does not offer Resume on a document whose server
-  // copy misses an edit made while live editing was off.
-  it("offers no Resume for a deferred Stop on a document edited while live editing was off",async () => {
+  it("offers no Resume after the real relay retires a held document and forgets its running hold", async () => {
+    const f = await heldDocumentFixture(workspaceId);
+    try {
+      expect((await f.stop()).status).toBe(200);
+      expect(f.host.holdReason()).toBeUndefined();
+      const h = harness();
+      h.request.mockImplementation(async (_credentials, path) => {
+        const response = await f.handle(new Request(`https://relay.test${path}`, {headers: {authorization: "Bearer owner-token"}}));
+        return response.json();
+      });
+      await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [{
+        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", canResume: false,
+      }], nextCursor: null});
+    } finally {await f.close();}
+  });
+
+  // Proves: a deferred Stop offers Resume on a document whose server copy
+  // is missing an owner edit, since a Resume retries it, but not on one whose
+  // conflict parent is withheld.
+  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
       ? {ok:true,documents:[],nextCursor:null}
-      : {ok:true,documents:[{path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted"}]});
+      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted",canResume:false,deferredStop:{unsentEdits:1,editable:true}},
+      {path:"edited.md",objectId:"object",status:"unavailable",reason,canResume,deferredStop:{unsentEdits:1,editable:true}},
     ],nextCursor:null});
   });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
@@ -229,10 +410,10 @@ describe("owner live document enrollment", () => {
   });
 
   it("retries enrollment using only the share identity and owner session", async () => {
-    const h = harness(); h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "preparing"}]});
+    const h = harness(); h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", objectId: "object", status: "preparing"}]});
     await expect(h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"})).resolves.toBeUndefined();
     expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-host", {method: "POST", body: JSON.stringify({shareId: "share", retry: true})});
-    h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "unavailable"}]});
+    h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", objectId: "object", status: "unavailable"}]});
     await expect(h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"})).rejects.toThrow("could not start");
   });
 
@@ -276,33 +457,49 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
       ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired", acceptedCursor: 0}], nextCursor: "old.md"}
       : {ok: true, documents: [
-        {path: "live.md", status: "ready", document: {shareId: "secret"}},
-        {path: "paused.md", status: "paused"},
-        {path: "moved.md", status: "paused", reason: "document-unavailable"},
-        {path: "changed.md", status: "unavailable", reason: "workspace-changed"},
-        {path: "refused.md", status: "unavailable", reason: "session-host-refused"},
-        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"},
-        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"},
-        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"},
+        {path: "live.md", objectId: "live", status: "ready", document: {shareId: "secret"}},
+        {path: "paused.md", objectId: "paused", status: "paused"},
+        {path: "moved.md", objectId: "moved", status: "paused", reason: "document-unavailable"},
+        {path: "changed.md", objectId: "changed", status: "unavailable", reason: "workspace-changed"},
+        {path: "refused.md", objectId: "refused", status: "unavailable", reason: "session-host-refused"},
+        {path: "unopened.md", objectId: "unopened", status: "unavailable", reason: "live-document-without-lineage"},
+        {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged"},
+        {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted"},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
-        {path: "old.md", status: "retired", canResume: true},
-        {path: "live.md", status: "ready", canResume: false},
-        {path: "paused.md", status: "paused", canResume: true},
-        {path: "moved.md", status: "paused", reason: "document-unavailable", canResume: false},
-        {path: "changed.md", status: "unavailable", reason: "workspace-changed", canResume: false},
-        {path: "refused.md", status: "unavailable", reason: "session-host-refused", canResume: true},
-        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
+        {path: "old.md", objectId: "object", status: "retired", canResume: true},
+        {path: "live.md", objectId: "live", status: "ready", canResume: false},
+        {path: "paused.md", objectId: "paused", status: "paused", canResume: true},
+        {path: "moved.md", objectId: "moved", status: "paused", reason: "document-unavailable", canResume: false},
+        {path: "changed.md", objectId: "changed", status: "unavailable", reason: "workspace-changed", canResume: false},
+        {path: "refused.md", objectId: "refused", status: "unavailable", reason: "session-host-refused", canResume: true},
+        {path: "unopened.md", objectId: "unopened", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
         // Only the server's operator can continue a diverged server copy.
-        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged", canResume: false},
-        // A Resume can't continue a server copy that misses an edit made while live editing was off.
-        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted", canResume: false},
+        {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged", canResume: false},
+        // A Resume adds an edit made while live editing was off to the server's copy.
+        {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([
       "/sync/workspace/live-host", "/sync/workspace/live-host?retired=1&after=older.md",
     ]);
+  });
+
+  it("lists each restore queue as save-only beside the current document, including an unhosted note", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [], nextCursor: null}
+      : {ok: true, documents: [{path: "note.md", objectId: "object", status: "ready"}]});
+    h.ownerLiveQuarantines.mockReturnValue(["old-1", "old-2"].map(incident => ({objectId: "object", path: "note.md",
+      reason: "restore-fenced", storedOn: "this-computer" as const, recovery: "paused" as const, saveOnly: true as const, incident})));
+    const listed = await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
+    expect(listed).toEqual({documents: [{path: "note.md", objectId: "object", status: "ready", canResume: false},
+      ...["old-1", "old-2"].map(incident => ({path: "note.md", objectId: "object", status: "paused", canResume: false,
+        quarantine: "paused", storedOn: "this-computer", incident, saveOnly: true}))], nextCursor: null});
+    h.request.mockResolvedValue({ok: true, documents: [], nextCursor: null});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toMatchObject({documents: [
+      {path: "note.md", incident: "old-1", saveOnly: true}, {path: "note.md", incident: "old-2", saveOnly: true}]});
   });
 
   it("uses the server owner credential session for retire and resume", async () => {
@@ -311,9 +508,9 @@ describe("owner live document enrollment", () => {
       expect(path).toBe("/sync/workspace/live-host");
       return init?.method === "DELETE"
         ? {ok: true, path: "live.md", objectId:"object", status: "retired", acceptedCursor: 37}
-        : {ok: true, path: "live.md", status: "ready", document: {shareId: "server-only"}};
+        : {ok: true, path: "live.md", objectId: "object", status: "ready", document: {shareId: "server-only"}};
     });
-    await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
+    await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
     expect(h.ownerLiveStop).toHaveBeenCalledWith(h.workspace,"release","live.md",expect.objectContaining({objectId:"object"}),37);
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
     expect(h.request.mock.calls.map((call) => [call[0], call[2]?.method, call[2]?.body])).toEqual([
@@ -322,11 +519,283 @@ describe("owner live document enrollment", () => {
     ]);
   });
 
+  describe("edits the server refused", () => {
+    const quarantine = {objectId: "object", path: "live.md", reason: "invalid-update", storedOn: "this-computer" as const,
+      incident: "outbox:delivery:0", recovery: "paused" as const};
+    const retired = {ok: true, path: "live.md", objectId: "object", status: "retired", acceptedCursor: 37};
+    const released = (deferred?: {unsentEdits: number; editable: boolean}, materialized = true, requested: "requested" | "released" = "requested") =>
+      async (...[, action, path]: Parameters<Dependencies["ownerLiveStop"]>) =>
+      action === "request"
+        ? {state: requested, relayDatabaseNamespace: "relay", retirementOwed: requested === "requested", document: {mainVersionId: "main", objectId: "object", currentPath: path},
+          binding: {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0}}
+        : {state: "released", relayDatabaseNamespace: "relay", retirementOwed: false, document: {mainVersionId: "main", objectId: "object", currentPath: path},
+          binding: {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0},
+          materialized, ...(deferred ? {deferred} : {})};
+
+    it("says the edits are in the file only when the release wrote them", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "recovered"});
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    });
+
+    // This computer's release cannot write edits the server keeps for a document it hosts.
+    it("keeps edits the server keeps when this computer's release writes the file", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, storedOn: "server", incident: "server:outbox:1"}]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    // Settlement committed but a blocked materialization left the file as it was.
+    it("claims no recovery when the release did not write the file", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released(undefined, false));
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    // A Stop that finished but could not write the file: Try again names the
+    // row's document and settles that release again, wherever the document is
+    // now. It never asks for a new Stop or the server. The record decides,
+    // even before this computer's list of kept edits is read, as after a
+    // restart or an engine store reset.
+    it("writes the file again from the unwritten release alone, and never starts a new Stop", async () => {
+      const h = harness(); h.unwrittenOwnerLiveReleases.mockResolvedValue([{objectId: "object", path: "old name.md", retry: true}]);
+      const settled = await released(undefined, true)(h.workspace, "release", "live.md");
+      h.retryOwnerLiveRelease.mockResolvedValueOnce(settled).mockResolvedValueOnce({...settled!, materialized: false}).mockResolvedValueOnce(undefined);
+      const tryAgain = () => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel,
+        {workspaceId, path: "old name.md", again: {objectId: "object", recovery: "not-written"}});
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "recovered"});
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "kept"});
+      // The engine holds no such release any more: the edits stay kept for Save recovery copy.
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "kept"});
+      // A Try again that fails still starts no Stop a later release could take for the record's own.
+      h.retryOwnerLiveRelease.mockRejectedValueOnce(new Error("dohc could not write the file."));
+      h.request.mockRejectedValue(new Error("offline"));
+      await expect(tryAgain()).rejects.toThrow("dohc could not write the file.");
+      expect(h.retryOwnerLiveRelease.mock.calls).toEqual([[h.workspace, "object"], [h.workspace, "object"], [h.workspace, "object"], [h.workspace, "object"]]);
+      // Its editors are held off where the document is now.
+      expect(h.reserved).toEqual(["live.md", "live.md", "live.md", "live.md"]);
+      expect(h.ownerLiveQuarantines).not.toHaveBeenCalled();
+      expect(h.ownerLiveStop).not.toHaveBeenCalled();
+      expect(h.request).not.toHaveBeenCalled();
+    });
+
+    // The record's release never committed, so the engine's Stop still waits:
+    // the Stop goes on as an ordinary one, released at the relay's cursor.
+    it("goes on with the waiting Stop when Try again finds its release never committed", async () => {
+      const h = harness(); h.unwrittenOwnerLiveReleases.mockResolvedValue([{objectId: "object", path: "live.md", retry: true}]);
+      h.ownerLiveQuarantines.mockReturnValue([{...quarantine, recovery: "stopping"}]); h.request.mockResolvedValue(retired);
+      h.retryOwnerLiveRelease.mockResolvedValue("requested");
+      h.ownerLiveStop.mockImplementation(released());
+      for (const again of [undefined, {objectId: "object", recovery: "not-written" as const}]) {
+        h.ownerLiveStop.mockClear();
+        await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md", ...(again ? {again} : {})}))
+          .resolves.toEqual({keptEdits: "recovered"});
+        expect(h.ownerLiveStop.mock.calls.map(call => [call[1], call[4]])).toEqual([["request", undefined], ["release", 37]]);
+      }
+      expect(h.retryOwnerLiveRelease.mock.calls).toEqual([[h.workspace, "object"], [h.workspace, "object"]]);
+      expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE", "DELETE"]);
+    });
+
+    // The server's row names a document this computer no longer has: the
+    // server stops live editing for it, and the edits kept here stay.
+    it("stops a server document this computer no longer has, by the server's identity, and keeps its records", async () => {
+      const h = harness(); h.liveDocument.mockResolvedValue(null);
+      h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "cannot-write"}]);
+      h.request.mockResolvedValue(retired);
+      const stop = (input: object) => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md", ...input});
+      await expect(stop({objectId: "object"})).resolves.toEqual({keptEdits: "kept"});
+      expect(h.request.mock.calls.map(call => JSON.parse(call[2]!.body as string))).toEqual([{path: "live.md", objectId: "object", retire: true}]);
+      expect(h.ownerLiveStop).not.toHaveBeenCalled();
+      expect(h.unwrittenOwnerLiveReleases).not.toHaveBeenCalled();
+      // Renamed on the server since the list was read, it is still that document, stopped.
+      h.request.mockResolvedValueOnce({...retired, path: "moved.md"});
+      await expect(stop({objectId: "object"})).resolves.toEqual({keptEdits: "kept"});
+      h.request.mockClear();
+      // Without the server's identity, a path with no document names nothing to stop.
+      await expect(stop({})).rejects.toThrow("This document changed.");
+      // Nor does a row's identity stand for another document now at its path.
+      h.liveDocument.mockResolvedValue({mainVersionId: "main", objectId: "other", currentPath: "live.md"});
+      await expect(stop({objectId: "object"})).rejects.toThrow("This document changed.");
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.ownerLiveStop).not.toHaveBeenCalled();
+    });
+
+    // Record A keeps old.md after its document moved to new.md; document B has
+    // old.md now, with a queue and a record of its own. Each row shows its own
+    // document's kept edits, and a record before its queue: it holds the next Stop until saved.
+    it("shows each row its own document's kept edits, a record before its queue", async () => {
+      const h = harness();
+      h.ownerLiveQuarantines.mockReturnValue([
+        {...quarantine, objectId: "b", path: "old.md", incident: "outbox-b:delivery:0"},
+        {...quarantine, objectId: "b", path: "old.md", incident: "release:b:0", recovery: "cannot-write"},
+        {...quarantine, objectId: "a", path: "old.md", incident: "release:a:0", recovery: "not-written"},
+      ]);
+      h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1") ? {ok: true, documents: [], nextCursor: null}
+        : {ok: true, documents: [{path: "old.md", objectId: "b", status: "ready"}, {path: "new.md", objectId: "a", status: "ready"}]});
+      expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toEqual({documents: [
+        {path: "old.md", objectId: "b", status: "ready", canResume: false, quarantine: "cannot-write", storedOn: "this-computer", incident: "release:b:0"},
+        {path: "new.md", objectId: "a", status: "ready", canResume: false, quarantine: "not-written", storedOn: "this-computer", incident: "release:a:0"},
+      ], nextCursor: null});
+    });
+
+    // Record A keeps "old.md" after its document moved to "new.md"; document B
+    // now has "old.md". Each Stop names its document before it changes anything.
+    it("names the document before it chooses a record or starts a Stop", async () => {
+      const h = harness();
+      h.unwrittenOwnerLiveReleases.mockResolvedValue([{objectId: "object", path: "old.md", retry: true}]);
+      const b = {mainVersionId: "main", objectId: "other", currentPath: "old.md"};
+      h.liveDocument.mockImplementation(async (_workspace, target) => "path" in target ? (target.path === "old.md" ? b : null)
+        : target.objectId === "object" ? {mainVersionId: "main", objectId: "object", currentPath: "new.md"} : target.objectId === "other" ? b : null);
+      h.ownerLiveStop.mockImplementation(async (_workspace, action, path, target) => {
+        const document = target && !("lineageClaimId" in target) ? target : {mainVersionId: "main", objectId: target!.objectId, currentPath: path};
+        return {state: action === "request" ? "requested" : "released", relayDatabaseNamespace: "relay", retirementOwed: action === "request", document,
+          binding: {workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0},
+          ...(action === "release" ? {materialized: true} : {})};
+      });
+      h.request.mockImplementation(async (_credentials, _path, init) => {
+        const {path, objectId} = JSON.parse(init!.body as string) as {path: string; objectId: string};
+        return {ok: true, path, objectId, status: "retired", acceptedCursor: 37};
+      });
+      const stop = (input: {path: string; again?: {objectId: string; recovery: "not-written" | "stopping"}}) =>
+        h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, ...input});
+      // Stop of "old.md" stops B, and leaves A's record.
+      await expect(stop({path: "old.md"})).resolves.toEqual({keptEdits: "none"});
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      expect(h.ownerLiveStop.mock.calls.map(([, action, path, target]) => [action, path, target?.objectId])).toEqual([["request", "old.md", "other"], ["release", "old.md", "other"]]);
+      // A Stop again for a document that is gone creates no Stop for anyone, nor for B at its row's path.
+      h.ownerLiveStop.mockClear(); h.request.mockClear();
+      await expect(stop({path: "old.md", again: {objectId: "gone", recovery: "stopping"}})).rejects.toThrow("This document changed.");
+      // B has no record to try again; A's record is not B's.
+      await expect(stop({path: "old.md", again: {objectId: "other", recovery: "not-written"}})).rejects.toThrow("This document changed.");
+      expect(h.ownerLiveStop).not.toHaveBeenCalled();
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      // A waiting Stop of A runs again for A where it is now, never for B.
+      await expect(stop({path: "old.md", again: {objectId: "object", recovery: "stopping"}})).resolves.toEqual({keptEdits: "none"});
+      expect(h.ownerLiveStop.mock.calls.map(([, action, path, target]) => [action, path, target?.objectId])).toEqual([["request", "new.md", "object"], ["release", "new.md", "object"]]);
+      expect(h.request.mock.calls.map(call => JSON.parse(call[2]!.body as string).objectId)).toEqual(["object"]);
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+    });
+
+    // A record keeps the path its document had when it stopped. Try again from
+    // the window holds off editors where the document is now, as an agent's
+    // does, and acts only while it is still there.
+    it("refuses a window's Try again while an editor holds the renamed document at its new path", async () => {
+      const h = harness();
+      h.unwrittenOwnerLiveReleases.mockResolvedValue([{objectId: "object", path: "old name.md", retry: true}]);
+      h.retryOwnerLiveRelease.mockResolvedValue(await released(undefined, true)(h.workspace, "release", "new name.md"));
+      const paths = ["new name.md"];
+      let documentPath = () => paths[0]!;
+      h.liveDocument.mockImplementation(async () => ({mainVersionId: "main", objectId: "object", currentPath: documentPath()}));
+      h.editors.add("new name.md");
+      const tryAgain = () => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel,
+        {workspaceId, path: "old name.md", again: {objectId: "object", recovery: "not-written"}});
+      await expect(tryAgain()).rejects.toThrow("new name.md is open in an editor.");
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      // Renamed again before it acts: it acts on no path it did not hold.
+      h.editors.clear();
+      documentPath = () => paths.shift() ?? "renamed again.md";
+      await expect(tryAgain()).rejects.toThrow("This document changed.");
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      documentPath = () => "new name.md";
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "recovered"});
+      // An agent's Stop again takes the same door.
+      const agents = createOwnerLiveDocumentActions<Workspace, Operation>(h.ownerHandlersDependencies);
+      await expect(agents.stop({workspaceId, path: "old name.md", again: {objectId: "object", recovery: "not-written"}},
+        {workspace: h.workspace, assertCurrent() {}})).resolves.toEqual({keptEdits: "recovered"});
+      expect(h.reserved).toEqual(["new name.md", "new name.md", "new name.md"]);
+      expect(h.retryOwnerLiveRelease.mock.calls).toEqual([[h.workspace, "object"], [h.workspace, "object"]]);
+    });
+
+    // Once only Save recovery copy remains, a Stop of the live document at
+    // that path is an ordinary Stop, never a release of the old record.
+    it("runs an ordinary Stop for a document whose kept edits can only be saved", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "cannot-write"}]);
+      h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      // It claims nothing about the edits the earlier release kept.
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+      expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
+    });
+
+    // Main lists the server's row beside a record that can only be saved, and this Stop does not claim the server's edits.
+    it("keeps the edits the server keeps beside a record that can only be saved", async () => {
+      const h = harness(); h.request.mockResolvedValue(retired);
+      h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "cannot-write"},
+        {...quarantine, storedOn: "server", incident: "server:outbox:1"}]);
+      h.ownerLiveStop.mockImplementation(released());
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+      expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
+    });
+
+    it("saves a recovery copy for the workspace's own path, and only there", async () => {
+      const h = harness();
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "notes/a.md"}))
+        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"});
+      expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith(h.workspace, "notes/a.md", undefined);
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId: "other", path: "notes/a.md"})).rejects.toThrow();
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "../outside.md"})).rejects.toThrow();
+      expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
+      // A row's Save names the kept edits it shows.
+      await h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "notes/a.md", incident: "release:a:0"});
+      expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenLastCalledWith(h.workspace, "notes/a.md", "release:a:0");
+    });
+
+    it("keeps the edits on this computer when the release defers", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released({unsentEdits: 2, editable: false}));
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    // An injected failure before the engine writes anything: the server
+    // stopped live editing, the queue stays, and nothing claims a recovery.
+    it("keeps the edits, and claims no recovery, when the release fails after the server stopped", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
+      const ordinary = released();
+      h.ownerLiveStop.mockImplementation(async (...args) => {
+        if (args[1] === "release") throw new Error("owner-stop-conflict");
+        return ordinary(...args);
+      });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    it("still fails a release for a document with no refused edits", async () => {
+      const h = harness(); h.request.mockResolvedValue(retired);
+      const ordinary = released();
+      h.ownerLiveStop.mockImplementation(async (...args) => {
+        if (args[1] === "release") throw new Error("owner-stop-conflict");
+        return ordinary(...args);
+      });
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow("owner-stop-conflict");
+    });
+
+    it("marks the refused document's row and passes Try again to main with the incident the owner saw", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]);
+      h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+        ? {ok: true, documents: [], nextCursor: null}
+        : {ok: true, documents: [{path: "live.md", objectId: "object", status: "ready"}, {path: "other.md", objectId: "other", status: "ready"}]});
+      expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).toEqual({documents: [
+        // The row names its document, whose kept edits it shows and which a Stop again acts on.
+        {path: "live.md", objectId: "object", status: "ready", canResume: false, quarantine: "paused", storedOn: "this-computer", incident: quarantine.incident},
+        {path: "other.md", objectId: "other", status: "ready", canResume: false},
+      ], nextCursor: null});
+      await h.invoke(relayShareOperations.retryOwnerLiveQuarantine.channel, {workspaceId, objectId: "object", incident: quarantine.incident});
+      expect(h.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith(h.workspace, "object", quarantine.incident);
+      // Another workspace's Try again never reaches main.
+      await expect(h.invoke(relayShareOperations.retryOwnerLiveQuarantine.channel, {workspaceId: "other", objectId: "object", incident: quarantine.incident})).rejects.toThrow();
+      expect(h.retryOwnerLiveQuarantine).toHaveBeenCalledOnce();
+    });
+  });
+
   it("rejects renderer identity, unsafe paths, and unavailable resumes", async () => {
     const h = harness();
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, credentials: h.credentials})).rejects.toThrow();
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "../secret"})).rejects.toThrow();
-    h.request.mockResolvedValue({ok: true, path: "live.md", status: "unavailable"});
+    h.request.mockResolvedValue({ok: true, path: "live.md", objectId: "object", status: "unavailable"});
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow("could not resume");
     expect(h.request.mock.calls.at(-1)?.[0]).toBe(h.credentials);
   });
@@ -342,6 +811,21 @@ describe("owner live document enrollment", () => {
   it("refuses mismatched action responses instead of claiming another file stopped", async () => {
     const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", objectId:"other-object", status: "retired", acceptedCursor: 0});
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
+  });
+
+  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+    const h = harness();
+    const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", objectId: "old", status: "retired"}, unknown("retired")], nextCursor: "unknown.md"}
+      : {ok: true, documents: [unknown("ready"), {path: "live.md", objectId: "live", status: "ready"},
+        {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
+      {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      {path: "live.md", objectId: "live", status: "ready", canResume: false},
+      {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
+    ], nextCursor: "unknown.md"});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "unknown.md"})).rejects.toThrow("list changed");
   });
 
   it("refuses invalid retired paging cursors and malformed document paths", async () => {
@@ -542,6 +1026,8 @@ describe("registered relay share handlers", () => {
       relayShareOperations.retryOwnerLiveShare.channel,
       relayShareOperations.stopOwnerLiveDocument.channel,
       relayShareOperations.resumeOwnerLiveDocument.channel,
+      relayShareOperations.retryOwnerLiveQuarantine.channel,
+      relayShareOperations.saveOwnerLiveRecoveryCopy.channel,
       relayShareOperations.createRelayShare.channel,
       relayShareOperations.listRelayShares.channel,
       relayShareOperations.getRelayReceivedShare.channel,
@@ -565,7 +1051,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.promoteRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(28);
+    expect(h.handlers.size).toBe(30);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -744,7 +1230,7 @@ describe("share roster refresh", () => {
     h.accountRequest.mockResolvedValue({ok: true, undo});
     await h.invoke(relayShareOperations.revokeRelayShare.channel, {shareId: "share"});
     h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
-    await h.invoke(relayShareOperations.undoRelayShare.channel, {shareId: "share", undoId: "undo-1"});
+    await h.invoke(relayShareOperations.undoRelayShare.channel, {workspaceId, shareId: "share", undoId: "undo-1"});
     expect(h.sharesChanged.mock.calls).toEqual([[null], [null]]);
   });
 
@@ -888,9 +1374,8 @@ describe("registered account share handlers", () => {
 
   it("restores a removal through the account transport with the receipt's id", async () => {
     const h = harness();
-    h.retirePhysical();
     h.accountRequest.mockResolvedValue({ ok: true, shareId: "share" });
-    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { shareId: "share", undoId: "undo-1" }))
+    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { workspaceId, shareId: "share", undoId: "undo-1" }))
       .resolves.toEqual({ shareId: "share" });
     expect(h.accountRequest).toHaveBeenCalledWith("/sync/shares/share/undo", {
       method: "POST", body: JSON.stringify({ undoId: "undo-1" }),
@@ -901,7 +1386,7 @@ describe("registered account share handlers", () => {
   it("rejects an undo answer that names another share", async () => {
     const h = harness();
     h.accountRequest.mockResolvedValue({ ok: true, shareId: "other" });
-    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { shareId: "share", undoId: "undo-1" }))
+    await expect(h.invoke(relayShareOperations.undoRelayShare.channel, { workspaceId, shareId: "share", undoId: "undo-1" }))
       .rejects.toThrow("sharing failed (500)");
   });
 
@@ -1026,10 +1511,11 @@ const ownerInputs = {
   retryOwnerLiveShare: {workspaceId, shareId: "share"},
   stopOwnerLiveDocument: {workspaceId, path: "live.md"},
   resumeOwnerLiveDocument: {workspaceId, path: "live.md"},
+  retryOwnerLiveQuarantine: {workspaceId, objectId: "object", incident: "outbox:delivery:0"},
   listRelayShares: undefined,
   getRelayReceivedShare: {shareId: "share"},
   revokeRelayShare: {shareId: "share"},
-  undoRelayShare: {shareId: "share", undoId: "undo-1"},
+  undoRelayShare: {workspaceId, shareId: "share", undoId: "undo-1"},
   pollRelayShareDiscussionActivity: pollInput,
   cancelRelayShareDiscussionActivity: {pollId: pollInput.pollId},
   createRelayShare: {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"},
@@ -1048,6 +1534,7 @@ const ownerInputs = {
   resumeRelayShareDiscussion: {workspaceId, shareId: "share"},
   promoteRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
   revokeRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant"},
+  saveOwnerLiveRecoveryCopy: {workspaceId, path: "notes/a.md"},
 } satisfies Record<keyof typeof relayShareOperations, unknown>;
 const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
   name, row, input: ownerInputs[name as keyof typeof ownerInputs],
@@ -1063,7 +1550,6 @@ describe("owner operation admission", () => {
     h.retireRenderer();
     if (name === "getRelayReceivedShare") h.request.mockResolvedValue({kind: "missing", removed: false});
     if (name === "revokeRelayShare") h.accountRequest.mockResolvedValue({ok: true});
-    if (name === "undoRelayShare") h.accountRequest.mockResolvedValue({ok: true, shareId: "share"});
     await h.invoke(row.channel, input);
     expect(h.workspaceOperations).not.toHaveBeenCalled();
     expect(h.remote).not.toHaveBeenCalled();

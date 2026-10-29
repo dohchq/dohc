@@ -30,6 +30,36 @@ function registration(sessions: JsonValue[] = [{sessionId: "s1", players: ["Firs
   return {fullName: "Synthetic Contact", mobile: "0917 123 4567", sessions, paymentMethod: "gcash", receiptFileId: file.fileId,
     submissionId: randomUUID(), retrySecret: randomBytes(32).toString("base64url"), receiptSha256: file.sha256};
 }
+type InProcessCall = (operation: string, input: JsonValue, options?: { caller?: JsonValue; readOnly?: boolean }) => Promise<JsonValue>;
+// Runs the fundraiser source in the same guest without a worker, under a time budget host load can't use up.
+async function inProcess(test: (call: InProcessCall) => Promise<void>) {
+  const db = new DatabaseSync(":memory:", { allowExtension: false, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false });
+  const tables = ["sessions", "registrations", "registration_sessions", "attendees"];
+  const source = read("fundraiser", "backend.ts");
+  let sequence = 0;
+  try {
+    db.exec(read("fundraiser", "schema.sql"));
+    await test(async (operation, input, options = {}) => {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = await evaluate(db, {
+          source, tables, operation, inputJson: JSON.stringify(input), callerJson: JSON.stringify(options.caller ?? participant),
+          nowMs: ++sequence * 1000, requestId: `request-${sequence}`, secret: randomBytes(32).toString("base64url"),
+          readOnly: options.readOnly ?? false, files: [file], limits: { ...DEFAULT_LIMITS, evaluationMs: 10_000 },
+        });
+        db.setAuthorizer(null);
+        db.exec("COMMIT");
+        return JSON.parse(result.resultJson) as JsonValue;
+      } finally {
+        // A refused operation leaves its transaction open.
+        db.setAuthorizer(null);
+        if (db.isTransaction) db.exec("ROLLBACK");
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
 const group = (sessionId: string, count: number) => ({sessionId, players: Array.from({length: count}, (_, i) => `Player Person${i}`), spectators: []});
 const rows = (value: JsonValue) => value as Array<Record<string, unknown>>;
 const row = (value: JsonValue) => value as Record<string, any>;
@@ -164,23 +194,7 @@ describe("fundraiser app operations", () => {
 
   it("accepts the maximum original roster within operation and SQL limits", async () => {
     // This case checks roster capacity, not worker deadlines or the production time budget.
-    const db = new DatabaseSync(":memory:", { allowExtension: false, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false });
-    const tables = ["sessions", "registrations", "registration_sessions", "attendees"];
-    const source = read("fundraiser", "backend.ts");
-    let sequence = 0;
-    async function call(operation: string, input: JsonValue, options: { caller?: JsonValue; readOnly?: boolean } = {}) {
-      db.exec("BEGIN IMMEDIATE");
-      const result = await evaluate(db, {
-        source, tables, operation, inputJson: JSON.stringify(input), callerJson: JSON.stringify(options.caller ?? participant),
-        nowMs: ++sequence * 1000, requestId: `request-${sequence}`, secret: randomBytes(32).toString("base64url"),
-        readOnly: options.readOnly ?? false, files: [file], limits: { ...DEFAULT_LIMITS, evaluationMs: 10_000 },
-      });
-      db.setAuthorizer(null);
-      db.exec("COMMIT");
-      return JSON.parse(result.resultJson) as JsonValue;
-    }
-    try {
-      db.exec(read("fundraiser", "schema.sql"));
+    await inProcess(async call => {
       const sessions = ["s1", "s2"].map(sessionId => ({...group(sessionId, 36), spectators: Array.from({length: 100}, (_, i) => `Spectator Person${i}`)}));
       const result = row(await call("register", registration(sessions)));
       expect(result.total).toBe(102000);
@@ -191,21 +205,19 @@ describe("fundraiser app operations", () => {
       const second = row(await call("attendees", {limit: 200, offset: 200}, {caller: helper, readOnly: true}));
       expect(second.records).toHaveLength(72);
       expect(second.nextOffset).toBeNull();
-    } finally {
-      db.setAuthorizer(null);
-      if (db.isTransaction) db.exec("ROLLBACK");
-      db.close();
-    }
+    });
   });
 
   it("accepts the original form's local and international mobile formats", async () => {
-    const f = await fixture();
-    for (const mobile of ["09171234567", "09991234567", "08171234567", "+639171234567", "639171234567", "9171234567", "0917 123 4567", "+63 (917) 123-4567", "00639171234567"]) {
-      expect((await f.call("register", {...registration(), mobile})).result).toMatchObject({status: "pending_verification"});
-    }
-    for (const mobile of ["", "0917123456", "091712345678", "+63281234567", "09001234567", "+12025550123", "08001234567", "0917abc4567", "call 09171234567", "09171234567 ext 2"]) {
-      await expect(f.call("register", {...registration(), mobile})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
-    }
+    // This case checks which numbers the form accepts, not the production time budget.
+    await inProcess(async call => {
+      for (const mobile of ["09171234567", "09991234567", "08171234567", "+639171234567", "639171234567", "9171234567", "0917 123 4567", "+63 (917) 123-4567", "00639171234567"]) {
+        expect(await call("register", {...registration(), mobile})).toMatchObject({status: "pending_verification"});
+      }
+      for (const mobile of ["", "0917123456", "091712345678", "+63281234567", "09001234567", "+12025550123", "08001234567", "0917abc4567", "call 09171234567", "09171234567 ext 2"]) {
+        await expect(call("register", {...registration(), mobile})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
+      }
+    });
   });
 });
 

@@ -3,6 +3,7 @@ import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
+  YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
@@ -22,6 +23,7 @@ import {
 import {
   createEngineYDocSessionIpc,
   DOCUMENT_EDIT_SHARED_WARNING,
+  DOCUMENT_EDIT_PENDING_WARNING,
   EngineYDocArrivals,
   LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
@@ -639,6 +641,21 @@ describe("engine Y.Doc IPC adapter", () => {
     signal.abort(new Error("disconnected"));
     await holding;
     await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
+  });
+  // An agent's Stop again refuses a document an editor holds, as the window closes its own editors first.
+  it("changes a document's live editing for a main-side door only while no editor holds it", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const change = vi.fn(async () => "stopped");
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
+      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+    expect(change).not.toHaveBeenCalled();
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
+    // The change's own failure passes through unchanged.
+    await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", async () => {throw new Error("Stop live editing is waiting.");}))
+      .rejects.toThrow("Stop live editing is waiting.");
   });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
@@ -1943,10 +1960,13 @@ describe("engine Y.Doc IPC adapter", () => {
       const doc = markdownToYDoc(markdown);
       return providerSession({
         doc,
-        applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
+        applyDecidedLocalUpdate: vi.fn(async (decide, onArmed) => {
+          const update = decide(doc);
+          if (update === null) return false;
           trace.push("apply");
           Y.applyUpdate(doc, update);
           onArmed?.();
+          return true;
         }),
         settleNow: vi.fn(async () => {
           trace.push("settle");
@@ -1957,6 +1977,11 @@ describe("engine Y.Doc IPC adapter", () => {
         }),
       });
     }
+
+    const pendingDraft = { binding: { workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 0 },
+      relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 1,
+      nativeUnsettled: true, outboxId: "outbox", pendingBytes: 10, state: "active" as const };
 
     const keepBlocksSeen: boolean[] = [];
     const edit = (documentEdit: DocumentEdit) => ({
@@ -2000,10 +2025,8 @@ describe("engine Y.Doc IPC adapter", () => {
 
       expect(keepBlocksSeen).toEqual([true]);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
-      expect(session.applyLocalUpdate).toHaveBeenCalledWith(
-        expect.any(Uint8Array),
-        expect.any(Function),
-        agentOrigin,
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledWith(
+        expect.any(Function), undefined, { ...agentOrigin, idempotencyKey: expect.any(String) },
       );
       expect(session.settleNow).toHaveBeenCalledOnce();
       expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
@@ -2228,6 +2251,49 @@ describe("engine Y.Doc IPC adapter", () => {
       );
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it.each([[false, "active"], [true, "active"], [false, "sealed"], [true, "sealed"]] as const)("reports an admitted pending edit as success, held=%s state=%s", async (held, state) => {
+      const session = editableSession();
+      const pending = new YdocOwnerDraftPendingError({ ...pendingDraft, state });
+      vi.mocked(session.settleNow).mockRejectedValueOnce(pending);
+      const h = harness(session);
+      if (held) await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({
+        path: "notes/a.md", changed: true, warning: held
+          ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}` : DOCUMENT_EDIT_PENDING_WARNING,
+      });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
+    it.each(["sealed", "frozen", "uncertain"])('does not report a refused edit as kept when an older draft is %s', async reason => {
+      const session = editableSession();
+      const refusal = new Error(reason);
+      vi.mocked(session.applyDecidedLocalUpdate).mockImplementationOnce(async (_decide, armed) => {
+        armed?.();
+        throw refusal;
+      });
+      vi.mocked(session.settleNow).mockRejectedValue(new YdocOwnerDraftPendingError(pendingDraft));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).rejects.toBe(refusal);
+      expect(session.settleNow).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("After.");
+    });
+
+    it("checks the held session again when the admission decision runs", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      vi.mocked(session.applyDecidedLocalUpdate).mockImplementationOnce(async decide => {
+        h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+        decide(session.doc);
+        return true;
+      });
+      await expect(h.ipc.editDocument(append)).rejects.toThrow("changed hands");
+      expect(session.settleNow).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
     });
 
     it("reports no change without applying or settling", async () => {

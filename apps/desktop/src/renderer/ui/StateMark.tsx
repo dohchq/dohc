@@ -100,7 +100,7 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   "changed-on-disk": {
     label: "Changed outside dohc",
     mark: "attention",
-    title: "This file changed outside dohc while it was open. dohc keeps your text in History.",
+    title: "This file changed outside dohc.",
   },
   deleted: {
     label: "Deleted",
@@ -291,7 +291,7 @@ export function StateMark(props: {
       }}
       // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
       // chip moves everything under it by half a pixel.
-      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded" : ""} ${props.className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded" : ""} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
       {props.truncate ? (
@@ -312,10 +312,10 @@ export function StateMark(props: {
   if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open. Beside Try again, the chip keeps the
-  // header's 25px for its mark and an ellipsis.
+  // header's 28px for its mark and an ellipsis.
   const explained = (
     <span
-      className={`inline-flex max-w-full ${retry ? "min-w-[25px]" : "min-w-0"}`}
+      className={`inline-flex max-w-full ${retry ? "min-w-[28px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);

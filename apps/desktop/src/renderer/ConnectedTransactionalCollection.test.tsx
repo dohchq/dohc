@@ -11,7 +11,7 @@ import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPane
 import type { TransactionalButtons } from "./TransactionalCollectionPage";
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
-  listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+  listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
   onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
@@ -335,6 +335,7 @@ describe("a dataset table's ⚡ panel", () => {
   it("names the automations file from Customize… once dohc finds the dataset's folder", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "missing" });
     renderPage();
     const customize = await screen.findByRole("button", { name: "Customize…" });
     customize.focus();
@@ -342,8 +343,9 @@ describe("a dataset table's ⚡ panel", () => {
     // The tab shows the table, so the dialog names it too.
     const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
     expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
-    // Without a workspace shell there is no agent to ask.
-    expect(within(dialog).queryByTestId("ask-agent")).toBeNull();
+    // No automation yet, so no file to open.
+    expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(customize);
@@ -490,6 +492,25 @@ describe("a dataset table's ⚡ panel", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it("asks main for the dataset's folder only once the page has read its dataset, even when automations change first", async () => {
+    const automationsChanged: Array<(event: { workspaceId: string }) => void> = [];
+    backend.onCollectionAutomationsChanged.mockImplementation(listener => { automationsChanged.push(listener); return () => undefined; });
+    const described = deferred<{ kind: "description"; dataset: DatasetDescription }>();
+    backend.dataset.mockReturnValue(described.promise);
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "missing" });
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    // A new Collection's automations change while its page still reads the dataset.
+    await waitFor(() => expect(automationsChanged.length).toBeGreaterThan(0));
+    act(() => { for (const listener of automationsChanged) listener({ workspaceId: "workspace-a" }); });
+    expect(backend.findDatasetCollection).not.toHaveBeenCalled();
+    await act(async () => described.resolve({ kind: "description", dataset }));
+    await waitFor(() => expect(backend.findDatasetCollection).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) }));
+    expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("says when dohc could not find the automations, through the error hook and in the panel, and tries again", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset });
     backend.findDatasetCollection.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
@@ -507,17 +528,17 @@ describe("a dataset table's ⚡ panel", () => {
 });
 
 describe("a Collection this computer cannot use", () => {
-  const refused = (code: string, words: string) =>
-    new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]: ${words}`);
+  const refused = (code: string, words: string, computer?: string) =>
+    new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]${computer ? ` [computer=${computer}]` : ""}: ${words}`);
   const props = { workspaceId: "workspace-a", datasetPath: "data/dataset.json", tableId: id(2), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn() };
 
   it("says which computer keeps it in place, without a toast, and reads again on Try again", async () => {
     const words = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    backend.dataset.mockRejectedValueOnce(refused("collections-elsewhere", words));
+    backend.dataset.mockRejectedValueOnce(refused("collections-elsewhere", words, "Laptop"));
     const onError = vi.fn(), onKeepCollections = vi.fn();
     render(<ConnectedTransactionalCollection {...props} onError={onError} onKeepCollections={onKeepCollections} />);
     expect((await screen.findByTestId("collection-refusal")).textContent).toContain(words);
-    expect(screen.getByRole("button", { name: "Keep the Collections on this computer" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
     expect(onError).not.toHaveBeenCalled();
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -526,11 +547,11 @@ describe("a Collection this computer cannot use", () => {
   });
 
   it("keeps Collections no computer keeps on this one, then opens the Collection", async () => {
-    backend.dataset.mockRejectedValueOnce(refused("collections-unclaimed", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer."));
+    backend.dataset.mockRejectedValueOnce(refused("collections-unclaimed", "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc."));
     const onKeepCollections = vi.fn((then: () => void) => then());
     render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} onKeepCollections={onKeepCollections} />);
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
-    fireEvent.click(await screen.findByRole("button", { name: "Keep the Collections on this computer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     await screen.findByLabelText("Collection view state");
   });

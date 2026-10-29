@@ -94,6 +94,8 @@ export interface TableViewProps {
    * already in flight.
    */
   onNearEnd?: () => void;
+  /** Adds a record. The table then ends with a New record row, so even an empty one shows how to start. */
+  onNewRecord?: () => void;
 }
 
 const TABLE_FEATURES = tableFeatures({});
@@ -103,6 +105,27 @@ const ROW_HEIGHT = 28;
 /** How close to the end of the loaded rows `onNearEnd` starts firing. */
 const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
+
+function NewRecordRow(props: { disabled: boolean; openColumn: boolean; onClick: () => void }) {
+  return (
+    <div role="row" className="flex shrink-0">
+      {props.openColumn ? <div role="gridcell" style={{ width: OPEN_COLUMN_WIDTH }} /> : null}
+      <div role="gridcell" className="flex-1">
+        <button
+          type="button"
+          disabled={props.disabled}
+          onClick={props.onClick}
+          className="flex h-8 w-full items-center gap-1.5 px-2 text-left text-[13px] text-subtle transition-colors hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
+            <path d="M5 12h14M12 5v14" />
+          </svg>
+          New record
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * The one cell whose editor is open, addressed by record id and field name
@@ -175,6 +198,7 @@ export function TableView({
   fieldMarks,
   renderButton,
   onNearEnd,
+  onNewRecord,
 }: TableViewProps) {
   const fields = useMemo(
     () => deriveColumns(schema, visibleFields),
@@ -292,7 +316,7 @@ export function TableView({
   };
 
   return (
-    <div role="grid" aria-rowcount={records.length + 1} className="flex h-full flex-col">
+    <div role="grid" aria-rowcount={records.length + (onNewRecord ? 2 : 1)} className="flex h-full flex-col">
       <div role="row" className="flex shrink-0 border-b border-line bg-panel">
         {onOpenRecord ? (
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
@@ -323,7 +347,11 @@ export function TableView({
         })}
       </div>
       {records.length === 0 ? (
-        <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>
+        onNewRecord ? (
+          <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} />
+        ) : (
+          <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>
+        )
       ) : (
         <div ref={scrollRef} className="flex-1 overflow-auto">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -425,6 +453,7 @@ export function TableView({
               </fieldset>
             ) : null}
           </div>
+          {onNewRecord ? <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} /> : null}
         </div>
       )}
     </div>

@@ -18,18 +18,31 @@ export interface CompilerProcessRuntime {
   nodeExecutable: string;
   workerPath: string;
   workerArgs?: readonly string[];
-  /** macOS and Linux: the installed compiler-owner. The worker's directory is the only tree the build may read and run. */
-  ownerExecutable?: string;
+  /** The installed compiler owner. On macOS and Linux the worker's directory is the only tree the build may read and run. */
+  ownerExecutable: string;
   onOwnerSpawn?: (pid: number) => void;
 }
 export interface CompilerProcessRequest { input: Uint8Array; bounds: CompilerProcessBounds; signal?: AbortSignal }
 export interface CompilerProcessResult { stdout: Uint8Array; stderr: Uint8Array }
 export class CompilerProcessError extends Error {
   diagnostics?: string;
+  /** Safe to copy into a bug report. Never contains compiler input or environment values. */
+  details?: string;
   readonly reason: "cancelled" | "timeout" | "memory" | "processes" | "output" | "stderr" | "exit" | "spawn" | "input";
   constructor(reason: CompilerProcessError["reason"], message: string) {
     super(message);this.reason = reason;this.name = "CompilerProcessError";
   }
+}
+
+const STARTUP_STAGES = ["owner running", "job assigned", "admitted", "worker spawned", "worker ready"] as const;
+const STAGE_PREFIX = "[dohc-compiler] ";
+const STDERR_TAIL_BYTES = 128;
+
+/** Only fixed stage names and runtime error codes are safe to copy from stderr. */
+function safeStderrLine(line: string): string {
+  if (STARTUP_STAGES.some(stage => line === `${STAGE_PREFIX}${stage}`)) return line;
+  const codes = line.match(/\b(?:ENOMEM|EPIPE|ERR_WORKER_OUT_OF_MEMORY|STATUS_NO_MEMORY|System\.ComponentModel\.Win32Exception|System\.OutOfMemoryException)\b/g);
+  return codes ? [...new Set(codes)].join(" ") : "[redacted stderr]";
 }
 
 /** The process that holds the build, and how this caller ends it. */
@@ -43,7 +56,6 @@ interface CompilerOwner {
 
 /** Windows Job Object limits aggregate committed memory, including native esbuild. */
 function windowsOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): CompilerOwner {
-  const ownerPath = fileURLToPath(new URL("./windowsCompilerJob.ps1", import.meta.url));
   const relayPath = fileURLToPath(new URL("./compilerProcessRelay.mjs", import.meta.url));
   const payload = Buffer.from(JSON.stringify({ worker: runtime.workerPath, args: runtime.workerArgs ?? [] })).toString("base64");
   const environment: NodeJS.ProcessEnv = {};
@@ -51,10 +63,7 @@ function windowsOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBo
   for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
-  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const command = `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(ownerPath)}))) ${[runtime.nodeExecutable, relayPath, payload, String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes)].map(quote).join(" ")}`;
-  const child = spawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+  const child = spawn(runtime.ownerExecutable, [runtime.nodeExecutable, relayPath, payload, String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes)], {
     cwd: fileURLToPath(new URL(".", import.meta.url)), env: environment, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
   });
   return { child, stop: () => child.kill("SIGKILL"), finish: async () => {}, reasons: new Map([[124, { reason: "timeout", message: "Compiler owner timed out." }]]) };
@@ -97,7 +106,6 @@ async function killProcessGroup(group: number): Promise<void> {
  * process that escaped its tree may have put there.
  */
 async function confinedOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): Promise<CompilerOwner> {
-  if (!runtime.ownerExecutable || !isAbsolute(runtime.ownerExecutable)) throw new Error("Compiler runtime paths must be absolute.");
   const directory = await mkdtemp(join(tmpdir(), "dohc-app-compiler-"));
   const child = spawn(runtime.ownerExecutable, [String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes),
     dirname(runtime.workerPath), directory, runtime.nodeExecutable, runtime.workerPath, ...(runtime.workerArgs ?? [])],
@@ -146,15 +154,41 @@ export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, r
   if (bounds.timeoutMs > 2_147_483_647) throw new Error("Compiler timeout exceeds the timer range.");
   if (bounds.maxProcesses > 4_294_967_295) throw new Error("Compiler process count exceeds the OS range.");
   if (!(request.input instanceof Uint8Array) || request.input.byteLength > bounds.maxInputBytes) throw new CompilerProcessError("input", "Compiler input bound exceeded.");
-  if (!isAbsolute(runtime.nodeExecutable) || !isAbsolute(runtime.workerPath)) throw new Error("Compiler runtime paths must be absolute.");
+  if (![runtime.ownerExecutable, runtime.nodeExecutable, runtime.workerPath].every(path => typeof path === "string" && isAbsolute(path))) throw new Error("Compiler runtime paths must be absolute.");
   if (signal?.aborted) throw new CompilerProcessError("cancelled", "Compiler cancelled.");
   const input = Buffer.from(request.input);
+  const started = performance.now();
   const owner = process.platform === "win32" ? windowsOwner(runtime, bounds, input.byteLength) : await confinedOwner(runtime, bounds, input.byteLength);
   const { child } = owner;
   return new Promise((resolve, reject) => {
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    const stages: string[] = [];
+    let lastStage = "starting owner", safeTail = "", pendingStderr = Buffer.alloc(0);
+    let lastStageIndex = -1;
+    let timeoutDetails: string | undefined;
+    const elapsed = () => Math.round(performance.now() - started);
+    const stage = (name: string) => { lastStage = name;stages.push(`${name}=${elapsed()}ms`); };
+    const details = () => `Last stage: ${lastStage}; elapsed=${elapsed()}ms${stages.length ? `; ${stages.join(", ")}` : ""}`;
+    const appendTail = (text: string) => { safeTail = Buffer.from(`${safeTail}${safeTail ? "; " : ""}${text}`).subarray(-STDERR_TAIL_BYTES).toString("utf8"); };
+    const stderrLine = (line: Buffer) => {
+      const text = line.toString("utf8").replace(/\r?\n$/, "");
+      const next = STARTUP_STAGES.find(name => text === `${STAGE_PREFIX}${name}`);
+      if (next && STARTUP_STAGES.indexOf(next) > lastStageIndex) {
+        lastStageIndex = STARTUP_STAGES.indexOf(next);
+        stage(next);
+        return;
+      }
+      appendTail(safeStderrLine(text));
+      errBytes += line.byteLength;
+      if (errBytes > bounds.maxErrorBytes) stop(new CompilerProcessError("stderr", "Compiler diagnostic bound exceeded."));
+      else stderr.push(line);
+    };
     let outBytes = 0, errBytes = 0, failure: Error | undefined;
-    const stop = (error: Error) => { failure ??= error;owner.stop(); };
+    const stop = (error: Error) => {
+      if (failure) return;
+      if (error instanceof CompilerProcessError && error.reason === "timeout") timeoutDetails = details();
+      failure = error;owner.stop();
+    };
     const abort = () => stop(new CompilerProcessError("cancelled", "Compiler cancelled."));
     const timer = setTimeout(() => stop(new CompilerProcessError("timeout", "Compiler timed out.")), bounds.timeoutMs);
     timer.unref();signal?.addEventListener("abort", abort, { once: true });
@@ -165,22 +199,32 @@ export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, r
       else stdout.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      errBytes += chunk.byteLength;
-      if (errBytes > bounds.maxErrorBytes) stop(new CompilerProcessError("stderr", "Compiler diagnostic bound exceeded."));
-      else stderr.push(chunk);
+      pendingStderr = Buffer.concat([pendingStderr, chunk]);
+      // Hold only a possible stage record. Other bytes spend the bound immediately.
+      for (;;) {
+        const newline = pendingStderr.indexOf(10);
+        const text = pendingStderr.length < 128 ? pendingStderr.toString("utf8") : "";
+        const isStagePrefix = text && STARTUP_STAGES.some(name => `${STAGE_PREFIX}${name}\n`.startsWith(text) || `${STAGE_PREFIX}${name}\r\n`.startsWith(text));
+        const length = newline >= 0 ? newline + 1 : isStagePrefix ? 0 : pendingStderr.length;
+        if (!length) break;
+        stderrLine(pendingStderr.subarray(0, length));pendingStderr = pendingStderr.subarray(length);
+      }
     });
     child.stdin.on("error", error => {if ((error as NodeJS.ErrnoException).code !== "EPIPE") stop(error);});
     child.once("error", error => { failure ??= new CompilerProcessError("spawn", error.message); });
     child.once("spawn", () => {
+      stage("owner spawned");
       try { if (child.pid !== undefined) onOwnerSpawn?.(child.pid); }
       catch (error) { stop(error instanceof Error ? error : new Error(String(error))); }
     });
     child.once("close", (code, exitSignal) => {
       clearTimeout(timer);signal?.removeEventListener("abort", abort);
+      if (pendingStderr.length) stderrLine(pendingStderr);
       void owner.finish().then(() => {
         const named = code === null ? undefined : owner.reasons.get(code);
+        if (!failure && named) failure = new CompilerProcessError(named.reason, named.message);
+        if (failure instanceof CompilerProcessError && failure.reason === "timeout") failure.details = `${timeoutDetails ?? details()}; stderr tail: ${safeTail || "(empty)"}`;
         if (failure) reject(failure);
-        else if (named) reject(new CompilerProcessError(named.reason, named.message));
         else if (code !== 0) {
           const error = new CompilerProcessError("exit", `Compiler exited (${exitSignal ?? code}).`);
           error.diagnostics = Buffer.concat(stderr).toString("utf8");reject(error);

@@ -901,8 +901,11 @@ pub(super) fn read(
         binding = metadata.accepted.binding;
         terminal = Some(metadata.accepted.receipt);
     }
-    if cursor != through || doc.has_missing_updates() {
+    if cursor != through {
         return Err(ApplicationError::Conflict);
+    }
+    if doc.has_missing_updates() {
+        return Err(ApplicationError::AcceptedStateIncomplete);
     }
     Ok(doc)
 }

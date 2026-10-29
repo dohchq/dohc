@@ -2,6 +2,7 @@ import {createHash} from "node:crypto";
 import {beforeEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
 import {drainOwnerOutbox} from "./ownerOutboxDelivery";
@@ -77,7 +78,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
     client: client as unknown as EngineClient,workspace: "handle",deadlineMs: 1_000,nextRequestId: () => ++requestId,
     host: {mode: "device",hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"} as never,
     bounds: {maxBytes: 10_000,maxEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,validate: () => ({} as never)},
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,refusals: new OwnerKnownRefusals(),validate: () => ({} as never)},
   });
   return {consumer,client,store,storage,journal,retained,outboxAcks,ownerEntries,persist,invalidate: () => {current = false;}};
 }
@@ -323,7 +324,7 @@ it("continues applying incoming accepted edits while the retained owner outbox i
   vi.mocked(drainOwnerOutbox).mockImplementation(actual.drainOwnerOutbox);
   const original = f.client.sendRequest.getMockImplementation()!;
   f.client.sendRequest.mockImplementation(async input => input.method === "liveApplication.ownerOutbox"
-    ? {id: input.id, result: {outboxId: "outbox", pendingBytes: 1, state: "quarantined"}}
+    ? {id: input.id, result: {outboxId: "outbox", pendingBytes: 1, state: "quarantined", retryDeliveryId: null}}
     : original(input));
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
   expect(f.client.sendLiveApplication).toHaveBeenCalledTimes(1);

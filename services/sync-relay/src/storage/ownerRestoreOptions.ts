@@ -11,7 +11,7 @@ import {liveJournalHistoryNamespace} from "./liveJournalHistory";
 import {retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE} from "./liveRestoreOperationSchema";
 import type {StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestoreRecipient} from "./liveRestoreOperation";
-import {readStopRestoreInTransaction} from "./liveRestoreOperation";
+import {readStopRestoreInTransaction, requireStopRestorable} from "./liveRestoreOperation";
 import type {StorageContext} from "./context";
 import type {SyncRelayShareRow} from "./types";
 import {ticketRecord} from "../liveTicketInputs";
@@ -227,7 +227,7 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
       const status = statusInTransaction(storage, {workspaceId, ownerUserId: input.ownerUserId,
         operationId: parseLiveUpdateIdentifier(pending[0].operation_id)});
       result.pendingOperation = {operationId: status.operationId, phase: status.phase, proposalDigest: status.proposalDigest};
-    }
+    } else requireStopRestorable(storage, document);
     let bytes = Buffer.byteLength(JSON.stringify(result));
     const charge = (value: unknown, reserve = 0) => {bytes += Buffer.byteLength(JSON.stringify(value)) + 1 + reserve; bounded(bytes);};
     // Grants leave room for a restore point, the baseline, and the cursors.

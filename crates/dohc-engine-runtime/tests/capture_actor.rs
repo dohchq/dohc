@@ -154,7 +154,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
 
     let written = handle
         .capture_ingest_with_search_policy_blocking(
-            CaptureIngest {
+            &CaptureIngest {
                 workspace_id: "ws-actor-capture".to_owned(),
                 version_id: "main".to_owned(),
                 path: "notes/a.md".to_owned(),
@@ -167,6 +167,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 request_id: Some("actor-capture-request".to_owned()),
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),
@@ -221,7 +222,7 @@ fn an_absence_retire_refuses_a_file_at_another_spelling() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     handle
         .capture_ingest_with_search_policy_blocking(
-            CaptureIngest {
+            &CaptureIngest {
                 workspace_id: "ws-actor-capture".to_owned(),
                 version_id: "main".to_owned(),
                 path: "notes.md".to_owned(),
@@ -234,6 +235,7 @@ fn an_absence_retire_refuses_a_file_at_another_spelling() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),
@@ -649,12 +651,13 @@ fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let foreign = handle
         .capture_ingest_with_search_policy_blocking(
-            input(
+            &input(
                 "notes/foreign.md",
                 "foreign authoritative body",
                 "api",
                 true,
             ),
+            scratch.path().to_owned(),
             Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -1316,7 +1319,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     handle
         .capture_ingest_with_search_policy_blocking(
-            CaptureIngest {
+            &CaptureIngest {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 version_id: "main".to_owned(),
                 path: "notes/a.md".to_owned(),
@@ -1329,6 +1332,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),

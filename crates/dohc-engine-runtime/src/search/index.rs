@@ -58,9 +58,9 @@ fn chat_header_text(title: &str) -> String {
 }
 
 /// The indexed text for a chat message row. Ports `chatIndexText` with an
-/// author + body: displayName, then `displayName (agent)` or
-/// `displayName (automation)` for those authors, then the body — newline-joined,
-/// empty parts dropped.
+/// author + body: displayName, then `displayName (agent)`,
+/// `displayName (automation)` or `displayName (link holder)` for those authors,
+/// then the body — newline-joined, empty parts dropped.
 fn chat_message_text(display_name: &str, author_kind: &str, body: &str) -> String {
     chat_message_search_text(display_name, author_kind, body)
 }
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn message_text_marks_agent_and_automation() {
+    fn message_text_marks_agent_automation_and_link_holder() {
         assert_eq!(chat_message_text("Ada", "human", "hi"), "Ada\nhi");
         assert_eq!(
             chat_message_text("Bot", "agent", "beep"),
@@ -659,6 +659,10 @@ mod tests {
         assert_eq!(
             chat_message_text("Stamp", "automation", "done"),
             "Stamp\nStamp (automation)\ndone"
+        );
+        assert_eq!(
+            chat_message_text("Sam", "link", "count me in"),
+            "Sam\nSam (link holder)\ncount me in"
         );
     }
 

@@ -1,12 +1,11 @@
 import {createHash} from 'node:crypto'
+import {WORKER_LIVE_VALIDATION_POLICY} from './liveValidationPolicy.js'
 import {createEngineMarkdownReader, type EngineMarkdownProof} from './engine-markdown-reader.js'
 import type {LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 
 const CHUNK = 65536, UPDATE = 20 * 1024 * 1024
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
-const reader = createEngineMarkdownReader({maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
-  maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
-  maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000})
+const reader = createEngineMarkdownReader(WORKER_LIVE_VALIDATION_POLICY)
 function requireWire(ok: unknown): asserts ok {if (!ok) throw new Error('invalid-frame')}
 function keys(value: unknown, names: readonly string[]): asserts value is Record<string, unknown> {
   requireWire(value && typeof value === 'object' && !Array.isArray(value)
@@ -103,7 +102,7 @@ export async function runEngineMarkdownHost() {
         continue
       }
       keys(r, ['id', 'method', 'document', 'currentPath', 'source', 'checkpoint'])
-      requireWire(r.method === 'construct' || r.method === 'prove')
+      requireWire(r.method === 'construct' || r.method === 'construct-fold' || r.method === 'prove')
       keys(r.document, ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'])
       requireWire(Object.values(r.document).every(v => typeof v === 'string' && v.length > 0)
         && typeof r.currentPath === 'string')
@@ -117,14 +116,14 @@ export async function runEngineMarkdownHost() {
       async function respond(result: EngineMarkdownProof, delta: Uint8Array) {
         if (result.kind === 'refused') return control({id, ...result})
         requireWire(result.sourceSha256 === sourceDeclaration.sha256 && result.sourceByteLength === sourceDeclaration.length)
-        await control({id, kind: result.kind === 'expired' ? 'expired' : r.method === 'construct' ? 'constructed' : 'proved', sourceSha256: result.sourceSha256,
+        await control({id, kind: result.kind === 'expired' ? 'expired' : r.method !== 'prove' ? 'constructed' : 'proved', sourceSha256: result.sourceSha256,
           sourceByteLength: result.sourceByteLength, projectionSha256: result.projectionSha256,
           stateSha256: result.stateSha256,
           delta: {length: delta.length, sha256: sha(delta)}})
         await blob(3, delta); await control({id, end: true})
       }
-      if (r.method === 'construct') {
-        const result = reader.construct(input)
+      if (r.method !== 'prove') {
+        const result = reader.construct({...input, nativeFold: r.method === 'construct-fold'})
         if (result.kind === 'accepted') requireWire(result.delta instanceof Uint8Array)
         await respond(result, result.kind === 'accepted' ? result.delta : new Uint8Array())
       } else await respond(reader.prove(input), new Uint8Array())

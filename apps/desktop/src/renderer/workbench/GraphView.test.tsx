@@ -184,9 +184,11 @@ describe("GraphView", () => {
     expect(
       screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
     ).toBe(true);
-    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
-      "240 of 2000 docs shown",
-    );
+    // The side panel shows the notice as its icon, named with the full words.
+    const notice = screen.getByRole("img", { name: /240 of 2000 docs shown/ });
+    expect(notice.dataset.testid).toBe("graph-unresolved-count");
+    expect(notice.title).toBe(notice.getAttribute("aria-label"));
+    expect(notice.textContent).toBe("");
 
   });
 
@@ -223,9 +225,9 @@ describe("GraphView", () => {
     );
     await waitFor(() => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500));
     expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
-    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
-      "500 of 900 docs shown",
-    );
+    const notice = screen.getByTestId("graph-unresolved-count");
+    expect(notice.getAttribute("role")).toBeNull();
+    expect(notice.textContent).toContain("500 of 900 docs shown");
   });
 
   it.each([
@@ -254,7 +256,8 @@ describe("GraphView", () => {
       expect(screen.getByTestId("graph-link-count").textContent).toBe(
         `${edgeLimit + 1} links`,
       );
-      expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      const notice = screen.getByTestId("graph-unresolved-count");
+      expect(variant === "panel" ? notice.getAttribute("aria-label") : notice.textContent).toContain(
         `${edgeLimit} of ${edgeLimit + 1} links shown`,
       );
     },
@@ -627,6 +630,8 @@ describe("GraphView", () => {
     ] }));
     await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 docs"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
+    // The counts truncate together in a narrow panel, so their tooltip holds both.
+    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 docs · 1 link");
     const row=screen.getAllByTestId("graph-file-row").find(row=>row.dataset.path==="a.md")!;
     expect(row.textContent).toContain("0/1");
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();
@@ -658,7 +663,7 @@ describe("GraphView", () => {
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()}/>);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();
-    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain("1 unchecked");
+    expect(screen.getByTestId("graph-unresolved-count").getAttribute("aria-label")).toContain("1 unchecked");
     expect(linksEdges).toHaveBeenCalledOnce();
   });
 

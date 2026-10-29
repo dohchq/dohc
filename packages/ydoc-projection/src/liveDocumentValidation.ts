@@ -23,6 +23,7 @@ import {
   validateRegistrationCutForProjection,
   validateJournalCutForProjection,
   MAX_OLD_SUFFIX_ENTRIES,
+  type JournalPrefixProjection,
   type OrderedLiveUpdateCutPolicy,
   type OrderedLiveUpdateCutFinalizeResult,
   type ProjectionTopology,
@@ -272,6 +273,15 @@ type RefusedJournal = {
 export type LiveMarkdownJournalResult =
   | { readonly kind: 'accepted'; readonly evidence: LiveMarkdownJournalEvidence }
   | RefusedJournal
+/**
+ * The projection of each prefix that ends at input `from` or later, before the
+ * candidate, checked in the pass that validates the journal. Input 0 is the
+ * checkpoint and input `i` is suffix entry `i - 1`.
+ */
+export interface LiveMarkdownJournalPrefixes {
+  readonly from: number
+  readonly visit: (projection: { readonly projectedMarkdownSha256: string; readonly projectedMarkdownByteLength: number }, index: number) => void
+}
 
 function captureSuffix(value: unknown): Uint8Array[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) refuse('invalid-input')
@@ -298,14 +308,47 @@ export function createLiveMarkdownJournalValidator(
   policy: OrderedLiveUpdateCutPolicy,
   engineReader = false,
 ): (input: unknown) => LiveMarkdownJournalResult {
+  const validate = journalValidator(policy, engineReader)
+  return input => validate(input)
+}
+
+/** A journal validator that also checks each prefix's projection in the same pass. */
+export function createLiveMarkdownHistoryValidator(
+  policy: OrderedLiveUpdateCutPolicy,
+): (input: unknown, prefixes: LiveMarkdownJournalPrefixes) => LiveMarkdownJournalResult {
+  const validate = journalValidator(policy, false)
+  return (input, prefixes) => validate(input, prefixes)
+}
+
+function journalValidator(
+  policy: OrderedLiveUpdateCutPolicy,
+  engineReader: boolean,
+): (input: unknown, prefixes?: LiveMarkdownJournalPrefixes) => LiveMarkdownJournalResult {
   const ownedPolicy = capturePolicy(policy)
 
-  function validateAttempt(input: LiveMarkdownJournalInput, includeEvidence: boolean):
+  function prefixProjection(prefixes: LiveMarkdownJournalPrefixes): JournalPrefixProjection {
+    const {from, visit} = prefixes
+    return {from, project: (document, topology, index) => {
+      let projectedMarkdown: string
+      try {
+        if (topology.kind !== 'compatible') refuse('invalid-schema')
+        projectedMarkdown = validatePublicState(document, topology, 'refuse', engineReader)
+      } catch (error) {
+        if (engineReader && !(error instanceof Refusal)) throw error
+        return error instanceof Refusal ? error.reason : 'invalid-schema'
+      }
+      const markdownBytes = utf8.encode(projectedMarkdown)
+      visit({projectedMarkdownSha256: sha256Hex(markdownBytes), projectedMarkdownByteLength: markdownBytes.byteLength}, index)
+      return undefined
+    }}
+  }
+
+  function validateAttempt(input: LiveMarkdownJournalInput, includeEvidence: boolean, prefixes?: LiveMarkdownJournalPrefixes):
     | { kind: 'accepted'; evidence?: LiveMarkdownJournalEvidence }
     | { kind: 'refused'; failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'> } {
     const result = validateJournalCutForProjection({
       mode: 'journal-candidate', checkpoint: input.checkpoint, suffix: input.suffix, candidate: input.candidate,
-    }, ownedPolicy, engineReader)
+    }, ownedPolicy, engineReader, prefixes && prefixProjection(prefixes))
     let failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'>
     if (result.kind === 'refused') failure = result
     else {
@@ -341,11 +384,11 @@ export function createLiveMarkdownJournalValidator(
     return { kind: 'refused', failure }
   }
 
-  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: true): LiveMarkdownJournalResult
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: true, prefixes?: LiveMarkdownJournalPrefixes): LiveMarkdownJournalResult
   function validateCaptured(input: LiveMarkdownJournalInput, diagnose: false): ValidationOutcome
-  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: boolean): LiveMarkdownJournalResult | ValidationOutcome {
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: boolean, prefixes?: LiveMarkdownJournalPrefixes): LiveMarkdownJournalResult | ValidationOutcome {
     // Let the completed cut become collectible before replaying its prefix.
-    const attempt = validateAttempt(input, diagnose)
+    const attempt = validateAttempt(input, diagnose, prefixes)
     if (attempt.kind === 'accepted') return attempt
     const { failure } = attempt
     if (failure.stage.kind === 'call') return refusal(failure.reason, 'call')
@@ -362,7 +405,7 @@ export function createLiveMarkdownJournalValidator(
     return refusal(failure.reason, 'final')
   }
 
-  return (input): LiveMarkdownJournalResult => {
+  return (input, prefixes): LiveMarkdownJournalResult => {
     let captured: LiveMarkdownJournalInput
     try {
       const snapshot = exactDataFields(input, JOURNAL_INPUT_FIELDS)
@@ -381,7 +424,7 @@ export function createLiveMarkdownJournalValidator(
       if (engineReader && !(error instanceof Refusal)) throw error
       return refusal(error instanceof Refusal ? error.reason : 'invalid-input', 'call')
     }
-    return validateCaptured(captured, true)
+    return validateCaptured(captured, true, prefixes)
   }
 }
 
@@ -410,7 +453,8 @@ function projectAndFinalize(
     if (topology.kind !== 'compatible') refuse('invalid-schema')
     projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
   } catch (error) {
-    if (engineReader && !(error instanceof Refusal)) throw error
+    // A journal candidate is an owner's edit: a validator failure retries it instead of refusing it.
+    if ((engineReader || unverifiedSource === 'refuse') && !(error instanceof Refusal)) throw error
     pending = error instanceof Refusal ? error.reason : 'invalid-schema'
   }
   finally {
@@ -755,8 +799,8 @@ function validatePublicState(
       if (Object.keys(json).length !== 1 || json.type !== 'doc') refuse('invalid-schema')
     } else rootNode.check()
   } catch (error) {
-    if (engineReader && !isProseMirrorSchemaError(error)) throw error
-    if (error instanceof Refusal) throw error
+    // Only a schema verdict refuses the document; anything else is a validator failure.
+    if (!isProseMirrorSchemaError(error)) throw error
     refuse('invalid-schema')
   }
 
@@ -767,8 +811,7 @@ function validatePublicState(
       prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
-      if (engineReader && !isProseMirrorSchemaError(error)) throw error
-      if (error instanceof Refusal) throw error
+      if (!isProseMirrorSchemaError(error)) throw error
       refuse('invalid-schema')
     } finally { rebuilt.destroy() }
   }

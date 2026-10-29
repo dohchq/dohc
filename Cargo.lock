@@ -374,6 +374,7 @@ dependencies = [
  "dohc-engine-testkit",
  "dohc-heap-profiler",
  "dohc-test-scratch",
+ "memchr",
  "rusqlite",
  "ryu-js",
  "serde",
@@ -663,6 +664,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "yrs",
 ]
 
 [[package]]

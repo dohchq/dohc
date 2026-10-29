@@ -818,6 +818,588 @@ fn enrolled_with_unsent_draft() -> (
 }
 
 #[test]
+fn a_refused_queue_reads_its_accepted_checkpoint_as_its_own_part() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, _observed, _checkpoint, _unsent, _host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let (digest, accepted): (String, Vec<u8>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.checkpoint_digest,blob.bytes FROM ydoc_owner_bindings b JOIN binary_blobs blob ON blob.sha256=b.checkpoint_digest",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    let read = |cursor: Option<OwnerOutboxReadCursor>, budget: usize| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        budget,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("unchanged snapshot"),
+    };
+    let header = read(None, 4096);
+    let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(digest));
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot: header.cursor.snapshot.clone(),
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    let mut bytes = Vec::new();
+    while let Some(next) = cursor {
+        let page = read(Some(next), 7);
+        assert_eq!(page.digest, digest);
+        bytes.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(bytes, accepted);
+}
+
+#[test]
+fn a_checkpoint_that_changes_between_pages_changes_the_read() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, _observed, checkpoint, _unsent, _host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let OwnerOutboxPageResult::Page(header) =
+        read_pending_page(&store, "workspace", &outbox_id, None, 4096).unwrap()
+    else {
+        panic!("a first read never changed")
+    };
+    let first = OwnerOutboxReadCursor {
+        snapshot: header.cursor.snapshot.clone(),
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    };
+    let OwnerOutboxPageResult::Page(page) =
+        read_pending_page(&store, "workspace", &outbox_id, Some(first), 1).unwrap()
+    else {
+        panic!("the checkpoint has not changed yet")
+    };
+    // The binding's checkpoint changes to a shorter state between pages.
+    let shorter = bounded(&Ydoc::wire()).unwrap();
+    assert!(shorter.len() > 1 && shorter.len() < checkpoint.len());
+    store
+        .write_with(&NoFaults, |tx| {
+            let digest = hex_sha256(&shorter);
+            put_binary_blob_with_sha(tx, &shorter, &digest)?;
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET checkpoint_digest=?1",
+                [&digest],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    // Within the new bytes the page names their digest, which the client reads as a change.
+    let within = page.next_cursor.clone().unwrap();
+    assert_eq!(within.offset, 1);
+    let OwnerOutboxPageResult::Page(changed) =
+        read_pending_page(&store, "workspace", &outbox_id, Some(within.clone()), 4096).unwrap()
+    else {
+        panic!("an offset within the new checkpoint still reads")
+    };
+    assert_ne!(changed.digest, page.digest);
+    // Past them the engine answers that the read changed, not that the cursor is invalid.
+    let beyond = OwnerOutboxReadCursor {
+        offset: i64::try_from(shorter.len()).unwrap(),
+        ..within
+    };
+    assert!(matches!(
+        read_pending_page(&store, "workspace", &outbox_id, Some(beyond), 4096).unwrap(),
+        OwnerOutboxPageResult::ReadChanged
+    ));
+}
+
+#[test]
+fn a_queue_of_an_earlier_restore_generation_reads_its_own_checkpoint_never_its_successors() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, observed, _checkpoint, _unsent, host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let header = |store: &EngineStore| {
+        let OwnerOutboxPageResult::Page(page) =
+            read_pending_page(store, "workspace", &outbox_id, None, 4096).unwrap()
+        else {
+            panic!("a first read never changed")
+        };
+        let raw: serde_json::Value = serde_json::from_slice(&page.bytes).unwrap();
+        (page.cursor.snapshot, raw)
+    };
+    let own: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(header(&store).1["checkpointDigest"], serde_json::json!(own));
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host.clone());
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    // The older queue still waits and keeps the checkpoint it builds on; the successor's need not hold it.
+    let (snapshot, raw) = header(&store);
+    assert_eq!(
+        raw["binding"],
+        serde_json::to_value(&observed.binding).unwrap()
+    );
+    assert!(raw["pendingEntryCount"].as_i64().unwrap() >= 1);
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(own));
+    assert_ne!(own, hex_sha256(&host));
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    let mut bytes = Vec::new();
+    while let Some(at) = cursor {
+        let OwnerOutboxPageResult::Page(page) =
+            read_pending_page(&store, "workspace", &outbox_id, Some(at), 7).unwrap()
+        else {
+            panic!("a kept checkpoint never changes")
+        };
+        assert_eq!(page.digest, own);
+        bytes.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(hex_sha256(&bytes), own);
+}
+
+// An edit that builds on one the server accepted, still waiting when a later
+// restore generation replaces the accepted checkpoint. Its base and its own
+// bytes cannot rebuild it; with the checkpoint its queue kept, its recovery
+// copy can.
+#[test]
+fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_advance() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let edited = Ydoc::wire();
+    edited.apply(&checkpoint).unwrap();
+    let accepted = edited.richdoc_append_paragraph("accepted prefix");
+    accept_field_frame(&mut store, &observed.binding, accepted);
+    let dependent = edited.richdoc_append_paragraph("unsent on the accepted prefix");
+    let revision = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap()
+        .revision;
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                revision,
+                "dependent".into(),
+                dependent.clone(),
+                13,
+            )
+        })
+        .unwrap();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='dependent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    // Read every part as a recovery copy does: the queue, then its checkpoint.
+    let read = |cursor: Option<OwnerOutboxReadCursor>| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        4096,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
+    };
+    let header = read(None);
+    let snapshot = header.cursor.snapshot.clone();
+    let mut parts: Vec<(OwnerOutboxReadPart, Vec<u8>)> = Vec::new();
+    let mut cursor = header.next_cursor;
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        cursor = page.next_cursor;
+        // A later page of the same part continues it.
+        if page.cursor.offset > 0 {
+            parts.last_mut().unwrap().1.extend(page.bytes);
+        } else {
+            parts.push((page.cursor.part, page.bytes));
+        }
+    }
+    let part = |wanted: OwnerOutboxReadPart| {
+        parts
+            .iter()
+            .find(|(part, _)| *part == wanted)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap()
+    };
+    let (base, update) = (
+        part(OwnerOutboxReadPart::Base),
+        part(OwnerOutboxReadPart::Update),
+    );
+    assert_eq!(update, dependent);
+    let mut kept = Vec::new();
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        kept.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    let without = Ydoc::wire();
+    without.apply(&base).unwrap();
+    without.apply(&update).unwrap();
+    assert!(
+        without.has_pending_dependencies(),
+        "the unsent edit builds on the accepted prefix"
+    );
+    let rebuilt = Ydoc::wire();
+    rebuilt.apply(&base).unwrap();
+    rebuilt.apply(&kept).unwrap();
+    rebuilt.apply(&update).unwrap();
+    assert!(!rebuilt.has_pending_dependencies());
+    let text = rebuilt
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    assert!(text.contains("accepted prefix") && text.contains("unsent on the accepted prefix"));
+    assert!(!text.contains("restored on the host"));
+}
+
+// The server refused the edit on the accepted prefix before a later restore
+// generation arrived. The advance leaves it refused for its own reason, not
+// restore-fenced, and its queue keeps the checkpoint it builds on.
+#[test]
+fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation_advance() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let edited = Ydoc::wire();
+    edited.apply(&checkpoint).unwrap();
+    let accepted = edited.richdoc_append_paragraph("accepted prefix");
+    accept_field_frame(&mut store, &observed.binding, accepted);
+    let refused = edited.richdoc_append_paragraph("refused on the accepted prefix");
+    let revision = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap()
+        .revision;
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                revision,
+                "refused".into(),
+                refused.clone(),
+                13,
+            )
+        })
+        .unwrap();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='refused'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let own: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    let (state, reason, kept): (String, Option<String>, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state,quarantine_reason,kept_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                [&outbox_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        (state.as_str(), reason.as_deref(), kept.as_deref()),
+        ("quarantined", Some("invalid-update"), Some(own.as_str()))
+    );
+    let read = |cursor: Option<OwnerOutboxReadCursor>| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        4096,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
+    };
+    let header = read(None);
+    let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(own));
+    let snapshot = header.cursor.snapshot.clone();
+    let mut parts: Vec<(OwnerOutboxReadPart, Vec<u8>)> = Vec::new();
+    let mut cursor = header.next_cursor;
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        cursor = page.next_cursor;
+        if page.cursor.offset > 0 {
+            parts.last_mut().unwrap().1.extend(page.bytes);
+        } else {
+            parts.push((page.cursor.part, page.bytes));
+        }
+    }
+    let part = |wanted: OwnerOutboxReadPart| {
+        parts
+            .iter()
+            .find(|(part, _)| *part == wanted)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap()
+    };
+    let (base, update) = (
+        part(OwnerOutboxReadPart::Base),
+        part(OwnerOutboxReadPart::Update),
+    );
+    assert_eq!(update, refused);
+    let mut kept = Vec::new();
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        kept.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(hex_sha256(&kept), own);
+    let rebuilt = Ydoc::wire();
+    rebuilt.apply(&base).unwrap();
+    rebuilt.apply(&kept).unwrap();
+    rebuilt.apply(&update).unwrap();
+    assert!(!rebuilt.has_pending_dependencies());
+    let text = rebuilt
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    assert!(text.contains("accepted prefix") && text.contains("refused on the accepted prefix"));
+    assert!(!text.contains("restored on the host"));
+}
+
+// As above, with native work past the accepted checkpoint that no pending
+// row holds. The advance keeps that work in the refused queue, after its
+// refused head, without reopening it: the queue keeps its refusal.
+#[test]
+fn an_already_refused_queue_keeps_native_work_past_its_checkpoint_across_a_generation_advance() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let key = key(&observed.binding).unwrap();
+    let edited = Ydoc::wire();
+    edited.apply(&checkpoint).unwrap();
+    let refused = edited.richdoc_append_paragraph("refused before the restore");
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                1,
+                "refused".into(),
+                refused.clone(),
+                13,
+            )
+        })
+        .unwrap();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='refused'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let native = Ydoc::wire();
+    native.apply(&checkpoint).unwrap();
+    let delta = native.richdoc_append_paragraph("native past the checkpoint");
+    // An owner binding refuses ordinary writes, so this lands as frames do,
+    // and the binding follows the native head as a draft append moves it.
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::durable::record_authorized_update_in_tx(
+                tx, &key, &delta, false, None, None, false, 21,
+            )
+            .map_err(collab)?;
+            let head = crate::read_marker_in(tx, &key)
+                .map_err(collab)?
+                .unwrap()
+                .head_update_seq;
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET native_head_sequence=?1",
+                [head],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let local = store
+        .read_with(|conn| bounded(&crate::load_doc_in(conn, &key).map_err(collab)?))
+        .unwrap();
+    assert_ne!(local, checkpoint);
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    store
+        .read_with(|conn| {
+            let (state, reason, retry): (String, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT state,quarantine_reason,retry_delivery_id FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                    [&outbox_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (state.as_str(), reason.as_deref(), retry),
+                ("quarantined", Some("invalid-update"), None)
+            );
+            let mut stmt = conn
+                .prepare("SELECT append_key,update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence")
+                .unwrap();
+            let entries = stmt
+                .query_map([&outbox_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let fenced = format!(
+                "owner-restore-fenced:{}",
+                restored.captured.local_state_digest
+            );
+            assert_eq!(
+                entries.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+                ["refused", fenced.as_str()]
+            );
+            assert_eq!(bounded_blob(conn, &entries[1].1)?, local);
+            assert_eq!(
+                bounded(&crate::load_doc_in(conn, &key).map_err(collab)?)?,
+                restored.checkpoint
+            );
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpoint() {
     use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
     let (dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();
@@ -1156,7 +1738,8 @@ fn stop_after_move_keeps_the_binding_and_folds_into_the_same_object() {
             release::release_in_tx(
                 tx,
                 &observed.binding,
-                observed.accepted_cursor,
+                Some(observed.accepted_cursor),
+                None,
                 22,
                 |_, _, _, _, _| Ok(()),
             )
@@ -1211,7 +1794,8 @@ fn stop_journals_only_the_credit_groups_own_update_bytes() {
             release::release_in_tx(
                 tx,
                 &observed.binding,
-                observed.accepted_cursor,
+                Some(observed.accepted_cursor),
+                None,
                 22,
                 |_, bytes, _, _, _| {
                     assert_eq!(
@@ -1300,7 +1884,7 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
                 21,
             )?;
             release::request_in_tx(tx, &key, 22)?;
-            release::release_in_tx(tx, &next, 0, 23, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(tx, &next, Some(0), None, 23, |_, _, _, _, _| Ok(()))
         })
         .unwrap();
     store
@@ -1315,9 +1899,32 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
-    store
+    // A finished Stop is no longer listed, but clearing it names it, so the
+    // desktop can end what that Stop held.
+    assert!(store
+        .read_with(|conn| release::list_requested_in(conn, "workspace"))
+        .unwrap()
+        .is_empty());
+    let cleared = store
         .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
         .unwrap();
+    let TxnOutcome::Committed(Some(cleared)) = cleared else {
+        panic!("the finished Stop was not cleared")
+    };
+    assert_eq!(
+        (
+            cleared.state.as_str(),
+            cleared.retirement_owed,
+            cleared.binding.as_ref()
+        ),
+        ("released", false, Some(&next))
+    );
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
+            .unwrap(),
+        TxnOutcome::Committed(None)
+    ));
     let checkpoint = store
         .read_with(|conn| bounded(&crate::load_doc_in(conn, &key).map_err(collab)?))
         .unwrap();
@@ -1398,6 +2005,351 @@ fn old_generation_queue(conn: &Connection) -> (String, Option<String>, Option<St
         observed,
         bounded_blob(conn, &digest).unwrap(),
     )
+}
+
+#[test]
+fn restore_fenced_discovery_survives_reopen_and_recovers_typing() {
+    use super::super::{
+        list_restore_fenced_in, read_pending, read_pending_page, OwnerOutboxPageResult,
+        OwnerOutboxReadCursor, OwnerOutboxReadPart, OwnerOutboxRetryInput,
+    };
+    let (dir, mut store, observed, checkpoint, _, host) = enrolled_with_unsent_draft();
+    let draft = store
+        .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
+        .unwrap();
+    let typed = draft.doc.richdoc_append_paragraph("TYPED");
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::draft::append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    1,
+                    "typed".into(),
+                    typed.clone(),
+                    6,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host.clone());
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    drop(store);
+    let mut store = EngineStore::open(&dir.join("engine.db"), 30).unwrap();
+    let rows = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 1))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.binding, observed.binding);
+    assert!(row.pending_bytes > 0);
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&row.outbox_id), 1))
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "another-workspace", None, 64))
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 0))
+        .is_err());
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 65))
+        .is_err());
+    let pending = read_pending(&store, "workspace", &row.outbox_id).unwrap();
+    assert_eq!(pending.quarantine_reason.as_deref(), Some("restore-fenced"));
+    let header = match read_pending_page(&store, "workspace", &row.outbox_id, None, 4096).unwrap() {
+        OwnerOutboxPageResult::Page(page) => page,
+        _ => panic!("unchanged snapshot"),
+    };
+    let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
+    assert_eq!(
+        raw["checkpointDigest"],
+        serde_json::json!(hex_sha256(&checkpoint))
+    );
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot: header.cursor.snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    let mut accepted = Vec::new();
+    while let Some(next) = cursor {
+        let page =
+            match read_pending_page(&store, "workspace", &row.outbox_id, Some(next), 7).unwrap() {
+                OwnerOutboxPageResult::Page(page) => page,
+                _ => panic!("unchanged snapshot"),
+            };
+        accepted.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(accepted, checkpoint);
+    let recovered = Ydoc::wire();
+    recovered.apply(&accepted).unwrap();
+    for entry in pending.entries {
+        recovered.apply(&entry.update).unwrap();
+    }
+    assert!(recovered.canonical_content().to_string().contains("TYPED"));
+    let current = store
+        .read_with(|conn| open_draft_in(conn, &next, 2))
+        .unwrap();
+    assert_eq!(bounded(&current.doc).unwrap(), host);
+    assert!(!current
+        .doc
+        .canonical_content()
+        .to_string()
+        .contains("TYPED"));
+    assert!(super::super::retry(
+        &mut store,
+        "workspace",
+        OwnerOutboxRetryInput {
+            outbox_id: row.outbox_id.clone(),
+            binding: observed.binding.clone(),
+        }
+    )
+    .is_err());
+    assert!(super::super::retry(
+        &mut store,
+        "workspace",
+        OwnerOutboxRetryInput {
+            outbox_id: row.outbox_id.clone(),
+            binding: next.clone(),
+        }
+    )
+    .is_err());
+    let fresh = current.doc.richdoc_append_paragraph("TYPED AGAIN");
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::draft::append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &next,
+                    2,
+                    "typed-again".into(),
+                    fresh.clone(),
+                    31,
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    let later = LiveObjectBinding {
+        restore_fence_generation: next.restore_fence_generation + 1,
+        ..next
+    };
+    let input = successor_input(&store, &later, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    let first = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 1))
+        .unwrap();
+    let second = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&first[0].outbox_id), 1))
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(first[0].outbox_id < second[0].outbox_id);
+    assert_ne!(
+        first[0].binding.restore_fence_generation,
+        second[0].binding.restore_fence_generation
+    );
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", Some(&second[0].outbox_id), 1))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_other_quarantines() {
+    for reason in ["stale-binding", "binding-changed", "invalid-update"] {
+        let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+        let outbox_id: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        super::super::quarantine(
+            &mut store,
+            "workspace",
+            OwnerOutboxQuarantineInput {
+                outbox_id,
+                reason: reason.into(),
+                observed_binding: None,
+            },
+            10,
+        )
+        .unwrap();
+        let input = successor_input(&store, &next_generation(&observed), host);
+        enroll(&mut store, &input, &observed.limits).unwrap();
+        assert!(
+            store
+                .read_with(|conn| super::super::list_restore_fenced_in(conn, "workspace", None, 64))
+                .unwrap()
+                .is_empty(),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn restore_fenced_discovery_survives_release() {
+    use super::super::{list_restore_fenced_in, read_pending, release};
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    let before = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap();
+    assert_eq!(before.len(), 1);
+    let key = key(&next).unwrap();
+    let stop = committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                release::request_in_tx(tx, &key, 30)?;
+                release::release_in_tx(tx, &next, Some(0), None, 31, |_, _, _, _, _| Ok(()))
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stop.state, "released");
+    assert!(store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &next))
+        .unwrap()
+        .is_none());
+    let after = store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].outbox_id, before[0].outbox_id);
+    assert_eq!(after[0].binding, observed.binding);
+    assert_eq!(after[0].pending_bytes, before[0].pending_bytes);
+    assert!(!read_pending(&store, "workspace", &after[0].outbox_id)
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_the_current_generation() {
+    use super::super::{list_restore_fenced_in, release};
+    let (_dir, mut store, observed, ..) = enrolled_with_unsent_draft();
+    let outbox_id = store
+        .read_with(|conn| {
+            Ok::<_, OwnerOutboxError>(
+                super::super::draft::descriptor_for_key_in(conn, &key(&observed.binding)?)?
+                    .unwrap()
+                    .outbox_id
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id,
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
+    let key = key(&observed.binding).unwrap();
+    store
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 21))
+        .unwrap();
+    assert!(matches!(
+        store.write_with(&NoFaults, |tx| {
+            release::release_in_tx(tx, &observed.binding, Some(0), None, 22, |_, _, _, _, _| {
+                Ok(())
+            })
+        }),
+        Err(OwnerOutboxError::RestorePending)
+    ));
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_zero_pending_bytes() {
+    use super::super::list_restore_fenced_in;
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(
+        store
+            .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+            .unwrap()
+            .len(),
+        1
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM owner_ydoc_outbox_entries", [])
+                .map_err(write_sql)?;
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+                [],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_work_consumed_by_recovery_enrollment() {
+    use super::super::list_restore_fenced_in;
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let parent = store
+        .read_with(|conn| find_parent_for_binding(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    assert!(parent.pending_bytes > 0);
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: parent.outbox_id.clone(),
+            reason: "restore-fenced".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let next = next_generation(&observed);
+    let mut input = successor_input(&store, &next, host);
+    input.recovery = true;
+    let draft = enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(draft.binding, next);
+    let old = store
+        .read_with(|conn| read_parent(conn, &parent.outbox_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.pending_bytes, 0);
+    assert!(store
+        .read_with(|conn| list_restore_fenced_in(conn, "workspace", None, 64))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

@@ -6,20 +6,22 @@ import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import { authorityInteger, currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
+import { authorityInteger, currentLiveDocumentBinding, ownerLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
+import { releaseRetiredLiveDelivery, reserveLiveDeliverySuccessor } from "./liveDeliveryReservations";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
-import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
-export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
+import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
+  type OrdinaryActivationBounds} from "./ordinaryActivationSource";
+import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
+export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
-import { readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { predecessorAcceptedThrough, readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
 import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
@@ -118,16 +120,31 @@ export class ServiceActivationStore {
         WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`)
         .get(this.history.namespace,input.document.workspaceId,input.document.mainVersionId,input.document.objectId,input.document.lineageClaimId,input.host.hostId);
       if (!owner) throw new Error("Native adoption acknowledgement is missing.");
+      // The adoption kept its predecessor's released prefix, or none for a first activation or a chain that never adopted.
+      const prefix = row.predecessor_activation_id === null ? null : retainedBoundary(JSON.parse(String(this.storage.db.prepare(`SELECT retired_boundary_json
+        FROM ${SERVICE_ACTIVATIONS} WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`)
+        .get(this.history.namespace,row.predecessor_activation_id)?.retired_boundary_json ?? "false")));
       const origin = JSON.parse(String(owner.origin_json));
       if (origin.adoptionId !== row.activation_id || origin.expectedLocalSequence !== source.nativeHeadSequence ||
-          origin.sourceMomentId !== source.sourceMomentId || origin.sourceDigest !== source.sourceDigest || origin.originEventCount !== 0) {
+          origin.sourceMomentId !== source.sourceMomentId || origin.sourceDigest !== source.sourceDigest ||
+          origin.originEventCount !== (prefix?.eventCount ?? 0) || !isDeepStrictEqual(origin.terminalReceipt, prefix?.terminalReceipt ?? null) ||
+          origin.originHistoryEvidenceDigest !== (prefix?.historyEvidenceDigest ?? initialAcceptedHistoryDigest(this.history.namespace, input.document))) {
         throw new Error("Native adoption acknowledgement differs from activation.");
       }
-      const events = this.storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor FROM ${LIVE_JOURNAL_TABLE}
-        WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? ORDER BY journal_cursor LIMIT 2`)
-        .all(input.document.workspaceId,input.document.mainVersionId,input.document.objectId,input.document.lineageClaimId);
-      if (events.length > 1 || (events.length === 0 ? owner.tip_cursor !== 0 :
-          events[0]!.update_digest !== row.state_digest || owner.tip_cursor !== events[0]!.journal_cursor)) {
+      // The predecessor's accepted-before-Stop suffix runs through F. After it, the journal holds at most this activation's own seed.
+      const where = `WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`;
+      const params = [input.document.workspaceId,input.document.mainVersionId,input.document.objectId,input.document.lineageClaimId];
+      const seeded = this.storage.db.prepare(`SELECT update_digest,principal_kind,principal_id FROM ${LIVE_JOURNAL_TABLE} ${where} AND journal_cursor>? ORDER BY journal_cursor LIMIT 2`)
+        .all(...params,predecessorAcceptedThrough(this.storage,row));
+      if (seeded.length > 1 || (seeded.length === 1 && (seeded[0]!.update_digest !== row.state_digest ||
+          seeded[0]!.principal_kind !== "owner" || seeded[0]!.principal_id !== row.owner_user_id))) {
+        throw new Error("Service activation journal holds another update after its predecessor's.");
+      }
+      // The host applied every row through the document's last, by its own ACKs.
+      const last = this.storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM ${LIVE_JOURNAL_TABLE} ${where}
+        ORDER BY journal_cursor DESC LIMIT 1`).get(...params);
+      if (owner.tip_cursor !== (last?.journal_cursor ?? 0) || !isDeepStrictEqual(JSON.parse(String(owner.tip_receipt_json)), last ? {deliveryId: last.delivery_id,
+          updateDigest: last.update_digest, journalCursor: last.journal_cursor, acceptingHostEpoch: last.accepting_host_epoch} : null)) {
         throw new Error("Native activation application acknowledgement is missing.");
       }
       const completion = JSON.stringify({adoptionId:row.activation_id,localYDocSequence:owner.tip_application_sequence,
@@ -141,12 +158,10 @@ export class ServiceActivationStore {
   }
 
   /**
-   * Retires the activation its open obligation names, once the engine released
-   * it at `boundary` and its document parked. Archives its owner row, keeps
-   * that boundary, and drops its retained state, refunding those bytes once.
-   * Exact replay changes nothing, so it never touches a successor's owner row.
-   * Pending, with nothing changed, while the document's restore is unfinished
-   * or the log does not yet hold the settlement moment of a restore it carries.
+   * Retires the activation after the engine released it and its document parked.
+   * Archives its owner, releases its reservations on every host, and refunds its retained state.
+   * A restore carried by this retirement must finish and publish its settlement first.
+   * Replay changes nothing and cannot touch a successor's owner row.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
     host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
@@ -158,7 +173,7 @@ export class ServiceActivationStore {
       const namespace = this.history.namespace;
       const row = this.storage.db.prepare(`SELECT workspace_id,object_id,lineage_claim_id,owner_user_id,predecessor_activation_id,length(state_bytes) AS state_length,
         json_extract(source_json,'$.replicationEpoch') AS replication_epoch,json_extract(source_json,'$.streamIdentity') AS stream_identity,
-        retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+        completion_json,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
         WHERE relay_database_namespace=? AND activation_id=?`).get(namespace, key.activationId);
       if (!row || row.workspace_id !== input.workspaceId || row.object_id !== key.objectId || row.lineage_claim_id !== key.lineageClaimId ||
           row.retire_requested_at_ms === null || row.retire_restore_generation !== key.restoreFenceGeneration || row.retire_accepted_cursor !== key.acceptedThrough) {
@@ -208,11 +223,17 @@ export class ServiceActivationStore {
           WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`).run(...ownerKey);
         if (archived.changes !== 1 || deleted.changes !== 1) throw new Error("Retiring owner delivery is damaged.");
       } else {
+        // An activation that adopted on another host retires only there.
+        const adopted = row.completion_json !== null || this.storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS}
+          WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
+            AND json_extract(origin_json,'$.adoptionId')=? LIMIT 1`).get(...ownerKey.slice(0, 5), key.activationId);
+        if (adopted) throw new Error("Retiring activation adopted on another host.");
         // A never-adopted release keeps its released chain tail's boundary, or none.
         const inherited = row.predecessor_activation_id === null ? "null" : this.storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
           WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(namespace, row.predecessor_activation_id)?.retired_boundary_json;
         if (boundaryJson !== inherited) throw new Error("Retiring owner delivery is missing.");
       }
+      releaseRetiredLiveDelivery(this.storage, document, input.host.hostId);
       // The archived owner row keeps its charge. The boundary replaces the retained state.
       const charge = Buffer.byteLength(boundaryJson) - authorityInteger(row.state_length, 2);
       const retired = this.storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retired_at_ms=?,retired_boundary_json=?,state_bytes=NULL,accounted_bytes=accounted_bytes+?
@@ -234,6 +255,27 @@ export class ServiceActivationStore {
     if (!row || row.restore_operation_id === null) return true;
     return this.storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
       AND namespace=? AND restore_fence=? AND terminal_cursor>=?`).get(...params, this.history.namespace, authorityInteger(row.new_fence, 2), key.acceptedThrough) !== undefined;
+}
+  /**
+   * A successor follows its lineage's exact retired chain tail, which the same
+   * owner kept under the workspace's current identity from the same verified
+   * baseline, while no activation of the document is current or retiring.
+   */
+  #requireSuccession(document: LiveDocumentKey, source: NativeOwnerActivationSource,
+    predecessor: NonNullable<ReturnType<typeof readServiceActivation>>, ownerUserId: string): void {
+    const namespace = this.history.namespace;
+    const open = this.storage.db.prepare(`SELECT retire_requested_at_ms FROM ${SERVICE_ACTIVATIONS}
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL LIMIT 1`).get(document.workspaceId, document.mainVersionId, document.objectId);
+    if (open) throw new Error(open.retire_requested_at_ms === null ? "Service activation already has a current activation." : "Service activation is retiring.");
+    const prior = JSON.parse(String(predecessor.source_json)) as NativeOwnerActivationSource, identity = this.storage.getWorkspaceIdentity(document.workspaceId);
+    if (predecessor.relay_database_namespace !== namespace || predecessor.owner_user_id !== ownerUserId || !identity ||
+        prior.replicationEpoch !== identity.replicationEpoch || prior.streamIdentity !== identity.streamIdentity ||
+        source.replicationEpoch !== identity.replicationEpoch || source.streamIdentity !== identity.streamIdentity) {
+      throw new Error("Service activation predecessor belongs to another owner or workspace identity.");
+    }
+    if (prior.baseRelaySeq !== source.baseRelaySeq || prior.baseOriginId !== source.baseOriginId || prior.baseOriginSeq !== source.baseOriginSeq) {
+      throw new Error("Service activation successor has another baseline.");
+    }
   }
 
   // The boundary must end the lineage's real accepted history at or before F.
@@ -288,11 +330,13 @@ export class ServiceActivationStore {
     });
   }
 
-  prepare(input: {
+  /**
+   * Retains a capture as the document's live baseline. Its validation runs in a live validation
+   * process before the transaction opens; the transaction refuses it as stale if the history changed.
+   */
+  async prepare(input: {
     capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate; shareId: string; registeredAtMs: number; guard(): void;
-    validateBaseline: ReturnType<typeof createLiveMarkdownRegistrationValidator>;
-    validateJournal: ReturnType<typeof createLiveMarkdownJournalValidator>;
-    bounds: OrdinaryActivationBounds;
+    validate: OrdinaryActivationValidator; bounds: OrdinaryActivationBounds; signal?: AbortSignal;
   }) {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
@@ -307,44 +351,85 @@ export class ServiceActivationStore {
         digest(fullState) !== source.fullStateDigest || digest(baselineBytes) !== source.lineageClaimId) {
       throw new Error("Native activation identity differs.");
     }
-    const base = input.validateBaseline({document,currentPath:source.currentPath,checkpoint:baselineBytes});
-    if (base.kind !== "accepted") {
-      throw new Error("Native activation does not match the ordinary source.");
-    }
     const sourceJson = JSON.stringify(source);
-    return this.storage.tx(() => {
-      input.guard(); requireLiveJournalHistory(this.storage, this.history);
-      const prior = readServiceActivation(this.storage, document);
+    const owner = () => {
       const share = this.storage.getShare(input.shareId);
       if (!share || share.workspaceId !== document.workspaceId || !this.storage.workspaceIsOwnedBy(document.workspaceId, share.granterUserId)) {
         throw new Error("Service activation owner is unavailable.");
       }
-      if (prior) {
-        const state = serviceActivationState(prior);
-        if (state === "retiring" || state === "retired") throw new Error("Service activation is retiring.");
-        if (prior.activation_id !== activationId || prior.relay_database_namespace !== this.history.namespace ||
-            prior.source_json !== sourceJson || prior.state_digest !== source.fullStateDigest ||
-            prior.owner_user_id !== share.granterUserId || prior.share_id !== share.shareId) throw new Error("Service activation already has another retained source.");
-        return {document, replayed: true, completed: prior.completion_json !== null};
+      return share;
+    };
+    // A retained activation replays without validating history again; a retired one is a predecessor, so its successor validates the full history.
+    const retained = (prior: ReturnType<typeof readServiceActivation>) => {
+      const state = serviceActivationState(prior);
+      if (state === "retiring") throw new Error("Service activation is retiring.");
+      return prior && state !== "retired" ? prior : null;
+    };
+    // A capture follows the lineage's retired chain tail, or none when the lineage has no activation.
+    const succeed = (predecessor: ReturnType<typeof readServiceActivation> | null, ownerUserId: string) => {
+      if ((source.predecessorActivationId ?? null) !== (predecessor?.activation_id ?? null)) {
+        throw new Error("Service activation names another predecessor.");
       }
-      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base.evidence,
-        validateJournal:input.validateJournal,validateRegistration:input.validateBaseline,bounds:input.bounds});
+      if (predecessor) this.#requireSuccession(document, source, predecessor, ownerUserId);
+    };
+    const history = this.storage.readTx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const prior = readServiceActivation(this.storage, document);
+      const share = owner();
+      if (retained(prior)) return undefined;
+      succeed(prior ?? null, share.granterUserId);
+      return readOrdinaryActivationHistory(this.storage, {source, document, baselineBytes, fullState, bounds: input.bounds});
+    });
+    const validation = await input.validate({document, currentPath: source.currentPath, baselineBytes,
+      ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
+    if (validation.kind === "retry") throw new ServiceActivationBusy();
+    if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
+    if (validation.kind !== "accepted") throw new Error(validation.message);
+    const base = validation.baseline;
+    return this.storage.tx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const prior = readServiceActivation(this.storage, document);
+      const share = owner();
+      const kept = retained(prior);
+      if (kept) {
+        if (kept.activation_id !== activationId || kept.relay_database_namespace !== this.history.namespace ||
+            kept.source_json !== sourceJson || kept.state_digest !== source.fullStateDigest ||
+            kept.owner_user_id !== share.granterUserId || kept.share_id !== share.shareId) throw new Error("Service activation already has another retained source.");
+        return {document, replayed: true, completed: kept.completion_json !== null};
+      }
+      // The retained activation the read found has since gone, so nothing validated this history.
+      if (!history) throw new ServiceActivationStaleCut();
+      const predecessor = prior ?? null;
+      succeed(predecessor, share.granterUserId);
+      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base,history,proof:validation.proof,bounds:input.bounds});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
       const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
-        evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.evidence.checkpoint.ranges},
-          projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength}},ordinaryCut);
-      if (registration.kind !== "registered" || registration.replayed) throw new Error("Service activation requires a new live baseline.");
-      const binding = currentLiveDocumentBinding(this.storage,{document,actor:{kind:"owner",userId:share.granterUserId,shareId:share.shareId}});
-      if (binding.kind !== "current" || !isDeepStrictEqual(binding.host,input.host)) throw new Error("Service activation selector is unavailable.");
-      const bindingJson = JSON.stringify(binding.binding);
+        evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.checkpoint.ranges},
+          projectedMarkdownSha256:base.projectedMarkdownSha256,projectedMarkdownByteLength:base.projectedMarkdownByteLength}},ordinaryCut);
+      // A successor replays the baseline its verified predecessor registered; a first activation registers it.
+      if (registration.kind !== "registered" || registration.replayed !== (predecessor !== null)) throw new Error("Service activation requires a new live baseline.");
+      const actor = {kind:"owner" as const,userId:share.granterUserId,shareId:share.shareId};
+      // The retired predecessor admits nothing, so a successor's binding is authorized below, through its own pending access.
+      const current = predecessor ? null : currentLiveDocumentBinding(this.storage,{document,actor});
+      const binding = predecessor ? ownerLiveDocumentBinding(this.storage,document,actor) : current?.kind === "current" && isDeepStrictEqual(current.host,input.host) ? current.binding : null;
+      if (!binding) throw new Error("Service activation selector is unavailable.");
+      const bindingJson = JSON.stringify(binding);
       const charge = fullState.length + Buffer.byteLength(JSON.stringify([this.history.namespace,activationId,sourceJson,bindingJson,
-        source.fullStateDigest,share.granterUserId,share.shareId,null]));
+        source.fullStateDigest,share.granterUserId,share.shareId,null,...(predecessor ? [predecessor.activation_id] : [])]));
       assertWorkspaceQuota(this.storage,document.workspaceId,charge);
       this.storage.db.prepare(`INSERT INTO ${SERVICE_ACTIVATIONS}(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`)
+        predecessor_activation_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`)
         .run(this.history.namespace,activationId,document.workspaceId,document.mainVersionId,document.objectId,document.lineageClaimId,
-          sourceJson,bindingJson,source.fullStateDigest,fullState,share.granterUserId,share.shareId,charge);
+          predecessor?.activation_id ?? null,sourceJson,bindingJson,source.fullStateDigest,fullState,share.granterUserId,share.shareId,charge);
       this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge,document.workspaceId);
+      if (predecessor) {
+        // Retirement released the lineage's adoption funding. Quota refuses this Resume, retryably, and leaves the retired tail as Stop left it.
+        reserveLiveDeliverySuccessor(this.storage, document, input.host.hostId);
+        const pending = currentLiveDocumentBinding(this.storage,{document,actor},serviceActivationAccess(this.storage,activationId,binding,input.host));
+        if (pending.kind !== "current" || !isDeepStrictEqual(pending.host,input.host) || !isDeepStrictEqual(pending.binding,binding)) {
+          throw new Error("Service activation selector is unavailable.");
+        }
+      }
       return {document,replayed:false,completed:false};
     });
   }

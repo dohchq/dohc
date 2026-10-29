@@ -4,7 +4,7 @@ import {cancelStopRestore, deliverStopRestore} from "./liveRestoreDelivery";
 import {StopRestoreCancellationRefused} from "./storage/liveRestoreOperation";
 
 const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:0};
-const operation={operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
+const operation={point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
   origin:{kind:"owner",id:"adoption"},terminal:null,appliedSequence:2};
 const receipt={operation,localHeadSequence:2,recordedAtMs:3};
 const refused={status:"pending",reason:"publication-pending"};
@@ -40,6 +40,14 @@ it("leaves the fence pending on a host without ordinary publication",async()=>{
   expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
 });
 
+it.each(["binding-changed","reader-unavailable","source-unavailable","source-too-large","incomplete-witness"])(
+  "keeps a typed %s refusal on the existing retry path",async reason=>{
+    const f=restore([{status:"refused",refusal:{operation,reason}}],async()=>({pushed:0}));
+    await expect(f.stopped).rejects.toThrow();
+    expect(f.calls).toEqual(["liveApplication.fenceRestore"]);
+    expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
+  });
+
 it.each([[{pushed:0,hasMore:true}],[{pushed:1,hasMore:true}]])(
   "asks once more after publication %o, then stays pending without looping",async published=>{
     const f=restore([refused,refused,{status:"fenced",receipt}],async()=>published);
@@ -47,6 +55,14 @@ it.each([[{pushed:0,hasMore:true}],[{pushed:1,hasMore:true}]])(
     expect(f.calls).toEqual(["liveApplication.fenceRestore","publish","liveApplication.fenceRestore"]);
     expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
   });
+
+it("keeps a fence held back by an update awaiting its dependency pending, as for publication",async()=>{
+  const waiting={status:"pending",reason:"accepted-state-incomplete"};
+  const f=restore([waiting,waiting],async()=>({pushed:0}));
+  await expect(f.stopped).resolves.toEqual({kind:"pending",reason:"accepted-state-incomplete"});
+  expect(f.calls).toEqual(["liveApplication.fenceRestore","publish","liveApplication.fenceRestore"]);
+  expect(f.store.acknowledgeStopRestoreFence).not.toHaveBeenCalled();
+});
 
 it("does not ask again for the fence after failed publication",async()=>{
   const f=restore([refused],async()=>{throw new Error("the relay stopped answering");});

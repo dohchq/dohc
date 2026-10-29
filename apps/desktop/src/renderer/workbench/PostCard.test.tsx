@@ -63,7 +63,7 @@ describe("PostCard as a feed row", () => {
     />);
   }
 
-  it("draws an untitled post's text in ink, with a short mono time and no meta line", () => {
+  it("draws an untitled post's text in ink, with a short time in tabular numbers and no meta line", () => {
     row({ title: "Can we ship on Friday?" }, "Can we ship on Friday?");
     const text = screen.getByTestId("chats-post-title");
     expect(text.className).toContain("text-[14px] leading-[21px]");
@@ -71,7 +71,8 @@ describe("PostCard as a feed row", () => {
     const time = screen.getByTestId("chats-post-time");
     expect(time.textContent).toBe(formatShortTime(at));
     expect(time.getAttribute("dateTime")).toBe(new Date(at).toISOString());
-    expect(time.className).toContain("font-mono");
+    expect(time.className).toContain("tabular-nums");
+    expect(time.className).not.toContain("font-mono");
     expect(screen.queryByTestId("chats-post-footer")).toBeNull();
   });
 

@@ -27,7 +27,10 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, DeferredWrites, PolicyState, SelfWriteSuppression,
     StoreCaptureSink, StoreCaptureSinkParams,
 };
-use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
+use crate::{
+    CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
+    EngineEvents,
+};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -58,6 +61,10 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
+    #[cfg(test)]
+    task_stop: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    task_stop_panics: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     reconcile_refused: Arc<tokio::sync::Notify>,
     #[cfg(test)]
@@ -153,8 +160,8 @@ struct CaptureApplyProbeInner {
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
-    gate_wait_armed: std::sync::atomic::AtomicBool,
-    gate_wait_entered: tokio::sync::Semaphore,
+    apply_gate_waiting: tokio::sync::watch::Sender<bool>,
+    close_gate_waiting: tokio::sync::watch::Sender<bool>,
     worker_armed: std::sync::atomic::AtomicBool,
     worker_entered: tokio::sync::Semaphore,
     worker_release: (Mutex<bool>, std::sync::Condvar),
@@ -193,8 +200,8 @@ impl Default for CaptureApplyProbeInner {
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
-            gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
-            gate_wait_entered: tokio::sync::Semaphore::new(0),
+            apply_gate_waiting: tokio::sync::watch::channel(false).0,
+            close_gate_waiting: tokio::sync::watch::channel(false).0,
             worker_armed: std::sync::atomic::AtomicBool::new(false),
             worker_entered: tokio::sync::Semaphore::new(0),
             worker_release: (Mutex::new(false), std::sync::Condvar::new()),
@@ -357,17 +364,34 @@ impl CaptureApplyProbe {
         self.inner.commit_release.add_permits(1);
     }
 
-    pub fn observe_next_apply_gate_wait(&self) {
-        self.inner.gate_wait_armed.store(true, Ordering::Release);
-    }
-
     pub async fn wait_until_apply_gate_waiting(&self) {
         self.inner
-            .gate_wait_entered
-            .acquire()
+            .apply_gate_waiting
+            .subscribe()
+            .wait_for(|waiting| *waiting)
             .await
-            .expect("capture apply probe remains open")
-            .forget();
+            .expect("capture apply probe remains open");
+    }
+
+    pub fn is_apply_gate_waiting(&self) -> bool {
+        *self.inner.apply_gate_waiting.borrow()
+    }
+
+    pub async fn wait_until_close_gate_waiting(&self) {
+        self.inner
+            .close_gate_waiting
+            .subscribe()
+            .wait_for(|waiting| *waiting)
+            .await
+            .expect("workspace close probe remains open");
+    }
+
+    fn observe_apply_gate_wait(&self) -> CaptureGateWait<'_> {
+        CaptureGateWait::new(&self.inner.apply_gate_waiting)
+    }
+
+    pub(crate) fn observe_close_gate_wait(&self) -> CaptureGateWait<'_> {
+        CaptureGateWait::new(&self.inner.close_gate_waiting)
     }
 
     /// Pause the next plain apply worker after it starts but before it calls
@@ -448,6 +472,24 @@ impl CaptureApplyProbe {
 
     pub fn layer_start_count(&self) -> u64 {
         self.inner.layer_start_count.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(feature = "harness")]
+pub(crate) struct CaptureGateWait<'a>(&'a tokio::sync::watch::Sender<bool>);
+
+#[cfg(feature = "harness")]
+impl<'a> CaptureGateWait<'a> {
+    fn new(waiting: &'a tokio::sync::watch::Sender<bool>) -> Self {
+        waiting.send_replace(true);
+        Self(waiting)
+    }
+}
+
+#[cfg(feature = "harness")]
+impl Drop for CaptureGateWait<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
     }
 }
 
@@ -558,15 +600,6 @@ impl CaptureApplyProbe {
         }
     }
 
-    pub(crate) fn observe_gate_wait_if_armed(&self) {
-        #[cfg(feature = "harness")]
-        {
-            if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
-                self.inner.gate_wait_entered.add_permits(1);
-            }
-        }
-    }
-
     fn pause_worker_if_armed(&self) {
         #[cfg(feature = "harness")]
         {
@@ -605,6 +638,21 @@ impl CaptureApplyProbe {
             }
             *released = false;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_task_for_test(&self, panic: bool) {
+        self.task_stop_panics.store(panic, Ordering::Release);
+        self.task_stop.notify_one();
+    }
+
+    #[cfg(test)]
+    async fn stop_task_if_requested(&self) {
+        self.task_stop.notified().await;
+        assert!(
+            !self.task_stop_panics.load(Ordering::Acquire),
+            "capture task test panic"
+        );
     }
 
     fn fail_before_worker_if_armed(&self) -> bool {
@@ -1211,6 +1259,8 @@ impl CaptureDriver {
             }
         }));
         let drive_import_priority = Arc::clone(&import_priority);
+        #[cfg(test)]
+        let stop_probe = apply_probe.clone();
         let task = tokio::spawn(async move {
             let mut env = RealEnv {
                 observation,
@@ -1233,14 +1283,25 @@ impl CaptureDriver {
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
             };
-            drive_loop(
+            let run = drive_loop(
                 &mut env,
                 drive_cancel,
                 drive_status,
                 open_ready_tx,
                 flush_rx,
-            )
-            .await;
+            );
+            #[cfg(not(test))]
+            run.await;
+            #[cfg(test)]
+            tokio::select! {
+                () = run => {}
+                () = async {
+                    let Some(probe) = stop_probe else {
+                        return std::future::pending().await;
+                    };
+                    probe.stop_task_if_requested().await;
+                } => {}
+            }
         });
         CaptureDriver {
             cancel,
@@ -1315,6 +1376,25 @@ impl CaptureDriver {
 
     pub(crate) fn status(&self) -> &Arc<DriverStatus> {
         &self.status
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| task.is_finished())
+    }
+
+    /// A finished task cannot update its status or recover on a later tick.
+    pub(crate) fn status_snapshot(&self) -> StatusSnapshot {
+        let snapshot = self.status.snapshot();
+        if self.is_finished() {
+            StatusSnapshot {
+                running: false,
+                degraded: true,
+                terminal: true,
+                phase: CapturePhase::Degraded,
+            }
+        } else {
+            snapshot
+        }
     }
 
     /// Ask a running fresh import to capture `path` next. It does nothing
@@ -2246,6 +2326,11 @@ impl DriverEnv for RealEnv {
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
         );
+        #[cfg(feature = "harness")]
+        let gate_wait = self
+            .apply_probe
+            .as_ref()
+            .map(CaptureApplyProbe::observe_apply_gate_wait);
         let _apply_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -2255,6 +2340,8 @@ impl DriverEnv for RealEnv {
             },
             guard = self.apply_gate.lock() => guard,
         };
+        #[cfg(feature = "harness")]
+        drop(gate_wait);
         let _links_hold = self.actor.hold_link_drain();
         #[cfg(feature = "harness")]
         let actor_before = self
@@ -2352,14 +2439,18 @@ impl DriverEnv for RealEnv {
             probe.pause_initial_if_armed(cancel).await;
         }
 
-        // The startup baseline is the offline-reconcile pass (TS parity):
-        // One correlation id and the "Reconciled offline edits" summary tie
-        // its per-file moments together, retries included — they finish the
-        // same pass. A new layer also performs one collection reconciliation:
-        // its in-memory retry bit cannot preserve a failed request across a
-        // daemon restart, and a rehydrated manifest may make this plan empty.
+        // The startup baseline is one pass: one correlation id and one
+        // summary tie its per-file moments together, retries included, since
+        // they finish the same pass. Only the pass that opens the workspace,
+        // with a readable seed, knows where its changes came from: no record
+        // of the workspace means the folder's own files, a record means edits
+        // made while dohc was closed. A rebuild while open (lost watch,
+        // policy edit) or an unreadable seed only found changes. A new layer
+        // also performs one collection reconciliation: its in-memory retry
+        // bit cannot preserve a failed request across a daemon restart, and a
+        // rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
-        let provenance = reconcile_provenance();
+        let provenance = startup_provenance(initial_start && seed_loaded, workspace_missing);
         #[cfg(feature = "harness")]
         fence_phase.field(
             "correlation",
@@ -2493,26 +2584,33 @@ impl DriverEnv for RealEnv {
         // A write, or a recovery at open, fell back since the last tick; its
         // own rename is what woke this tick.
         self.announce_no_atomic_placement();
-        if let Some(probe) = &self.apply_probe {
-            probe.observe_gate_wait_if_armed();
-        }
+        #[cfg(feature = "harness")]
+        let gate_wait = self
+            .apply_probe
+            .as_ref()
+            .map(CaptureApplyProbe::observe_apply_gate_wait);
         let _apply_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return TickIo::Cancelled,
             guard = self.apply_gate.lock() => guard,
         };
+        #[cfg(feature = "harness")]
+        drop(gate_wait);
         let _links_hold = self.actor.hold_link_drain();
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_unrecorded_after_release(
+        if offer_unrecorded_after_release(
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
             &files,
         )
-        .await;
+        .await
+        {
+            self.actor.offer_released_link_rewrites(&self.workspace_id);
+        }
         let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
@@ -2524,7 +2622,7 @@ impl DriverEnv for RealEnv {
         {
             probe.pause_if_armed().await;
         }
-        match run {
+        let tick = match run {
             // Converged means at quiescence — except with a NON-EMPTY
             // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
@@ -2599,7 +2697,11 @@ impl DriverEnv for RealEnv {
             }
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
-        }
+        };
+        self.actor
+            .retry_pending_link_rewrites(&self.workspace_id)
+            .await;
+        tick
     }
 
     async fn stop_layer(&mut self, layer: FilesLayer) {
@@ -2796,12 +2898,21 @@ struct CaptureThreadOutcome {
     pending_placement_paths: Vec<CapturePlacementPath>,
 }
 
-/// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
-/// actor-neutral correlation id ties a reconcile pass's per-file moments
-/// together as a group without inventing an author.
-fn reconcile_provenance() -> CaptureProvenance {
+const OFFLINE_RECONCILE_SUMMARY: &str = "Changed while dohc was closed";
+const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+const RESCAN_SUMMARY: &str = "Found changes in the folder";
+
+/// TS parity (`reconcile-${createId()}`): one actor-neutral correlation id
+/// ties a startup pass's per-file moments together as a group without
+/// inventing an author.
+fn startup_provenance(opening: bool, workspace_missing: bool) -> CaptureProvenance {
+    let summary = match (opening, workspace_missing) {
+        (true, true) => FIRST_IMPORT_SUMMARY,
+        (true, false) => OFFLINE_RECONCILE_SUMMARY,
+        (false, _) => RESCAN_SUMMARY,
+    };
     CaptureProvenance {
-        summary: Some("Reconciled offline edits".to_owned()),
+        summary: Some(summary.to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
     }
 }
@@ -2897,9 +3008,26 @@ async fn apply_run(
     cancel: &CancellationToken,
 ) -> ApplyOutcome {
     let status = Arc::clone(context.status);
+    let events = context.events.clone();
+    let workspace_id = context.workspace_id;
     let mut outcome = apply_bound_run_with_handle(context, files, run, cancel).await;
     if let Some(writes) = outcome.deferred_writes.take() {
-        *crate::lock(&status.deferred_writes) = writes;
+        let gained = {
+            let mut previous = crate::lock(&status.deferred_writes);
+            let gained: Vec<_> = writes
+                .keys()
+                .filter(|path| !previous.contains_key(*path))
+                .cloned()
+                .collect();
+            *previous = writes;
+            gained
+        };
+        for path in gained {
+            events.emit(
+                CAPTURE_WRITE_DEFERRED_EVENT,
+                serde_json::json!({ "workspaceId": workspace_id, "path": path }),
+            );
+        }
     }
     outcome
 }
@@ -3376,6 +3504,15 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
+    if result.completed() {
+        let observed: Vec<_> = result
+            .applied_paths
+            .iter()
+            .chain(&result.not_owned_paths)
+            .cloned()
+            .collect();
+        actor.offer_captured_link_rewrites(workspace_id, &observed);
+    }
     if result.degraded {
         status.mark_degraded();
     }
@@ -3560,15 +3697,16 @@ async fn offer_unrecorded_after_release(
     workspace_id: &str,
     releases_seen: &mut u64,
     files: &FilesHandle,
-) {
+) -> bool {
     let releases = leases.release_generation(workspace_id);
     if releases == *releases_seen {
-        return;
+        return false;
     }
     *releases_seen = releases;
     if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
+    true
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op

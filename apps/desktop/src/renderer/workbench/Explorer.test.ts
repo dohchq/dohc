@@ -7,7 +7,7 @@ import { collectionTabPath, siteTabPath, versionCompareTabPath } from "./workben
 // PR 0M manual drive caught it.
 describe("editorTitle", () => {
   it.each([
-    [siteTabPath("apps/trip"), "App: apps/trip"],
+    [siteTabPath("apps/trip"), "trip"],
     [collectionTabPath("notes/旅"), "旅"],
   ])("keeps the Explorer title for %s", (path, title) => {
     expect(editorTitle(path)).toBe(title);

@@ -2,6 +2,10 @@
 /// to the next, at the tip its current activation holds.
 fn fence_next(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
     let mut input = NativeRestoreFence {
+        point: crate::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: operation.into(),
         relay_database_namespace: "namespace".into(),
         old_binding: f.binding.clone(),

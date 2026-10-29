@@ -13,6 +13,7 @@ import {
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
   LossyNoteNotice,
+  OpenExternallyLink,
 } from "./fileInspectorUi";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -31,9 +32,9 @@ import {
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
-import { outsideVersionWaitingMessage } from "../ipc/errorWords";
+import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
-import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
+import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
@@ -54,8 +55,11 @@ import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import type { LossyNoteCheck } from "./editor/lossyNote";
 import {
+  applyFrontmatter,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  orderFrontmatter,
+  parseFrontmatter,
 } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
@@ -68,7 +72,6 @@ import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
-import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
@@ -114,7 +117,7 @@ const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
     default: mod.PropertiesPanel,
   })),
-) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement>;
+) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement | null>;
 
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
@@ -156,7 +159,7 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
 }
 
 export const CHANGED_OUTSIDE_NOTICE =
-  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
+  "This file changed outside dohc.";
 
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
@@ -221,6 +224,13 @@ function PropertiesFallback() {
     </div>
   );
 }
+
+// A document's editor, as a new page hands it what the person typed.
+export type PageEditor = {
+  editor: MarkdownEditorHandle;
+  // Writes the title and icon into the document, skipping an empty one.
+  setIdentity: (identity: { title: string; icon: string }) => void;
+};
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
   useEffect(() => props.onRendered(), [props.onRendered]);
@@ -296,6 +306,9 @@ export function MarkdownView(props: {
   // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
   onEditAnyway: () => void;
+  // Set while capture holds the note. A held lossy note shows the hold, which
+  // Edit anyway would reach only after its warning.
+  onRetryHeldCapture?: () => void;
   // Reopen the engine session after `engine.engineMayHoldDocument`.
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
@@ -309,6 +322,10 @@ export function MarkdownView(props: {
   // unmounts this component, with no child render to fold into `readOnly`.
   writesRefusedRef: { current: boolean };
   localBuffer: SharedLocalDocument;
+  // A new page waits here for the editor to take the keystrokes it held.
+  // Called each time an editable editor mounts, and with null once the
+  // document opens with none.
+  onEditorReady?: (editor: PageEditor | null) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
@@ -751,7 +768,7 @@ export function MarkdownView(props: {
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The file changed outside dohc. Reopening closes this session first, and
-  // main lets the disk version stand, keeping any unsaved text in History.
+  // main lets the disk version stand. Reload can wait for capture to record it.
   // A document with nothing unsaved reopens by itself, never over edits main
   // has not confirmed; otherwise the notice asks the person.
   const { onReloadChangedOutside, onButtonError } = props;
@@ -946,8 +963,12 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  // The record this file is, as the record row hears from main. The engine
+  // gave it its `id`, so the properties count that line as shown.
+  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
+  const recordId = record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} />
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
@@ -977,6 +998,40 @@ export function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  // The rich editor's handle is kept as state only while a new page waits
+  // for it, so no other document renders again when its editor mounts.
+  const { onEditorReady } = props;
+  const onEditorReadyRef = useRef(onEditorReady);
+  onEditorReadyRef.current = onEditorReady;
+  const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+    wysiwygRef.current = handle;
+    if (onEditorReadyRef.current) setPageEditor(handle);
+  }, []);
+  useEffect(() => {
+    if (!onEditorReady || opening) return;
+    if (readOnly || (!displayDoc && surfaceMode !== "wysiwyg")) {
+      onEditorReady(null);
+      return;
+    }
+    if (!pageEditor) return;
+    onEditorReady({
+      editor: pageEditor,
+      setIdentity: (identity) => {
+        const values = Object.entries(identity).filter(([, value]) => value !== "");
+        if (displayDoc) {
+          for (const [key, value] of values) setFrontmatterValue(displayDoc, key, value);
+        } else if (values.length > 0) {
+          // Without a live session the title field writes the draft, so the
+          // page's title does too.
+          const { meta } = parseFrontmatter(latestDraft.current);
+          onPropertiesDraft(applyFrontmatter(latestDraft.current, orderFrontmatter({ ...meta, ...Object.fromEntries(values) })));
+        }
+      },
+    });
+    // onPropertiesDraft reads refs and this render's readOnly, checked above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayDoc, onEditorReady, opening, pageEditor, readOnly, surfaceMode]);
   // A record's properties show the ⚡ of the automations that set them. An
   // editable file in a folder asks; main answers none for a folder that is
   // not a document Collection. A shared file's automations run on its
@@ -2170,26 +2225,15 @@ export function MarkdownView(props: {
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
-              </Suspense>
-            )}
-            <LiveFrontmatterAsWritten
-              workspaceId={props.workspaceId}
-              path={props.path}
-              // Null until the inspector has read the file.
-              body={props.contentRequestId > 0 ? props.body : null}
-              ydoc={displayDoc}
-              saveState={engine.saveState}
-              propertiesShown={!readOnly}
-            />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
           >
             <LazyMarkdownEditor
-              ref={wysiwygRef}
+              ref={attachEditor}
               value={props.body}
               onDirty={() => undefined}
               workspaceId={props.workspaceId}
@@ -2301,8 +2345,12 @@ export function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
-      {props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+      {props.lossyNote === "lossy" && props.onRetryHeldCapture ? (
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryHeldCapture} contentShown message={captureHeldLiveMessage(props.path)}>
+          <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+        </EngineMayHoldDocumentNotice>
+      ) : props.lossyNote === "lossy" ? (
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
@@ -2354,19 +2402,16 @@ export function MarkdownView(props: {
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {!readOnly ? (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
-              </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
           >
             <LazyMarkdownEditor
               key={wysiwygResyncEpoch}
-              ref={wysiwygRef}
+              ref={attachEditor}
               value={markdownEditorBody(draft)}
               onDirty={(materialize) =>
                 scheduleSave("wysiwyg", materialize)
@@ -2428,15 +2473,19 @@ export function MarkdownView(props: {
               opening={opening}
             />
             {recordButtons}
-            {/* Opening, the panel draws its pills where they will be and the
-                block as written starts as it will once the open answers, so
-                the ready document draws in the same place. */}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
-              </Suspense>
-            )}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            {/* Opening, the panel draws its pills where they will be, so the
+                ready document draws in the same place. */}
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel
+                body={draft}
+                onChange={onPropertiesDraft}
+                fieldMarks={fieldMarks}
+                opening={opening}
+                readOnly={readOnly}
+                recordId={recordId}
+                onShowSource={toggleSourceView}
+              />
+            </Suspense>
           </div>
           {/* The editor's own rules draw the body, so it replaces it in place. */}
           <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">

@@ -254,5 +254,13 @@
   "collection.copies.left.remove",
   "dataset.holder.keep",
   "file.retained.list",
-  "file.retained.delete"
+  "file.retained.delete",
+  "chat.dispatch.pause.read",
+  "chat.dispatch.pause.switch",
+  "share.live.document.retry",
+  "share.live.document.recovery.save",
+  "workspace.name.suggest",
+  "agent.run.retry",
+  "settings.agents.order",
+  "device.update.download"
 ]

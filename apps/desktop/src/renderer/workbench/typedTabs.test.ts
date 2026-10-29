@@ -13,10 +13,10 @@ const rows = [
   ["chat", "tab://chats/new", ["New message", "New message", "New message"], ["folder/Label", "folder/Label", "folder/Label"]],
   ["chat", "tab://chats/channel/team%2Fone", ["Chat", "Chat", "Chat"], ["folder/Label", "folder/Label", "folder/Label"]],
   ["chat", "tab://chats/dm/person%20one", ["Chat", "Chat", "Chat"], ["folder/Label", "folder/Label", "folder/Label"]],
-  ["site", "tab://app/apps%2Ftrip", ["apps%2Ftrip", "tab://app/apps%2Ftrip", "App: apps/trip"], ["apps%2Ftrip", "tab://app/apps%2Ftrip", "App: apps/trip"]],
+  ["site", "tab://app/apps%2Ftrip", ["trip", "apps/trip", "trip"], ["trip", "apps/trip", "trip"]],
   ["momentDiff", "tab://moment-diff/moment%20one", ["History change", "History change", "History change"], ["Diff: Label", "History diff: folder/Label", "Diff: Label"]],
   ["versionCompare", "tab://versions/compare/try%2Fone", ["Compare with Main", "Compare this Version with Main", "Compare with Main"], ["Compare with Main", "Compare this Version with Main", "Compare with Main"]],
-  ["collection", "tab://collection/notes%2F%E6%97%85", ["notes%2F%E6%97%85", "tab://collection/notes%2F%E6%97%85", "旅"], ["notes%2F%E6%97%85", "tab://collection/notes%2F%E6%97%85", "旅"]],
+  ["collection", "tab://collection/notes%2F%E6%97%85", ["旅", "notes/旅", "旅"], ["旅", "notes/旅", "旅"]],
   ["transactionalCollection", dataset, ["Collection", "Collection", "Collection"], ["folder/Label", "Collection: folder/Label", "folder/Label"]],
 ] as const;
 

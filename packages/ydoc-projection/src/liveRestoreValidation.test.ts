@@ -71,7 +71,7 @@ it("cannot anchor a witness without a stored artifact reader", () => {
   expect(f.artifact).not.toHaveBeenCalled();
 });
 
-it.each(["reader-restore","reader-to-reader","native-to-reader","reader-to-native"])("validates the engine's %s proposal and review", direction => {
+it.each(["reader-restore","reader-to-reader","native-to-reader","reader-to-native","expired-to-native","expired-to-fresh","expired-to-expired"])("validates the engine's %s proposal and review", direction => {
   const saved = JSON.parse(readFileSync(new URL(`../../../crates/dohc-engine-collab/tests/${direction}.json`,import.meta.url),"utf8"));
   const source = new TextEncoder().encode(saved.source);
   const artifact = (digest: string) => digest === hash(source) ? source : undefined;
@@ -84,7 +84,7 @@ it.each(["reader-restore","reader-to-reader","native-to-reader","reader-to-nativ
     pointStateBytes:Uint8Array.from(saved.pointStateBytes),nativeSourceBytes:saved.nativeSourceBytes.map((b:number[])=>Uint8Array.from(b))};
   const checked=validateLiveRestoreProposal(capture,bytes,policy,{maxBytes:2_000_000,maxEvents:100});
   expect(checked.content.projectedMarkdownSha256).toBe(saved.receipt.point.markdownDigest);
-  expect(checked.projectReview(2_000_000).restoredMarkdown).toBe(direction === "reader-to-native" ? "native original\n" : saved.source);
+  expect(checked.projectReview(2_000_000).restoredMarkdown).toBe(saved.restoredMarkdown ?? (direction === "reader-to-native" ? "native original\n" : saved.source));
 });
 
 it("does not accept the obsolete prefix identity in a restore receipt", async () => {

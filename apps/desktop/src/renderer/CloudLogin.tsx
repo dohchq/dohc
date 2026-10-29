@@ -1,5 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Cloud, ExternalLink } from "lucide-react";
+import { Cloud, ExternalLink, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
@@ -12,7 +12,7 @@ import {
   useConnectionNotices,
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
-import { Pill, PrimaryButton } from "./ui/controls";
+import { IconButton, Pill, PrimaryButton } from "./ui/controls";
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
@@ -72,6 +72,8 @@ export function CloudLogin(props: {
   // The host already titles the step (a step title, a section header): drop
   // this panel's own heading so the name is not said twice.
   untitled?: boolean;
+  // A dialog host passes its close for the X beside the heading.
+  onClose?: () => void;
   // onConnectionError decides where a failed connect, poll, status check, or
   // disconnect goes. A host that takes it owns the toast and the Notices row,
   // so the failure outlives this panel and survives the route change that
@@ -305,10 +307,17 @@ export function CloudLogin(props: {
       }
     >
       {props.untitled ? null : (
-        <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
-          <Cloud size={14} aria-hidden className="text-subtle" />
-          Sync and sharing
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="m-0 flex flex-1 items-center gap-1.5 text-base font-semibold text-ink">
+            <Cloud size={14} aria-hidden className="text-subtle" />
+            Sync and sharing
+          </h2>
+          {props.onClose ? (
+            <IconButton aria-label="Close" title="Close" onClick={props.onClose}>
+              <X size={14} aria-hidden />
+            </IconButton>
+          ) : null}
+        </div>
       )}
 
       {phase.kind === "loading" ? (

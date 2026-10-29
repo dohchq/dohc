@@ -343,6 +343,21 @@ fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
             offline_edit(&mut f, "Edited while stopped", "offline");
         }
         let id = successor(&mut f);
+        // The owner state a successor's adoption starts from reads no current activation until it adopts.
+        let current = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    &format!(
+                        "SELECT count(*) FROM {} WHERE relay_database_namespace='namespace' AND workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+                        crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS
+                    ),
+                    rusqlite::params![f.binding.workspace_id, f.binding.main_version_id, f.binding.object_id, f.binding.lineage_claim_id],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(current, 0, "edited={edited}");
         let updates = f.store.table_row_count("ydoc_updates").unwrap();
         let ack = f.adopt().unwrap();
         assert!(!ack.adoption_replayed, "edited={edited}");

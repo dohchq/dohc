@@ -183,6 +183,10 @@ function readSocketResponse(
   });
 }
 
+type ThreadResult<Verb extends CliVerb> = Verb extends "show" | "chat"
+  ? Exclude<CliResultByVerb[Verb], { stream: unknown }>
+  : CliResultByVerb[Verb];
+
 describe("CLI socket server", () => {
   let tempRoot: string;
   let workspaceRoot: string;
@@ -217,7 +221,9 @@ describe("CLI socket server", () => {
   // reports it: this one for the fixture workspace, 0 for any other.
   let agentRunDepth: number;
   // Whether a run dohc dispatched holds the fixture workspace's run slot.
-  let dispatchedRun: boolean;
+  let dispatchedRun: string | null;
+  // The engine's id for that run, when a test claimed one.
+  let dispatchedRunId: string | null;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -228,7 +234,17 @@ describe("CLI socket server", () => {
     }];
   }
 
+  // `show` and `chat` read a thread here; invokeAny also takes a group's stream.
   async function invoke<Verb extends CliVerb>(
+    verb: Verb,
+    args: ArgsFor<Verb>,
+  ): Promise<ThreadResult<Verb>> {
+    const result: unknown = await invokeAny(verb, args);
+    if (typeof result === "object" && result !== null && Object.hasOwn(result, "stream")) throw new Error("expected a thread, not a stream");
+    return result as ThreadResult<Verb>;
+  }
+
+  async function invokeAny<Verb extends CliVerb>(
     verb: Verb,
     args: ArgsFor<Verb>,
   ): Promise<CliResultByVerb[Verb]> {
@@ -256,7 +272,7 @@ describe("CLI socket server", () => {
   async function post(input: {
     actor: "human" | "agent";
     group?: string;
-    title: string;
+    title?: string;
     body: string;
     attachments?: string[];
     needsDecision?: boolean;
@@ -267,7 +283,7 @@ describe("CLI socket server", () => {
       actor: input.actor,
       ...(input.runId ? { runId: input.runId } : {}),
       group: input.group ?? "general",
-      title: input.title,
+      ...(input.title ? { title: input.title } : {}),
       attachments: input.attachments ?? [],
       needsDecision: input.needsDecision ?? false,
       body: input.body,
@@ -424,7 +440,8 @@ describe("CLI socket server", () => {
       },
     };
     agentRunDepth = 0;
-    dispatchedRun = false;
+    dispatchedRun = null;
+    dispatchedRunId = null;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -449,6 +466,7 @@ describe("CLI socket server", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
+        agentIdsNamedIn: async () => [],
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -461,7 +479,9 @@ describe("CLI socket server", () => {
       }),
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
-      dispatchedAgentRun: (workspaceId) => workspaceId === WORKSPACE_ID && dispatchedRun,
+      dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
+      dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
+      agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
       },
@@ -850,7 +870,7 @@ describe("CLI socket server", () => {
     fixture.summary.path = fixture.detail.path = "folder/tracked.txt";
     let changes = [fixture.summary];
     let details = [fixture.detail];
-    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),
+    const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),
       readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: fixture.summary.id, operation: "delete", path: "folder/tracked.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
         const compensation = momentFixtures(WORKSPACE_ID, "undo", SERVER_NOW_MS + 1);
@@ -872,7 +892,7 @@ describe("CLI socket server", () => {
     });
     fixture.summary.metadata.correlationId = fixture.detail.metadata.correlationId = removed.operationId!;
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
-    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history, {agent: true});
     context.listMoments = async () => changes;
     context.readMoment = async id => details.find(moment => moment.id === id) ?? null;
     const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
@@ -917,11 +937,11 @@ describe("CLI socket server", () => {
     await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot });
     await finishMoveRecovery({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, plan, "a.txt", "b.txt", false);
-    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
+    const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
         return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history, {agent: true});
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
     const restored = { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] };
@@ -951,8 +971,8 @@ describe("CLI socket server", () => {
   it("returns missing-delete recovery words through the socket, CLI and MCP", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
-    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
+    const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history, {agent: true});
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." };
     expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
@@ -1161,9 +1181,9 @@ describe("CLI socket server", () => {
     agentRunDepth = 2;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
-    dispatchedRun = true;
+    dispatchedRun = "codex";
     await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
-    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2 });
     context.readOnly = true;
     await expect(invoke("stopSync", { cwd: workspaceRoot, actor: "agent" })).rejects.toThrow("owning workspace");
     expect(stop).toHaveBeenCalledTimes(4);
@@ -1620,7 +1640,7 @@ describe("CLI socket server", () => {
   it("refuses post and reply by engine id in a read-only channel before any row", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const existing = await store.startChannelThread({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
@@ -1939,6 +1959,7 @@ describe("CLI socket server", () => {
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
           steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      serverRuns: vi.fn(), serverRun: vi.fn(),
       retry: vi.fn(async (input) => {
         retries.push(input);
         return answers.shift()!;
@@ -1994,6 +2015,46 @@ describe("CLI socket server", () => {
     expect(retries).toHaveLength(3);
   });
 
+  it("reads the runs of the workspace's server, including one its rebuilt copy says may not have been sent", async () => {
+    const trigger = { kind: "added" as const, recordId: "rec_1", by: "human" as const, sharedAuthor: null, depth: 0 };
+    const ran = { claimId: "atc_server", state: "done" as const, error: null, createdAtMs: 3, updatedAtMs: 4, trigger,
+      definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+      writes: [{ kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Status", before: "Open", after: "Paid" }] };
+    // The server lost its copy after this run changed it; the rebuilt copy keeps only this mark of it.
+    const lost = { ...ran, claimId: "atc_lost", state: "failed" as const, writes: [], unsentChangesLost: true as const,
+      trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      error: "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed." };
+    const pages = new Map([[undefined, { runs: [ran], next: "lost:2:1:atc_lost" }], ["lost:2:1:atc_lost", { runs: [lost], next: null }]]);
+    context.automations = {
+      automationIdAt: vi.fn(async (_collectionPath: string, id: string) => `collection:object-tasks#${id}`),
+      runs: vi.fn(), run: vi.fn(), retry: vi.fn(),
+      serverRuns: vi.fn(async (_automationId: string, before?: string) => pages.get(before) ?? null),
+      serverRun: vi.fn(async (_automationId: string, claimId: string) => [ran, lost].find((run) => run.claimId === claimId) ?? null),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp", server: true };
+    const fields = { error: lost.error, createdAtMs: 3, updatedAtMs: 4, trigger: lost.trigger, definitionChanged: false, neverStarted: false,
+      chainStopped: false, undone: false };
+    await expect(invoke("automationRuns", args)).resolves.toMatchObject({ ok: true, runs: [{ run: "atc_server", changes: 1 }], next: "lost:2:1:atc_lost" });
+    await expect(invoke("automationRuns", { ...args, page: "lost:2:1:atc_lost" })).resolves.toEqual({
+      ok: true, runs: [{ run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, changes: 0 }], next: null,
+    });
+    expect(context.automations.serverRuns).toHaveBeenLastCalledWith("collection:object-tasks#stamp", "lost:2:1:atc_lost");
+    await expect(invoke("automationRun", { ...args, run: "atc_lost" })).resolves.toEqual({
+      ok: true, run: { run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, server: true, changes: [] },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_server" })).resolves.toMatchObject({
+      ok: true, run: { run: "atc_server", server: true, changes: ran.writes },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_gone" })).resolves.toEqual({
+      ok: false, reason: "Your server has no run atc_gone of this automation that this computer can read.",
+    });
+    expect(context.automations.runs).not.toHaveBeenCalled();
+    expect(context.automations.run).not.toHaveBeenCalled();
+    await expect(invoke("automationRuns", { ...args, page: "unknown" })).resolves.toEqual({
+      ok: false, reason: "Your server has no runs in this workspace that this computer can read.",
+    });
+  });
+
 
   it("gives share agents the definition list and switch seam, including pending results", async () => {
     context.readOnly = true;
@@ -2001,7 +2062,7 @@ describe("CLI socket server", () => {
       sync: "pending" as const };
     const switched = { status: "written" as const, contentHash: "b".repeat(64), sync: "pending" as const };
     const list = vi.fn(async () => definitions), toggle = vi.fn(async () => switched);
-    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn(), list, switch: toggle };
+    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn(), list, switch: toggle };
     const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks" };
     await expect(invoke("automationList", args)).resolves.toEqual({ ok: true, definitions });
     await expect(invoke("automationSwitch", { ...args, automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" })).resolves.toEqual({ ok: true, result: switched });
@@ -2191,7 +2252,7 @@ describe("CLI socket server", () => {
     let kept = [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }];
     context.keptCopies = {
       async list() {
-        return { keptCopies: kept, more: false };
+        return { keptCopies: kept, more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
       },
       async save(id) {
         const found = kept.some((copy) => copy.id === id);
@@ -2205,6 +2266,7 @@ describe("CLI socket server", () => {
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
       ok: true,
       keptCopies: [{ id: 3, path: "notes/plan.md", keptAtMs: 10 }],
+      outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]],
       more: false,
     });
     await expect(invoke("saveKeptCopy", { cwd: workspaceRoot, actor: "agent", id: 3 }))
@@ -2214,7 +2276,7 @@ describe("CLI socket server", () => {
       .resolves.toEqual({ ok: true, status: "gone" });
     expect(calls.writes).toBe(1);
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
-      .resolves.toEqual({ ok: true, keptCopies: [], more: false });
+      .resolves.toEqual({ ok: true, keptCopies: [], more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] });
 
     delete context.keptCopies;
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
@@ -2454,6 +2516,8 @@ describe("CLI socket server", () => {
     context.automations = {
       automationIdAt: vi.fn(async () => "collection:app-tasks#stamp"),
       runs: vi.fn(),
+      serverRuns: vi.fn(),
+      serverRun: vi.fn(),
       retry: vi.fn(),
       run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
     };
@@ -2550,7 +2614,7 @@ describe("CLI socket server", () => {
     };
     // An automation wakes an agent through dispatch.
     agentRunDepth = 3;
-    dispatchedRun = true;
+    dispatchedRun = "codex";
 
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
     await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
@@ -2564,15 +2628,15 @@ describe("CLI socket server", () => {
       .resolves.toMatchObject({ ok: false });
 
     // A name the client gives, as "Client" and "claude-code" do, gives way to the run's.
-    const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
+    const woken = { kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 3 };
     const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
       woken,
       woken,
-      { actorOriginId: "dohc-mcp", attribution },
-      { actorOriginId: "dohc-mcp", attribution },
+      { actorOriginId: "codex", attribution },
+      { actorOriginId: "codex", attribution },
     ]);
   });
 
@@ -2637,6 +2701,20 @@ describe("CLI socket server", () => {
     expect(mine?.author.kind).toBe("human");
   });
 
+  it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
+    const posted = await post({ actor: "human", title: "Test", body: "Check." });
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
+    const args = { cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.", attachments: [], needsDecision: false, runId: "run_live" } as const;
+    await invoke("reply", { ...args, attachments: [] });
+    expect((await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind).toBe("agent");
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
   it("records a named MCP client's file write and reply in a dispatched run as one agent", async () => {
     if (!store) throw new Error("Store is not available");
     const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
@@ -2662,12 +2740,12 @@ describe("CLI socket server", () => {
       };
     }
 
-    dispatchedRun = true;
+    dispatchedRun = "codex";
     const during = await writeAndReply();
     expect(during.reply).toEqual(during.file);
 
     // Outside a run, the client's writes keep the name it gave.
-    dispatchedRun = false;
+    dispatchedRun = null;
     expect((await writeAndReply()).file).toMatchObject({ kind: "agent", claimedName: "Codex" });
   });
 
@@ -2888,6 +2966,18 @@ describe("CLI socket server", () => {
     expect(await invoke("fileChatStart", corrected)).toEqual(started);
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
       .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
+  });
+
+  it("returns a pending document edit as success and replays it without another edit", async () => {
+    const warning = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+    const edit = vi.fn(async (input: { path: string }) => ({ path: input.path, changed: true, warning }));
+    context.documents = { read: async () => { throw new Error("unused"); }, edit,
+      create: async () => { throw new Error("unused"); } };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "After.", requestId: "kept-edit" };
+    const expected = { ok: true, path: "notes/plan.md", changed: true, warning };
+    await expect(invoke("documentEdit", args)).resolves.toEqual(expected);
+    await expect(invoke("documentEdit", args)).resolves.toEqual(expected);
+    expect(edit).toHaveBeenCalledOnce();
   });
 
   it("answers a resent document edit with its first result", async () => {
@@ -3627,12 +3717,11 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
-  it("lists chat-only and mixed groups and posts into a chat-only lane", async () => {
+  it("posts into a chat-only group's chat lane, and lists both lanes of every group", async () => {
     if (!store) throw new Error("Store is not available");
     const chat = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Chat group", kind: "channel", type: "chat", purpose: "Plan the launch" });
     await post({ actor: "human", group: chat.slug, title: "Hello", body: "In chat" });
-    const chatThreads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" });
-    expect(chatThreads).toHaveLength(1);
+    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" })).toHaveLength(1);
     expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(0);
     const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: chat.slug });
     expect(listed.group.purpose).toBe("Plan the launch");
@@ -3652,7 +3741,7 @@ describe("CLI socket server", () => {
 
   it("posts to the agent channel using the name returned by MCP discovery", async () => {
     if (!store) throw new Error("Store is not available");
-    const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const listed = await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     if (!listed.ok) throw new Error(listed.reason);
     const discovered = listed.groups.find((channel) => channel.id === agent.id);
@@ -3660,11 +3749,10 @@ describe("CLI socket server", () => {
     const started = await post({
       actor: "agent",
       group: discovered!.name,
-      title: "Continue",
       body: "Continue this task.",
     });
     expect(started.group.kind).toBe("agent");
-    const threads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agent.id });
+    const threads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agent.id, lane: "chat" });
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
   });
 
@@ -3687,9 +3775,9 @@ describe("CLI socket server", () => {
     )).not.toContain("agent");
   });
 
-  it("rejects post for DM streams while allowing agent-channel task posts", async () => {
+  it("rejects post for DM streams and titles in an agent DM", async () => {
     if (!store) throw new Error("Store is not available");
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const dm = await store.createChannel({
       workspaceId: WORKSPACE_ID,
       name: "Alice",
@@ -3711,14 +3799,91 @@ describe("CLI socket server", () => {
       channelId: dm.id,
     })).toEqual([]);
 
-    const agentPost = await post({
+    await expect(post({
       actor: "human",
       group: "my-agent",
       title: "Agent task",
-      body: "Agent channels still create task threads.",
+      body: "An agent DM's messages take no title.",
+    })).rejects.toThrow("Drop --title.");
+    const agentPost = await post({
+      actor: "human",
+      group: "my-agent",
+      body: "Agent DMs still take new messages.",
     });
     expect(agentPost.group.kind).toBe("agent");
-    expect(agentPost.title).toBe("Agent task");
+  });
+
+  it("shows a group's stream to the CLI and MCP in one order, with the same summaries, a page at a time", async () => {
+    if (!store) throw new Error("Store is not available");
+    const group = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Trip", kind: "channel", type: "both" });
+    const sam = { kind: "human" as const, displayName: "Sam" };
+    const post = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "posts", author: sam, body: "Plan the trip",
+    });
+    await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: post.thread.id,
+      author: { kind: "agent", displayName: "Scout" }, body: "Booked the train.",
+    });
+    const chat = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "chat", author: sam, body: "Who is driving?",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: chat.thread.id, triggerMessageId: chat.message.id, agentId: "default" });
+
+    const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: group.slug, peek: true });
+    if (!("stream" in shown)) throw new Error("expected a stream");
+    const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: group.slug });
+    if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+
+    const summary = (items: ReadonlyArray<{
+      position: { lane: string };
+      message: { body: string; agentRequests?: ReadonlyArray<{ state: string }> };
+      post?: { replyCount: number; repliers: ReadonlyArray<{ author: { displayName: string } }>; latestAgentReply?: { bodyExcerpt: string } };
+    }>) => items.map((item) => ({
+      lane: item.position.lane,
+      body: item.message.body,
+      requests: item.message.agentRequests?.map((request) => request.state) ?? [],
+      replies: item.post?.replyCount,
+      repliers: item.post?.repliers.map((replier) => replier.author.displayName),
+      agentReply: item.post?.latestAgentReply?.bodyExcerpt,
+    }));
+    expect(summary(shown.stream.items)).toEqual([
+      { lane: "posts", body: "Plan the trip", requests: [], replies: 1, repliers: ["Scout"], agentReply: "Booked the train." },
+      { lane: "chat", body: "Who is driving?", requests: ["waiting"], replies: undefined, repliers: undefined, agentReply: undefined },
+    ]);
+    expect(summary(read.stream.items)).toEqual(summary(shown.stream.items));
+    expect(shown.stream.items[0]!.threadId).toBe(cliThreadId(post.thread.id));
+    expect(read.stream.items[0]!.threadId).toBe(post.thread.id);
+    expect(shown.stream.nextBefore).toBeNull();
+
+    // The newest page holds the conversation message; its nextBefore reads the post.
+    const newest = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: group.slug, peek: true, limit: 1 });
+    if (!("stream" in newest) || !newest.stream.nextBefore) throw new Error("expected an older page");
+    expect(newest.stream.items.map((item) => item.message.body)).toEqual(["Who is driving?"]);
+    const older = await invokeAny("show", {
+      cwd: workspaceRoot, actor: "human", target: group.slug, peek: true, before: newest.stream.nextBefore,
+    });
+    if (!("stream" in older)) throw new Error("expected a stream");
+    expect(older.stream.items.map((item) => item.message.body)).toEqual(["Plan the trip"]);
+
+    // A thread read names the same request.
+    const thread = await invoke("show", { cwd: workspaceRoot, actor: "human", target: cliThreadId(chat.thread.id), peek: true });
+    expect(thread.messages[0]?.agentRequests).toEqual([{ agentId: "default", state: "waiting" }]);
+    await expect(invokeAny("show", { cwd: workspaceRoot, actor: "human", target: cliThreadId(chat.thread.id), peek: true, limit: 1 }))
+      .rejects.toThrow("--before and --limit page a group's stream");
+  });
+
+  it("names each agent's chat stream by its own group in the CLI and MCP", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    for (const slug of ["my-agent", "my-agent-codex"]) {
+      const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: slug, peek: true });
+      if (!("stream" in shown)) throw new Error("expected a stream");
+      const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: slug });
+      if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+      expect(shown.stream.group.name).toBe(slug);
+      expect(read.stream.group.name).toBe(slug);
+    }
   });
 
   it("exposes budget pauses in show and MCP chat reads without adding messages", async () => {
@@ -3734,7 +3899,7 @@ describe("CLI socket server", () => {
     await dispatchStore.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", paused: false });
     expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger" });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger", agentId: "default" });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected run");
     expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
@@ -3743,7 +3908,7 @@ describe("CLI socket server", () => {
     expect(await show()).toMatchObject({ dispatch, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch });
     expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2" });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2", agentId: "default" });
     const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!next) throw new Error("Expected next run");
     await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
@@ -3761,6 +3926,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-dispatch_trigger",
       threadId: "thread-dispatch",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3837,6 +4003,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-retry_trigger",
       threadId: "thread-retry",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3879,6 +4046,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-recovery_trigger",
       threadId: "thread-recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -3930,6 +4098,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-restart_recovery_trigger",
       threadId: "thread-restart_recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -4020,6 +4189,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-mixed_restore_trigger",
       threadId: "thread-mixed_restore",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a run for mixed restore.");
@@ -4118,6 +4288,7 @@ describe("CLI socket server", () => {
         workspaceId: WORKSPACE_ID,
         triggerMessageId: `message-bounded_${suffix}`,
         threadId: `thread-bounded_${suffix}`,
+        agentId: "default",
       });
       const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
       if (!claim) throw new Error("Expected a bounded-queue run.");
@@ -4167,6 +4338,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-foreground_budget_trigger",
       threadId: "thread-foreground_budget",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -4209,6 +4381,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-permanent_trigger",
       threadId: "thread-permanent",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4255,6 +4428,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_foreground_trigger",
       threadId: "thread-terminal_foreground",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4303,6 +4477,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_recovery_trigger",
       threadId: "thread-terminal_recovery",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4364,6 +4539,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-terminal_transient_trigger",
       threadId: "thread-terminal_transient",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4415,6 +4591,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-plain_error_trigger",
       threadId: "thread-plain_error",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4454,6 +4631,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-deadline_trigger",
       threadId: "thread-deadline",
+      agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -4802,12 +4980,17 @@ describe("CLI socket server", () => {
 
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
     if (!store) throw new Error("Store is not available");
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
     const agentDm = await post({
       actor: "human",
       group: "my-agent",
-      title: "Work for my agent",
       body: "Please investigate this",
+    });
+    const codexDm = await post({
+      actor: "human",
+      group: "my-agent-codex",
+      body: "Please review this",
     });
     const mention = await post({
       actor: "human",
@@ -4820,6 +5003,23 @@ describe("CLI socket server", () => {
       body: "This should be unread by the human",
     });
     if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const askedCodex = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["codex"],
+      body: "@Codex can you check the release notes?",
+    });
+    await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["default"],
+      body: "@Nova can you book the room?",
+    });
     const fileThread = await store.createThread({
       workspaceId: WORKSPACE_ID,
       title: "Unread file discussion",
@@ -4838,7 +5038,7 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot,
       actor: "agent",
     });
-    expect(agentInbox.threads.map((thread) => thread.id)).toContain(agentDm.threadId);
+    expect(agentInbox.threads.map((thread) => thread.id)).toEqual(expect.arrayContaining([agentDm.threadId, codexDm.threadId]));
     expect(agentInbox.threads.every((thread) => thread.group.kind === "agent")).toBe(true);
     expect(agentInbox.mentions).toEqual([
       expect.objectContaining({
@@ -4847,6 +5047,27 @@ describe("CLI socket server", () => {
         text: "Could @agent check the transport contract?",
       }),
     ]);
+
+    // A dispatched run sees its own agent's unread work: its chat, and each
+    // message elsewhere that asked it.
+    const codexRun = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (codexRun?.run.agentId !== "codex") throw new Error("Expected Codex's run");
+    dispatchedRun = "codex";
+    dispatchedRunId = codexRun.run.runId;
+    const runInbox = await invoke("inbox", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    });
+    expect(runInbox.threads.map((thread) => thread.id)).toEqual([codexDm.threadId]);
+    expect(runInbox.mentions).toEqual([
+      expect.objectContaining({
+        threadId: cliThreadId(askedCodex.thread.id),
+        messageId: cliMessageId(askedCodex.message.id),
+        text: "@Codex can you check the release notes?",
+      }),
+    ]);
+    dispatchedRun = null;
+    dispatchedRunId = null;
 
     const humanInbox = await invoke("inbox", {
       cwd: workspaceRoot,
@@ -4878,6 +5099,44 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot,
       actor: "human",
     })).threads.map((thread) => thread.id)).not.toContain(fileThreadId);
+  });
+
+  it("keeps a message that asked two agents in each one's inbox until that agent reads it", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["codex", "default"],
+      body: "@Codex and @Nova, can you both check the plan?",
+    });
+    const target = cliThreadId(asked.thread.id);
+    const asks = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
+    const startRun = async (agentId: string) => {
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      if (claim?.run.agentId !== agentId) throw new Error(`Expected ${agentId}'s run`);
+      dispatchedRun = agentId;
+      dispatchedRunId = claim.run.runId;
+      return claim.run.runId;
+    };
+
+    // An agent outside a run reads the thread with its own place.
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    const codexRun = await startRun("codex");
+    expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    expect(await asks()).toEqual([]);
+    await dispatchStore.completeRun({ runId: codexRun, exitCode: 0 });
+
+    await startRun("default");
+    expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+    expect(await asks()).toEqual([]);
   });
 
   it("toggles reactions with main-derived actor identity", async () => {

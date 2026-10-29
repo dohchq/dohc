@@ -25,6 +25,7 @@ import {
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Overlay } from "./Overlay";
 import {
+  onRestartStopped,
   RecoveryCloseGuard,
   requestGuardedReload,
   requestGuardedUpdateInstall,
@@ -550,6 +551,171 @@ describe("RecoveryCloseGuard", () => {
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway");
   });
 
+  // With two windows, a late draft in window B can stop the approved
+  // restart window A asked for. Going back in B takes the restart back from
+  // every window of the round, so A's button offers Restart to update again
+  // instead of showing "Restarting…" for a restart that is off.
+  it("goes back on an approved restart for every window when a late draft stopped this window's unload", async () => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    await user.click(await screen.findByTestId("recovery-close-goback"));
+    expect(main.answers(), "Go back after the round proceeded must tell main, or the window that asked keeps showing Restarting…").toContainEqual({ roundId: 1, decision: "cancel" });
+    // Main's retraction reaches this window too, which already stopped.
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
+  it("ends the restart in this window when main takes back the round that approved it", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    await waitFor(() => expect(main.answers()).toContainEqual({ roundId: 1, decision: "clear" }));
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    main.cancelled(3);
+    expect(stopped, "a stale round stops nothing").not.toHaveBeenCalled();
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting… after another window went back").toHaveBeenCalledOnce();
+  });
+
+  it("closes this window's warning about an approved restart another window went back on", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect((await screen.findByTestId("recovery-close-anyway")).textContent).toBe("Restart anyway");
+
+    main.cancelled(1);
+    await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
+  });
+
+  it("keeps a newer reload's warning open when another window goes back on the approved restart", async () => {
+    const main = roundBridge({ reloadRenderer: vi.fn(async () => undefined) });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    act(() => requestGuardedReload());
+    captureOrphanedDraft("ws-1", "a.md", "Later");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway");
+
+    main.cancelled(1);
+    expect(screen.getByTestId("recovery-close-anyway").textContent, "a reload warning must not take the held restart's round").toBe("Reload anyway");
+  });
+
+  // A second unload attempt, such as the window's close button, replaces
+  // the warning while the restart is held. Going back there still ends it.
+  it("goes back on the held restart from a warning a later unload attempt replaced", async () => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Close anyway");
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    await user.click(screen.getByTestId("recovery-close-goback"));
+    expect(main.answers(), "the held restart stays under way in the window that asked for it").toContainEqual({ roundId: 1, decision: "cancel" });
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped, "this window's own button would stay on Restarting…").toHaveBeenCalledOnce();
+  });
+
+  it("ends this window's restart when a newer round replaces it", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    // A quit asked while another window holds the restart, then gone back on.
+    main.request(2, "quit");
+    main.cancelled(2);
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting… after the quit was gone back on").toHaveBeenCalledOnce();
+  });
+
+  it("keeps a newer restart under way, and ends it through its own round", async () => {
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    main.request(2, "update");
+    expect(stopped, "a button that just asked for the newer restart would offer it again while it runs").not.toHaveBeenCalled();
+    main.cancelled(2);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
   // Dismissing the last at-risk draft from a round's warning removes the
   // dialog and its buttons. The round still owes main an answer.
   it("answers a held round clear when its warning empties by dismissal", async () => {
@@ -570,6 +736,38 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() =>
       expect(main.answers(), "no silent held round may remain").toContainEqual({ roundId: 4, decision: "clear" }),
     );
+  });
+
+  // After the round proceeded, a late draft's warning holds the restart.
+  // Dismissing that draft, from that warning or one a second unload attempt
+  // put in its place, takes the restart back as Go back does.
+  it.each([1, 2])("takes back a held restart when its warning empties by dismissal (%i unload attempts)", async (attempts) => {
+    const user = userEvent.setup();
+    const main = roundBridge();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await main.ready();
+    main.request(1, "update");
+    main.proceed(1);
+    captureOrphanedDraft("ws-1", "late.md", "Typed after the restart was approved");
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+      });
+    }
+
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
+    await user.click(await screen.findByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("recovery-close-warning")).toBeNull());
+    expect(main.answers(), "every window would keep showing Restarting… for a restart that is off").toContainEqual({ roundId: 1, decision: "cancel" });
+    main.cancelled(1);
+    unsubscribe();
+    expect(stopped).toHaveBeenCalledOnce();
   });
 
   // Go back leaves the person in the app. An approval a previous local
@@ -1023,7 +1221,11 @@ describe("RecoveryCloseGuard", () => {
       window.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(true);
+    const stopped = vi.fn();
+    const unsubscribe = onRestartStopped(stopped);
     await user.click(await screen.findByTestId("recovery-close-goback"));
+    unsubscribe();
+    expect(stopped, "the update button would stay on Restarting…").toHaveBeenCalledOnce();
     resetOrphanedDrafts();
 
     await requestGuardedUpdateInstall();

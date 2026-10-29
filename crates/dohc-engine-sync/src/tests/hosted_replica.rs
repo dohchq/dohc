@@ -521,7 +521,14 @@ fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
         let mut chats = LinkedChatStore::new(&mut store);
         for refused in [
             chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
-            chats.ensure_agent_channel("ws", "agent-local", 2_000, &NoFaults),
+            chats.ensure_agent_channel(
+                "ws",
+                "agent-local",
+                "default",
+                "My agent",
+                2_000,
+                &NoFaults,
+            ),
         ] {
             assert!(matches!(
                 refused,
@@ -2061,9 +2068,75 @@ fn withheld_conflict(
 fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     let (_scratch, _path, mut store) = hosted_store();
     let (parent, child, result_sha) = withheld_conflict(&mut store);
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+#[test]
+fn a_text_keep_without_lineage_holds_like_an_incoming_resolution() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (parent, _, result_sha) = withheld_conflict(&mut store);
+    let context = crate::conflict_resolve_v1::ConflictResolveEnvelopeContext {
+        workspace_id: "ws",
+        recorded_at_ms: 21,
+    };
+    let mut payload =
+        crate::conflict_resolve_v1::validate_conflict_resolve_v1(&parent.payload, context)
+            .unwrap()
+            .payload;
+    payload.chosen_from = crate::conflict_resolve_v1::ResolveChoiceV1::Current;
+    payload.resolution = crate::conflict_resolve_v1::ResolutionV1::KeptCurrent;
+    payload.current = payload.result.clone();
+    if let crate::conflict_resolve_v1::HeadV1::Present(head) = &mut payload.current {
+        head.latest_moment_id = "owner-before".to_owned();
+        head.updated_at_ms = 20;
+    }
+    payload.incoming = crate::conflict_resolve_v1::HeadV1::Absent { path_ref: 0 };
+    payload.effect_context.current_object_created_at_ms = Some(20);
+    assert!(payload.lineage_transition.is_none());
+    let built = crate::conflict_resolve_v1::build_conflict_resolve_v1(payload).unwrap();
+    let mut parent = envelope("owner", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "owner",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 21;
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "hosted-object".to_owned(),
+                path: "hosted.md".to_owned(),
+                text: "resolved by the owner".to_owned(),
+                moment_id: "owner-before".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+fn assert_conflict_child_hold_parity(
+    store: &mut EngineStore,
+    parent: ReplicationEnvelope,
+    child: ReplicationEnvelope,
+    result_sha: String,
+) {
     assert!(matches!(
         apply_replication_envelope(
-            &mut store,
+            store,
             &mut WriterDocCache::new(),
             &child,
             &NoFaults,
@@ -2079,7 +2152,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     feed.share("hosted-object", "hosted.md");
     feed.share("other-object", "other.md");
     let client = RelaySyncClient::new(feed);
-    sync(&client, &mut store);
+    sync(&client, store);
 
     // The child waits for its parent; a later edit of its document waits
     // behind it, though an edit of another document from the same origin does not.
@@ -2119,33 +2192,33 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
         }),
     ));
     feed.create("peer", 1, "other-object", "other.md", "independent");
-    let held = pass(&client, &mut store, &NoFaults).unwrap();
+    let held = pass(&client, store, &NoFaults).unwrap();
     assert_eq!(held.applied, 1);
-    assert!(commit(&client, &mut store, &held));
-    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert!(commit(&client, store, &held));
+    assert_eq!(hold(store, "hosted-object"), Some(parent_withheld()));
     assert_eq!(
-        retained(&store),
+        retained(store),
         0,
         "both edits of the held document wait in its feed"
     );
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [("owner".to_owned(), 2), ("peer".to_owned(), 1)]
     );
 
     // The parent arrives (5b projects it); the held document resumes in order.
     apply_replication_envelope(
-        &mut store,
+        store,
         &mut WriterDocCache::new(),
         &parent,
         &NoFaults,
         &NoLiveLeases,
     )
     .unwrap();
-    sync(&client, &mut store);
-    assert_eq!(retained(&store), 0);
+    sync(&client, store);
+    assert_eq!(retained(store), 0);
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [
             ("owner".to_owned(), 0),
             ("owner".to_owned(), 1),
@@ -2156,11 +2229,19 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     );
     assert_eq!(
         count(
-            &store,
+            store,
             "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='owner-moment'"
         ),
         1,
         "the resolution applies once, through its parent"
+    );
+    assert_eq!(
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .read_text("ws", "main", "hosted.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        later_text
     );
 }
 
@@ -6014,11 +6095,39 @@ fn peer_update(
     ));
 }
 
+/// The queued Y.Doc updates of `doc-b`, with the feed each recorded.
+fn queued_b(store: &EngineStore) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_group_array(json_array(origin_id,origin_seq,ingress_kind, \
+                   relay_namespace)) FROM (SELECT * FROM ydoc_deferred_updates \
+                   WHERE object_id='doc-b' ORDER BY origin_id,origin_seq)",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The session's binding of `doc-b` goes, as at its release.
+fn release_b(store: &mut EngineStore) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM live_device_application_bindings WHERE object_id='doc-b'",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+}
+
 /// Parking (G2): `doc-b` has a native live binding when it parks, and while
 /// it is parked a peer makes an ordinary edit its session never admitted.
-/// On its return the replica refuses that edit, so the content here would
-/// miss it: `doc-b` is held, every pass reports why, and it never becomes
-/// ready.
+/// On its return the replica keeps that edit queued, refusing nothing, so
+/// `doc-b` is held while the binding stands and every pass reports why.
+/// Once the binding goes, the edit applies and `doc-b` is ready with it.
 #[test]
 fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -6033,8 +6142,8 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     feed.share("doc-b", "a.md");
     sync(&client, &mut store);
     assert!(ready(&store, "doc-b"));
-    accept_live_work(&mut store, "doc-b");
-    settle_live_work(&mut store, "doc-b");
+    accept_live_update(&mut store, "doc-b", &lineage, b"live update");
+    settle_live_lineage(&mut store, "doc-b", &lineage);
     feed.unshare("doc-b");
     sync_parking(&client, &mut store);
     assert!(is_parked(&store, "doc-b"));
@@ -6049,8 +6158,9 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
             &store,
             "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
         ),
-        1
+        0
     );
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
     let again = pass(&client, &mut store, &NoFaults).unwrap();
     assert!(!again.has_more);
     assert_eq!(
@@ -6059,13 +6169,19 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     );
     assert!(commit(&client, &mut store, &again));
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
 }
 
 /// Parking (G2), through native admission: `doc-b` is a richdoc whose native
 /// live binding accepted and settled `echo` before it parked. While it is
 /// parked, a peer sends `echo` back, or, if `!admitted`, an edit its session
 /// never saw. On its return the echo applies and `doc-b` is ready; the edit
-/// is refused, and `doc-b` is held.
+/// stays queued, and `doc-b` is held.
 fn richdoc_edit_made_while_parked(admitted: bool) {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
@@ -6101,12 +6217,13 @@ fn richdoc_edit_made_while_parked(admitted: bool) {
         "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
     );
     assert!(coordinates(&store).contains(&("peer".to_owned(), 1)));
+    assert_eq!(refused, 0);
     if admitted {
         assert!(ready(&store, "doc-b"));
-        assert_eq!(refused, 0);
+        assert_eq!(queued_b(&store), "[]");
     } else {
         assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
-        assert_eq!(refused, 1);
+        assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
         // Opus's second park review: a held document's pass writes none of
         // its heads.
         let again = pass(&client, &mut store, &NoFaults).unwrap();
@@ -6222,11 +6339,13 @@ fn ready_bound_b() -> (
 }
 
 /// The ready hold: an ordinary edit of `doc-b`'s current lineage that its
-/// session never admitted, as the owner's edit after Stop, reaches the
+/// session never admitted, as the owner's edit while paused, reaches the
 /// replica while `doc-b` is ready. Its content here would miss the edit, so
-/// the refusal holds it in its own transaction: the pass reports it held,
-/// a reopened store still holds it before any commit, and every pass after
-/// reports it again. The refusal row stays.
+/// the edit stays queued with its feed and holds `doc-b` in its own
+/// transaction: the pass reports it held, a reopened store still holds it
+/// before any commit, and every pass after reports it again. Nothing is
+/// refused. Once the binding goes, the next pass applies the edit and
+/// `doc-b` is ready with it.
 #[test]
 fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
     let (_scratch, path, mut store, client, ydoc, lineage) = ready_bound_b();
@@ -6240,11 +6359,12 @@ fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
         edit,
         &lineage,
     );
-    let refused = pass(&client, &mut store, &NoFaults).unwrap();
+    let queued = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(
-        refused.held,
+        queued.held,
         BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
     );
+    assert!(queued.refusals.is_empty());
     drop(store);
 
     let mut store = EngineStore::open(&path, 3_000).unwrap();
@@ -6262,21 +6382,84 @@ fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
             &store,
             "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
         ),
-        1
+        0
     );
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
+}
+
+/// The drain arm: `doc-b`'s unadmitted edit was queued before its session
+/// bound, as one a live session kept queued. The drain that decides it
+/// keeps it queued, refusing nothing, and holds the ready `doc-b`; once the
+/// binding goes, the drain applies it.
+#[test]
+fn a_drain_keeps_an_unadmitted_edit_queued_on_a_hosted_replica() {
+    let (_scratch, _path, mut store, client, ydoc, lineage) = ready_bound_b();
+    let edit = ydoc.plaintext_insert(8, " and more");
+    let sha = store.put_binary_blob(&edit).unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    let op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "doc-b",
+            "path": "a.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "lineageClaimId": lineage,
+            "isBaseState": false
+        }),
+    );
+    crate::apply_envelope_with(&mut store, &op, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &lineage, 2, Some("relay"))
+    })
+    .unwrap();
+    assert!(ready(&store, "doc-b"));
+
+    let drained = crate::drain_deferred_ydoc_for_key(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(drained.refusals.is_empty());
+    assert_eq!(drained.drained, 0);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        0
+    );
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
 }
 
 /// The ready hold holds only a ready document of the current scope. One the
 /// scope holds for another reason keeps that reason, and one that left the
-/// scope keeps its state; each meets its refusals when a read of it
+/// scope keeps its state; each meets its queued edit when a read of it
 /// completes.
 #[test]
 fn the_ready_hold_leaves_other_documents_as_they_are() {
-    // The coordinate of `doc-b`'s base, an update of its current lineage.
     let hold_b = |store: &mut EngineStore| {
         store
             .write_with(&NoFaults, |tx| {
-                crate::hosted::hold_unadmitted_in_tx(tx, "ws", "peer", 0)
+                crate::hosted::hold_unadmitted_in_tx(tx, "ws", "doc-b")
             })
             .unwrap();
     };
@@ -6325,6 +6508,222 @@ fn an_unadmitted_edit_of_another_lineage_leaves_a_ready_document_ready() {
         ),
         1
     );
+}
+
+/// [`ready_bound_b`] for a richdoc `doc-b` at `base`, whose session admitted
+/// `echo`, a later edit of its lineage the replica has not pulled.
+#[allow(clippy::type_complexity)]
+fn ready_bound_richdoc_b() -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+) {
+    let (scratch, path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.richdoc_append_paragraph("hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "richdoc", 0, "doc-b", "a.md", base.clone(), &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let echo = ydoc.richdoc_append_paragraph("accepted");
+    accept_live_update(&mut store, "doc-b", &lineage, &echo);
+    (scratch, path, store, client, base, echo, lineage)
+}
+
+/// Queue `kind` `update` of `doc-b` on `lineage`, as `peer`'s `seq` at
+/// relay position `relay_seq`, as a drain leaves one queued.
+fn queue_b(
+    store: &mut EngineStore,
+    seq: i64,
+    relay_seq: i64,
+    kind: &str,
+    update: &[u8],
+    lineage: &str,
+) {
+    let sha = store.put_binary_blob(update).unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    let op = envelope(
+        "peer",
+        seq,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "doc-b",
+            "path": "a.md",
+            "contentKind": kind,
+            "updateBlobSha256": sha,
+            "lineageClaimId": lineage,
+            "isBaseState": false
+        }),
+    );
+    crate::apply_envelope_with(store, &op, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, lineage, relay_seq, Some("relay"))
+    })
+    .unwrap();
+}
+
+/// The documents the end-of-pass drain takes up again now.
+fn drained_again(store: &mut EngineStore) -> Vec<String> {
+    crate::ydoc_apply::drain_released_holds(
+        store,
+        &mut WriterDocCache::new(),
+        "ws",
+        &BTreeMap::new(),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap()
+    .holds
+    .into_keys()
+    .collect()
+}
+
+/// Sol's 7h finding and Opus's second: an echo its session admitted, left
+/// queued while `doc-b`'s binding stands, holds nothing. `doc-b`'s read
+/// completes with only the echo queued once it is back at its scope's path:
+/// it waits for that work, the next drain consumes the echo, and `doc-b` is
+/// ready with its content as it was.
+#[test]
+fn a_queued_echo_its_session_admitted_leaves_a_bound_document_ready() {
+    let (_scratch, _path, mut store, client, _base, echo, lineage) = ready_bound_richdoc_b();
+    let before = content(&store);
+    client.transport().share("doc-b", "moved.md");
+    sync(&client, &mut store);
+    assert!(matches!(
+        hold(&store, "doc-b"),
+        Some(HostedHold::ScopePathMismatch { .. })
+    ));
+    queue_b(&mut store, 1, 2, "richdoc", &echo, &lineage);
+
+    client.transport().share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(queued_b(&store), "[]");
+    assert_eq!(content(&store), before);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        0
+    );
+}
+
+/// An echo left queued behind `doc-b`'s unadmitted edit keeps its place.
+/// While the binding stands, `doc-b` stays held with both queued, its
+/// content as it was, and no pass's drain takes it up again. Once the
+/// binding goes, both apply in order, once.
+#[test]
+fn an_echo_queued_behind_an_unadmitted_edit_applies_once_after_release() {
+    let (_scratch, _path, mut store, client, base, echo, lineage) = ready_bound_richdoc_b();
+    let peer = dohc_engine_collab::Ydoc::wire();
+    peer.apply(&base).unwrap();
+    let edit = peer.richdoc_append_paragraph("unseen");
+    // The edit and the echo are concurrent, so their client IDs order them.
+    peer.apply(&echo).unwrap();
+    let merged = peer
+        .project(dohc_engine_collab::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    peer_update(
+        client.transport(),
+        "richdoc",
+        1,
+        "doc-b",
+        "a.md",
+        edit,
+        &lineage,
+    );
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    queue_b(&mut store, 2, 100, "richdoc", &echo, &lineage);
+    let before = content(&store);
+    for _ in 0..2 {
+        assert_eq!(drained_again(&mut store), Vec::<String>::new());
+        let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+        assert_eq!(
+            outcome.held,
+            BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+        );
+        assert!(commit(&client, &mut store, &outcome));
+    }
+    assert_eq!(
+        queued_b(&store),
+        r#"[["peer",1,"hosted","relay"],["peer",2,"hosted","relay"]]"#
+    );
+    assert_eq!(content(&store), before);
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(queued_b(&store), "[]");
+    let applied = content(&store);
+    assert_eq!(applied.0["doc-b"], merged);
+    assert_eq!(
+        (
+            merged.matches("unseen").count(),
+            merged.matches("accepted").count()
+        ),
+        (1, 1),
+        "{merged}"
+    );
+    sync(&client, &mut store);
+    assert_eq!(content(&store), applied);
+}
+
+/// Opus's 7h first finding: one binding check. A session bound on another
+/// lineage of `doc-b` keeps an edit of its current lineage queued as one of
+/// that lineage does: `doc-b` is held as live-edit-unadmitted, no drain
+/// takes it up again while the binding stands, and once it goes the edit
+/// applies.
+#[test]
+fn a_binding_on_another_lineage_holds_an_unadmitted_edit_until_release() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "plaintext", 0, "doc-b", "a.md", base, &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    accept_live_update(&mut store, "doc-b", &"e".repeat(64), b"live update");
+
+    let edit = ydoc.plaintext_insert(8, " and more");
+    peer_update(feed, "plaintext", 1, "doc-b", "a.md", edit, &lineage);
+    for _ in 0..2 {
+        let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+        assert_eq!(
+            outcome.held,
+            BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+        );
+        assert!(commit(&client, &mut store, &outcome));
+        assert_eq!(drained_again(&mut store), Vec::<String>::new());
+    }
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
 }
 
 /// Parking: the reply to the host's push of `doc-b`'s row is lost after the

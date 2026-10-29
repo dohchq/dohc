@@ -7,6 +7,7 @@ import {
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
+import { announceOverlayOpen } from "./overlayStack";
 import { Smile } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
@@ -111,8 +112,9 @@ function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
 }
 
 const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
-// Its own line under the icon, as large as the drawing's title.
-const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
+// Its own line under the icon, as large as the drawing's title. Like the
+// body, it shows focus by its caret alone, so it draws no field edge.
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle focus:shadow-none!`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
 // page's identity or the field has focus. A read-only page has nothing to
 // add, so it stays hidden. Square corners keep its focus underline straight,
@@ -160,6 +162,8 @@ export type PageIdentityProps = (
   // Enter, or ArrowDown on the title's last line, moves focus into the body
   // editor's start.
   onEnterBody?: () => void;
+  // A new page opens with the cursor in its title.
+  autoFocus?: boolean;
 };
 
 // A title is one line, so pasted or dropped line breaks become spaces.
@@ -344,6 +348,8 @@ export function PageIdentity(props: PageIdentityProps) {
   // place when the picker unmounts.
   useEffect(() => {
     if (!pickerOpen) return;
+    // Notices closes, as it does for any dialog.
+    announceOverlayOpen();
     const container = pickerRef.current;
     if (container) modalFocusableElements(container)[0]?.focus();
 
@@ -480,6 +486,7 @@ export function PageIdentity(props: PageIdentityProps) {
           data-testid="page-title"
           aria-label="Page title"
           rows={1}
+          autoFocus={props.autoFocus}
           value={titleDraft}
           placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}

@@ -249,6 +249,16 @@ struct OwnerYDocOutboxQuarantineParams {
     reason: String,
     #[serde(default)]
     observed_binding: Option<dohc_engine_collab::LiveObjectBinding>,
+    /// Present when delivery received a terminal refusal of the head.
+    #[serde(default)]
+    refusal: Option<dohc_engine_collab::OwnerOutboxRefusal>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxRetryParams {
+    outbox_id: String,
+    binding: dohc_engine_collab::LiveObjectBinding,
 }
 
 #[derive(Deserialize)]
@@ -493,6 +503,43 @@ fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
     Ok(bytes)
 }
 
+fn restore_fenced_page(
+    rows: Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>,
+    limit: usize,
+    max_frame_bytes: usize,
+) -> Result<Value, WireError> {
+    let corrupt = |_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
+    let too_large = || {
+        WireError::new(
+            ErrorCode::LimitExceeded,
+            "owner-outbox-page-exceeds-wire-limit",
+        )
+    };
+    let mut bytes = 256usize;
+    let fetched = rows.len();
+    let mut queues = Vec::new();
+    let mut next = None;
+    let mut truncated = false;
+    for row in rows {
+        let row_bytes = serde_json::to_vec(&row).map_err(corrupt)?.len();
+        let cursor_bytes = serde_json::to_vec(&row.outbox_id).map_err(corrupt)?.len();
+        if bytes.saturating_add(row_bytes).saturating_add(cursor_bytes) > max_frame_bytes {
+            truncated = true;
+            break;
+        }
+        bytes += row_bytes + 1;
+        next = Some(row.outbox_id.clone());
+        queues.push(row);
+    }
+    if truncated && queues.is_empty() {
+        return Err(too_large());
+    }
+    if !truncated && fetched < limit {
+        next = None;
+    }
+    Ok(json!({"queues": queues, "next": next}))
+}
+
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
@@ -528,6 +575,20 @@ fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
 }
 
 impl EngineService {
+    /// The daemon's reconstruction permit. A rebuild takes it before its
+    /// writer command and moves it into a task that ends with that command,
+    /// so a caller that stops waiting never frees it early.
+    pub(super) async fn reconstruction_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        #[cfg(test)]
+        if self.reconstructions.available_permits() == 0 {
+            self.reconstruction_waits.notify_one();
+        }
+        Arc::clone(&self.reconstructions)
+            .acquire_owned()
+            .await
+            .expect("the reconstruction permit is never closed")
+    }
+
     async fn ydoc_editor_draft(
         &self,
         open: &Arc<OpenWorkspace>,
@@ -604,10 +665,19 @@ impl EngineService {
             binding: Option<dohc_engine_collab::LiveObjectBinding>,
             document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
             accepted_cursor: Option<i64>,
+            kept_snapshot: Option<String>,
         }
         let params: Params = parse(params)?;
+        // A release names its relay cut, a Try again only its kept edits.
         if (action == "release") != params.binding.is_some()
-            || (action == "release") != params.accepted_cursor.is_some()
+            || (action == "release")
+                != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
+            || params.kept_snapshot.as_deref().is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
@@ -644,6 +714,7 @@ impl EngineService {
                 params.binding,
                 params.document,
                 params.accepted_cursor,
+                params.kept_snapshot,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),
@@ -652,8 +723,11 @@ impl EngineService {
             .await
             .map_err(map_runtime)?
             .map_err(map_owner_outbox)?;
+        // A released row says whether its settlement wrote the file, so the
+        // desktop claims recovered edits only when they reached it.
+        let mut materialized = vec![false; rows.len()];
         if action == "release" {
-            for row in &rows {
+            for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
                     continue;
                 }
@@ -709,16 +783,26 @@ impl EngineService {
                         None,
                     )
                     .await
-                    .map_err(map_runtime)?;
+                    .map_err(map_runtime)?
+                    .settled();
                 if settled
-                    .settled()
+                    .as_ref()
                     .is_some_and(|s| s.collection_reconcile_required)
                 {
                     open.request_collection_reconcile();
                 }
+                materialized[index] = settled.is_some_and(|s| s.materialized);
             }
         }
-        Ok(json!({"stops":rows}))
+        let mut stops = json!(rows);
+        if action == "release"
+            && let Some(values) = stops.as_array_mut()
+        {
+            for (value, materialized) in values.iter_mut().zip(materialized) {
+                value["materialized"] = json!(materialized);
+            }
+        }
+        Ok(json!({"stops":stops}))
     }
 
     pub(super) async fn owner_ydoc_outbox_append(
@@ -781,6 +865,35 @@ impl EngineService {
         }))
     }
 
+    pub(super) async fn owner_ydoc_outbox_list_restore_fenced(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            after: Option<String>,
+            limit: usize,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = open
+            .actor
+            .owner_ydoc_list_restore_fenced(
+                open.workspace_id.clone(),
+                params.after,
+                params.limit,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        restore_fenced_page(rows, params.limit, ctx.max_frame_bytes as usize)
+    }
+
     pub(super) async fn owner_ydoc_outbox_read_pending(
         &self,
         ctx: &RequestContext,
@@ -799,23 +912,108 @@ impl EngineService {
                 "owner-outbox-page-exceeds-wire-limit",
             ));
         }
-        let open = self.open(handle.as_ref())?;
+        // An earlier store open for recovery has no workspace actor; its handle
+        // names the store, prepared once, and its identity. Until it is
+        // prepared, a read answers `preparing`. The read's lease moves into
+        // the worker, so the store stays open for recovery until the worker
+        // ends, even once this request is cancelled. An earlier store is never
+        // written, so its pages are read as they are, and a frozen queue whose
+        // recovery checkpoint was never built at its final cursor refuses the
+        // copy instead of answering a change forever.
+        enum Source {
+            Recovery(crate::rpc::configured_live_host::RecoveryRead),
+            Current(Arc<OpenWorkspace>),
+        }
+        use crate::rpc::configured_live_host::RecoveryPage;
+        let source = match self.recovery_read(handle.as_ref()).transpose()? {
+            Some(RecoveryPage::Preparing) => return Ok(json!({ "kind": "preparing" })),
+            Some(RecoveryPage::Read(read)) => Source::Recovery(read),
+            None => Source::Current(self.open(handle.as_ref())?),
+        };
         let cancellation = OperationCancellation::new(ctx);
-        let read = async move {
+        let token = cancellation.token();
+        let read_page = move |open: Arc<OpenWorkspace>, cursor: Option<_>, outbox_id: String| async move {
             tokio::task::spawn_blocking(move || {
                 let store =
                     dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
-                    &params.outbox_id,
-                    params.cursor,
+                    &outbox_id,
+                    cursor,
                     max_bytes,
                 )
             })
             .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))
+        };
+        let read = async move {
+            let open = match source {
+                Source::Current(open) => open,
+                Source::Recovery(read) => {
+                    let (outbox_id, cursor) = (params.outbox_id, params.cursor);
+                    return tokio::task::spawn_blocking(move || {
+                        let page = dohc_engine_collab::read_pending_hosted_owner_outbox_page(
+                            crate::lock(&read.store).store(),
+                            &read.workspace_id,
+                            &read.identity,
+                            &outbox_id,
+                            cursor,
+                            max_bytes,
+                        );
+                        // Its store goes before its lease.
+                        drop(read);
+                        page
+                    })
+                    .await
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+                    .map_err(|error| match error {
+                        dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated => {
+                            WireError::new(
+                                ErrorCode::InvalidParams,
+                                "owner-outbox-recovery-checkpoint-unavailable",
+                            )
+                        }
+                        error => map_owner_outbox(error),
+                    });
+                }
+            };
+            let first = read_page(
+                open.clone(),
+                params.cursor.clone(),
+                params.outbox_id.clone(),
+            )
+            .await?;
+            if !matches!(
+                first,
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated)
+            ) {
+                return first.map_err(map_owner_outbox);
+            }
+            // A frozen lineage's recovery checkpoint is built on the writer, once per applied cursor.
+            let permit = self.reconstruction_permit().await;
+            let (actor, workspace_id, outbox_id) = (
+                open.actor.clone(),
+                open.workspace_id.clone(),
+                params.outbox_id.clone(),
+            );
+            tokio::spawn(async move {
+                let _permit = permit;
+                actor
+                    .owner_ydoc_outbox_prepare_recovery_checkpoint(workspace_id, outbox_id, token)
+                    .await
+            })
+            .await
             .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
-            .map_err(map_owner_outbox)
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+            match read_page(open, params.cursor, params.outbox_id).await? {
+                // Another acceptance moved the cursor meanwhile; the reader starts over.
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated) => {
+                    Ok(dohc_engine_collab::OwnerOutboxPageResult::ReadChanged)
+                }
+                page => page.map_err(map_owner_outbox),
+            }
         };
         let pending = tokio::select! {
             biased;
@@ -940,24 +1138,78 @@ impl EngineService {
             .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.quarantine (queued)")
             .await?;
         let open = self.open(Some(&handle))?;
-        open.actor
-            .owner_ydoc_outbox_quarantine(
-                open.workspace_id.clone(),
-                dohc_engine_collab::OwnerOutboxQuarantineInput {
-                    outbox_id: params.outbox_id,
-                    reason: params.reason,
-                    observed_binding: params.observed_binding,
-                },
-                now_ms()?,
-                cancellation.token(),
-            )
-            .await
+        let input = dohc_engine_collab::OwnerOutboxQuarantineInput {
+            outbox_id: params.outbox_id,
+            reason: params.reason,
+            observed_binding: params.observed_binding,
+        };
+        let workspace_id = open.workspace_id.clone();
+        let outcome = match params.refusal {
+            Some(refusal) => {
+                open.actor
+                    .owner_ydoc_outbox_record_refusal(
+                        workspace_id,
+                        input,
+                        refusal,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+            None => {
+                open.actor
+                    .owner_ydoc_outbox_quarantine(
+                        workspace_id,
+                        input,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+        };
+        outcome
             .map_err(|error| match error {
                 RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.quarantine"),
                 error => map_runtime(error),
             })?
             .map_err(map_owner_outbox)?;
         Ok(json!({ "quarantined": true }))
+    }
+
+    /// The owner's Try again for one quarantined outbox. The workspace handle
+    /// is the caller's authority; the engine checks the binding generation.
+    pub(super) async fn owner_ydoc_outbox_retry(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxRetryParams = parse(params)?;
+        validate_owner_outbox_wire_binding(&params.binding)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.retry (queued)")
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let delivery_id = open
+            .actor
+            .owner_ydoc_outbox_retry(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxRetryInput {
+                    outbox_id: params.outbox_id,
+                    binding: params.binding,
+                },
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.retry"),
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({ "retryDeliveryId": delivery_id }))
     }
 
     pub(super) async fn ydoc_open(
@@ -1020,7 +1272,7 @@ impl EngineService {
         }
         let capture_phase = lock(&open.capture)
             .as_ref()
-            .map(|driver| driver.status().snapshot().phase)
+            .map(|driver| driver.status_snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
         if probe.head_blob_sha256.is_none() && capture_phase != capture_driver::CapturePhase::Ready
         {
@@ -2008,6 +2260,7 @@ impl EngineService {
                     lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
+                    record_facts: Vec::new(),
                 },
                 Some(draft.descriptor),
             ),
@@ -2029,6 +2282,13 @@ impl EngineService {
                 None,
             ),
         };
+        // Post-commit: the resync's drain committed these history rows, and no
+        // other path fires a parked update's events. Never claims —
+        // drained updates are synced, and only the origin device claims its
+        // automation triggers (ADR 0008).
+        for facts in &state.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session
                 .set_lineage_claim(state.lineage_claim_id.clone())
@@ -4126,6 +4386,43 @@ mod tests {
         assert!(total_wire_bytes > 1_048_576);
         assert!(base_pages >= 2, "one base must span pages");
         assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[test]
+    fn restore_fenced_discovery_pages_fit_the_actual_wire_envelope() {
+        use dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced;
+        let params = owner_outbox_append_params("workspace", "append");
+        let binding: dohc_engine_collab::LiveObjectBinding =
+            serde_json::from_value(params["binding"].clone()).unwrap();
+        let rows: Vec<_> = (0..3)
+            .map(|index| OwnerOutboxRestoreFenced {
+                outbox_id: format!("queue-{index}-\"\\"),
+                binding: binding.clone(),
+                pending_bytes: 12,
+            })
+            .collect();
+        let id = dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
+        let wire_bytes = |result| {
+            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response {
+                id,
+                result,
+            }))
+            .unwrap()
+            .len()
+        };
+        let budget = 256
+            + serde_json::to_vec(&rows[0]).unwrap().len()
+            + serde_json::to_vec(&rows[0].outbox_id).unwrap().len();
+        let first = restore_fenced_page(rows.clone(), 3, budget).unwrap();
+        assert_eq!(first["queues"].as_array().unwrap().len(), 1);
+        assert_eq!(first["next"], rows[0].outbox_id);
+        assert!(wire_bytes(first) <= budget);
+        assert!(restore_fenced_page(rows.clone(), 3, budget - 1).is_err());
+        let all = restore_fenced_page(rows, 64, usize::MAX).unwrap();
+        assert_eq!(all["queues"].as_array().unwrap().len(), 3);
+        assert!(all["next"].is_null());
+        let empty = restore_fenced_page(Vec::new(), 64, budget).unwrap();
+        assert_eq!(empty, json!({"queues": [], "next": null}));
     }
 
     #[tokio::test]

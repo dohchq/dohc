@@ -9,8 +9,8 @@ type Author = GetCollectionRecordHistoryResult["entries"][number]["author"];
 export interface RecordHistoryAuthors {
   /** Prepare account labels together, without waiting on network I/O. */
   prepare(userIds: readonly string[]): void;
-  /** An agent, by the person it acted for: this computer's agent by name, any other as "Agent". */
-  agent(onBehalfOf: string | null): string;
+  /** An agent, by its id and the person it acted for: this computer's agent by name, any other as "Agent". */
+  agent(agentId: string, onBehalfOf: string | null): string;
   /** Null for the workspace owner and device-local people, whose rows need no extra label. */
   person(userId: string): string | null;
   /** An automation's name in its Collection's automations.yaml now, or null. */
@@ -92,7 +92,7 @@ export async function recordHistoryForIpc(
     if (entry.linkAuthor !== null) {
       // The renderer names the role, so the link's ids stay in main.
       return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
-        ? { kind: "link", agentName: authors.agent(entry.onBehalfOf) }
+        ? { kind: "link", agentName: authors.agent(entry.authorOriginId, entry.onBehalfOf) }
         : { kind: "link" };
     }
     const actor = entry.authorOriginId;
@@ -103,7 +103,7 @@ export async function recordHistoryForIpc(
     }
     if (entry.actorKind === "agent") {
       const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
-      return { kind: "agent", name: authors.agent(entry.onBehalfOf), ...(person === null ? {} : { person }) };
+      return { kind: "agent", name: authors.agent(actor, entry.onBehalfOf), ...(person === null ? {} : { person }) };
     }
     if (entry.actorKind !== "automation") return null;
     const run = entry.automationRun;

@@ -593,7 +593,11 @@ where
             // stays private like any edit until it applies, and the file
             // holds accepted state without it.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
-            Some(accepted_history::read_state(conn,held,terminal_cursor,reconstruction)?)
+            // A settlement still answers a missing dependency as a conflict.
+            Some(accepted_history::read_state(conn,held,terminal_cursor,reconstruction).map_err(|error| match error {
+                ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                error => error,
+            })?)
         } else {
             None
         };

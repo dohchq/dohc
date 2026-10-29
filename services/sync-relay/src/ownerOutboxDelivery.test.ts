@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
+import {createRequire} from "node:module";
+import {markdownToYDoc} from "@dohc/ydoc-projection";
+import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
+import {parseServiceActivationConfig} from "./serviceActivationDriver.js";
+import {selfHostLiveProfile} from "./selfHostLiveProfile.js";
+import {liveValidation} from "./liveValidation.js";
+import {afterAll} from "vitest";
 import { expect, it, vi } from "vitest";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import { drainOwnerOutbox, type OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import { serviceOwnerTransport } from "./serviceOwnerTransport.js";
 import {startLiveJournalCheck} from './storage/liveJournalCheck';
@@ -21,25 +29,26 @@ const serviceHost = {mode: "service", hostId: "host", hostEpoch: 1, instanceId: 
  * of that full state at that entry's sequence.
  */
 function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true,
-  seedDigest?: string, sequences = [1, 3, 7]) {
+  seedDigest?: string, sequences = [1, 3, 7], candidate?: Uint8Array) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
   const first = sequences[0];
+  const update = (sequence: number) => candidate ?? Buffer.from([sequence]);
   const entries = sequences.map(sequence => ({sequence,
-    appendKey: sequence === first && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
-    deliveryId: sequence === first && seedDigest ? seedDelivery(seedDigest, sequence) : `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    appendKey: sequence === first && firstKey ? firstKey(sha(update(sequence))) : `append-${sequence}`,
+    deliveryId: sequence === first && seedDigest ? seedDelivery(seedDigest, sequence) : `delivery-${sequence}`,updateDigest: sha(update(sequence)),byteLength: update(sequence).byteLength,createdAtMs: sequence,
     ...(personEdit ? {personEdit: true} : {}),
     ...(sequence === first && agentDeclaration ? {agentDeclaration} : {})}));
+  const pendingBytes = () => entries.reduce((bytes, entry) => bytes + entry.byteLength, 0);
   const applied = vi.fn();
   const host = {...serviceHost};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [], order: string[] = [];
-  const state = {value: "active"};
+  const state = {value: "active", retryDeliveryId: null as string | null}, quarantine = {reason: null as string | null};
   const applyThrough = vi.fn(async (receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null> => {
     order.push("apply"); return {...receipt,localYDocSequence: receipt.journalCursor,applicationReplayed: true};
   });
   let requestId = 0;
   const cursor = (snapshot: string, part: string, sequence = 0, offset = 0) => ({snapshot,part,sequence,offset});
-  // A native service transport sends the same calls under native names.
   const methods: Record<string, string> = {"ydoc.ownerOutbox.acknowledge": "liveApplication.acknowledgeOwnerOutbox", "ydoc.ownerOutbox.readPending": "liveApplication.readOwnerOutbox"};
   // Before a fresh adoption native names no adopted cursor and no outbox.
   const native = {activationId: "adoption", adopted: true};
@@ -48,13 +57,19 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const method = methods[request.method] ?? request.method;
     if (method === "liveApplication.register") return {id: request.id,result: {registrationId: 1}};
     if (method === "liveApplication.ownerState") return {id: request.id,result: {adoptionId: native.activationId,expectedLocalSequence: 7,
-      throughCursor: native.adopted ? 0 : null,outboxId: native.adopted ? "outbox" : null,pendingBytes: entries.length,outboxState: state.value}};
-    if (method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: entries.length,state: state.value}};
+      throughCursor: native.adopted ? 0 : null,outboxId: native.adopted ? "outbox" : null,pendingBytes: pendingBytes(),outboxState: state.value,
+      retryDeliveryId: state.retryDeliveryId}};
+    if (method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pendingBytes(),state: state.value,retryDeliveryId: state.retryDeliveryId}};
     if (method === "liveApplication.acknowledgeOwnerOutbox") {
       const receipt = (request.params.receipts as Array<{deliveryId: string; updateDigest: string}>)[0]!;
       expect(receipt).toMatchObject({deliveryId: entries[0]!.deliveryId,updateDigest: entries[0]!.updateDigest});
+      // Native refuses a quarantined queue's receipt unless it is the granted head, which resumes the queue.
+      if (state.value === "quarantined") {
+        if (state.retryDeliveryId !== receipt.deliveryId) throw new Error("A quarantined owner outbox refuses acknowledgement.");
+        state.value = "active"; state.retryDeliveryId = null;
+      }
       order.push("acknowledge"); receipts.push(receipt); entries.shift();
-      return {id: request.id,result: {acknowledged: 1,pendingBytes: entries.length,oldestEntryAtMs: entries[0]?.createdAtMs ?? null}};
+      return {id: request.id,result: {acknowledged: 1,pendingBytes: pendingBytes(),oldestEntryAtMs: entries[0]?.createdAtMs ?? null}};
     }
     expect(method).toBe("liveApplication.readOwnerOutbox");
     const snapshot = sha(Buffer.from(JSON.stringify(entries)));
@@ -65,11 +80,11 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const entry = entries.find(row => row.sequence === current.sequence);
     let bytes: Buffer, following: ReturnType<typeof cursor> | null;
     if (current.part === "header") {
-      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: null,observedBinding: null,firstEntryCursor}));
+      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: pendingBytes(),pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor,frozenAtRefusedSeed: false,checkpointDigest: null,recoveryCheckpointDigest: null}));
       following = cursor(snapshot,"base");
     } else if (current.part === "base") {bytes = base; following = firstEntryCursor;}
     else if (current.part === "entryHeader") {bytes = Buffer.from(JSON.stringify(entry)); following = cursor(snapshot,"update",current.sequence);}
-    else {bytes = Buffer.from([current.sequence]); const next = entries.find(row => row.sequence > current.sequence); following = next ? cursor(snapshot,"entryHeader",next.sequence) : null;}
+    else {bytes = Buffer.from(update(current.sequence)); const next = entries.find(row => row.sequence > current.sequence); following = next ? cursor(snapshot,"entryHeader",next.sequence) : null;}
     const chunk = bytes.subarray(current.offset,current.offset + 1024);
     requests.push({part: current.part,bytes: chunk.toString("base64").length});
     return {id: request.id,result: {kind: "page",...current,totalBytes: bytes.length,digest: sha(bytes),bytesBase64: chunk.toString("base64"),nextCursor: current.offset + chunk.length < bytes.length ? {...current,offset: current.offset + chunk.length} : following}};
@@ -84,7 +99,8 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     }),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
-  const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
+  const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,
+    refusals: new OwnerKnownRefusals(),validate};
   /**
    * A native service transport over this native outbox, registered and
    * adopted, `fresh` through its own adoption. Its capture names
@@ -100,10 +116,10 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     await transport.client.sendRequest({...request, id: ++requestId, method: "liveApplication.register", params: {binding: scope.binding ?? binding}});
     await transport.client.sendRequest({...request, id: ++requestId, method: "liveApplication.ownerState", params: {registrationId: 1}});
     if (fresh) await transport.client.sendLiveOwnerAdoption({...request, id: ++requestId, registrationId: 1, sessionId: "session"} as never,
-      {adoptionId: activationId, expectedLocalSequence: 7, events: [], terminalReceipt: null} as never, {} as never);
+      {adoptionId: activationId, expectedLocalSequence: 7, events: [], terminalReceipt: null, retainedPrefix: null} as never, {} as never);
     return transport;
   };
-  return {requests,receipts,order,binding,storage,state,client,applyThrough,validate,applied,admission,service,
+  return {entries,requests,receipts,order,binding,storage,state,quarantine,client,applyThrough,validate,applied,admission,service,
     run: (options: Partial<Parameters<typeof drainOwnerOutbox>[0]> = {}) => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
       adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough,...options})};
 }
@@ -316,24 +332,318 @@ it("retains configured entry and byte limits without acknowledging unread update
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
-it.each(["provenance-refused", "delivery-conflict"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
-  const f = fixture(1);
+it.each(["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
+  const f = fixture(3), other = fixture(3);
+  // An out-of-memory check answers capacity-refused, and commit refuses the entry the same way.
+  if (reason === "capacity-refused") f.validate.mockReturnValue({kind: "refused", reason, source: "final"});
+  // Storage maps a final schema refusal to invalid-update.
+  if (reason === "invalid-update") f.validate.mockReturnValue({kind: "refused", reason: "invalid-schema", source: "final"});
   f.storage.commitLiveUpdateJournal.mockReturnValue({result: {kind: "refused", reason}} as never);
   const original = f.client.sendRequest.getMockImplementation()!;
   f.client.sendRequest.mockImplementation(async request => {
     if (request.method === "liveApplication.quarantineOwnerOutbox") {
-      expect(request.params).toEqual({registrationId: 1, reason});
-      f.state.value = "quarantined";
+      expect(request.params).toEqual({registrationId: 1, reason, deliveryId: "delivery-1", refusalKey: expect.any(String)});
+      f.state.value = "quarantined"; f.state.retryDeliveryId = null;
       return {id: request.id, result: {state: "quarantined"}} as never;
     }
     return original(request);
   });
+  // A pass visits the stuck document, then another of the owner's documents.
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(await other.run()).toEqual({admittedEntries: 3, hasMore: false});
+  // The refused head's suffix depends on it, so it waits too.
+  expect(f.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => input.metadata.deliveryId)).toEqual(["delivery-1"]);
+  expect(f.entries.map(entry => entry.deliveryId)).toEqual(["delivery-1", "delivery-3", "delivery-7"]);
+  expect(f.applyThrough).not.toHaveBeenCalled();
   expect(f.state.value).toBe("quarantined");
   expect(f.receipts).toEqual([]);
-  f.storage.commitLiveUpdateJournal.mockClear();
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  f.storage.commitLiveUpdateJournal.mockClear(); f.validate.mockClear();
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).not.toHaveBeenCalled();
   expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox")).toHaveLength(1);
+  expect(f.entries).toHaveLength(3);
+});
+
+// The native outbox's refusal record: another refusal uses up the owner's Try again. Writing a
+// refusal again, or one that is no longer its head's own attempt, changes nothing. A fault fails
+// the write, or commits it and loses the response.
+function quarantinedBy(f: ReturnType<typeof fixture>, faults: Array<"failed" | "lost"> = []) {
+  const reasons: string[] = [], original = f.client.sendRequest.getMockImplementation()!;
+  let recorded: unknown;
+  f.client.sendRequest.mockImplementation(async request => {
+    if (request.method !== "liveApplication.quarantineOwnerOutbox") return original(request);
+    const fault = faults.shift(), {reason, deliveryId, refusalKey} = request.params;
+    if (fault === "failed") throw new Error("Engine unavailable.");
+    if (refusalKey !== recorded && f.entries[0]?.deliveryId === deliveryId && (f.state.value !== "quarantined" || f.state.retryDeliveryId === deliveryId)) {
+      reasons.push(reason as string); recorded = refusalKey;
+      f.state.value = "quarantined"; f.state.retryDeliveryId = null; f.quarantine.reason = reason as string;
+    }
+    if (fault === "lost") throw new Error("Engine response lost.");
+    return {id: request.id, result: {quarantined: true}} as never;
+  });
+  return reasons;
+}
+const committedDeliveries = (f: ReturnType<typeof fixture>) => f.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => input.metadata.deliveryId);
+const refuseOnce = (f: ReturnType<typeof fixture>) => {
+  f.validate.mockReturnValueOnce({kind: "refused", reason: "invalid-schema", source: "final"});
+  f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "refused", reason: "invalid-update"}} as never);
+};
+const refusalKeys = (f: ReturnType<typeof fixture>) => f.client.sendRequest.mock.calls
+  .filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox").map(([request]) => request.params.refusalKey);
+
+it("keeps a refusal whose quarantine write fails, and records it on a later pass without validating it again", async () => {
+  const f = fixture(3), reasons = quarantinedBy(f, ["failed", "failed", "failed"]);
+  refuseOnce(f);
+  for (let pass = 0; pass < 3; pass++) await expect(f.run()).rejects.toThrow("Engine unavailable.");
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(committedDeliveries(f)).toEqual(["delivery-1"]);
+  expect(f.state).toEqual({value: "active", retryDeliveryId: null});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: null});
+  for (let pass = 0; pass < 3; pass++) expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(committedDeliveries(f)).toHaveLength(1);
+  expect(reasons).toEqual(["invalid-update"]);
+  // Every write carried the one refusal it records.
+  expect(refusalKeys(f)).toHaveLength(4); expect(new Set(refusalKeys(f)).size).toBe(1);
+  expect(f.receipts).toEqual([]); expect(f.entries).toHaveLength(3);
+});
+
+it("admits an outstanding Try again once after a crash lost its refusal, then drains the suffix", async () => {
+  const f = fixture(3), faults: Array<"failed" | "lost"> = [], reasons = quarantinedBy(f, faults);
+  refuseOnce(f);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  f.state.retryDeliveryId = "delivery-1";
+  refuseOnce(f); faults.push("failed");
+  await expect(f.run()).rejects.toThrow("Engine unavailable.");
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: "delivery-1"});
+  // The relay restarts and loses the refusal it received; the owner's request is still open.
+  Object.assign(f.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await f.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(committedDeliveries(f)).toEqual(["delivery-1", "delivery-1", "delivery-1", "delivery-3", "delivery-7"]);
+  const [first, , recovered] = f.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => input as unknown as {metadata: unknown; updateBytes: unknown});
+  expect(recovered!.metadata).toEqual(first!.metadata); expect(recovered!.updateBytes).toEqual(first!.updateBytes);
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}, {deliveryId: "delivery-3"}, {deliveryId: "delivery-7"}]);
+  expect(f.state).toEqual({value: "active", retryDeliveryId: null});
+  expect(reasons).toEqual(["invalid-update"]);
+});
+
+it("a lost quarantine response cannot use up the owner's later Try again", async () => {
+  const f = fixture(3), faults: Array<"failed" | "lost"> = [], reasons = quarantinedBy(f, faults);
+  refuseOnce(f);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  f.state.retryDeliveryId = "delivery-1";
+  refuseOnce(f); faults.push("lost");
+  await expect(f.run()).rejects.toThrow("Engine response lost.");
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: null});
+  // The owner asks again before the relay writes the refusal again.
+  f.state.retryDeliveryId = "delivery-1";
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: "delivery-1"});
+  expect(f.validate).toHaveBeenCalledTimes(2);
+  expect(await f.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(committedDeliveries(f)).toEqual(["delivery-1", "delivery-1", "delivery-1", "delivery-3", "delivery-7"]);
+  expect(reasons).toEqual(["invalid-update", "invalid-update"]);
+});
+
+it("keeps a Try again through a transient admission failure", async () => {
+  const f = fixture(3);
+  quarantinedBy(f);
+  refuseOnce(f);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  f.state.retryDeliveryId = "delivery-1";
+  f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "retry", reason: "admission-unavailable"}} as never);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: "delivery-1"});
+  expect(await f.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(f.state).toEqual({value: "active", retryDeliveryId: null});
+});
+
+it("lets one pass at a time hold an outbox, so a duplicate wake cannot submit its head in parallel", async () => {
+  const f = fixture(1); let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => {entered = resolve;}), held = new Promise<void>(resolve => {release = resolve;});
+  f.validate.mockImplementationOnce(async () => {entered(); await held; return {} as never;});
+  const first = f.run(); await waiting;
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  release(); expect(await first).toEqual({admittedEntries: 1, hasMore: true});
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(committedDeliveries(f)).toEqual(["delivery-1", "delivery-3"]);
+});
+
+it("re-quarantines a Try again the relay refuses again, with the same reason, and never tries it in the background", async () => {
+  const f = fixture(3), reasons = quarantinedBy(f);
+  f.validate.mockReturnValue({kind: "refused", reason: "invalid-schema", source: "final"});
+  f.storage.commitLiveUpdateJournal.mockReturnValue({result: {kind: "refused", reason: "invalid-update"}} as never);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  // The owner's Try again grants the frozen head one attempt.
+  f.state.retryDeliveryId = "delivery-1";
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(2);
+  expect(committedDeliveries(f)).toEqual(["delivery-1", "delivery-1"]);
+  expect(reasons).toEqual(["invalid-update", "invalid-update"]);
+  expect(f.state).toEqual({value: "quarantined", retryDeliveryId: null});
+  for (let pass = 0; pass < 3; pass++) expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(2);
+  expect(committedDeliveries(f)).toHaveLength(2);
+  expect(f.receipts).toEqual([]); expect(f.applyThrough).not.toHaveBeenCalled();
+  expect(f.entries.map(entry => entry.deliveryId)).toEqual(["delivery-1", "delivery-3", "delivery-7"]);
+});
+
+it("delivers a Try again a later validator accepts under its original delivery, once, then drains the suffix", async () => {
+  const f = fixture(3), reasons = quarantinedBy(f);
+  f.validate.mockReturnValueOnce({kind: "refused", reason: "invalid-schema", source: "final"});
+  f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "refused", reason: "invalid-update"}} as never);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  // A grant for any delivery but the head opens nothing.
+  f.state.retryDeliveryId = "delivery-3";
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  f.state.retryDeliveryId = "delivery-1";
+  expect(await f.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(committedDeliveries(f)).toEqual(["delivery-1", "delivery-1", "delivery-3", "delivery-7"]);
+  const [refused, accepted] = f.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => input as unknown as {metadata: unknown; updateBytes: unknown});
+  expect(accepted!.metadata).toEqual(refused!.metadata);
+  expect(accepted!.updateBytes).toEqual(refused!.updateBytes);
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}, {deliveryId: "delivery-3"}, {deliveryId: "delivery-7"}]);
+  expect(f.state).toEqual({value: "active", retryDeliveryId: null});
+  expect(reasons).toEqual(["invalid-update"]);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(committedDeliveries(f)).toHaveLength(4);
+});
+
+// The relay's records of server-held refusals, one per queue of each store. Recording the same refusal again changes nothing.
+type Store = {replicationEpoch: string; streamIdentity: string};
+type KeptRow = {identity: Store; outboxId: string; reason: string; headDeliveryId: string; refusalKey: string};
+const store = {replicationEpoch: "epoch", streamIdentity: "stream"};
+// The key of a queue's row in the store of `identity`.
+const at = (outboxId: string, identity: Store = store) => JSON.stringify([identity.replicationEpoch, identity.streamIdentity, outboxId]);
+function keptOnServer(f: ReturnType<typeof fixture>, rows = new Map<string, KeptRow>(), identity: Store = store) {
+  Object.assign(f.admission, {keptOnServer: identity});
+  Object.assign(f.storage, {
+    recordServiceKeptEdits: vi.fn((input: KeptRow) => {
+      const key = at(input.outboxId, input.identity);
+      if (rows.get(key)?.refusalKey !== input.refusalKey) rows.set(key, input);
+    }),
+    readServiceKeptEdits: (queue: {identity: Store; outboxId: string}) => rows.get(at(queue.outboxId, queue.identity)) ?? null,
+    forgetServiceKeptEdits: vi.fn((queue: {identity: Store; outboxId: string}) => {rows.delete(at(queue.outboxId, queue.identity));})});
+  return rows;
+}
+
+it("records each refusal of a server-held queue for its owner until a Try again delivers it, and none for a device's queue", async () => {
+  const service = fixture(3), device = fixture(3), rows = keptOnServer(service);
+  for (const f of [service, device]) {quarantinedBy(f); refuseOnce(f);}
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect([...rows.values()]).toEqual([{identity: store, outboxId: "outbox", binding: expect.objectContaining({objectId: "object"}),
+    reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: expect.any(String), nowMs: expect.any(Number)}]);
+  const first = rows.get(at("outbox"))!.refusalKey;
+  // A quarantined queue, and one whose Try again is waiting, are still kept. A second refusal is a new record.
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  service.state.retryDeliveryId = "delivery-1";
+  refuseOnce(service);
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))!.refusalKey).not.toBe(first);
+  // An accepted Try again resumes the queue; the next pass forgets it.
+  service.state.retryDeliveryId = "delivery-1";
+  expect(await service.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.size).toBe(0);
+  // A device's storage has no such record to write.
+  expect(await device.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(device.storage).not.toHaveProperty("recordServiceKeptEdits");
+});
+
+// Proves: a server-held quarantine always has a record its owner can find. The
+// record is written before the engine's quarantine, so a reply lost between
+// them, a cancellation or a crash leaves it; a record lost anyway is rebuilt
+// from the engine's queue on the next pass. A record whose quarantine never
+// reached the engine goes once the queue delivers.
+it("leaves no server-held quarantine without its record, whatever is lost between them", async () => {
+  const f = fixture(3), rows = keptOnServer(f);
+  quarantinedBy(f, ["lost"]); refuseOnce(f);
+  await expect(f.run()).rejects.toThrow("Engine response lost.");
+  expect(f.state.value).toBe("quarantined");
+  expect(rows.get(at("outbox"))).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  // The relay restarts having lost the record and every refusal it received.
+  rows.clear(); Object.assign(f.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  const rebuilt = rows.get(at("outbox"))!.refusalKey;
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))!.refusalKey).toBe(rebuilt);
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.receipts).toEqual([]);
+
+  const healed = fixture(3), kept = keptOnServer(healed);
+  quarantinedBy(healed, ["failed"]); refuseOnce(healed);
+  await expect(healed.run()).rejects.toThrow("Engine unavailable.");
+  expect(healed.state.value).toBe("active");
+  expect(kept.size).toBe(1);
+  // After a restart a later validator accepts the head, so the queue delivers and its record goes.
+  Object.assign(healed.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await healed.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(kept.size).toBe(0);
+});
+
+// Proves: a pass forgets a server-held queue's record only under the queue's
+// hold, after reading its status again. A pass that finds the queue held, as
+// while another one records a refusal and waits on the engine's quarantine,
+// keeps the record, and so does one whose second read sees that quarantine.
+it("forgets a server-held queue's record only under its hold, after reading its status again", async () => {
+  const f = fixture(3), rows = keptOnServer(f);
+  rows.set(at("outbox"), {identity: store, outboxId: "outbox", reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: "recording"});
+  const held = JSON.stringify(["service", "host", "outbox"]);
+  expect(f.admission.refusals.hold(held)).toBe(true);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  expect(rows.has(at("outbox"))).toBe(true);
+  f.admission.refusals.release(held);
+  // The other pass's quarantine lands between this pass's two status reads.
+  const answer = f.client.sendRequest.getMockImplementation()!;
+  let reads = 0;
+  f.client.sendRequest.mockImplementation(async request => {
+    if (request.method === "liveApplication.ownerOutbox" && ++reads === 2) f.state.value = "quarantined";
+    return answer(request);
+  });
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.has(at("outbox"))).toBe(true);
+  expect(f.validate).not.toHaveBeenCalled();
+});
+
+// Proves: a row of an earlier store's queue survives everything the attached
+// store's queue with the same outbox ID goes through: draining while active, a
+// refusal, and a rebuild of its record once it is quarantined with none.
+it("keeps an earlier store's record of a queue whose outbox ID the attached store's queue shares", async () => {
+  const earlier = {replicationEpoch: "old-epoch", streamIdentity: "old-stream"};
+  const old = {identity: earlier, outboxId: "outbox", reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: "old-refusal"};
+  const rows = new Map([[at("outbox", earlier), old]]);
+  // Active, the attached store's queue drains.
+  const active = fixture(3);
+  keptOnServer(active, rows);
+  expect(await active.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(rows.get(at("outbox", earlier))).toBe(old);
+  // Refused, it gets its own record.
+  const refused = fixture(3);
+  keptOnServer(refused, rows); quarantinedBy(refused); refuseOnce(refused);
+  expect(await refused.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))).toMatchObject({identity: store, headDeliveryId: "delivery-1"});
+  // Its record lost, a later pass rebuilds it from the engine's queue.
+  rows.delete(at("outbox")); Object.assign(refused.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await refused.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))).toMatchObject({identity: store, refusalKey: "quarantined:delivery-1"});
+  expect(rows.get(at("outbox", earlier))).toBe(old);
+  expect(rows.size).toBe(2);
+});
+
+it.each(["admission-unavailable", "host-unavailable"])("retries the same head without quarantine while commit answers %s", async reason => {
+  const f = fixture(1);
+  f.storage.commitLiveUpdateJournal.mockReturnValueOnce({result: {kind: "retry", reason}} as never);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox")).toEqual([]);
+  expect(f.receipts).toEqual([]);
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}]);
 });
 
 it("continues a byte-limited pass only after a real admission and native outbox ACK", async () => {
@@ -438,3 +748,28 @@ it("keeps submitted context when an admitted head retries across a missing accou
   await f.run();
   expect(f.storage.commitLiveUpdateJournal.mock.calls[1]![0].metadata).toEqual(first);
 });
+
+it("admits an owner-outbox entry when its admitted cut exceeds the former activation limit", async () => {
+  const {encodeStateAsUpdate} = createRequire(new URL("../../../packages/ydoc-projection/package.json", import.meta.url))("yjs") as {
+    encodeStateAsUpdate(doc: ReturnType<typeof markdownToYDoc>): Uint8Array;
+  };
+  const doc = markdownToYDoc(Array.from({length: 5000}, (_, i) =>
+    `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`).join("\n\n"));
+  const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const f = fixture(1, 10_000, undefined, undefined, false, undefined, [1], Uint8Array.of(0, 0));
+  const profile = selfHostLiveProfile();
+  const config = parseServiceActivationConfig({...profile.service.activation, targets: []})!;
+  const input = {document: {workspaceId: f.binding.workspaceId, mainVersionId: f.binding.mainVersionId,
+    objectId: f.binding.objectId, lineageClaimId: f.binding.lineageClaimId},
+    currentPath: f.binding.currentPath, checkpoint, suffix: [], candidate: Uint8Array.of(0, 0)};
+  expect(createLiveMarkdownJournalValidator({...profile.validation, maxIndexOperations: 10_000_000})(input))
+    .toMatchObject({kind: "refused", reason: "capacity-refused", source: "admitted-cut"});
+  f.storage.readLiveUpdateJournalCut = () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array(checkpoint)}, suffix: []}});
+  const validate = vi.fn(config.validateAdmission);
+  expect(await f.run({admission: {...f.admission, validate}})).toEqual({admittedEntries: 1, hasMore: false});
+  expect(await validate.mock.results[0]!.value).toMatchObject({kind: "accepted"});
+  expect(f.storage.commitLiveUpdateJournal).toHaveBeenCalledTimes(1);
+  expect(f.receipts).toHaveLength(1);
+}, 60_000);
+
+afterAll(async () => {await liveValidation.close();});

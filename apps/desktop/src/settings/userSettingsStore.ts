@@ -1,12 +1,16 @@
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
 import { join, resolve } from "node:path";
+import { hasPreferredNameControlCharacters } from "@dohc/workspace-contracts/chat-identity-values";
+import { AGENT_HUES } from "../renderer/tokens";
 import {
-  DEFAULT_USER_SETTINGS, type AgentColors,
+  agentProblem, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
   StoredUserSettings,
   settingsDeepEqual,
   type StoredUserSettingsResult,
 } from "./userSettings";
+import { migrateVersion1 } from "./userSettingsMigration";
 import {
   isSettingsObject,
   overlaySettings,
@@ -20,6 +24,8 @@ export const MAX_USER_SETTINGS_FILE_BYTES = 256 * 1024;
 const schemaSettingKinds = settingKinds(StoredUserSettings, DEFAULT_USER_SETTINGS);
 const userSettingKinds: typeof schemaSettingKinds = path =>
   path.length === 2 && path[0] === "appearance" && path[1] === "agentColors" ? "group" : schemaSettingKinds(path);
+// An agent starts from a tool or a command, never from parts of both.
+const agentLaunch = (path: readonly string[]) => path.length === 3 && path[0] === "agents" && path[2] === "launch";
 
 function parseUserSettings(candidate: unknown): StoredUserSettings | null {
   const parsed = StoredUserSettings.safeParse(candidate);
@@ -67,14 +73,29 @@ function unusable(
   };
 }
 
+function agentProblems(raw: Record<string, unknown>, settings: StoredUserSettings): AgentProblem[] {
+  if (!isSettingsObject(raw.agents)) return [];
+  return Object.entries(raw.agents).flatMap(([id, entry], position) => {
+    if (Object.hasOwn(settings.agents, id)) return [];
+    const fields = isSettingsObject(entry) ? entry : {};
+    // A name Settings can show, or none, so the row shows the id.
+    const name = typeof fields.name === "string" && !hasPreferredNameControlCharacters(fields.name) ? fields.name.trim().slice(0, 200) : "";
+    const hue = AGENT_HUES.find((value) => value === fields.hue);
+    return [{ id: id.slice(0, 200), ...(name ? { name } : {}), ...(hue ? { hue } : {}), position, problem: agentProblem(id, entry).slice(0, 500) }];
+  }).slice(0, 50);
+}
+
 function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
-  let raw: unknown;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     return unusable(path, text, "it is not valid JSON");
   }
-  if (!isSettingsObject(raw)) return unusable(path, text, "it is not a JSON object");
+  if (!isSettingsObject(parsed)) return unusable(path, text, "it is not a JSON object");
+  // The first save writes the migrated file. Version 1 read a file without a
+  // version as its own, and migrating one without its keys changes nothing.
+  const raw = parsed.version === 1 || parsed.version === undefined ? migrateVersion1(parsed) : parsed;
   // Another version is a format this build cannot read, not one bad key.
   if (raw.version !== undefined && raw.version !== DEFAULT_USER_SETTINGS.version) {
     return unusable(path, text, `its version is not ${DEFAULT_USER_SETTINGS.version}`);
@@ -86,11 +107,16 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
     parse: parseUserSettings,
     reportIgnored: path => !(path[0] === "appearance" && path[1] === "agentColors"),
   });
+  const problems = agentProblems(raw, settings);
   return {
     text,
     problem: null,
     raw,
-    result: { settings, source: "stored", ...(ignored.length > 0 ? { ignored } : {}) },
+    result: {
+      settings, source: "stored",
+      ...(ignored.length > 0 ? { ignored } : {}),
+      ...(problems.length > 0 ? { agentProblems: problems } : {}),
+    },
   };
 }
 
@@ -206,10 +232,11 @@ const SAVE_ATTEMPTS = 5;
  * did not change, stay as the person wrote them. When the file changes
  * during the save, the change is merged again onto the new file. A file dohc
  * cannot use is refused rather than replaced: it may be an edit in progress.
+ * So is a change to an agent entry dohc could not use.
  */
 export async function updateUserSettingsFile(
   dir: string,
-  change: (current: StoredUserSettings) => StoredUserSettings,
+  change: (current: StoredUserSettings) => Record<string, unknown>,
 ): Promise<StoredUserSettingsResult> {
   const root = resolve(dir);
   const path = settingsPath(root);
@@ -219,14 +246,26 @@ export async function updateUserSettingsFile(
       throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
     }
     const current = onDisk.result.settings;
-    const next = StoredUserSettings.parse(change(current));
+    const changed = change(current);
+    // `current` leaves out the agents dohc could not use, so one in the
+    // change would be written over what the person wrote there.
+    const fileAgents = onDisk.raw?.agents;
+    const changedIds = Object.keys(isSettingsObject(changed.agents) ? changed.agents : {});
+    if (fileAgents !== undefined && !isSettingsObject(fileAgents) && changedIds.length > 0) {
+      throw new Error(`dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`);
+    }
+    const replaced = changedIds.find((id) => isSettingsObject(fileAgents) && Object.hasOwn(fileAgents, id) && !Object.hasOwn(current.agents, id));
+    if (replaced !== undefined) {
+      throw new Error(`dohc did not save settings. ${path} has an agent "${replaced}" that dohc can't use. Fix or remove it in the file, then try again.`);
+    }
+    const next = StoredUserSettings.parse(changed);
     if (settingsDeepEqual(next, current)) {
       snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
       return onDisk.result;
     }
     const saved = await commitUserSettings(
       root,
-      overlaySettings(onDisk.raw ?? current, current, next),
+      overlaySettings(onDisk.raw ?? current, current, next, agentLaunch),
       { text: onDisk.text },
     );
     if (saved) return saved;
@@ -234,10 +273,19 @@ export async function updateUserSettingsFile(
   throw new Error(`dohc did not save settings because ${path} kept changing. Try again.`);
 }
 
+/** A save that adds an agent the file has by then, which came in after the caller read the file. */
+export class AgentIdTakenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = AGENT_ID_TAKEN_ERROR;
+  }
+}
+
 /**
  * Saves the settings a caller changed from `base`. Only that difference is
  * written onto the file as it is now, so an edit made in the file after the
- * caller read it stays.
+ * caller read it stays. An agent the caller adds that the file has by then
+ * is refused rather than written over.
  */
 export function writeUserSettingsFile(
   dir: string,
@@ -245,8 +293,46 @@ export function writeUserSettingsFile(
   base: StoredUserSettings,
 ): Promise<StoredUserSettingsResult> {
   const next = StoredUserSettings.parse(settings);
-  return updateUserSettingsFile(dir, (current) =>
-    StoredUserSettings.parse(overlaySettings(current, base, next)));
+  return updateUserSettingsFile(dir, (current) => {
+    const taken = Object.keys(next.agents).find((id) => !Object.hasOwn(base.agents, id) && Object.hasOwn(current.agents, id));
+    if (taken !== undefined) {
+      throw new AgentIdTakenError(`dohc didn't add ${next.agents[taken]!.name} because the settings file changed at the same time.`);
+    }
+    return overlaySettings(current, base, next, agentLaunch);
+  });
+}
+
+/**
+ * Moves the agents in `order` to the front of the file, in that order. Every
+ * other entry, one dohc could not use included, keeps its place after them.
+ * Nothing but the agents' order changes.
+ */
+export async function orderUserSettingsAgents(
+  dir: string,
+  order: readonly string[],
+): Promise<StoredUserSettingsResult> {
+  const root = resolve(dir);
+  const path = settingsPath(root);
+  for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt += 1) {
+    const onDisk = await loadUserSettings(path);
+    if (onDisk.problem !== null) {
+      throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
+    }
+    const agents = onDisk.raw?.agents;
+    const ids = isSettingsObject(agents) ? Object.keys(agents) : [];
+    const next = [...new Set([...order.filter((id) => ids.includes(id)), ...ids])];
+    if (onDisk.raw === null || !isSettingsObject(agents) || next.every((id, index) => id === ids[index])) {
+      snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
+      return onDisk.result;
+    }
+    const saved = await commitUserSettings(
+      root,
+      { ...onDisk.raw, agents: Object.fromEntries(next.map((id) => [id, agents[id]])) },
+      { text: onDisk.text },
+    );
+    if (saved) return saved;
+  }
+  throw new Error(`dohc did not save settings because ${path} kept changing. Try again.`);
 }
 
 /** Replaces the whole file. Reset user settings is the one caller. */

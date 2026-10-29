@@ -1,5 +1,5 @@
 import {mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile} from "node:fs/promises";
-import {existsSync} from "node:fs";
+import {existsSync, realpathSync} from "node:fs";
 import {createHash} from "node:crypto";
 import {basename, dirname, join} from "node:path";
 import {tmpdir} from "node:os";
@@ -8,7 +8,9 @@ import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHos
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import type {ServiceHostedSet} from "./serviceLiveHost";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
@@ -74,10 +76,13 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const pending = new Set<string>(options.pending), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [], events: string[] = [];
   // Documents the running host cannot continue until their owner tries again, with why.
   const blocked = new Map<string, ServiceActivationBlock>();
+  const holdReasons = new Map<string, ServiceHostedHold["reason"]>();
   const refusal = new Error("Workspace attach refused.");
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
   let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
   const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; controller: AbortController}> = [];
+  // Each page read of a kept queue, with the store it names.
+  const keptReads: Array<{outboxId: string; store: string}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
     await options.beforeStart?.();
@@ -125,8 +130,10 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     }};
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
-    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
+    const readKeptEditsPage = async (kept: ServiceKeptEdits, _cursor: unknown, store: string) => {keptReads.push({outboxId: kept.outboxId, store}); return {kind: "page"};};
+    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined,
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
+      holdReason: (document: Document) => holds(document) ? holdReasons.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
@@ -172,13 +179,14 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     initializeAccountDeletion(f.storage as StorageContext, "fence-key");
     return fenceAccount(f.storage as StorageContext, "fence-key", ownerUserId, `${ownerUserId}@dohc.test`).manifest!;
   };
-  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events, fence,
+  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events, fence, keptReads,
     refusal, peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
     /** Refuses every update that wants the path. */
     refuseAttach(path: string | undefined) {refusedPath = path;},
     holds: (objectId: string, workspaceId = scope.workspaceId) => running?.holds({workspaceId, objectId}) ?? false,
     diverge: (workspaceId = scope.workspaceId, detached = true) => running!.diverge(workspaceId, detached),
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}, unblock(objectId: string) {blocked.delete(objectId);},
+    hold(objectId: string, reason: ServiceHostedHold["reason"] | undefined) {if (reason) holdReasons.set(objectId, reason); else holdReasons.delete(objectId);},
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -242,6 +250,27 @@ it("becomes available after reconciling an empty deployment without starting a d
   expect(f.startHost).not.toHaveBeenCalled();
 });
 
+// Proves: an owner's recovery read starts the daemon when none runs, as after
+// an identity change left only earlier stores. Reads at once start one daemon,
+// each reads the store its row's identity names, not the workspace's current
+// store, and later reconciliations keep that daemon.
+it("starts its daemon for a recovery read while it hosts nothing, and reads the store of the row's identity", async () => {
+  const f = await fixture({empty: true});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  const identity = {replicationEpoch: "epoch", streamIdentity: "stream"};
+  f.storage.recordServiceKeptEdits({identity, outboxId: "outbox", binding, reason: "invalid-update", headDeliveryId: "delivery", refusalKey: "refusal", nowMs: 1});
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: scope.workspaceId, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 20})).toBe("rotated");
+  const kept = f.storage.readServiceKeptEdits({workspaceId: scope.workspaceId, identity, outboxId: "outbox"})!;
+  expect(f.startHost).not.toHaveBeenCalled();
+  await expect(Promise.all([f.host.keptEdits.page(kept, undefined), f.host.keptEdits.page(kept, undefined)])).resolves.toEqual([{kind: "page"}, {kind: "page"}]);
+  expect(f.startHost).toHaveBeenCalledOnce();
+  expect(f.keptReads).toEqual([{outboxId: "outbox", store: join(f.data, storeName(scope.workspaceId))}, {outboxId: "outbox", store: join(f.data, storeName(scope.workspaceId))}]);
+  expect(f.keptReads[0]!.store).not.toBe(join(f.data, storeName(scope.workspaceId, "epoch-2", "stream-2")));
+  await f.waitPasses();
+  expect(f.startHost).toHaveBeenCalledOnce();
+  expect(f.starts[0]!.close).not.toHaveBeenCalled();
+});
+
 it("starts one empty daemon and attaches the first shared document's workspace to a hosted replica", async () => {
   const f = await fixture(); expect(f.host.unavailable).toBe(true); await f.waitStarted(1);
   const first = await f.waitUpdate(["docs/a.md"]), {config} = f.starts[0]!;
@@ -266,6 +295,13 @@ it.skipIf(process.platform === "win32")("writes the daemon's configuration in th
   vi.stubEnv("TMPDIR", linked);
   f.add(); await f.waitStarted(1);
   expect(dirname(dirname(f.starts[0]!.configPath))).toBe(real);
+});
+
+// The daemon copies an earlier store for its owner's recovery copy under the
+// store root, within the profile's preparation deadline.
+it("names the store root for recovery copies in the daemon's configuration", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  expect((f.starts[0]!.config as unknown as {recovery: unknown}).recovery).toEqual({root: realpathSync(f.data), preparationDeadlineMs: 300_000});
 });
 
 it("adds and removes documents on the running daemon while the sibling stays hosted", async () => {
@@ -373,6 +409,31 @@ it("drains a stopped last document, then detaches the workspace and releases it,
   expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]);
   expect(await readdir(f.data)).toEqual([storeName(scope.workspaceId)]);
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
+});
+
+// Proves: a document its owner resumes before its stopped activation retired
+// stays departing, so the host only retires that activation. Once the
+// retirement closes, the document is hosted again, where its successor activates.
+it("keeps a document resumed before its activation retired departing until that retirement closes", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  let open = true;
+  const read = f.storage.serviceActivationRetirement.bind(f.storage);
+  vi.spyOn(f.storage, "serviceActivationRetirement").mockImplementation(document => open && document.objectId === binding.objectId
+    ? {relayDatabaseNamespace: namespace, activationId: `ordinary-activation-${"a".repeat(64)}`, workspaceId: scope.workspaceId, mainVersionId: "main",
+      objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: binding.currentPath, restoreFenceGeneration: 0, acceptedThrough: 0, requestedAtMs: 20}
+    : read(document));
+  f.pending.add(binding.objectId);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
+  await f.waitUpdate([]);
+  f.storage.enrollServiceHostDocument({...f.input, nowMs: 40});
+  await f.waitPasses();
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.updates.at(-1)!.documents).toEqual([]);
+  expect(f.updates.at(-1)!.departing.map(row => row.objectId)).toEqual([binding.objectId]);
+  open = false;
+  f.host.reconcile();
+  await f.waitUpdate(["docs/a.md"]);
+  expect(f.updates.at(-1)!.departing).toEqual([]);
 });
 
 it("retires the last document without stopping the daemon", async () => {
@@ -543,6 +604,17 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
 });
 
+it("reports a held document without treating it as blocked or stopped", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  f.hold(binding.objectId, "hosted-conflict-parent-withheld");
+  expect(f.host.holdReason(binding)).toBe("hosted-conflict-parent-withheld");
+  expect(f.host.holdReason({...binding, objectId: "other"})).toBeUndefined();
+  expect(f.host.blocked(binding)).toBeUndefined();
+  expect(f.host.stopped(binding)).toBe(false);
+  f.hold(binding.objectId, undefined);
+  expect(f.host.holdReason(binding)).toBeUndefined();
+});
+
 // Proves: the operator learns where a blocked document's store is kept, once
 // per block, and the document stays hosted. A new block after its owner's
 // retry is reported again, even one before any reconciliation saw it unblocked.
@@ -581,13 +653,13 @@ it("tells the operator a document without lineage must be opened on a desktop fi
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
-// Proves: a document whose host copy misses an edit made while live editing
-// was off tells the operator, once, that it cannot resume and why.
-it("tells the operator a document edited while live editing was off cannot resume", async () => {
+// Proves: a document whose host copy is missing an owner edit tells the
+// operator, once, that it is held until its owner resumes it.
+it("tells the operator a document missing an owner edit is held until its owner resumes it", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   f.block(binding.objectId, "live-edit-unadmitted");
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
-  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot resume: the document changed while live editing was off, and the session host's copy is missing that edit. Its owner can keep editing it in dohc. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
   expect(f.host.blocked(binding)).toBe("live-edit-unadmitted");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
@@ -638,7 +710,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
-  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"}]});
+  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}]});
   const passes = vi.spyOn(f.storage, "listUndrainedServiceHostEnrollments");
   await vi.waitFor(() => {restarted.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
   expect(f.starts).toHaveLength(1);

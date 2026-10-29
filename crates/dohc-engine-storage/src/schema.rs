@@ -31,21 +31,32 @@ use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// SQLite VM steps per count of open work. A single long statement, such as a
 /// migration or the integrity check on a large store, still moves the count
 /// many times, and one atomic add per thousand steps costs nothing measurable.
 pub(crate) const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
 
-/// Count the SQLite work of this open into `work` until [`stop_counting`].
-fn count_open_work(conn: &Connection, work: Option<Arc<AtomicU64>>) -> Result<(), StorageError> {
-    let Some(work) = work else { return Ok(()) };
+/// Count the SQLite work of this open into `work` until [`stop_counting`], and
+/// interrupt it once `cancelled` is set.
+fn count_open_work(
+    conn: &Connection,
+    work: Option<Arc<AtomicU64>>,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<(), StorageError> {
+    if work.is_none() && cancelled.is_none() {
+        return Ok(());
+    }
     conn.progress_handler(
         OPEN_WORK_STEP_OPS,
         Some(move || {
-            work.fetch_add(1, Ordering::Relaxed);
-            false
+            if let Some(work) = &work {
+                work.fetch_add(1, Ordering::Relaxed);
+            }
+            cancelled
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
         }),
     )
     .map_err(StorageError::corrupt)
@@ -87,6 +98,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_event_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
+    "live_accepted_reader_history",
     "live_restore_fences",
     "live_restore_cancellations",
     "ydoc_owner_applied_frames",
@@ -168,6 +180,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "released_hold_copy_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_ydoc_outbox_refusals",
     "owner_live_stops",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
@@ -197,8 +210,6 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_bookmarks",
     "chat_bookmark_outbox",
     "chat_dispatch_ledger",
-    "chat_dispatch_scan_cursor",
-    "chat_dispatch_local_discovery",
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
@@ -276,7 +287,7 @@ pub(crate) fn open_engine_db_with_root_token(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, false, false)
+    open_engine_db_configured(path, now_ms, root_token, work, false, false, None)
 }
 
 pub(crate) fn store_is_passive(conn: &Connection) -> Result<bool, StorageError> {
@@ -316,7 +327,18 @@ pub(crate) fn open_engine_db_with_store_role(
     work: Option<Arc<AtomicU64>>,
     passive: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, false, passive)
+    open_engine_db_configured(path, now_ms, root_token, work, false, passive, None)
+}
+
+/// Migrate an existing store of the given role as an ordinary open does,
+/// interrupted once `cancelled` is set.
+pub(crate) fn open_engine_db_cancellable(
+    path: &Path,
+    now_ms: i64,
+    passive: bool,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, None, None, false, passive, Some(cancelled))
 }
 
 pub(crate) fn open_engine_db_for_actor(
@@ -325,7 +347,7 @@ pub(crate) fn open_engine_db_for_actor(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, true, false)
+    open_engine_db_configured(path, now_ms, root_token, work, true, false, None)
 }
 
 fn open_engine_db_configured(
@@ -335,6 +357,7 @@ fn open_engine_db_configured(
     work: Option<Arc<AtomicU64>>,
     background_checkpoints: bool,
     passive: bool,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
@@ -349,7 +372,7 @@ fn open_engine_db_configured(
     // must not fold them into engine.db.
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work)?;
+    count_open_work(&conn, work, cancelled)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
@@ -443,28 +466,52 @@ fn open_engine_db_configured(
 /// Open an existing, fully migrated v2 store without creating files, changing
 /// persistent pragmas, or applying migrations. This is the reader primitive
 /// for daemon requests that run while another engine owns workspace writes.
+/// Its checks stop once `cancelled` is set.
 pub(crate) fn open_engine_db_read_only(
     path: &Path,
     work: Option<Arc<AtomicU64>>,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let conn =
         crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work)?;
+    count_open_work(&conn, work, cancelled)?;
     apply_session_pragmas(&conn)?;
-    if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
-        return Err(StorageError::StateCorrupt { source: None });
-    }
-    crate::migration::refuse_declared_v1_evidence(&conn)?;
-    validate_v2(&conn)?;
-    integrity_check(&conn)?;
+    validate_current(&conn)?;
     stop_counting(&conn)?;
-    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
         checkpoints: None,
     })
+}
+
+/// The ledger of an existing v2 store that a read-only open may find,
+/// classified before the schema is validated: a store an older build last
+/// opened can lack tables this build requires.
+pub(crate) fn classify_existing(
+    conn: &Connection,
+) -> Result<crate::migration::LedgerState, StorageError> {
+    if classify_fingerprint(conn)? != Disposition::ExistingV2 {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
+    crate::migration::refuse_declared_v1_evidence(conn)?;
+    crate::migration::classify_ledger(conn, BASELINE_MIGRATIONS)
+}
+
+/// Refuse a store this build cannot read as it is, then check it.
+fn validate_current(conn: &Connection) -> Result<(), StorageError> {
+    if classify_existing(conn)? == crate::migration::LedgerState::Pending {
+        return Err(StorageError::MigrationPending);
+    }
+    check_current(conn)
+}
+
+/// Check a current store's schema and pages once and ready its queries.
+pub(crate) fn check_current(conn: &Connection) -> Result<(), StorageError> {
+    validate_v2(conn)?;
+    integrity_check(conn)?;
+    crate::search_generation::install(conn).map_err(StorageError::corrupt)
 }
 
 /// Reject an existing, non-empty file that is too small to hold a SQLite
@@ -486,7 +533,7 @@ pub(crate) fn open_engine_db_read_only(
 /// first byte are indistinguishable. We resolve that fail-closed — an
 /// unrecoverable workspace reported as corrupt costs a manual delete; the other
 /// way round costs the workspace.
-fn reject_undersized_database(path: &Path) -> Result<(), StorageError> {
+pub(crate) fn reject_undersized_database(path: &Path) -> Result<(), StorageError> {
     let size = match std::fs::metadata(path) {
         Ok(metadata) => metadata.len(),
         // Absent is the create path; any other stat failure surfaces as the
@@ -499,7 +546,7 @@ fn reject_undersized_database(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {
+pub(crate) fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {
     conn.busy_timeout(std::time::Duration::from_millis(u64::from(
         ENGINE_SQLITE_BUSY_TIMEOUT_MS,
     )))
@@ -681,7 +728,8 @@ mod tests {
         let path = scratch.path().join("engine.db");
         for now_ms in [1, 2] {
             let opened =
-                super::open_engine_db_configured(&path, now_ms, None, None, true, true).unwrap();
+                super::open_engine_db_configured(&path, now_ms, None, None, true, true, None)
+                    .unwrap();
             assert!(super::store_is_passive(&opened.conn).unwrap());
             assert!(
                 opened.checkpoints.is_none(),
@@ -780,6 +828,7 @@ mod tests {
             "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
+            "live_accepted_reader_history",
             "live_restore_fences",
             "live_restore_cancellations",
             "live_owner_adoptions",
@@ -818,6 +867,7 @@ mod tests {
         for table in [
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
+            "owner_ydoc_outbox_refusals",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
         ] {

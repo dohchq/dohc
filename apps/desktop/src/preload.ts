@@ -25,10 +25,12 @@ import type {
 import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
+  updateDownloadOperations,
   DesktopUserSettingsResult,
   AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
@@ -39,6 +41,8 @@ import {
   EngineYDocSaveStateEvent,
   ExitRoundAnswerPayload,
   ExitRoundMessage,
+  VersionRoundAnswerPayload,
+  VersionRoundMessage,
   ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
@@ -71,6 +75,10 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  stoppedRunOperations,
+  chatDispatchPauseOperations,
+  ChatDispatchPausedEvent,
+  ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
@@ -147,7 +155,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(sharedChannelOperations, invoke),
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(updateDownloadOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -529,6 +539,10 @@ const bridge: DohcDesktopBridge = {
   answerExitRound: async (payload) => {
     await ipcRenderer.invoke(CHANNELS.exitRoundAnswer, ExitRoundAnswerPayload.parse(payload));
   },
+  onVersionRound: (listener) => onEvent(CHANNELS.versionRound, VersionRoundMessage, listener),
+  answerVersionRound: async (payload) => {
+    await ipcRenderer.invoke(CHANNELS.versionRoundAnswer, VersionRoundAnswerPayload.parse(payload));
+  },
   holdQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.holdQuit);
   },
@@ -556,6 +570,12 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentRunStateOperations, invoke),
   onAgentRunState: (listener) =>
     onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
+  ...operationBridge(stoppedRunOperations, invoke),
+  ...operationBridge(chatDispatchPauseOperations, invoke),
+  onChatDispatchPaused: (listener) =>
+    onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
+  onChatAgentRequestsChanged: (listener) =>
+    onEvent(CHANNELS.chatAgentRequestsChanged, ChatAgentRequestsChangedEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

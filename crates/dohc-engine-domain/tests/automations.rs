@@ -1570,6 +1570,7 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         message_id: message_id.to_owned(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_owner_display_name: None,
@@ -1582,6 +1583,8 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         automation: None,
         now_ms,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
 }
 
@@ -1614,7 +1617,7 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
             .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
             .expect("DM");
         chats
-            .ensure_agent_channel(WS, "agent-1", 5, &NO_FAULTS)
+            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 5, &NO_FAULTS)
             .expect("agent channel");
     }
     // Only a Group this computer has can be watched: not a DM, the agent
@@ -1740,6 +1743,8 @@ fn a_group_message_claims_each_matching_subscription_once() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 25,
                 request_id: None,
             },
@@ -2056,6 +2061,7 @@ fn ask_agent(
         ..post(message_id, "Plan the trip", now_ms)
     };
     if let Some(chain_depth) = wake_depth {
+        request.own_thread = true;
         request.author_kind = ChatActorKind::Automation;
         request.author_display_name = "Ask my agent".to_owned();
         request.author_owner_display_name = Some("Ice".to_owned());
@@ -2069,7 +2075,14 @@ fn ask_agent(
         .start_channel_thread(&request, &NO_FAULTS)
         .expect("message");
     chats
-        .enqueue_dispatch(WS, message_id, &request.thread_id, now_ms, &NO_FAULTS)
+        .enqueue_dispatch(
+            WS,
+            message_id,
+            "default",
+            &request.thread_id,
+            now_ms,
+            &NO_FAULTS,
+        )
         .expect("queue the agent");
     chats
         .claim_next_pending(
@@ -2108,7 +2121,7 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
         .expect("subscribe");
     }
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
 
     // A person asks the agent directly: its writes start a chain at 0.
@@ -2182,7 +2195,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     let mut store = open_store(&scratch);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let thread = StartChannelThread {
         channel_id: MY_AGENT.to_owned(),
@@ -2213,6 +2226,8 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                         automation_id: ASK.to_owned(),
                         chain_depth,
                     }),
+                    author_agent_id: None,
+                    named_agent_ids: Vec::new(),
                     now_ms: 11,
                     request_id: None,
                 },
@@ -2222,7 +2237,14 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     }
     for (message_id, now_ms) in [("m-first", 12), ("m-deep", 13), ("m-shallow", 14)] {
         chats
-            .enqueue_dispatch(WS, message_id, &thread.thread_id, now_ms, &NO_FAULTS)
+            .enqueue_dispatch(
+                WS,
+                message_id,
+                "default",
+                &thread.thread_id,
+                now_ms,
+                &NO_FAULTS,
+            )
             .expect("queue");
     }
     let claim = chats
@@ -2242,8 +2264,9 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     );
 
     // A restart interrupts the run, and every trigger it covered goes back to
-    // the queue. A person's later request that sorts first starts the next
-    // run, which still counts the wakes the interrupted run covered.
+    // the queue. The next run starts from the oldest request again, covers the
+    // person's later one, and still counts the wakes the interrupted run
+    // covered.
     chats
         .reclaim_running_dispatches(WS, 2, 16, &NO_FAULTS)
         .expect("reclaim");
@@ -2268,23 +2291,24 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 automation: None,
+                author_agent_id: None,
+                named_agent_ids: Vec::new(),
                 now_ms: 17,
                 request_id: None,
             },
             &NO_FAULTS,
         )
         .expect("a person's request");
-    chats
-        .enqueue_dispatch(WS, "m-early", &thread.thread_id, 11, &NO_FAULTS)
-        .expect("queue");
     let again = chats
         .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
         .expect("claim again")
         .expect("the requeued run");
-    assert_eq!(again.run.trigger_message_id, "m-early");
+    assert_eq!(again.run.trigger_message_id, "m-first");
     assert_eq!(again.chain_depth, 4);
 
-    // A second restart gives back only what has attempts left.
+    // A second restart gives back only what has attempts left. The person's
+    // request the run covered comes back even though the run's first request
+    // has used its attempts.
     chats
         .reclaim_running_dispatches(WS, 2, 19, &NO_FAULTS)
         .expect("reclaim again");
@@ -2306,7 +2330,7 @@ fn an_agents_post_during_a_run_claims_at_the_runs_depth() {
     let mut store = open_group(&scratch);
     watch_groups(&mut store, &[(ALL, GROUP, None)]).expect("all");
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let woken = ask_agent(&mut store, "m-wake", Some(2), 10);
     let by_agent = |message_id: &str, now_ms: i64| StartChannelThread {

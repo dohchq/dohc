@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from "node:util";
 import { test, expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
-import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { readHistoryMoments } from "./helpers/history";
 import { liveDocumentFold, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
@@ -54,10 +54,10 @@ const HA = "Agent edited while hosted.";
 const AGENT = "trip-agent";
 const HOSTED_AGENT = "trip-agent-hosted";
 const NEXT_AGENT = "trip-agent-after-restore";
-// While the server hosts the document, an agent's edit can reach the live
-// document before the file is saved. The CLI then fails with this line, and
-// the agent reads the document instead of retrying.
-const EDIT_NOT_YET_SAVED = `dohc: The edit is in ${PATH}, but dohc has not saved it to the file yet (Saved locally. The shared file update is pending.). Read the document before you retry.\n`;
+// The document is shared, so the pending warning goes on to say someone may change the same blocks.
+const PENDING_EDIT_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit. " +
+  "The edit is saved. Someone may be changing this document at the same moment, and a change they make to the " +
+  "same blocks before your edit reaches them can still remove its text. Read the document to check it is there.";
 
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
@@ -77,14 +77,15 @@ async function cliRead(temp: TempWorkspace): Promise<string> {
 }
 
 /** One agent edit through the CLI while the server hosts the document. An applied edit is never retried. */
-async function hostedAgentEdit(temp: TempWorkspace, find: string, text: string, agent: string): Promise<"saved" | "applied, not yet saved"> {
-  const edited = await runDohcCli(temp, ["--json", "document", "edit", PATH, "--find", find, "--text", text, "--agent", agent])
-    .catch((error: unknown) => {
-      if (error instanceof DohcCliFailure && error.exitCode === 1 && error.stdout === "" && error.stderr === EDIT_NOT_YET_SAVED) return null;
-      throw error;
-    });
-  if (!edited) return "applied, not yet saved";
-  expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: PATH, changed: true });
+async function hostedAgentEdit(temp: TempWorkspace, find: string, text: string, agent: string): Promise<"saved" | "saved locally, pending"> {
+  const edited = await runDohcCli(temp, ["--json", "document", "edit", PATH, "--find", find, "--text", text, "--agent", agent]);
+  expect(edited.stderr).toBe("");
+  const result = JSON.parse(edited.stdout) as { warning?: string };
+  expect(result).toMatchObject({ ok: true, path: PATH, changed: true });
+  if (result.warning?.startsWith("Saved locally.")) {
+    expect(result.warning).toBe(PENDING_EDIT_WARNING);
+    return "saved locally, pending";
+  }
   return "saved";
 }
 

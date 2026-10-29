@@ -34,7 +34,7 @@ export function AgentPresenceHint(props: {
       role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-subtle"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-subtle"
     >
       <span
         aria-hidden
@@ -204,7 +204,7 @@ export function ComposerModeBar(props: {
   return (
     <div
       data-testid={props.testId}
-      className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
+      className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 text-[10px] tabular-nums text-muted"
     >
       <span className="min-w-0 flex-1 truncate">{props.children}</span>
       <button
@@ -218,6 +218,23 @@ export function ComposerModeBar(props: {
       </button>
     </div>
   );
+}
+
+// A screen reader hears the dispatch strip through a status region that stays
+// mounted, so a run that starts without a new message is still announced. A
+// comma reads better aloud than the strip's middle dot.
+export function DispatchAnnouncement(props: { testId: string; text: string }) {
+  return (
+    <span data-testid={props.testId} role="status" aria-live="polite" className="sr-only">
+      {props.text}
+    </span>
+  );
+}
+
+export function dispatchAnnouncement(working: boolean, pendingCount: number): string {
+  const queued = pendingCount > 0 ? `${pendingCount} queued` : "";
+  if (!working) return queued;
+  return queued ? `Agent working, ${queued}` : "Agent working";
 }
 
 // The read-only / ended composer replacement: honest and quiet.

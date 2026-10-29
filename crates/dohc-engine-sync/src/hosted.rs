@@ -697,9 +697,9 @@ pub enum HostedHold {
         scope_path: String,
         head_path: Option<String>,
     },
-    /// Its history holds an ordinary edit of its live lineage that this
-    /// replica refused because its session never admitted it, so its content
-    /// here is incomplete. It cannot be edited live here.
+    /// An ordinary edit of its live lineage that its bound session never
+    /// admitted stays queued, so its content here is incomplete. It applies
+    /// once the session's binding goes.
     LiveEditUnadmitted,
     /// Its next row could destroy work a released chain's tail retains
     /// ([`crate::SyncError::ReleasedLineageUnsettled`]); `binding` names what
@@ -1334,6 +1334,9 @@ pub(crate) fn stopped_hold(
         return Ok(hold);
     }
     let conn = occupancy.conn;
+    if live_edit_unadmitted(conn, occupancy.workspace_id, object_id)? {
+        return Ok(HostedHold::LiveEditUnadmitted);
+    }
     let unready = BTreeSet::from([object_id.to_owned()]);
     if let Some(hold) = backfill_path_held(conn, &unready, op)? {
         return Ok(hold);
@@ -1347,11 +1350,11 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: heads still parked, a released hold whose row still stands,
-/// retained work of it still waiting, a live edit it refused, a head away
-/// from the path its scope names, or queued work it still owes, in that
-/// order. A reason it stored before counts only where it still holds.
-/// `None` once nothing does.
+/// ready: heads still parked, a released hold whose row still stands, a
+/// live edit its bound session never admitted, retained work of it still
+/// waiting, a head away from the path its scope names, or queued work it
+/// still owes, in that order. A reason it stored before counts only where
+/// it still holds. `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1366,11 +1369,11 @@ fn completed_hold(
     if let Some(hold) = queued_released_hold(conn, workspace_id, object_id)? {
         return Ok(Some(hold));
     }
-    if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
-        return stopped_hold(occupancy, object_id, &waiting).map(Some);
-    }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
+    }
+    if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
+        return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
     let scope_path: String = conn
         .query_row(
@@ -1476,33 +1479,33 @@ pub(crate) fn redelivered_unready(
     Ok(standing)
 }
 
-/// Hold the ready document whose ordinary `ydoc.update` at this coordinate
-/// was just refused because its live session never admitted it, when the
-/// update is of its current lineage. Its content here is now incomplete, so
-/// it is no longer ready, in the refusal's own transaction. Its own read
-/// starts where the main feed is, which applied everything of it before, and
-/// only [`completed_hold`] clears the hold. A document that is not ready
-/// meets the refusal there when its read completes.
+/// Hold the document `object_id` for an ordinary `ydoc.update` of its
+/// current lineage that its bound session never admitted, in the
+/// transaction that keeps that update queued. Its content here would miss
+/// the edit. Only this records the hold, so [`completed_hold`] keeps it only
+/// for an edit the direct path or a drain kept. A ready document's own read
+/// starts where the main feed is, as with [`hold_waiting_in_tx`]; one
+/// backfilling, or held for work waiting, keeps its read. A document held
+/// for another reason meets the queued edit once a drain decides it again.
 pub(crate) fn hold_unadmitted_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
-    origin_id: &str,
-    origin_seq: i64,
+    object_id: &str,
 ) -> Result<(), SyncError> {
     tx.execute(
-        "UPDATE hosted_documents SET state='held',held_reason=?4,held_path=NULL,held_by=NULL, \
-           held_conflict_id=NULL,backfill_cursor=MAX(backfill_cursor, \
-             (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
-         WHERE workspace_id=?1 AND state='ready' \
-           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1) \
-           AND object_id=(SELECT d.object_id FROM replication_log l JOIN ydoc_docs d \
-             ON d.workspace_id=l.workspace_id \
-             AND d.version_id=json_extract(l.payload_json,'$.versionId') \
-             AND d.object_id=json_extract(l.payload_json,'$.objectId') \
-             AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
-             WHERE l.workspace_id=?1 AND l.origin_id=?2 AND l.origin_seq=?3 \
-               AND l.op_kind='ydoc.update')",
-        params![workspace_id, origin_id, origin_seq, LIVE_EDIT_UNADMITTED],
+        "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
+           held_conflict_id=NULL,backfill_cursor=CASE WHEN state='ready' \
+             THEN MAX(backfill_cursor,(SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+             ELSE backfill_cursor END \
+         WHERE workspace_id=?1 AND object_id=?2 \
+           AND (state IN ('ready','backfilling') OR held_reason=?4) \
+           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1)",
+        params![
+            workspace_id,
+            object_id,
+            LIVE_EDIT_UNADMITTED,
+            HostedHold::WorkWaiting.reason()
+        ],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -1573,10 +1576,33 @@ pub(crate) fn hold_released_in_tx(
     Ok(true)
 }
 
-/// Whether the hosted document `d` is held for queued work a drain takes up
-/// again: released retained work, or work still waiting.
-pub(crate) const HELD_FOR_DRAIN: &str = "(d.state='held' AND d.held_reason IN \
-     ('released-lineage-unsettled','hosted-backfill-work-waiting'))";
+/// SQL that holds while a native live session binds the document
+/// `object_id` names in version `version_id` of `workspace_id`, whatever
+/// lineage it binds. Each argument is a column or parameter of the query
+/// that uses it.
+pub(crate) fn live_bound(workspace_id: &str, version_id: &str, object_id: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM live_device_application_bindings b \
+           WHERE b.workspace_id={workspace_id} AND b.main_version_id={version_id} \
+             AND b.object_id={object_id}) \
+         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings b \
+           WHERE b.workspace_id={workspace_id} AND b.main_version_id={version_id} \
+             AND b.object_id={object_id}))"
+    )
+}
+
+/// Whether the hosted document `d` is held for its queued update `u` that a
+/// drain takes up again: released retained work, work still waiting, or a
+/// live edit whose session's binding is gone. A drain would stop at that
+/// edit again while the binding stands.
+pub(crate) fn held_for_drain() -> String {
+    format!(
+        "(d.state='held' AND (d.held_reason IN \
+           ('released-lineage-unsettled','hosted-backfill-work-waiting') \
+         OR (d.held_reason='hosted-live-edit-unadmitted' AND NOT {})))",
+        live_bound("d.workspace_id", "u.version_id", "d.object_id")
+    )
+}
 
 /// Whether the queued Y.Doc update `u` is application work this replica
 /// still owes: a base, or an update of a document whose lineage a base
@@ -1672,23 +1698,31 @@ pub(crate) fn recorded_hold(
     })
 }
 
-/// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
-/// current lineage because its live session never admitted it. The refusal
-/// keeps the row journaled, so no later read applies it.
+/// Whether `object_id` stays held for an ordinary `ydoc.update` of its
+/// current lineage that [`hold_unadmitted_in_tx`] recorded the direct path
+/// or a drain kept: its row records the hold, and such an update is still
+/// queued while a live session binds its document. Once the binding goes, a
+/// drain applies it. An echo the session admitted holds nothing: a drain
+/// consumes it.
 fn live_edit_unadmitted(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<bool, SyncError> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs r \
-         JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
-         JOIN ydoc_docs d ON d.workspace_id=l.workspace_id \
-           AND d.version_id=json_extract(l.payload_json,'$.versionId') \
-           AND d.object_id=json_extract(l.payload_json,'$.objectId') \
-           AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
-         WHERE r.workspace_id=?1 AND d.object_id=?2)",
-        params![workspace_id, object_id],
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2 \
+               AND state='held' AND held_reason=?3) \
+             AND EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
+             JOIN ydoc_docs d ON d.workspace_id=u.workspace_id AND d.version_id=u.version_id \
+               AND d.object_id=u.object_id AND d.lineage_claim_id=u.lineage_claim_id \
+             JOIN replication_log l ON l.workspace_id=u.workspace_id AND l.origin_id=u.origin_id \
+               AND l.origin_seq=u.origin_seq \
+             WHERE u.workspace_id=?1 AND u.object_id=?2 \
+               AND NOT COALESCE(json_extract(l.payload_json,'$.isBaseState'),0) AND {})",
+            live_bound("u.workspace_id", "u.version_id", "u.object_id")
+        ),
+        params![workspace_id, object_id, LIVE_EDIT_UNADMITTED],
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)

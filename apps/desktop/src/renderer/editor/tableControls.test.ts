@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
-import { Editor, Extension } from "@tiptap/core";
+import { Editor, Extension, getSchema } from "@tiptap/core";
+import { Collaboration } from "@tiptap/extension-collaboration";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
+import { closeHistory } from "@tiptap/pm/history";
+import { columnResizingPluginKey } from "@tiptap/pm/tables";
+import { prosemirrorJSONToYXmlFragment } from "@tiptap/y-tiptap";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import {
   makeTableControlsPlugin,
   resolveTableDropDestination,
@@ -56,7 +61,32 @@ function createTableEditor(rows = 2, cols = 2): Editor {
   return editor;
 }
 
-function createLabeledTableEditor(): Editor {
+// A 3 by 3 table whose cells read A1 to C3, after an optional paragraph.
+function labeledTableDoc(intro?: string) {
+  return {
+    type: "doc",
+    content: [
+      ...(intro ? [{ type: "paragraph", content: [{ type: "text", text: intro }] }] : []),
+      {
+        type: "table",
+        content: ["A", "B", "C"].map((rowLabel) => ({
+          type: "tableRow",
+          content: ["1", "2", "3"].map((columnLabel) => ({
+            type: rowLabel === "A" ? "tableHeader" : "tableCell",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: `${rowLabel}${columnLabel}` }],
+              },
+            ],
+          })),
+        })),
+      },
+    ],
+  };
+}
+
+function createLabeledTableEditor(intro?: string): Editor {
   return new Editor({
     extensions: [
       StarterKit,
@@ -64,27 +94,43 @@ function createLabeledTableEditor(): Editor {
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
-    content: {
-      type: "doc",
-      content: [
-        {
-          type: "table",
-          content: ["A", "B", "C"].map((rowLabel) => ({
-            type: "tableRow",
-            content: ["1", "2", "3"].map((columnLabel) => ({
-              type: rowLabel === "A" ? "tableHeader" : "tableCell",
-              content: [
-                {
-                  type: "paragraph",
-                  content: [{ type: "text", text: `${rowLabel}${columnLabel}` }],
-                },
-              ],
-            })),
-          })),
-        },
-      ],
-    },
+    content: labeledTableDoc(intro),
   });
+}
+
+const collabExtensions = (document: Y.Doc) => [
+  StarterKit.configure({ undoRedo: false }),
+  DohcTableRowHeight,
+  TableKit.configure({ table: { resizable: true } }),
+  testTableControls,
+  Collaboration.configure({ document, field: "body" }),
+];
+
+// Two editors on two Y.Docs that pass every update to each other, the way a
+// collaborator's edits reach a note. Both open the labeled table after "Intro".
+async function createSyncedEditors(): Promise<{ local: Editor; peer: Editor }> {
+  const localDoc = new Y.Doc();
+  const peerDoc = new Y.Doc();
+  prosemirrorJSONToYXmlFragment(
+    getSchema(collabExtensions(localDoc)),
+    labeledTableDoc("Intro"),
+    localDoc.getXmlFragment("body"),
+  );
+  Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(localDoc));
+  localDoc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== peerDoc) Y.applyUpdate(peerDoc, update, localDoc);
+  });
+  peerDoc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== localDoc) Y.applyUpdate(localDoc, update, peerDoc);
+  });
+  const local = new Editor({ extensions: collabExtensions(localDoc) });
+  const peer = new Editor({ extensions: collabExtensions(peerDoc) });
+  // The sync plugin renders the Y.Doc after the editor is created.
+  await vi.waitFor(() => {
+    expect(local.view.dom.querySelector("table")).not.toBeNull();
+    expect(peer.view.dom.querySelector("table")).not.toBeNull();
+  });
+  return { local, peer };
 }
 
 function createColspanTableEditor(): Editor {
@@ -185,6 +231,7 @@ type JsonNode = {
     colspan?: number;
     rowspan?: number;
     height?: number | null;
+    colwidth?: number[] | null;
   };
   content?: JsonNode[];
   text?: string;
@@ -214,6 +261,246 @@ function tableTextGrid(editor: Editor): string[][] {
     ),
   );
 }
+
+async function createSyncedTableEditors() {
+  const { local: editor, peer: collaborator } = await createSyncedEditors();
+  const editors = [editor, collaborator];
+  editors.forEach((each) => document.body.append(each.view.dom));
+  const destroy = () => {
+    editors.forEach((each) => {
+      const dom = each.view.dom;
+      each.destroy();
+      dom.remove();
+    });
+  };
+  return { editor, collaborator, destroy };
+}
+
+describe("table gestures while the note changes", () => {
+  let pair: Awaited<ReturnType<typeof createSyncedTableEditors>> | undefined;
+  const errors: unknown[] = [];
+  const recordError = (event: ErrorEvent) => {
+    errors.push(event.error);
+    event.preventDefault();
+  };
+
+  afterEach(() => {
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    window.removeEventListener("error", recordError);
+    pair?.destroy();
+    pair = undefined;
+    elementFromPointResult = null;
+    vi.restoreAllMocks();
+    expect(errors.splice(0)).toEqual([]);
+  });
+
+  async function setup() {
+    window.addEventListener("error", recordError);
+    pair = await createSyncedTableEditors();
+    return pair;
+  }
+
+  function editAbove(editor: Editor) {
+    editor.view.dispatch(editor.state.tr.insertText("New text ", 1));
+  }
+
+  function expectNoDragChrome(editor: Editor) {
+    expect(editor.view.dom.querySelector(
+      ".is-reordering, .is-dragging, .is-drop-target, .dohc-table-drag-source, .dohc-table-drop-before, .dohc-table-drop-after, [aria-grabbed='true']",
+    )).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator")).toBeNull();
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
+      .toBe("Table reorder cancelled.");
+  }
+
+  it.each([
+    { band: "row", origin: "synced" },
+    { band: "column", origin: "synced" },
+    { band: "row", origin: "local" },
+    { band: "column", origin: "local" },
+  ])("cancels a $band grip drag after a $origin edit above the table", async ({ band, origin }) => {
+    const { editor, collaborator } = await setup();
+    const before = tableTextGrid(editor);
+    const selector = `.dohc-table-grip--${band === "column" ? "col" : "row"}`;
+    const grips = editor.view.dom.querySelectorAll(selector);
+    const source = grips[0]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+    expect(source.getAttribute("aria-grabbed")).toBe("true");
+    expect(document.body.querySelector(".dohc-table-drop-indicator.is-visible")).not.toBeNull();
+
+    editAbove(origin === "synced" ? collaborator : editor);
+    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    expectNoDragChrome(editor);
+    elementFromPointResult = editor.view.dom.querySelectorAll(selector)[2]!;
+    dispatchPointer(editor.view.dom, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)).toEqual(before);
+    expect(tableTextGrid(collaborator)).toEqual(before);
+    expect(source.getAttribute("aria-grabbed")).toBe("false");
+    expectNoDragChrome(editor);
+
+    // The grip stays in place through the edit, so a new drag from it works.
+    drag(source, editor.view.dom.querySelectorAll(selector)[2]!);
+    const moved = band === "row"
+      ? [before[1]!, before[2]!, before[0]!]
+      : before.map((row) => [row[1]!, row[2]!, row[0]!]);
+    expect(tableTextGrid(editor)).toEqual(moved);
+    expect(tableTextGrid(collaborator)).toEqual(moved);
+  });
+
+  function mouse(target: EventTarget, type: string, clientX: number) {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 20, button: 0, buttons: 1 });
+    Object.defineProperty(event, "which", { value: 1 });
+    target.dispatchEvent(event);
+  }
+
+  function startColumnResize(editor: Editor) {
+    const cell = editor.view.dom.querySelectorAll("th")[1] as HTMLTableCellElement;
+    vi.spyOn(cell, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 0, 100, 40));
+    Object.defineProperty(cell, "offsetWidth", { configurable: true, value: 100 });
+    elementFromPointResult = cell;
+    mouse(cell, "mousemove", 199);
+    const handle = columnResizingPluginKey.getState(editor.state)!.activeHandle;
+    expect(editor.state.doc.nodeAt(handle)?.textContent).toBe("A2");
+    mouse(cell, "mousedown", 199);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
+    mouse(window, "mousemove", 239);
+    expect(editor.view.dom.querySelectorAll("col")[1]?.style.width).toBe("140px");
+    return handle;
+  }
+
+  function widths(editor: Editor) {
+    return tableNode(editor).content?.map((row) => row.content?.map((cell) => cell.attrs?.colwidth ?? null));
+  }
+
+  it("cancels a column width resize after a synced edit invalidates its handle", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableNode(editor);
+    const table = editor.view.dom.querySelector("table")!;
+    const beforeSize = [table.style.width, table.style.minWidth];
+    startColumnResize(editor);
+
+    editAbove(collaborator);
+    expect(editor.state.doc.firstChild?.textContent).toBe("New text Intro");
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(tableNode(editor)).toEqual(before);
+    expect(tableNode(collaborator)).toEqual(before);
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", "", ""]);
+    const currentTable = editor.view.dom.querySelector("table")!;
+    expect([currentTable.style.width, currentTable.style.minWidth]).toEqual(beforeSize);
+    expect(editor.view.dom.querySelector(".column-resize-dragging, .column-resize-handle")).toBeNull();
+  });
+
+  it("finishes a column width resize on the same column after a local edit above the table", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableTextGrid(editor);
+    const handle = startColumnResize(editor);
+
+    editAbove(editor);
+    expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle + "New text ".length);
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    expect(tableTextGrid(editor)).toEqual(before);
+  });
+
+  function deleteColumnOf(editor: Editor, label: string) {
+    let cell = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === "tableHeader" && node.textContent === label) cell = pos;
+    });
+    editor.chain().setTextSelection(cell + 2).deleteColumn().run();
+  }
+
+  it.each(["synced", "local"])("cancels a column width resize when a %s edit deletes its column", async (origin) => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(origin === "synced" ? collaborator : editor, "A2");
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "A3"]);
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    expect(Array.from(editor.view.dom.querySelectorAll("col"), (col) => col.style.width)).toEqual(["", ""]);
+  });
+
+  it("cancels a column width resize when a local edit replaces its cell", async () => {
+    const { editor, collaborator } = await setup();
+    const handle = startColumnResize(editor);
+    const cell = editor.state.doc.nodeAt(handle)!;
+
+    editor.view.dispatch(editor.state.tr.replaceWith(
+      handle,
+      handle + cell.nodeSize,
+      cell.type.create(cell.attrs, editor.schema.nodes.paragraph!.create(null, editor.schema.text("X2"))),
+    ));
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A1", "X2", "A3"]);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeFalsy();
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, null, null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+  });
+
+  it("finishes a column width resize on the same column after a local edit deletes the column before it", async () => {
+    const { editor, collaborator } = await setup();
+    startColumnResize(editor);
+
+    deleteColumnOf(editor, "A1");
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(tableTextGrid(editor)[0]).toEqual(["A2", "A3"]);
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [[160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+    // Saving the width changes the cell, but the handle stays on its edge.
+    expect(editor.state.doc.nodeAt(columnResizingPluginKey.getState(editor.state)!.activeHandle)?.textContent)
+      .toBe("A2");
+  });
+
+  it("cancels a row height resize after a synced edit above the table", async () => {
+    const { editor, collaborator } = await setup();
+    const before = tableNode(editor);
+    const row = editor.view.dom.querySelector("tr")!;
+    const handle = editor.view.dom.querySelector(".dohc-table-row-resize")!;
+    vi.spyOn(row, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 300, 40));
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    editAbove(collaborator);
+    dispatchPointer(editor.view.dom, "pointermove", { clientY: 150 });
+    dispatchPointer(editor.view.dom, "pointerup", { clientY: 150 });
+
+    expect(errors).toEqual([]);
+    expect(tableNode(editor)).toEqual(before);
+    expect(tableNode(collaborator)).toEqual(before);
+    expect(row.style.height).toBe("");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    expect(editor.view.dom.querySelector(".is-resizing, [aria-grabbed='true']")).toBeNull();
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")?.textContent)
+      .toBe("Row 1 resize cancelled.");
+  });
+});
 
 describe("table controls grips", () => {
   let editor: Editor | undefined;
@@ -1458,6 +1745,51 @@ describe("table controls grips", () => {
     expect(rowStrip.style.width).toBe("0px");
   });
 
+  // jsdom has no layout, so model the browser's: the first geometry read after
+  // a style write lays out the whole document again.
+  it("sizes the append strips of many tables with one layout on pointer entry and on edits", () => {
+    let dirty = true;
+    let layouts = 0;
+    const style = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "style")!.get!;
+    const spies = [
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(() => {
+        if (dirty) layouts += 1;
+        dirty = false;
+        return new DOMRect(0, 0, 0, 0);
+      }),
+      vi.spyOn(HTMLElement.prototype, "style", "get").mockImplementation(function (this: HTMLElement) {
+        return new Proxy(style.call(this) as CSSStyleDeclaration, {
+          get: (target, key) => {
+            const value: unknown = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+          set: (target, key, value) => {
+            dirty = true;
+            return Reflect.set(target, key, value, target);
+          },
+        });
+      }),
+    ];
+    try {
+      const table = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>";
+      editor = createEditor(`<p>Start</p>${`${table}<p>Text</p>`.repeat(6)}`);
+      const dom = editor.view.dom;
+      expect(dom.querySelectorAll("table")).toHaveLength(6);
+
+      dirty = true;
+      layouts = 0;
+      dom.dispatchEvent(new MouseEvent("mouseenter"));
+      expect(layouts).toBe(1);
+
+      dirty = true;
+      layouts = 0;
+      editor.view.dispatch(editor.state.tr.insertText("x", 1));
+      expect(layouts).toBe(1);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   it("refreshes edge hit areas after layout changes while the same cell stays hovered", () => {
     editor = createTableEditor(2, 2);
     const dom = editor.view.dom;
@@ -1546,6 +1878,289 @@ describe("table controls grips", () => {
 
     // The two original cells stay centered; the appended bottom row is null.
     expect(columnAligns(editor, 0)).toEqual(["center", "center", null]);
+  });
+
+  // Text before a table moves every position in it. The controls keep their
+  // elements through that, so each one must find its position when it's used.
+  describe("after the table's positions move", () => {
+    let peer: Editor | undefined;
+
+    afterEach(() => {
+      peer?.destroy();
+      peer = undefined;
+    });
+
+    function controls(target: Editor): Element[] {
+      return Array.from(
+        target.view.dom.querySelectorAll(
+          ".dohc-table-grip, .dohc-table-menu-btn, .dohc-table-append, .dohc-table-row-resize",
+        ),
+      );
+    }
+
+    function control(target: Editor, selector: string, index = 0): HTMLElement {
+      const element = target.view.dom.querySelectorAll(selector)[index];
+      if (!(element instanceof HTMLElement)) throw new Error(`${selector} ${index} missing`);
+      return element;
+    }
+
+    function typeBefore(target: Editor, text = "Typed "): void {
+      target.view.dispatch(target.state.tr.insertText(text, 1));
+    }
+
+    function rowHeights(target: Editor): (number | null)[] {
+      return (tableNode(target).content ?? []).map((row) => row.attrs?.height ?? null);
+    }
+
+    const labeledGrid = [
+      ["A1", "A2", "A3"],
+      ["B1", "B2", "B3"],
+      ["C1", "C2", "C3"],
+    ];
+
+    it("keeps every control's element when text before the table changes", () => {
+      editor = createLabeledTableEditor("Intro");
+      const before = controls(editor);
+      expect(before).toHaveLength(12);
+
+      typeBefore(editor);
+
+      const after = controls(editor);
+      expect(after).toHaveLength(before.length);
+      expect(after.filter((element, index) => element !== before[index])).toEqual([]);
+    });
+
+    it("runs each menu on its own column, row and table", () => {
+      editor = createLabeledTableEditor("Intro");
+
+      typeBefore(editor);
+      click(control(editor, ".dohc-table-grip--col", 1));
+      click(menuItemByLabel("Align right"));
+      expect(columnAligns(editor, 0)).toEqual([null, null, null]);
+      expect(columnAligns(editor, 1)).toEqual(["right", "right", "right"]);
+      expect(columnAligns(editor, 2)).toEqual([null, null, null]);
+
+      typeBefore(editor);
+      click(control(editor, ".dohc-table-grip--row", 1));
+      click(menuItemByLabel("Duplicate row"));
+      expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["A1", "B1", "B1", "C1"]);
+
+      typeBefore(editor);
+      click(control(editor, ".dohc-table-menu-btn"));
+      click(menuItemByLabel("Toggle header row"));
+      expect(tableNode(editor).content?.[0]?.content?.[0]?.type).toBe("tableCell");
+    });
+
+    it("adds a column and a row at the table's edges", () => {
+      editor = createLabeledTableEditor("Intro");
+
+      typeBefore(editor);
+      click(control(editor, ".dohc-table-append--col"));
+      typeBefore(editor);
+      click(control(editor, ".dohc-table-append--row"));
+
+      expect(tableTextGrid(editor)).toEqual([
+        ["A1", "A2", "A3", ""],
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+        ["", "", "", ""],
+      ]);
+    });
+
+    it("resizes and resets the row each handle belongs to", () => {
+      editor = createLabeledTableEditor("Intro");
+
+      typeBefore(editor);
+      const row = editor.view.dom.querySelectorAll("tr")[1] as HTMLTableRowElement;
+      Object.defineProperty(row, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ top: 0, bottom: 40, left: 0, right: 240, width: 240, height: 40 }),
+      });
+      const handle = control(editor, ".dohc-table-row-resize", 1);
+      dispatchPointer(handle, "pointerdown", { clientY: 100 });
+      dispatchPointer(handle, "pointermove", { clientY: 134 });
+      dispatchPointer(handle, "pointerup", { clientY: 134 });
+      expect(rowHeights(editor)).toEqual([null, 74, null]);
+
+      typeBefore(editor);
+      control(editor, ".dohc-table-row-resize", 2).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+      expect(rowHeights(editor)).toEqual([null, 74, 38]);
+
+      typeBefore(editor);
+      control(editor, ".dohc-table-row-resize", 1).dispatchEvent(
+        new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
+      );
+      expect(rowHeights(editor)).toEqual([null, null, 38]);
+    });
+
+    it("moves the dragged row and column", () => {
+      editor = createLabeledTableEditor("Intro");
+
+      typeBefore(editor);
+      const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+      drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B1", "B2", "B3"],
+        ["C1", "C2", "C3"],
+        ["A1", "A2", "A3"],
+      ]);
+
+      typeBefore(editor);
+      const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
+      drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B2", "B3", "B1"],
+        ["C2", "C3", "C1"],
+        ["A2", "A3", "A1"],
+      ]);
+    });
+
+    it("acts on its own row and column after undoing and redoing a column and a row add", () => {
+      editor = createLabeledTableEditor("Intro");
+      click(control(editor, ".dohc-table-grip--col", 0));
+      click(menuItemByLabel("Insert column left"));
+      editor.view.dispatch(closeHistory(editor.state.tr));
+      click(control(editor, ".dohc-table-append--row"));
+      expect(tableTextGrid(editor)).toHaveLength(4);
+
+      editor.commands.undo();
+      editor.commands.undo();
+      expect(tableTextGrid(editor)).toEqual(labeledGrid);
+      editor.commands.redo();
+      expect(tableTextGrid(editor)[0]).toEqual(["", "A1", "A2", "A3"]);
+
+      click(control(editor, ".dohc-table-grip--col", 2));
+      click(menuItemByLabel("Align right"));
+      expect(columnAligns(editor, 1)).toEqual([null, null, null]);
+      expect(columnAligns(editor, 2)).toEqual(["right", "right", "right"]);
+
+      click(control(editor, ".dohc-table-grip--row", 2));
+      click(menuItemByLabel("Delete row"));
+      expect(tableTextGrid(editor).map((row) => row[1])).toEqual(["A1", "B1"]);
+    });
+
+    it("acts on its own column and row after a collaborator's edit arrives through sync", async () => {
+      ({ local: editor, peer } = await createSyncedEditors());
+      const before = controls(editor);
+
+      peer.view.dispatch(peer.state.tr.insertText("Synced ", 1));
+      expect(editor.state.doc.textContent).toContain("Synced Intro");
+      const after = controls(editor);
+      expect(after).toHaveLength(before.length);
+      expect(after.filter((element, index) => element !== before[index])).toEqual([]);
+
+      click(control(editor, ".dohc-table-grip--col", 2));
+      click(menuItemByLabel("Align center"));
+      expect(columnAligns(editor, 1)).toEqual([null, null, null]);
+      expect(columnAligns(editor, 2)).toEqual(["center", "center", "center"]);
+
+      peer.view.dispatch(peer.state.tr.insertText("Synced ", 1));
+      click(control(editor, ".dohc-table-grip--row", 1));
+      click(menuItemByLabel("Delete row"));
+      expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["A1", "C1"]);
+      expect(tableTextGrid(peer)).toEqual(tableTextGrid(editor));
+    });
+
+    it("adds, resizes and moves the right row and column after a collaborator's edit arrives through sync", async () => {
+      ({ local: editor, peer } = await createSyncedEditors());
+      const typeOnPeer = () => peer!.view.dispatch(peer!.state.tr.insertText("Synced ", 1));
+
+      typeOnPeer();
+      click(control(editor, ".dohc-table-append--col"));
+      expect(tableTextGrid(editor)).toEqual([
+        ["A1", "A2", "A3", ""],
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+      ]);
+      typeOnPeer();
+      click(control(editor, ".dohc-table-append--row"));
+      expect(tableTextGrid(editor)).toEqual([
+        ["A1", "A2", "A3", ""],
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+        ["", "", "", ""],
+      ]);
+
+      typeOnPeer();
+      control(editor, ".dohc-table-row-resize", 2).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+      expect(rowHeights(editor)).toEqual([null, null, 38, null]);
+
+      typeOnPeer();
+      const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+      drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B1", "B2", "B3", ""],
+        ["C1", "C2", "C3", ""],
+        ["A1", "A2", "A3", ""],
+        ["", "", "", ""],
+      ]);
+      expect(rowHeights(editor)).toEqual([null, 38, null, null]);
+      typeOnPeer();
+      const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
+      drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
+      expect(tableTextGrid(editor)).toEqual([
+        ["B2", "B3", "B1", ""],
+        ["C2", "C3", "C1", ""],
+        ["A2", "A3", "A1", ""],
+        ["", "", "", ""],
+      ]);
+      expect(rowHeights(editor)).toEqual([null, 38, null, null]);
+      expect(tableTextGrid(peer)).toEqual(tableTextGrid(editor));
+    });
+
+    it("acts on its own row and column after undo and redo in a synced note", async () => {
+      ({ local: editor, peer } = await createSyncedEditors());
+      click(control(editor, ".dohc-table-append--row"));
+      editor.commands.undo();
+      expect(tableTextGrid(editor)).toEqual(labeledGrid);
+      editor.commands.redo();
+      expect(tableTextGrid(editor)).toHaveLength(4);
+
+      peer.view.dispatch(peer.state.tr.insertText("Synced ", 1));
+      click(control(editor, ".dohc-table-grip--row", 3));
+      click(menuItemByLabel("Delete row"));
+      expect(tableTextGrid(editor)).toEqual(labeledGrid);
+
+      click(control(editor, ".dohc-table-grip--col", 1));
+      click(menuItemByLabel("Align left"));
+      expect(columnAligns(editor, 1)).toEqual(["left", "left", "left"]);
+      expect(tableTextGrid(peer)).toEqual(labeledGrid);
+    });
+
+    it("closes an open menu when text before the table changes, and a reopened menu acts on its own column", async () => {
+      ({ local: editor, peer } = await createSyncedEditors());
+      const openers: [string, number][] = [
+        [".dohc-table-grip--col", 1],
+        [".dohc-table-grip--row", 1],
+        [".dohc-table-menu-btn", 0],
+      ];
+      for (const [selector, index] of openers) {
+        click(control(editor, selector, index));
+        expect(document.body.querySelector(".dohc-table-menu")).not.toBeNull();
+
+        peer.view.dispatch(peer.state.tr.insertText("Synced ", 1));
+
+        expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+        expect(tableTextGrid(editor)).toEqual(labeledGrid);
+        expect(tableNode(editor).content?.[0]?.content?.[0]?.type).toBe("tableHeader");
+      }
+
+      click(control(editor, ".dohc-table-grip--col", 1));
+      typeBefore(editor);
+      expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+
+      click(control(editor, ".dohc-table-grip--col", 1));
+      click(menuItemByLabel("Align right"));
+      expect(columnAligns(editor, 1)).toEqual(["right", "right", "right"]);
+      expect(columnAligns(editor, 2)).toEqual([null, null, null]);
+    });
   });
 });
 

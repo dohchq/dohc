@@ -48,6 +48,8 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
     try {
       if(!draft.name.trim())throw Error("Give the view a name.");
       const parsed=CollectionTableView.parse(draft);validateTableView(parsed,dataset,tableId);
+      // Saving a calendar needs a date field. A saved one whose field is gone still opens, and asks for one.
+      if(parsed.kind==="calendar"&&!fields.some(field=>field.fieldId===parsed.dateField&&field.type==="date"))throw Error("Choose a readable date field for this calendar.");
       if(snapshot.document.views.some(view=>view.viewId!==parsed.viewId&&view.name===parsed.name))throw Error("A view already has this name. Choose another name.");
       const exists=snapshot.document.views.some(view=>view.viewId===parsed.viewId),views=exists?snapshot.document.views.map(view=>view.viewId===parsed.viewId?parsed:view):[...snapshot.document.views,parsed];
       void save(views,parsed,()=>{setDraft(null);setProblem(null);});
@@ -60,7 +62,7 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
     </select>
     <SecondaryButton disabled={busy||props.disabled} onClick={()=>setOpen(true)}>Views</SecondaryButton>
     {open&&<Overlay onClose={busy?undefined:()=>{setOpen(false);setDraft(null);setProblem(null);}}><section aria-label="Collection views" className="dohc-elevated flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-auto rounded-xl border border-line bg-panel p-5">
-      <header className="flex items-center justify-between"><h2 className="m-0 text-sm font-semibold text-ink">Views</h2><SecondaryButton disabled={busy} onClick={()=>{void refresh();}}>Refresh views</SecondaryButton></header>
+      <header className="flex items-center justify-between"><h2 className="m-0 text-base font-semibold text-ink">Views</h2><SecondaryButton disabled={busy} onClick={()=>{void refresh();}}>Refresh views</SecondaryButton></header>
       {views.length===0&&<p className="m-0 text-sm text-muted">No saved views yet. Create a view for the records you need.</p>}
       {views.map(view=><div key={view.viewId} className="flex items-center gap-2"><span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
         <SecondaryButton aria-label={`Edit view ${view.name}`} disabled={busy} onClick={()=>{setDraft(structuredClone(view));setProblem(null);}}>Edit</SecondaryButton>

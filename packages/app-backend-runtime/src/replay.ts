@@ -1,6 +1,5 @@
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import { DatabaseSync, constants } from "node:sqlite";
 import { databaseBytes, HEARTBEAT_ROWS, reject, unbudgeted } from "./persistent-protocol.js";
 import type { CpuBudgets } from "./persistent-protocol.js";
@@ -49,7 +48,7 @@ function copyRows(source:DatabaseSync, target:DatabaseSync, table:string, column
 // the app's indexes and generated columns, so each runs as a dataset check.
 export function replayThroughShadow(database:DatabaseSync, input:{directory:string;tables:string[];changeset:Uint8Array;databaseBytes:number;checkForeignKeys?:boolean}, commit:()=>void,
   steps:{progress(step:string):void;datasetCheck:CpuBudgets["datasetCheck"]}={progress(){},datasetCheck:unbudgeted.datasetCheck}):void {
-  const path=join(input.directory,`replay-${randomUUID()}.sqlite`);
+  const path=join(input.directory,"replay.sqlite");
   closeSync(openSync(path,"wx",0o600));
   let shadow:DatabaseSync | undefined;
   // The replayed dataset holds at most the current rows and the changeset's.

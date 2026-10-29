@@ -322,20 +322,23 @@ fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
     Ok(())
 }
 
+/// The binding's queue: its ID, pending bytes, state and granted Try again.
+type OwnerOutboxRow = (String, i64, String, Option<String>);
+
 /// The outbox at the registration's exact binding. A succession leaves
 /// retired outboxes at earlier paths of the same generation, so path and
 /// selectors decide which one owner deliveries come from.
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
-) -> Result<Option<(String, i64, String)>, dohc_engine_storage::StorageError> {
+) -> Result<Option<OwnerOutboxRow>, dohc_engine_storage::StorageError> {
     use rusqlite::OptionalExtension;
     let selectors = serde_json::to_string(&binding.selector_paths)
         .map_err(dohc_engine_storage::StorageError::persist_public)?;
     conn.query_row(
-        "SELECT outbox_id,pending_bytes,state FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
+        "SELECT outbox_id,pending_bytes,state,retry_delivery_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
         rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,selectors,binding.restore_fence_generation],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )
     .optional()
     .map_err(dohc_engine_storage::StorageError::persist_public)
@@ -485,11 +488,11 @@ impl EngineService {
                 let prior: Option<(String,i64,i64)> = conn.query_row(&format!("SELECT activation_id,local_ydoc_sequence,terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
                     dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
-                let (outbox_id,pending_bytes,outbox_state) = read_owner_outbox(conn,b)?.map_or((None,0,None),|(id,bytes,state)|(Some(id),bytes,Some(state)));
-                if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state})); }
+                let (outbox_id,pending_bytes,outbox_state,retry_delivery_id) = read_owner_outbox(conn,b)?.map_or((None,0,None,None),|(id,bytes,state,retry)|(Some(id),bytes,Some(state),retry));
+                if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state,"retryDeliveryId":retry_delivery_id})); }
                 let sequence: i64 = conn.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 let identity = serde_json::to_vec(&(&registration.host.namespace,&b.workspace_id,&b.main_version_id,&b.object_id,&b.lineage_claim_id)).map_err(dohc_engine_storage::StorageError::persist_public)?;
-                Ok(json!({"adoptionId":format!("owner-adoption-{}",dohc_engine_storage::hex_sha256(&identity)),"expectedLocalSequence":sequence,"throughCursor":Value::Null,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state}))
+                Ok(json!({"adoptionId":format!("owner-adoption-{}",dohc_engine_storage::hex_sha256(&identity)),"expectedLocalSequence":sequence,"throughCursor":Value::Null,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state,"retryDeliveryId":retry_delivery_id}))
             }).map_err(|_|workspace_unavailable())?;
             Ok::<_, WireError>(state)
             }).await.map_err(|_| workspace_unavailable())??;
@@ -765,6 +768,14 @@ impl EngineService {
             }
             serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
         };
+        // The fence keeps the checkpoints of the binding it stops.
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("native restore fence (queued)"));
+            }
+            permit = self.reconstruction_permit() => permit,
+        };
         check_interruption()?;
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(workspace))?, &host.open) {
             return Err(workspace_unavailable());
@@ -783,7 +794,7 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let worker_host = host.clone();
         let operation = tokio::spawn(async move {
-            let _serial = serial;
+            let (_serial, _permit) = (serial, permit);
             let receipt = worker_host
                 .owner
                 .fence_restore_after_reconnect(
@@ -823,14 +834,36 @@ impl EngineService {
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
         {
             Ok(receipt) => receipt,
-            // Nothing committed. The host publishes ordinary work and asks again.
+            // Nothing committed. The host publishes ordinary work, or waits for
+            // a deferred update's dependency, and asks again.
             Err(dohc_engine_runtime::RuntimeError::LiveApplication(
-                dohc_engine_collab::live_update_application::ApplicationError::PublicationPending,
+                pending @ (dohc_engine_collab::live_update_application::ApplicationError::PublicationPending
+                | dohc_engine_collab::live_update_application::ApplicationError::AcceptedStateIncomplete),
+            )) => {
+                let reason = match pending {
+                    dohc_engine_collab::live_update_application::ApplicationError::PublicationPending => {
+                        "publication-pending"
+                    }
+                    _ => "accepted-state-incomplete",
+                };
+                return Ok(ServiceResponse {
+                    response: Response {
+                        id: request.id,
+                        result: json!({"status":"pending", "reason":reason}),
+                    },
+                    blob_egress: None,
+                    output_guard: Some(guard),
+                });
+            }
+            Err(dohc_engine_runtime::RuntimeError::LiveApplication(
+                dohc_engine_collab::live_update_application::ApplicationError::RestoreRefused(
+                    refusal,
+                ),
             )) => {
                 return Ok(ServiceResponse {
                     response: Response {
                         id: request.id,
-                        result: json!({"status":"pending", "reason":"publication-pending"}),
+                        result: json!({"status":"refused", "refusal":refusal}),
                     },
                     blob_egress: None,
                     output_guard: Some(guard),
@@ -1064,6 +1097,15 @@ impl EngineService {
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
         }
+        // A registration that moves a document keeps the checkpoints of the
+        // binding it leaves.
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live registration (queued)"));
+            }
+            permit = self.reconstruction_permit() => permit,
+        };
         // Re-registering an object retires its queued acknowledgements under the
         // same fence as output polling, before the replacement writer command.
         {
@@ -1094,27 +1136,35 @@ impl EngineService {
         }
         let object_id = params.binding.object_id.clone();
         let binding = params.binding.clone();
-        let handle = match params.activation_id {
-            Some(activation_id) => {
-                host.owner
-                    .register_activation(
-                        host.namespace.clone(),
-                        host.coordinate.clone(),
-                        params.binding,
-                        activation_id,
-                    )
-                    .await
+        let worker_host = host.clone();
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            match params.activation_id {
+                Some(activation_id) => {
+                    worker_host
+                        .owner
+                        .register_activation(
+                            worker_host.namespace.clone(),
+                            worker_host.coordinate.clone(),
+                            params.binding,
+                            activation_id,
+                        )
+                        .await
+                }
+                None => {
+                    worker_host
+                        .owner
+                        .register(
+                            worker_host.namespace.clone(),
+                            worker_host.coordinate.clone(),
+                            params.binding,
+                        )
+                        .await
+                }
             }
-            None => {
-                host.owner
-                    .register(
-                        host.namespace.clone(),
-                        host.coordinate.clone(),
-                        params.binding,
-                    )
-                    .await
-            }
-        }
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
         .map_err(map_runtime)?;
         let mut registry = lock(&self.live_applications);
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
@@ -1834,8 +1884,37 @@ mod tests {
             deadline_ms: Some(60_000),
             idempotency_key: None,
             progress: false,
-            params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
+            params: json!({"operation":{"point":{"journalCursor":0,"receiptDigest":binding.lineage_claim_id},"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
         }
+    }
+
+    #[tokio::test]
+    async fn fence_returns_an_identified_pre_write_refusal_for_a_changed_binding() {
+        let (_scratch, service, owner, workspace, _registration, binding) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_application_bindings SET available=0",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let request = fence_request(&workspace, &binding, "relay-history");
+        let expected = json!({"status":"refused", "refusal":{
+            "operation":request.params["operation"], "reason":"binding-changed"
+        }});
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let result = service.call(ctx, request).await.unwrap();
+        assert_eq!(result.response.result, expected);
+        assert!(result.output_guard.as_ref().unwrap().is_current());
+        assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+        service.workspace_close(Some(workspace)).await.unwrap();
     }
 
     /// Owner deliveries come from the outbox at the registration's exact
@@ -1868,19 +1947,19 @@ mod tests {
             .read_with(|conn| {
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
-                    Some(("old".into(), 64, "quarantined".into()))
+                    Some(("old".into(), 64, "quarantined".into(), None))
                 );
                 binding.restore_fence_generation = 1;
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
-                    Some(("current".into(), 61, "active".into()))
+                    Some(("current".into(), 61, "active".into(), None))
                 );
                 let mut earlier = binding.clone();
                 earlier.current_path = "a-earlier.md".into();
                 earlier.selector_paths = vec!["a-earlier.md".into()];
                 assert_eq!(
                     read_owner_outbox(conn, &earlier)?,
-                    Some(("a-retired".into(), 3, "quarantined".into()))
+                    Some(("a-retired".into(), 3, "quarantined".into(), None))
                 );
                 binding.restore_fence_generation = 2;
                 assert_eq!(read_owner_outbox(conn, &binding)?, None);
@@ -2825,6 +2904,115 @@ mod tests {
         assert!(lock(&service.live_applications).registrations.is_empty());
         drop(serial);
         service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_registration_waits_while_another_workspaces_rebuild_holds_the_permit() {
+        let roots = [
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        ];
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "permit-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [
+                {"root":roots[0].path(),"workspaceId":"first","maxRegistrations":4},
+                {"root":roots[1].path(),"workspaceId":"second","maxRegistrations":4}
+            ],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let handle = |workspace_id: &str| {
+            lock(&service.handles)
+                .iter()
+                .find(|(_, open)| open.workspace_id == workspace_id)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let (first, second) = (handle("first"), handle("second"));
+        let mut bindings = Vec::new();
+        for workspace in [&first, &second] {
+            let open = service.open(Some(workspace)).unwrap();
+            open.actor
+                .ensure_main_version(
+                    open.workspace_id.clone(),
+                    0,
+                    Arc::new(NoFaults),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            bindings.push(LiveObjectBinding {
+                workspace_id: open.workspace_id.clone(),
+                main_version_id: "main".into(),
+                object_id: "document".into(),
+                lineage_claim_id: hex_sha256(&fixture_baseline().0),
+                current_path: "document.md".into(),
+                selector_paths: vec!["document.md".into()],
+                restore_fence_generation: 0,
+            });
+        }
+        // The second workspace's fence takes the permit and waits for its writer.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = service.open(Some(&second)).unwrap().actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "blocking-workspace".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut fencing = Box::pin(service.call(
+            ctx.clone(),
+            fence_request(&second, &bindings[1], "permit-test"),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(fencing.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(service.reconstructions.available_permits(), 0);
+        let mut registering = tokio::spawn({
+            let (service, workspace) = (service.clone(), first.clone());
+            let binding = bindings[0].clone();
+            async move {
+                service
+                    .live_application_register(&ctx, Some(workspace), json!({"binding": binding}))
+                    .await
+            }
+        });
+        tokio::select! {
+            () = service.reconstruction_waits.notified() => {}
+            registered = &mut registering => {
+                panic!("a registration ran while another workspace's rebuild held the permit: {registered:?}")
+            }
+        }
+        assert!(!registering.is_finished());
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let _ = fencing.await;
+        registering
+            .await
+            .unwrap()
+            .expect("the registration runs once the rebuild ends");
+        assert_eq!(service.reconstructions.available_permits(), 1);
+        for workspace in [first, second] {
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -4513,6 +4701,10 @@ mod tests {
         );
         // A fence of the sibling that committed before its reply was lost.
         let fence = NativeRestoreFence {
+            point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: unload_binding("sibling").lineage_claim_id,
+            },
             operation_id: "fenced".into(),
             relay_database_namespace: "unload-test".into(),
             old_binding: unload_binding("sibling"),

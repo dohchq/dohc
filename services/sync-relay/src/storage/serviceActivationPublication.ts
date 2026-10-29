@@ -5,7 +5,7 @@ import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-bi
 import {parseHostControlIdentifier, parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {StorageContext} from "./context";
-import type {SyncRelayLogInput} from "./types";
+import type {SqliteDb, SyncRelayLogInput} from "./types";
 import {relayError} from "../errors";
 import {initialAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import {LIVE_JOURNAL_TABLE} from "./schema";
@@ -201,12 +201,12 @@ function requireOwnerSource(source: Record<string, unknown>): void {
 }
 
 /**
- * A `live.audit.base` record: the canonical event-zero checkpoint of the
- * lineage, the root owner origin the relay kept and its stamp, the immutable
- * baseline's digest and length, and a real base Y.Doc coordinate.
+ * Native's checks of a `live.audit.base` payload that read no relay row
+ * (`imported_base` in `live_audit.rs`): its fields in the order its record
+ * digest covers, that digest, an owner source's shape, and the origin stamp.
+ * Throws when any differs.
  */
-function requireBaseRecord(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput, value: Record<string, unknown>,
-  baselineLength: number, batch: RetirementBatch): void {
+export function nativeBaseRecord(db: SqliteDb, value: unknown) {
   const payload = ordered(value, ["formatVersion", "recordDigest", "record"]);
   const record = ordered(payload.record, ["relayDatabaseNamespace", "checkpoint", "originStamp", "origin", "baseByteLength", "baseCoordinate"]);
   const checkpoint = ordered(record.checkpoint, ["eventCount", "terminal", "binding", "stateDigest", "evidenceDigest"]);
@@ -217,10 +217,32 @@ function requireBaseRecord(storage: StorageContext, retirement: ServiceActivatio
   const coordinate = ordered(record.baseCoordinate, ["originId", "originSeq"]);
   Object.assign(record, {checkpoint, origin: {...origin, source}, baseCoordinate: coordinate});
   require(payload.formatVersion === 1 && payload.recordDigest === hash(JSON.stringify(record)));
+  requireOwnerSource(source);
+  // The native stamp hashes SQLite's JSON array, with the binding, receipt and host coordinate as embedded JSON strings.
+  const stamp = db.prepare(`SELECT json_array(?,?,?,?,?,CAST(? AS INTEGER),CAST(? AS INTEGER),CAST(? AS INTEGER),?,CAST(? AS INTEGER),
+      CAST(? AS INTEGER),CAST(? AS INTEGER),?,?,CAST(? AS INTEGER),CAST(? AS INTEGER)) AS stamp`)
+    .get(...[source.adoptionId, source.evidenceDigest, JSON.stringify(checkpoint.binding), source.sourceMomentId, source.sourceDigest,
+      source.sourceByteLength, source.baselineMomentRelaySequence, source.baselineRegisteredAtMs, source.coverageDigest, source.coveredOutboxSequence,
+      source.localYDocSequence, source.terminalCursor, JSON.stringify(source.terminalReceipt), JSON.stringify(source.hostCoordinate), source.maxPendingBytes,
+      source.maxPendingAgeMs].map(value => {
+      require(typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)));
+      return value;
+    }))!;
+  require(record.originStamp === hash(String(stamp.stamp)));
+  return {record, checkpoint, origin, source, coordinate};
+}
+
+/**
+ * A `live.audit.base` record: the canonical event-zero checkpoint of the
+ * lineage, the root owner origin the relay kept and its stamp, the immutable
+ * baseline's digest and length, and a real base Y.Doc coordinate.
+ */
+function requireBaseRecord(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput, value: Record<string, unknown>,
+  baselineLength: number, batch: RetirementBatch): void {
+  const {record, checkpoint, origin, source, coordinate} = nativeBaseRecord(storage.db, value);
   const document = {workspaceId: retirement.workspaceId, mainVersionId: "main", objectId: retirement.objectId, lineageClaimId: retirement.lineageClaimId};
   let binding;
   try {binding = parseLiveObjectBinding(checkpoint.binding);} catch {throw new Unproved();}
-  requireOwnerSource(source);
   require(isDeepStrictEqual(binding, checkpoint.binding) &&
     record.relayDatabaseNamespace === retirement.relayDatabaseNamespace && checkpoint.eventCount === 0 && checkpoint.terminal === null &&
     checkpoint.stateDigest === retirement.lineageClaimId && record.baseByteLength === baselineLength &&
@@ -246,17 +268,6 @@ function requireBaseRecord(storage: StorageContext, retirement: ServiceActivatio
     source.baselineMomentRelaySequence === owner.baselineMomentRelaySequence && source.baselineRegisteredAtMs === owner.baselineRegisteredAtMs &&
     source.localYDocSequence === owner.expectedLocalSequence && isDeepStrictEqual(terminal, owner.terminalReceipt ?? null) &&
     source.terminalCursor === (terminal?.journalCursor ?? 0) && isDeepStrictEqual(binding, original));
-  // The native stamp hashes SQLite's JSON array, with the binding, receipt and host coordinate as embedded JSON strings.
-  const stamp = storage.db.prepare(`SELECT json_array(?,?,?,?,?,CAST(? AS INTEGER),CAST(? AS INTEGER),CAST(? AS INTEGER),?,CAST(? AS INTEGER),
-      CAST(? AS INTEGER),CAST(? AS INTEGER),?,?,CAST(? AS INTEGER),CAST(? AS INTEGER)) AS stamp`)
-    .get(...[source.adoptionId, source.evidenceDigest, JSON.stringify(checkpoint.binding), source.sourceMomentId, source.sourceDigest,
-      source.sourceByteLength, source.baselineMomentRelaySequence, source.baselineRegisteredAtMs, source.coverageDigest, source.coveredOutboxSequence,
-      source.localYDocSequence, source.terminalCursor, JSON.stringify(terminal), JSON.stringify(source.hostCoordinate), source.maxPendingBytes,
-      source.maxPendingAgeMs].map(value => {
-      require(typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)));
-      return value;
-    }))!;
-  require(record.originStamp === hash(String(stamp.stamp)));
   // A real base coordinate: the lineage's base Y.Doc row, earlier in this push or already admitted.
   require(identifier(coordinate.originId) && typeof coordinate.originSeq === "number" && Number.isSafeInteger(coordinate.originSeq) &&
     coordinate.originSeq >= 0 && (coordinate.originId !== batch.originId || coordinate.originSeq < op.originSeq));
