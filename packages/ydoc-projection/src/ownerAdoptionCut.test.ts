@@ -10,7 +10,7 @@ import { liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js"
 
 afterEach(cleanupLiveDeliveryFixtures);
 
-it("retries an unmaterialized owner settlement and rechecks later explicit requests", async () => {
+it("retries an unmaterialized owner settlement and caches only its completed result", async () => {
   const f = registered();
   try {
     let sequence = 0, settles = 0;
@@ -34,7 +34,7 @@ it("retries an unmaterialized owner settlement and rechecks later explicit reque
     expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: false});
     expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
     expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
-    expect(settles).toBe(3);
+    expect(settles).toBe(2);
   } finally {f.close();}
 });
 
