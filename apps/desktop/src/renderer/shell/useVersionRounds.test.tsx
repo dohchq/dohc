@@ -72,11 +72,21 @@ it("answers ready for another workspace without saving, and lets go when main gi
   expect(bridge.answerVersionRound).not.toHaveBeenCalledWith({ roundId: 4, ready: true });
 });
 
-it("lets go of a held round when the window leaves the workspace", async () => {
+it("lets go and takes back its answers when the window leaves the workspace", async () => {
   const release = vi.fn();
-  const view = renderHook(({ id }) => useVersionRounds(id, async () => release, vi.fn()), { initialProps: { id: "workspace" } });
+  const later = vi.fn();
+  const saving = deferred<() => void>();
+  const begin = vi.fn().mockResolvedValueOnce(release).mockReturnValueOnce(saving.promise);
+  const view = renderHook(({ id }) => useVersionRounds(id, begin, vi.fn()), { initialProps: { id: "workspace" } });
   hear({ kind: "begin", roundId: 5, workspaceId: "workspace" });
   await waitFor(() => expect(bridge.answerVersionRound).toHaveBeenCalledWith({ roundId: 5, ready: true }));
+  hear({ kind: "begin", roundId: 6, workspaceId: "workspace" });
   view.rerender({ id: "other" });
   expect(release).toHaveBeenCalledOnce();
+  const reason = "A dohc window left this workspace while the change waited, so nothing changed. Try again.";
+  expect(bridge.answerVersionRound).toHaveBeenCalledWith({ roundId: 5, ready: false, reason });
+  expect(bridge.answerVersionRound).toHaveBeenCalledWith({ roundId: 6, ready: false, reason });
+  await act(async () => { saving.resolve(later); });
+  expect(later).toHaveBeenCalledOnce();
+  expect(bridge.answerVersionRound).not.toHaveBeenCalledWith({ roundId: 6, ready: true });
 });

@@ -6801,6 +6801,12 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
+        // The engine refuses to resolve a file an open document holds, so
+        // vacate live sessions first, as a merge does.
+        await settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before resolving a conflict",
+        );
         await engine.flushCapture?.();
         const result = await engine.resolveTextConflict({
           workspaceId,

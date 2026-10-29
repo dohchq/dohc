@@ -549,6 +549,9 @@ describe("desktop CLI workspace context", () => {
       expect(rounds.at(-1)).toEqual({ workspaceId: "workspace", told: { activeVersionId: "created" } });
       f.capture.createVersion.mockRejectedValueOnce(new VersionedTextStoreError("version-name-conflict", "version-name-conflict"));
       expect(await mcp("versionCreate", { name: "Draft" })).toEqual({ ok: false, reason: "Another version is called Draft. Choose another name." });
+      // Each change closes the editors' documents before it can fail, so a
+      // failed one tells the windows to look again.
+      expect(rounds.at(-1)!.told).toEqual({});
 
       expect((await cli("version", "switch", "Draft")).stdout).toBe("Switched to Draft · 2 files changed\n");
       expect(f.capture.switchVersion).toHaveBeenCalledWith("draft");
@@ -557,7 +560,6 @@ describe("desktop CLI workspace context", () => {
       const roundsBefore = rounds.length;
       expect(await mcp("versionSwitch", { version: "main" })).toEqual({ ok: true, version: { id: "main", name: "Main" }, changedFileCount: 0 });
       expect(rounds).toHaveLength(roundsBefore);
-      // A switch that failed part way tells the windows to look again.
       f.capture.switchVersion.mockRejectedValueOnce(new Error("The engine stopped."));
       expect(await mcp("versionSwitch", { version: "Draft" })).toEqual({ ok: false, reason: "The engine stopped." });
       expect(rounds.at(-1)!.told).toEqual({});
@@ -570,6 +572,9 @@ describe("desktop CLI workspace context", () => {
       // The merge prints the conflicts it left, except the one at a path History does not track.
       expect((await cli("version", "merge", "Draft")).stdout)
         .toBe("Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n");
+      expect(rounds.at(-1)!.told).toEqual({});
+      f.capture.mergeVersionIntoMain.mockRejectedValueOnce(new Error("The engine stopped."));
+      expect(await mcp("versionMerge", { version: "Draft" })).toEqual({ ok: false, reason: "The engine stopped." });
       expect(rounds.at(-1)!.told).toEqual({});
 
       expect(await mcp("versionResolve", { conflictId: "c3", resolution: { keep: "current" } })).toEqual({ ok: false,
@@ -585,6 +590,9 @@ describe("desktop CLI workspace context", () => {
       expect(f.capture.resolveConflict).toHaveBeenLastCalledWith("c1", { kind: "apply-merged", text: "mine and theirs" });
       expect(f.dependencies.notifyNoticesChanged).toHaveBeenCalled();
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+      f.capture.resolveConflict.mockRejectedValueOnce(new Error("The engine stopped."));
+      expect(await mcp("versionResolve", { conflictId: "c1", resolution: { keep: "current" } })).toEqual({ ok: false, reason: "The engine stopped." });
+      expect(rounds.at(-1)!.told).toEqual({});
 
       // A window that can't save its edits stops the change, and its reason reaches the caller.
       f.dependencies.versionRound = async () => { throw new Error("A Collection write failed. Try again."); };

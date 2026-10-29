@@ -532,15 +532,15 @@ export function createDesktopCliServer<State>(
                 };
               },
               // Each change tells the windows what changed, as the versions
-              // IPC handlers do for the window's own changes.
+              // IPC handlers do for the window's own changes. Each closes the
+              // editors' documents before it can fail, so a failed change
+              // still has the windows reopen on whichever version is active.
               create: name => dependencies.versionRound(workspace.workspaceId, async () => {
                 const snapshot = await capture.createVersion(name);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
                 const created = snapshot.versions.find(version => version.id === snapshot.activeVersionId)!;
                 return { id: created.id, name: created.name };
-              }, { done: created => ({ activeVersionId: created.id }) }),
-              // A switch that failed part way may have closed the editors'
-              // documents, so the windows reopen on whichever version is active.
+              }, { done: created => ({ activeVersionId: created.id }), failed: {} }),
               switch: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
                 const switched = await capture.switchVersion(versionId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -550,7 +550,7 @@ export function createDesktopCliServer<State>(
                 const merged = await capture.mergeVersionIntoMain(versionId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
                 return merged;
-              }, { done: () => ({}) }),
+              }, { done: () => ({}), failed: {} }),
               resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
                 await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }
                   : resolution.keep === "current" ? { kind: "keep-current" } : { kind: "apply-incoming" });
@@ -559,7 +559,7 @@ export function createDesktopCliServer<State>(
                 activity.queueCloudSync(workspace.workspaceId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
                 dependencies.notifyNoticesChanged();
-              }, { done: () => ({}) }),
+              }, { done: () => ({}), failed: {} }),
             },
             keptCopies: {
               list: () => capture.listKeptCopies(),

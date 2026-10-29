@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
+const LEFT_REASON = "A dohc window left this workspace while the change waited, so nothing changed. Try again.";
+
 // A version change from the CLI or the MCP reaches main, not this window, so
 // main asks first (versionRounds.ts). The window saves its open edits and
 // holds Collection writes as it does before its own switch, then answers.
@@ -49,9 +51,15 @@ export function useVersionRounds(
         },
       ).catch(() => undefined);
     });
+    // Leaving the workspace lets go of its holds, so a change still waiting
+    // on this window must not run on its earlier ready: if the window came
+    // back, it would edit without holding while the change ran.
     return () => {
       unsubscribe();
-      for (const release of holds.values()) release?.();
+      for (const [roundId, release] of holds) {
+        void bridge().answerVersionRound({ roundId, ready: false, reason: LEFT_REASON }).catch(() => undefined);
+        release?.();
+      }
       holds.clear();
     };
   }, [workspaceId]);
