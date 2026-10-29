@@ -617,7 +617,7 @@ mod tests {
             tx.execute("INSERT INTO live_audit_settlement_publications VALUES ('settlement','workspace','relay','main','object',?1,0,?2,'peer',0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
-            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1,0)",[&sha]).unwrap();
             tx.execute(r#"INSERT INTO live_audit_projection_authors VALUES ('workspace','peer',0,'main','object','note.md','lineage','[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]',NULL)"#,[]).unwrap();
             tx.execute(r#"INSERT INTO live_audit_projection_contributions VALUES ('workspace','peer',0,?1,'[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]')"#,[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();

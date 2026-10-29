@@ -4759,6 +4759,104 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
+    /// A fence that committed ends in its terminal cancellation. The answer
+    /// names the fenced generation, the fence's stopped binding and the
+    /// receipt the relay journal carries, ending at the bootstrap's origin,
+    /// and a replay answers the same.
+    #[tokio::test]
+    async fn a_committed_fence_answers_its_terminal_cancellation() {
+        use dohc_engine_collab::live_update_application::NativeRestoreCancellationReceipt;
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "cancel-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: hex_sha256(&fixture_baseline().0),
+            current_path: "document.md".into(),
+            selector_paths: vec!["document.md".into()],
+            restore_fence_generation: 0,
+        };
+        let registration = service
+            .live_application_register(
+                &host_context(&owner),
+                Some(workspace.clone()),
+                json!({"binding": binding}),
+            )
+            .await
+            .unwrap()["registrationId"]
+            .as_u64()
+            .unwrap();
+        bootstrap_baseline(&service, &owner, &workspace, registration).await;
+        let fenced = service
+            .call(
+                host_context(&owner),
+                fence_request(&workspace, &binding, "cancel-test"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fenced.response.result["status"], "fenced");
+        let params = json!({"operationId":"restore-rpc","objectId":"document",
+            "lineageClaimId":binding.lineage_claim_id,"hostId":"host","newFence":1});
+        let mut stopped = binding.clone();
+        stopped.restore_fence_generation = 1;
+        let answered = service
+            .call(
+                host_context(&owner),
+                cancel_fence_request(&workspace, params.clone()),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        let receipt: NativeRestoreCancellationReceipt =
+            serde_json::from_value(answered["receipt"].clone()).unwrap();
+        assert_eq!(
+            answered,
+            json!({"status":"fenceCancelled","hostId":"host","generation":1,
+                "binding":stopped,"receipt":receipt})
+        );
+        assert_eq!(receipt.binding, stopped);
+        assert_eq!(receipt.fence.operation.operation_id, "restore-rpc");
+        assert_eq!(
+            (
+                receipt.endpoint.event_count,
+                receipt.endpoint.terminal_receipt
+            ),
+            (0, None),
+            "nothing was accepted after the bootstrap"
+        );
+        let replayed = service
+            .call(
+                host_context(&owner),
+                cancel_fence_request(&workspace, params),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.response.result, answered);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
     /// The boundary a release of the fixture's adopted activation stores:
     /// its adopted origin, with nothing applied after it.
     const RELEASED_BOUNDARY: &str = r#"{"terminalReceipt":null,"eventCount":0,"historyEvidenceDigest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#;

@@ -340,8 +340,9 @@ fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applie
 
 /// Sol's proof test 3, as far as the engine reaches: after a cancellation
 /// and a successor, a collaborator's update at the new generation appends on
-/// the normal event count and digest chain and reads back by both readers.
-/// A session from the generation before refuses.
+/// the normal event count and digest chain and checkpoints there. After a
+/// restart both readers, settlement and publication read it back. A session
+/// from the generation before refuses.
 #[test]
 fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
     let mut f = imported_fixture();
@@ -354,8 +355,11 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
     returned(&mut f);
     successor(&mut f);
     f.adopt().unwrap();
-    let event = remote_event(&mut f, 11);
+    // The update carries checkpoint coverage, so it checkpoints at its count.
+    let mut event = remote_event(&mut f, 11);
+    event.metadata.checkpoint_coverage = Some(vec![]);
     let metadata = event.metadata.clone();
+    let terminal = metadata.accepted.receipt.clone();
     apply_event(&mut f, event).unwrap();
     let evidence = accepted_history::next_digest(&cancelled.endpoint.history_evidence_digest, 1, &metadata).unwrap();
     let saved: (i64, String) = f
@@ -363,6 +367,18 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
         .read_with(|conn| conn.query_row("SELECT event_count,evidence_digest FROM live_accepted_updates WHERE journal_cursor=11", [], |r| Ok((r.get(0)?, r.get(1)?))))
         .unwrap();
     assert_eq!(saved, (1, evidence.clone()));
+    let checkpoint: (i64, String) = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT event_count,evidence_digest FROM live_accepted_checkpoints WHERE journal_cursor=11", [], |r| Ok((r.get(0)?, r.get(1)?))))
+        .unwrap();
+    assert_eq!(checkpoint, (1, evidence.clone()));
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    reopen_store(&mut f);
+    let activation = binding_activation(&f).0.expect("the successor's activation");
+    f.handle = f
+        ._owner
+        .register_activation(&mut f.store, "namespace".into(), coordinate, f.binding.clone(), activation)
+        .unwrap();
     let held = Registration {
         workspace_id: "workspace".into(),
         namespace: "namespace".into(),
@@ -375,8 +391,20 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
         .read_with(|conn| {
             let read = accepted_history::read(conn, &held, 11, &mut restore_content::Budget { remaining: 2_000_000 }, 100)?;
             assert_eq!((read.proof.event_count, read.proof.evidence_digest.as_str()), (1, evidence.as_str()));
+            assert_eq!(read.proof.checkpoint.event_count, 1, "read from its own checkpoint");
             accepted_history::read_state(conn, &held, 11, f.cut.reconstruction)?;
             Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let settled = settle_as(&mut f, Some(terminal), "after-cancellation").unwrap();
+    assert_eq!(settled.terminal_cursor, 11);
+    assert!(moment_text(&f, "after-cancellation").contains("Remote paragraph 11"));
+    f.store
+        .read_with(|conn| {
+            let (binding, namespace, doc) = publication::read_native_accepted_in(conn, &f.key, &mut 2_000_000)?.expect("a native accepted state");
+            assert_eq!((&binding, namespace.as_str()), (&f.binding, "namespace"));
+            assert!(doc.project(ContentKind::Richdoc)?.content.contains("Remote paragraph 11"));
+            publication::require_restore_registration_in(conn, &f.key, "namespace", &f.binding, &mut 2_000_000)
         })
         .unwrap();
     // A session that captured the generation before the cancellation.
@@ -453,6 +481,16 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     f.adopt().unwrap();
     let prep = native_tail_input(&mut f, None, 0);
     let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
+    let blobs: [String; 3] = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256 FROM live_restore_fences",
+                [],
+                |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?]),
+            )
+        })
+        .unwrap();
     let cancelled = cancel_fenced(&mut f, "tail-restore");
     assert_eq!(cancelled.fence, prep.fence);
     let kept: bool = f
@@ -460,6 +498,19 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
         .read_with(|conn| conn.query_row("SELECT proposal_json IS NOT NULL FROM live_restore_fences", [], |r| r.get(0)))
         .unwrap();
     assert!(!kept, "a cancelled row holds no proposal");
+    // Each proposal blob nothing else holds goes in the same commit. Here the
+    // frozen and point states are the lineage's baseline, which its claim
+    // holds.
+    assert_eq!([&blobs[1], &blobs[2]], [&f.binding.lineage_claim_id; 2]);
+    let left: Vec<String> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT sha256 FROM binary_blobs WHERE sha256 IN (?1,?2,?3)")?
+                .query_map(rusqlite::params![blobs[0], blobs[1], blobs[2]], |r| r.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap();
+    assert_eq!(left, [f.binding.lineage_claim_id.clone()], "{blobs:?}");
     assert!(matches!(native_tail_prepare(&mut f, prep.clone()), Err(ApplicationError::Conflict)));
     let input = restore_application(&f, prep, &proposal, 71);
     assert!(apply_restore(&mut f, input).is_err());
@@ -473,4 +524,333 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     let preparation = baseline_preparation(&f, fence);
     assert!(prepare(&mut f, preparation, 64).is_err(), "the preparation exceeds its limits");
     cancel_fenced(&mut f, "restore");
+}
+
+/// Sol 1: a restore completes and resumes at generation 1, then one or two
+/// restores fence and cancel. The lineage registers at the last generation,
+/// accepts an update and settles from the completed restore's settlement,
+/// crossing only the cancellations after it.
+#[test]
+fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
+    for cancellations in 1..=2 {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let prep = native_tail_input(&mut f, None, 0);
+        let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
+        let input = restore_application(&f, prep, &proposal, 71);
+        let input_receipt = input.admitted.accepted.receipt.clone();
+        apply_restore(&mut f, input.clone()).unwrap();
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        let restored = f
+            ._owner
+            .with_restore_settlement(&mut f.store, None, input.clone(), coordinate.clone(), 2_000_000, 100, |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "resumed-owner")
+            })
+            .unwrap();
+        f._owner
+            .resume_restore(
+                &mut f.store,
+                None,
+                NativeRestoreResume { application: input, settlement_id: restored.settlement_id.clone() },
+                coordinate.clone(),
+                2_000_000,
+                100,
+                100,
+                &NoFaults,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
+        f.binding.restore_fence_generation = 1;
+        f.doc = f.store.read_with(|conn| durable::load_doc_in(conn, &f.key)).unwrap();
+        f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        for _ in 0..cancellations {
+            let operation = format!("cancelled-{}", f.binding.restore_fence_generation + 1);
+            fence_next(&mut f, &operation).unwrap();
+            cancel_fenced(&mut f, &operation);
+            f.binding.restore_fence_generation += 1;
+            f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        }
+        // Before any update, a settlement at the restore's terminal replays
+        // the restore's own settlement.
+        let saved: (String, String, String) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_id,markdown_digest,source_state_vector_digest FROM live_device_settlements WHERE settlement_id=?1",
+                    [&restored.settlement_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap();
+        let replayed = with_settlement(
+            &mut f.store,
+            &f.handle,
+            Some(input_receipt.clone()),
+            128,
+            NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
+            |store, audit| {
+                let outcome = store.write_with(&NoFaults, |tx| audit.record_in_tx(tx, &saved.0, &saved.1, &saved.2, 30))?;
+                let TxnOutcome::Committed(id) = outcome else {
+                    return Err(ApplicationError::Interrupted);
+                };
+                Ok::<_, ApplicationError>(id)
+            },
+        )
+        .unwrap();
+        assert_eq!(replayed, restored.settlement_id, "{cancellations}: the restore's own settlement");
+        let event = remote_event(&mut f, 80);
+        let terminal = event.metadata.accepted.receipt.clone();
+        assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));
+        let settled = settle_as(&mut f, Some(terminal), "after-cancellations").unwrap();
+        assert_eq!(
+            (settled.previous_cursor, settled.terminal_cursor, settled.application_count),
+            (71, 80, 1),
+            "{cancellations}: from the completed restore"
+        );
+        assert!(moment_text(&f, "after-cancellations").contains("Remote paragraph 80"));
+        // The completed restore keeps its own binding and identity.
+        let kept: (String, i64) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT settlement_kind,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_device_settlements WHERE settlement_id=?1",
+                    [&restored.settlement_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(kept, ("restore".to_owned(), 1));
+    }
+}
+
+/// Sol 2: every reader binds a cancellation to the fence row it ends and to
+/// the accepted history at its endpoint. One that names another host, origin
+/// or native head than its fence, or an endpoint the lineage never held,
+/// refuses retirement, adoption and both history readers.
+#[test]
+fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
+    let alterations = [
+        ("host", "json_set(cancelled_json,'$.fence.operation.hostId','elsewhere')".to_owned()),
+        ("origin", "json_set(cancelled_json,'$.fence.operation.origin.id','elsewhere')".to_owned()),
+        ("head", "json_set(cancelled_json,'$.fence.localHeadSequence',json_extract(cancelled_json,'$.fence.localHeadSequence')+1)".to_owned()),
+        ("endpoint", format!("json_set(cancelled_json,'$.endpoint.historyEvidenceDigest','{}')", "f".repeat(64))),
+    ];
+    let cancelled = || {
+        let mut f = imported_fixture();
+        adopt_root(&mut f);
+        fence_next(&mut f, "restore").unwrap();
+        cancel_fenced(&mut f, "restore");
+        f.binding.restore_fence_generation = 1;
+        f
+    };
+    for (case, altered) in &alterations {
+        let alter = |f: &mut Fixture| write(f, &format!("UPDATE live_restore_fences SET cancelled_json={altered}"));
+        // Retirement at the fenced generation.
+        let mut f = cancelled();
+        alter(&mut f);
+        let retired = match begin(&mut f, 10) {
+            Ok(_) => {
+                host_document(&mut f, true, true);
+                release_through(&mut f, 10).map(|_| ())
+            }
+            Err(error) => Err(error),
+        };
+        assert!(retired.is_err(), "{case}: retirement");
+        // A successor's adoption across the cancelled generation.
+        let mut f = cancelled();
+        release_parked(&mut f);
+        returned(&mut f);
+        successor(&mut f);
+        alter(&mut f);
+        assert!(f.adopt().is_err(), "{case}: adoption");
+        // Both history readers, for the first event after it.
+        let mut f = cancelled();
+        release_parked(&mut f);
+        returned(&mut f);
+        successor(&mut f);
+        f.adopt().unwrap();
+        let event = remote_event(&mut f, 11);
+        apply_event(&mut f, event).unwrap();
+        alter(&mut f);
+        let held = Registration {
+            workspace_id: "workspace".into(),
+            namespace: "namespace".into(),
+            coordinate: retirement_host(),
+            binding: f.binding.clone(),
+            activation_id: None,
+            live: false,
+        };
+        f.store
+            .read_with(|conn| {
+                let budget = &mut restore_content::Budget { remaining: 2_000_000 };
+                assert!(accepted_history::read(conn, &held, 11, budget, 100).is_err(), "{case}: history");
+                assert!(accepted_history::read_state(conn, &held, 11, f.cut.reconstruction).is_err(), "{case}: state");
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+    }
+}
+
+/// A cancellation's endpoint receipt is read from the leading bytes of its
+/// event's metadata, so a long metadata tail does not change the answer, and
+/// a receipt that differs there refuses every generation read.
+#[test]
+fn a_cancellation_endpoint_receipt_is_read_exactly_from_its_metadata_head() {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    let event = remote_event(&mut f, 11);
+    apply_event(&mut f, event).unwrap();
+    fence_next(&mut f, "restore").unwrap();
+    cancel_fenced(&mut f, "restore");
+    f.binding.restore_fence_generation = 1;
+    let reads = |f: &Fixture| {
+        f.store.read_with(|conn| {
+            super::super::restore_fence::require_registration(conn, &f.key, "namespace", &f.binding)?;
+            assert_eq!(super::super::restore_fence::resumed_binding(conn, &f.key)?, Some(f.binding.clone()));
+            Ok::<_, ApplicationError>(())
+        })
+    };
+    for (case, sql) in [
+        ("padded", "UPDATE live_accepted_updates SET metadata_json=substr(metadata_json,1,length(metadata_json)-1)||printf('%600000s','')||'}'"),
+        ("epoch", "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receipt.acceptingHostEpoch',2)"),
+    ] {
+        write(&mut f, sql);
+        match case {
+            "padded" => reads(&f).unwrap(),
+            _ => assert!(reads(&f).is_err(), "{case}"),
+        }
+    }
+}
+
+/// Sol 4 and Opus 5: a fence that would leave its lineage a cancelled chain longer
+/// than an event can cross refuses at admission. The chain counts from the
+/// generation of the lineage's accepted tip.
+#[test]
+fn a_fence_past_the_readable_cancelled_chain_refuses() {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    fence_next(&mut f, "restore").unwrap();
+    cancel_fenced(&mut f, "restore");
+    let mut b = f.binding.clone();
+    b.restore_fence_generation = 1;
+    let limit = accepted_history::CHECKPOINT_EVENTS;
+    f.store
+        .read_with(|conn| {
+            super::super::restore_fence::require_chain_room(conn, "namespace", &b, limit)?;
+            assert!(matches!(
+                super::super::restore_fence::require_chain_room(conn, "namespace", &b, limit + 1),
+                Err(ApplicationError::Conflict)
+            ));
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+}
+
+/// Sol 3: under a chain limit of 2, a lineage cancels four restores, split by
+/// an accepted event into two spans of 2. Crossing from the origin to the
+/// binding reads only the span after that event, while one chain over the
+/// whole history refuses.
+#[test]
+fn a_crossing_reads_each_span_within_the_chain_limit() {
+    use super::super::restore_fence::{require_crossed_since_within, require_crossed_within};
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    for span in 0..2 {
+        if span > 0 {
+            let event = remote_event(&mut f, 80);
+            assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));
+        }
+        for _ in 0..2 {
+            let operation = format!("cancelled-{}", f.binding.restore_fence_generation + 1);
+            fence_next(&mut f, &operation).unwrap();
+            cancel_fenced(&mut f, &operation);
+            f.binding.restore_fence_generation += 1;
+            f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        }
+    }
+    assert_eq!(f.binding.restore_fence_generation, 4);
+    f.store
+        .read_with(|conn| {
+            require_crossed_since_within(conn, "namespace", &f.binding, 0, 2)?;
+            assert!(matches!(
+                require_crossed_within(conn, "namespace", &f.binding, 0, 2),
+                Err(ApplicationError::Conflict)
+            ));
+            // The whole history is cancellations, so only its length refuses.
+            require_crossed_within(conn, "namespace", &f.binding, 0, 4)
+        })
+        .unwrap();
+}
+
+/// Opus 4: with no binding, a released lineage proves only the generation
+/// it released at. A later settled restore of another lineage of the
+/// document moves the document, not this lineage.
+#[test]
+fn a_released_lineage_proves_its_own_generation_after_another_lineage_restores() {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    fence_next(&mut f, "restore").unwrap();
+    cancel_fenced(&mut f, "restore");
+    f.binding.restore_fence_generation = 1;
+    release_parked(&mut f);
+    // Another lineage of the document fenced from 4 to 5 and cancelled
+    // there, at the origin this lineage's history starts from.
+    let ours = f.binding.lineage_claim_id.clone();
+    let other = "e".repeat(64);
+    let relineaged = |column: &str, path: &str| {
+        format!(
+            "json_set(replace({column},'{ours}','{other}'),'{path}oldBinding.restoreFenceGeneration',4,'{path}newFence',5,'{path}operationId','other')"
+        )
+    };
+    write(
+        &mut f,
+        &format!(
+            "INSERT INTO live_accepted_checkpoints(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,
+                event_count,journal_cursor,terminal_json,binding_json,origin_stamp,state_sha256,evidence_digest)
+             SELECT relay_database_namespace,workspace_id,main_version_id,object_id,'{other}',event_count,journal_cursor,
+                terminal_json,replace(binding_json,'{ours}','{other}'),origin_stamp,state_sha256,evidence_digest
+             FROM live_accepted_checkpoints WHERE event_count=0;
+             INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,
+                input_json,receipt_json,cancelled_json)
+             SELECT workspace_id,main_version_id,object_id,relay_database_namespace,'other',{},{},
+                json_set({},'$.binding.restoreFenceGeneration',5)
+             FROM live_restore_fences WHERE operation_id='restore'",
+            relineaged("input_json", "$."),
+            relineaged("receipt_json", "$.operation."),
+            relineaged("cancelled_json", "$.fence.operation."),
+        ),
+    );
+    assert_eq!(
+        f.store.read_with(|conn| super::super::restore_fence::current_generation(conn, &f.key)).unwrap(),
+        Some(5),
+        "the other lineage settled at 5"
+    );
+    // A key from 5 is the other lineage's generation, not this one's.
+    let mut beyond = cancellation(&f, "beyond");
+    beyond.new_fence = 6;
+    assert!(matches!(cancel(&mut f, &beyond), Err(ApplicationError::Conflict)));
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
+}
+
+/// Sol 5 and Opus 6: a fence's answer, and a replay's, is durable before it is sent;
+/// a replay, which changes nothing, commits its marker.
+#[test]
+fn a_replayed_fence_commits_a_durable_answer() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let fence = fence_next(&mut f, "restore").unwrap();
+    let marker = |f: &Fixture| -> Option<i64> {
+        f.store
+            .read_with(|conn| {
+                conn.query_row("SELECT result_seq FROM engine_requests WHERE kind='restore-fence-durability'", [], |r| r.get(0))
+                    .optional()
+            })
+            .unwrap()
+    };
+    let before = marker(&f);
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    let replayed = f._owner.fence_restore(&mut f.store, None, fence.operation.clone(), coordinate, 41, &NoFaults).unwrap();
+    assert_eq!(replayed, fence);
+    assert!(marker(&f).is_some() && marker(&f) != before, "the replay wrote its marker");
 }

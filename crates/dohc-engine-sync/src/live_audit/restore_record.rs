@@ -76,6 +76,11 @@ impl HistoryEnd {
 }
 
 impl RestoreSource {
+    /// The generation the restore fenced from.
+    pub(super) fn old_generation(&self) -> i64 {
+        self.old_generation
+    }
+
     pub(super) fn verify(
         &self,
         conn: &Connection,

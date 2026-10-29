@@ -100,7 +100,7 @@ impl LiveSettlementAudit {
         };
         let binding: LiveObjectBinding =
             serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
-        validate_historical_binding(&binding, b).map_err(audit_error)?;
+        validate_crossed_binding(conn, &self.namespace, &binding, b).map_err(audit_error)?;
         Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
     }
     /// An unchanged projection may name the current head moment only when that
@@ -529,7 +529,7 @@ where
             let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,held)?.ok_or(ApplicationError::Corrupt)?;
             (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
         };
-        validate_historical_binding(&original_binding,b)?;
+        validate_crossed_binding(conn,&held.namespace,&original_binding,b)?;
         let latest = latest_receipt(conn,held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
@@ -842,6 +842,28 @@ pub(super) fn validate_historical_binding(
     Ok(())
 }
 
+/// [`validate_historical_binding`] across restores cancelled after their
+/// fences: `historical` may name an earlier generation than `current` when
+/// only cancellations of its lineage lie between. A cancellation is not a
+/// restore, so the history before it, and its origin, stay `current`'s.
+fn validate_crossed_binding(
+    conn: &Connection,
+    namespace: &str,
+    historical: &LiveObjectBinding,
+    current: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let from = historical.restore_fence_generation;
+    let same = LiveObjectBinding {
+        restore_fence_generation: current.restore_fence_generation,
+        ..historical.clone()
+    };
+    validate_historical_binding(&same, current)?;
+    if from > current.restore_fence_generation {
+        return Err(ApplicationError::Conflict);
+    }
+    restore_fence::require_crossed_since(conn, namespace, current, from)
+}
+
 pub(super) fn latest_receipt(
     conn: &Connection,
     registration: &Registration,
@@ -905,6 +927,10 @@ fn read_interval(
         ])
         .map_err(read_sql)?;
     let mut receipts = Vec::new();
+    // An interval can hold applications from before restores cancelled after
+    // their fences. Each step between applications, and from the last to the
+    // binding, crosses only cancellations; fence admission bounds each step.
+    let mut previous_generation: Option<i64> = None;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if receipts.len() == max {
             return Err(invalid("settlement application limit exceeded"));
@@ -914,13 +940,30 @@ fn read_interval(
         let selectors: Vec<String> =
             serde_json::from_str(&selectors).map_err(|_| ApplicationError::Corrupt)?;
         let generation: i64 = row.get(7).map_err(read_sql)?;
-        let historical = LiveObjectBinding {
+        let same = LiveObjectBinding {
             current_path: path,
             selector_paths: selectors,
-            restore_fence_generation: generation,
             ..b.clone()
         };
-        validate_historical_binding(&historical, b)?;
+        validate_historical_binding(&same, b)?;
+        if generation > b.restore_fence_generation {
+            return Err(ApplicationError::Conflict);
+        }
+        let historical = LiveObjectBinding {
+            restore_fence_generation: generation,
+            ..same
+        };
+        match previous_generation {
+            Some(previous) if previous > generation => return Err(ApplicationError::Conflict),
+            Some(previous) if previous < generation => restore_fence::require_crossed(
+                conn,
+                &registration.namespace,
+                &historical,
+                previous,
+            )?,
+            _ => {}
+        }
+        previous_generation = Some(generation);
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         receipts.push((
@@ -931,6 +974,9 @@ fn read_interval(
             row.get(4).map_err(read_sql)?,
             binding_digest,
         ));
+    }
+    if let Some(last) = previous_generation.filter(|last| *last != b.restore_fence_generation) {
+        restore_fence::require_crossed(conn, &registration.namespace, b, last)?;
     }
     Ok(receipts)
 }

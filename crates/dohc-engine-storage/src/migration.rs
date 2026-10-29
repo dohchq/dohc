@@ -2954,6 +2954,34 @@ DROP INDEX live_restore_resumed;
 CREATE INDEX live_restore_resumed ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation,relay_database_namespace,resume_receipt_json,cancelled_json);
 ";
 
+// Each restore cancellation a passive replica applied, exactly as the journal
+// carried it at its own cursor. Before a lineage's first accepted event its
+// last record holds the lineage's generation, and a replayed record must be
+// the one applied.
+const V2_REPLICA_RESTORE_CANCELLATIONS_DDL: &str = "
+CREATE TABLE replica_restore_cancellations (
+    relay_database_namespace TEXT NOT NULL,
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+    operation_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id)=64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    restore_generation INTEGER NOT NULL CHECK (restore_generation BETWEEN 1 AND 9007199254740991),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    PRIMARY KEY (relay_database_namespace, journal_cursor),
+    UNIQUE (relay_database_namespace, operation_id),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id, restore_generation)
+) STRICT;
+";
+
+// The restore generation of each audited event's binding, so the next
+// event's record can show how its lineage got from there to its own. Events
+// recorded before kept none.
+const V2_LIVE_AUDIT_EVENT_GENERATIONS_DDL: &str = "
+ALTER TABLE live_audit_events ADD COLUMN restore_generation INTEGER CHECK (restore_generation BETWEEN 0 AND 9007199254740991);
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3483,6 +3511,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 76,
         id: "v2-live-restore-fence-cancelled",
         sql: V2_LIVE_RESTORE_FENCE_CANCELLED_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 77,
+        id: "v2-replica-restore-cancellations",
+        sql: V2_REPLICA_RESTORE_CANCELLATIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 78,
+        id: "v2-live-audit-event-generations",
+        sql: V2_LIVE_AUDIT_EVENT_GENERATIONS_DDL,
         sets_user_version: None,
     },
 ];
@@ -5429,6 +5469,14 @@ mod tests {
                 "v2-live-restore-fence-cancelled",
                 "d5d54802fa99c451336062e012ad1d39e6ad10ad1b678ffe4ca8356402ab858a",
             ),
+            (
+                "v2-replica-restore-cancellations",
+                "bb8433cb8e80b108597caaa9a9c160c1c46292cf2bd7b9f06850919263616d90",
+            ),
+            (
+                "v2-live-audit-event-generations",
+                "9267cb5776cf80b1218c2a7c9eacb5c44544b5bc0a18be25cc36e02f3e8b69a3",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -7045,6 +7093,93 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, (1, "{}".to_owned()));
+    }
+
+    /// A replica's positions survive the upgrade. Afterwards it keeps one
+    /// cancellation record per journal cursor, per operation and per lineage
+    /// generation.
+    #[test]
+    fn replica_restore_cancellations_upgrade_keeps_positions_and_one_record_each() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-replica-restore-cancellations");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let lineage = "a".repeat(64);
+        conn.execute(
+            "INSERT INTO replica_documents VALUES ('ws','main','doc',?1,'relay',1,1,?1,1)",
+            [&lineage],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let position: (i64, i64) = conn
+            .query_row(
+                "SELECT restore_generation,journal_cursor FROM replica_documents",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(position, (1, 1));
+        let record = |cursor: i64, operation: &str, object: &str, generation: i64| {
+            conn.execute(
+                "INSERT INTO replica_restore_cancellations VALUES ('relay',?1,?2,'ws','main',?3,?4,?5,'{}')",
+                rusqlite::params![cursor, operation, object, lineage, generation],
+            )
+        };
+        record(2, "first", "doc", 2).unwrap();
+        for (case, cursor, operation, object, generation) in [
+            ("cursor", 2, "other", "other", 3),
+            ("operation", 3, "first", "other", 3),
+            ("lineage generation", 3, "other", "doc", 2),
+            ("generation zero", 3, "other", "other", 0),
+        ] {
+            assert!(
+                record(cursor, operation, object, generation).is_err(),
+                "{case}"
+            );
+        }
+        record(3, "second", "doc", 3).unwrap();
+    }
+
+    /// An audited event keeps through the upgrade with no generation, and a
+    /// generation an event holds is in range.
+    #[test]
+    fn live_audit_event_generations_upgrade_keeps_events() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-audit-event-generations");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let record = crate::blob::put_binary_blob(&conn, b"{}").unwrap();
+        conn.execute(
+            "INSERT INTO live_audit_record_manifests VALUES (?1,'{}',?1)",
+            [&record],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch)
+             VALUES ('relay','ws','main','doc','lineage',1,?1,?1,1,'delivery-1',1)",
+            [&record],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let event = |count: i64, generation: Option<i64>| {
+            conn.execute(
+                "INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_generation)
+                 VALUES ('relay','ws','main','doc','lineage',?1,?2,?2,?1,'delivery-'||?1,1,?3)",
+                rusqlite::params![count, record, generation],
+            )
+        };
+        let kept: Option<i64> = conn
+            .query_row(
+                "SELECT restore_generation FROM live_audit_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, None);
+        assert!(event(2, Some(-1)).is_err(), "a generation below zero");
+        event(2, Some(3)).unwrap();
     }
 
     #[test]

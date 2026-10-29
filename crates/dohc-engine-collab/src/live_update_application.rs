@@ -90,13 +90,14 @@ pub use restore_content::{
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreProposalReceipt,
     NativeRestoreSource,
 };
+pub use restore_fence::require_crossed_since as require_crossed_cancellations;
 pub use restore_fence::require_open as require_restore_open;
 pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
-    cancel_restore_fence, NativeRestoreCancellationReceipt, NativeRestoreFence,
+    cancel_restore_fence, cancelled_restores, NativeRestoreCancellationReceipt, NativeRestoreFence,
     NativeRestoreFenceReceipt, NativeRestoreRefusal, NativeRestoreRefusalReason,
     NativeRestoreSelection, RestoreDeliveryOrigin, RestoreFenceCancellation,
-    RestoreFenceCancellationOutcome,
+    RestoreFenceCancellationOutcome, MAX_CANCELLED_RESTORES,
 };
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,

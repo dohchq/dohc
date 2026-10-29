@@ -23,19 +23,27 @@ export interface ReplicaRestoreAdmission {
   readonly recordedAtMs: number;
 }
 
+/** The document's current lineage authority when the relay served the page. */
+export interface ReplicaAuthority { readonly lineageClaimId: string; readonly baselineSequence: number; readonly restoreFenceGeneration: number }
+
 export interface ReplicaJournalRow {
   readonly admitted: AdmittedLiveUpdate;
   readonly relayDatabaseNamespace: string;
   readonly evidenceDigest: string;
   readonly journalCursor: number;
-  readonly authority: { readonly lineageClaimId: string; readonly baselineSequence: number; readonly restoreFenceGeneration: number } | null;
+  readonly authority: ReplicaAuthority | null;
   readonly restore: { readonly operationId: string; readonly checkpointDigest: string; readonly checkpointBytes: Uint8Array; readonly proof: ReplicaRestoreAdmission } | null;
 }
 /**
  * A restore the relay declined after the host's native fence committed. The journal keeps it at its own
  * cursor, between deliveries; it is no delivery and carries no bytes. `cancellation` is the host's
  * `fenceCancelled` receipt from `liveApplication.cancelRestoreFence`, unchanged. A replica at exactly the
- * fence's old generation and the receipt's endpoint advances its generation and nothing else.
+ * fence's old generation and the receipt's endpoint advances its generation and nothing else. Before the
+ * lineage's first accepted event that endpoint is event zero at the lineage's initial digest. The replica
+ * keeps the record it applied; a replay at its cursor, of its operation or of its generation must be that
+ * record. `authority` is the document's current authority, as rows carry it; the replica neither keeps nor
+ * compares it. A lineage the replica held and no longer marks skips the record, and so does one the authority
+ * retires as it would retire a row's; any other lineage it never saw blocks.
  */
 export interface ReplicaRestoreCancellation {
   readonly relayDatabaseNamespace: string;
@@ -46,6 +54,7 @@ export interface ReplicaRestoreCancellation {
     readonly endpoint: {readonly terminalReceipt: LiveUpdateReceipt | null; readonly eventCount: number; readonly historyEvidenceDigest: string};
     readonly recordedAtMs: number;
   };
+  readonly authority: ReplicaAuthority | null;
 }
 /** One entry of a replica page, in journal order. */
 export type ReplicaJournalEntry = ReplicaJournalRow | ReplicaRestoreCancellation;
