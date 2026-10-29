@@ -110,7 +110,7 @@ Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment,
 
 ### `dohc_links_edges`
 
-Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
+Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
 
 - `cursor`: `string`
 

@@ -2210,7 +2210,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4090,7 +4090,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4877,7 +4877,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5664,7 +5664,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
